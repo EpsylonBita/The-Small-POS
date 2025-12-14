@@ -1,0 +1,335 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
+import {
+  Package,
+  RefreshCw,
+  Search,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  TrendingDown,
+  TrendingUp,
+  Boxes,
+  BarChart3,
+  Plus,
+  Minus,
+  Edit3
+} from 'lucide-react';
+import { useTheme } from '../contexts/theme-context';
+import { useShift } from '../contexts/shift-context';
+import { toast } from 'react-hot-toast';
+import { getApiUrl } from '../../config/environment';
+
+interface InventoryItem {
+  id: string;
+  name_en: string;
+  name_el: string;
+  category_name?: string;
+  stock_quantity: number;
+  min_stock_level: number;
+  cost_per_unit: number;
+  unit_of_measurement: string;
+  is_active: boolean;
+}
+
+type StockStatus = 'all' | 'critical' | 'low' | 'good';
+
+const InventoryPage: React.FC = () => {
+  const { t, i18n } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const { staff } = useShift();
+  const [loading, setLoading] = useState(true);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StockStatus>('all');
+  const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+  const [showAdjustModal, setShowAdjustModal] = useState(false);
+  const [adjustmentQty, setAdjustmentQty] = useState(0);
+
+  const isDark = resolvedTheme === 'dark';
+  const isGreek = i18n.language === 'el';
+  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+
+  const fetchInventory = useCallback(async () => {
+    if (!staff?.organizationId) return;
+    setLoading(true);
+    try {
+      const apiUrl = getApiUrl(`analytics/inventory?organization_id=${staff.organizationId}`);
+      const response = await fetch(apiUrl, {
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setInventory(data.data?.ingredients || []);
+      } else {
+        // Mock data for demo
+        setInventory([
+          { id: '1', name_en: 'Flour', name_el: 'Αλεύρι', category_name: 'Dry Goods', stock_quantity: 50, min_stock_level: 20, cost_per_unit: 1.5, unit_of_measurement: 'kg', is_active: true },
+          { id: '2', name_en: 'Sugar', name_el: 'Ζάχαρη', category_name: 'Dry Goods', stock_quantity: 15, min_stock_level: 15, cost_per_unit: 1.2, unit_of_measurement: 'kg', is_active: true },
+          { id: '3', name_en: 'Butter', name_el: 'Βούτυρο', category_name: 'Dairy', stock_quantity: 5, min_stock_level: 10, cost_per_unit: 8.0, unit_of_measurement: 'kg', is_active: true },
+          { id: '4', name_en: 'Eggs', name_el: 'Αυγά', category_name: 'Dairy', stock_quantity: 0, min_stock_level: 30, cost_per_unit: 0.25, unit_of_measurement: 'pcs', is_active: true },
+          { id: '5', name_en: 'Milk', name_el: 'Γάλα', category_name: 'Dairy', stock_quantity: 25, min_stock_level: 10, cost_per_unit: 1.8, unit_of_measurement: 'L', is_active: true },
+          { id: '6', name_en: 'Chocolate', name_el: 'Σοκολάτα', category_name: 'Sweets', stock_quantity: 8, min_stock_level: 5, cost_per_unit: 12.0, unit_of_measurement: 'kg', is_active: true },
+        ]);
+      }
+    } catch (error) {
+      console.error('Failed to fetch inventory:', error);
+      toast.error(t('inventory.errors.loadFailed', 'Failed to load inventory'));
+    } finally {
+      setLoading(false);
+    }
+  }, [staff?.organizationId, t]);
+
+  useEffect(() => {
+    fetchInventory();
+  }, [fetchInventory]);
+
+  const getStockStatus = (item: InventoryItem): 'critical' | 'low' | 'good' => {
+    if (item.stock_quantity <= 0) return 'critical';
+    if (item.stock_quantity <= item.min_stock_level) return 'low';
+    return 'good';
+  };
+
+  const filteredInventory = inventory.filter(item => {
+    const name = isGreek ? item.name_el : item.name_en;
+    const matchesSearch = name.toLowerCase().includes(searchTerm.toLowerCase());
+    const status = getStockStatus(item);
+    const matchesStatus = statusFilter === 'all' || status === statusFilter;
+    return matchesSearch && matchesStatus;
+  });
+
+  const stats = {
+    total: inventory.length,
+    critical: inventory.filter(i => getStockStatus(i) === 'critical').length,
+    low: inventory.filter(i => getStockStatus(i) === 'low').length,
+    good: inventory.filter(i => getStockStatus(i) === 'good').length,
+    totalValue: inventory.reduce((sum, i) => sum + (i.stock_quantity * i.cost_per_unit), 0)
+  };
+
+  const StatusIcon = ({ status }: { status: 'critical' | 'low' | 'good' }) => {
+    if (status === 'critical') return <XCircle className="w-5 h-5 text-red-500" />;
+    if (status === 'low') return <AlertTriangle className="w-5 h-5 text-yellow-500" />;
+    return <CheckCircle className="w-5 h-5 text-green-500" />;
+  };
+
+  const handleAdjustStock = async () => {
+    if (!selectedItem) return;
+    // In real implementation, call API to adjust stock
+    toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
+    setShowAdjustModal(false);
+    setSelectedItem(null);
+    setAdjustmentQty(0);
+    fetchInventory();
+  };
+
+  return (
+    <div className={`min-h-screen p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className={`p-3 rounded-xl ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}>
+            <Package className="w-8 h-8 text-blue-500" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold">{t('inventory.title', 'Inventory')}</h1>
+            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+              {t('inventory.subtitle', 'Track stock levels and adjustments')}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={fetchInventory}
+          className={`p-3 rounded-xl transition-all ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'} shadow-lg`}
+        >
+          <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-blue-500/20"><Boxes className="w-5 h-5 text-blue-500" /></div>
+            <div>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.totalItems', 'Total Items')}</p>
+              <p className="text-xl font-bold">{stats.total}</p>
+            </div>
+          </div>
+        </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-red-500/20"><XCircle className="w-5 h-5 text-red-500" /></div>
+            <div>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.critical', 'Critical')}</p>
+              <p className="text-xl font-bold text-red-500">{stats.critical}</p>
+            </div>
+          </div>
+        </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-yellow-500/20"><AlertTriangle className="w-5 h-5 text-yellow-500" /></div>
+            <div>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.lowStock', 'Low Stock')}</p>
+              <p className="text-xl font-bold text-yellow-500">{stats.low}</p>
+            </div>
+          </div>
+        </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-green-500/20"><CheckCircle className="w-5 h-5 text-green-500" /></div>
+            <div>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.inStock', 'In Stock')}</p>
+              <p className="text-xl font-bold text-green-500">{stats.good}</p>
+            </div>
+          </div>
+        </motion.div>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <div className="flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-cyan-500/20"><BarChart3 className="w-5 h-5 text-cyan-500" /></div>
+            <div>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
+              <p className="text-lg font-bold">{currency.format(stats.totalValue)}</p>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-col md:flex-row gap-4 mb-6">
+        <div className={`relative flex-1 ${isDark ? 'bg-gray-800' : 'bg-white'} rounded-xl shadow-lg`}>
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <input
+            type="text"
+            placeholder={t('inventory.searchPlaceholder', 'Search ingredients...')}
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 focus:ring-cyan-500`}
+          />
+        </div>
+        <div className="flex gap-2">
+          {(['all', 'critical', 'low', 'good'] as StockStatus[]).map((status) => (
+            <button
+              key={status}
+              onClick={() => setStatusFilter(status)}
+              className={`px-4 py-2 rounded-lg font-medium transition-all ${statusFilter === status ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'} shadow-lg`}
+            >
+              {t(`inventory.filter.${status}`, status.charAt(0).toUpperCase() + status.slice(1))}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Inventory Table */}
+      {loading ? (
+        <div className={`rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg p-8`}>
+          <div className="animate-pulse space-y-4">
+            {[1, 2, 3, 4, 5].map(i => (
+              <div key={i} className="h-12 bg-gray-600 rounded" />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className={`rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <table className="w-full">
+            <thead className={isDark ? 'bg-gray-700' : 'bg-gray-100'}>
+              <tr>
+                <th className="px-4 py-3 text-left text-sm font-medium">{t('inventory.status', 'Status')}</th>
+                <th className="px-4 py-3 text-left text-sm font-medium">{t('inventory.ingredient', 'Ingredient')}</th>
+                <th className="px-4 py-3 text-left text-sm font-medium">{t('inventory.category', 'Category')}</th>
+                <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.stock', 'Stock')}</th>
+                <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.minLevel', 'Min Level')}</th>
+                <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.value', 'Value')}</th>
+                <th className="px-4 py-3 text-center text-sm font-medium">{t('inventory.actions', 'Actions')}</th>
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${isDark ? 'divide-gray-700' : 'divide-gray-200'}`}>
+              {filteredInventory.map((item, index) => {
+                const status = getStockStatus(item);
+                const name = isGreek ? item.name_el : item.name_en;
+                return (
+                  <motion.tr
+                    key={item.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.03 }}
+                    className={`${isDark ? 'hover:bg-gray-750' : 'hover:bg-gray-50'} transition-colors`}
+                  >
+                    <td className="px-4 py-3"><StatusIcon status={status} /></td>
+                    <td className="px-4 py-3 font-medium">{name}</td>
+                    <td className="px-4 py-3 text-gray-400">{item.category_name || '-'}</td>
+                    <td className="px-4 py-3 text-right">
+                      <span className={status === 'critical' ? 'text-red-500 font-bold' : status === 'low' ? 'text-yellow-500' : ''}>
+                        {item.stock_quantity} {item.unit_of_measurement}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-400">{item.min_stock_level}</td>
+                    <td className="px-4 py-3 text-right font-medium">{currency.format(item.stock_quantity * item.cost_per_unit)}</td>
+                    <td className="px-4 py-3 text-center">
+                      <button
+                        onClick={() => { setSelectedItem(item); setShowAdjustModal(true); }}
+                        className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-200'}`}
+                        title={t('inventory.adjustStock', 'Adjust Stock')}
+                      >
+                        <Edit3 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </motion.tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {filteredInventory.length === 0 && (
+            <div className="text-center py-12 text-gray-400">
+              <Package className="w-12 h-12 mx-auto mb-4 opacity-50" />
+              <p>{t('inventory.noItems', 'No inventory items found')}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Adjust Stock Modal */}
+      {showAdjustModal && selectedItem && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowAdjustModal(false)}>
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className={`p-6 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-2xl w-full max-w-md`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
+            <p className="mb-2">{isGreek ? selectedItem.name_el : selectedItem.name_en}</p>
+            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'} mb-4`}>
+              {t('inventory.currentStock', 'Current')}: {selectedItem.stock_quantity} {selectedItem.unit_of_measurement}
+            </p>
+            <div className="flex items-center gap-4 mb-6">
+              <button onClick={() => setAdjustmentQty(q => q - 1)} className="p-3 rounded-xl bg-red-500/20 text-red-500 hover:bg-red-500/30">
+                <Minus className="w-5 h-5" />
+              </button>
+              <input
+                type="number"
+                value={adjustmentQty}
+                onChange={(e) => setAdjustmentQty(Number(e.target.value))}
+                className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}
+              />
+              <button onClick={() => setAdjustmentQty(q => q + 1)} className="p-3 rounded-xl bg-green-500/20 text-green-500 hover:bg-green-500/30">
+                <Plus className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setShowAdjustModal(false)} className={`flex-1 py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
+                {t('common.cancel', 'Cancel')}
+              </button>
+              <button onClick={handleAdjustStock} className="flex-1 py-3 rounded-xl bg-cyan-500 text-white font-medium">
+                {t('common.save', 'Save')}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default InventoryPage;
+

@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+release/
+*.tsbuildinfo
+
+# Environment files (contain secrets)
+.env
+.env.local
+.env.production
+.env.development
+
+# Logs
+*.log
+build.log
+test_output.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test-results/
+playwright-report/
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Database files
+*.db
+*.sqlite
+
+# Debug files
+debug_*.js
+fix_*.js
+restore_*.js
+check-*.js
+test-*.js
+comprehensive-*.js
+final-*.js
+interact-*.js
+verify-*.js
+set-*.js
+set-*.sql
+
+# Upload artifacts
+upload_url.txt
+main-stats.json

@@ -1,0 +1,235 @@
+import React, { useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
+import { useTranslation } from 'react-i18next';
+import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { useTheme } from '../../contexts/theme-context';
+import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
+
+interface OrderItem {
+  id: string;
+  name: string;
+  quantity: number;
+  price: number;
+  notes?: string;
+}
+
+interface EditOrderItemsModalProps {
+  isOpen: boolean;
+  orderCount: number;
+  initialItems: OrderItem[];
+  onSave: (items: OrderItem[], orderNotes?: string) => void;
+  onClose: () => void;
+}
+
+export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
+  isOpen,
+  orderCount,
+  initialItems,
+  onSave,
+  onClose
+}) => {
+  const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const [items, setItems] = useState<OrderItem[]>(initialItems);
+  const [orderNotes, setOrderNotes] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Reset form when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setItems([...initialItems]);
+      setOrderNotes('');
+    }
+  }, [isOpen, initialItems]);
+
+
+
+  const handleSave = async () => {
+    // Validate items
+    const validItems = items.filter(item => item.quantity > 0);
+
+    if (validItems.length === 0) {
+      toast.error(t('modals.editOrderItems.atLeastOneItem'));
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      // Simulate save delay
+      await new Promise(resolve => setTimeout(resolve, 500));
+      onSave(validItems, orderNotes);
+      setIsSaving(false);
+    } catch (error) {
+      setIsSaving(false);
+      toast.error(t('modals.editOrderItems.saveFailed'));
+    }
+  };
+
+  const handleClose = () => {
+    setItems([...initialItems]); // Reset form
+    setOrderNotes('');
+    onClose();
+  };
+
+  const updateItemQuantity = (itemId: string, quantity: number) => {
+    setItems(prev => prev.map(item =>
+      item.id === itemId
+        ? { ...item, quantity: Math.max(0, quantity) }
+        : item
+    ));
+  };
+
+  const updateItemNotes = (itemId: string, notes: string) => {
+    setItems(prev => prev.map(item =>
+      item.id === itemId
+        ? { ...item, notes }
+        : item
+    ));
+  };
+
+  const removeItem = (itemId: string) => {
+    setItems(prev => prev.filter(item => item.id !== itemId));
+  };
+
+  const calculateTotal = () => {
+    return items.reduce((total, item) => total + (item.price * item.quantity), 0);
+  };
+
+  return (
+    <LiquidGlassModal
+      isOpen={isOpen}
+      onClose={handleClose}
+      title={t('modals.editOrderItems.title')}
+      size="lg"
+      closeOnBackdrop={false}
+      closeOnEscape={true}
+      className="max-h-[90vh]"
+    >
+      <p className="mb-6 liquid-glass-modal-text-muted">
+        {t('modals.editOrderItems.message', { count: orderCount })}
+      </p>
+
+      <div className="flex-1 overflow-y-auto space-y-4 mb-6">
+        {/* Order Items */}
+        <div className="space-y-3">
+          {items.map((item) => (
+            <div key={item.id} className="border liquid-glass-modal-border rounded-lg p-4 bg-gray-50/50 dark:bg-gray-800/50">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex-1">
+                  <h4 className="font-medium liquid-glass-modal-text">{item.name}</h4>
+                  <p className="text-sm liquid-glass-modal-text-muted">${item.price.toFixed(2)} {t('modals.editOrderItems.each')}</p>
+                </div>
+
+                {/* Quantity Controls */}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
+                    className="w-8 h-8 rounded-full bg-red-100/50 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200/50 dark:hover:bg-red-900/50 transition-colors flex items-center justify-center"
+                  >
+                    -
+                  </button>
+
+                  <input
+                    type="number"
+                    value={item.quantity}
+                    onChange={(e) => updateItemQuantity(item.id, parseInt(e.target.value) || 0)}
+                    className={`${inputBase(resolvedTheme)} w-16 text-center`}
+                    min="0"
+                  />
+
+                  <button
+                    onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
+                    className="w-8 h-8 rounded-full bg-green-100/50 dark:bg-green-900/30 text-green-600 dark:text-green-400 hover:bg-green-200/50 dark:hover:bg-green-900/50 transition-colors flex items-center justify-center"
+                  >
+                    +
+                  </button>
+
+                  <button
+                    onClick={() => removeItem(item.id)}
+                    className="w-8 h-8 rounded-full bg-gray-500/20 hover:bg-red-500/20 liquid-glass-modal-text hover:text-red-600 transition-colors flex items-center justify-center"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+
+              {/* Item Notes */}
+              <div>
+                <input
+                  type="text"
+                  value={item.notes || ''}
+                  onChange={(e) => updateItemNotes(item.id, e.target.value)}
+                  placeholder={t('modals.editOrderItems.itemNotesPlaceholder')}
+                  className={`${inputBase(resolvedTheme)} text-sm`}
+                />
+              </div>
+
+              {/* Item Total */}
+              <div className="mt-2 text-right">
+                <span className="text-sm font-medium liquid-glass-modal-text">
+                  {t('modals.editOrderItems.subtotal')}: ${(item.price * item.quantity).toFixed(2)}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Order Notes */}
+        <div className="border-t liquid-glass-modal-border pt-4">
+          <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
+            {t('modals.editOrderItems.orderNotes')}
+          </label>
+          <textarea
+            value={orderNotes}
+            onChange={(e) => setOrderNotes(e.target.value)}
+            placeholder={t('modals.editOrderItems.orderNotesPlaceholder')}
+            className={`${inputBase(resolvedTheme)} resize-none`}
+            rows={3}
+            maxLength={500}
+          />
+          <div className="text-xs liquid-glass-modal-text-muted mt-1">
+            {t('modals.editOrderItems.characterCount', { current: orderNotes.length, max: 500 })}
+          </div>
+        </div>
+      </div>
+
+      {/* Total and Actions */}
+      <div className="border-t liquid-glass-modal-border pt-4">
+        <div className="flex items-center justify-between mb-4">
+          <span className="text-lg font-semibold liquid-glass-modal-text">
+            {t('modals.editOrderItems.total')}: ${calculateTotal().toFixed(2)}
+          </span>
+          <span className="text-sm liquid-glass-modal-text-muted">
+            {t('modals.editOrderItems.itemsCount', { count: items.filter(item => item.quantity > 0).length })}
+          </span>
+        </div>
+
+        <div className="flex gap-3">
+          <button
+            onClick={handleClose}
+            disabled={isSaving}
+            className={`${liquidGlassModalButton('secondary')} flex-1 disabled:opacity-50`}
+          >
+            {t('modals.editOrderItems.cancel')}
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={isSaving || items.filter(item => item.quantity > 0).length === 0}
+            className={`${liquidGlassModalButton('primary')} flex-1 disabled:opacity-50 flex items-center justify-center gap-2`}
+          >
+            {isSaving && (
+              <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            )}
+            {isSaving ? t('modals.editOrderItems.saving') : t('modals.editOrderItems.saveChanges')}
+          </button>
+        </div>
+      </div>
+    </LiquidGlassModal>
+  );
+};
+
+export default EditOrderItemsModal;

@@ -1,0 +1,264 @@
+import { contextBridge, ipcRenderer } from 'electron';
+
+// Expose a safe, minimal IPC surface to the renderer
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Window controls (implemented in main)
+  minimize: () => ipcRenderer.invoke('window-minimize'),
+  maximize: () => ipcRenderer.invoke('window-maximize'),
+  close: () => ipcRenderer.invoke('window-close'),
+
+  // Settings
+  getSettings: () => ipcRenderer.invoke('settings:get-local'),
+  updateSettings: (payload: { settingType: string; settings: any }) =>
+    ipcRenderer.invoke('settings:update-local', payload),
+
+  // Settings version management
+  getSettingsVersion: (category: string) => ipcRenderer.invoke('settings:get-version', category),
+  getAllSettingsVersions: () => ipcRenderer.invoke('settings:get-all-versions'),
+  getSettingsSyncStatus: () => ipcRenderer.invoke('settings:get-sync-status'),
+  forceSettingsSync: (category?: string) => ipcRenderer.invoke('settings:force-sync', category),
+
+  // Per-category settings listeners
+  onTerminalSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:terminal', handler);
+    return () => ipcRenderer.removeListener('settings:update:terminal', handler);
+  },
+  onPaymentSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:payment', handler);
+    return () => ipcRenderer.removeListener('settings:update:payment', handler);
+  },
+  onTaxSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:tax', handler);
+    return () => ipcRenderer.removeListener('settings:update:tax', handler);
+  },
+  onDiscountSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:discount', handler);
+    return () => ipcRenderer.removeListener('settings:update:discount', handler);
+  },
+  onReceiptSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:receipt', handler);
+    return () => ipcRenderer.removeListener('settings:update:receipt', handler);
+  },
+  onPrinterSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:printer', handler);
+    return () => ipcRenderer.removeListener('settings:update:printer', handler);
+  },
+  onInventorySettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:inventory', handler);
+    return () => ipcRenderer.removeListener('settings:update:inventory', handler);
+  },
+  onStaffSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:staff', handler);
+    return () => ipcRenderer.removeListener('settings:update:staff', handler);
+  },
+  onRestaurantSettingsUpdate: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('settings:update:restaurant', handler);
+    return () => ipcRenderer.removeListener('settings:update:restaurant', handler);
+  },
+
+  // Discount settings
+  getDiscountMaxPercentage: () => ipcRenderer.invoke('settings:get-discount-max'),
+  setDiscountMaxPercentage: (percentage: number) => ipcRenderer.invoke('settings:set-discount-max', percentage),
+
+  // Tax settings
+  getTaxRatePercentage: () => ipcRenderer.invoke('settings:get-tax-rate'),
+  setTaxRatePercentage: (percentage: number) => ipcRenderer.invoke('settings:set-tax-rate', percentage),
+
+  // Auth
+  login: (pin: string, staffId?: string) =>
+    ipcRenderer.invoke('auth:login', { pin, staffId }),
+  logout: () => ipcRenderer.invoke('auth:logout'),
+
+  // System
+  getSystemInfo: () => ipcRenderer.invoke('system:get-info'),
+
+  // Customer
+  customerLookup: (phone: string) => ipcRenderer.invoke('customer:lookup', phone),
+  customerSearch: (query: string, limit?: number) => ipcRenderer.invoke('customer:search', query, limit),
+  customerClearExpiredCache: () => ipcRenderer.invoke('customer:clearExpiredCache'),
+  customerGetCacheStats: () => ipcRenderer.invoke('customer:getCacheStats'),
+
+  // Order retry queue
+  saveOrderForRetry: (orderData: any) => ipcRenderer.invoke('order:save-for-retry', orderData),
+  getRetryQueue: () => ipcRenderer.invoke('order:get-retry-queue'),
+  processRetryQueue: () => ipcRenderer.invoke('order:process-retry-queue'),
+
+  // Real-time order updates
+  onOrderRealtimeUpdate: (callback: any) => {
+    ipcRenderer.on('order-realtime-update', (_event: any, orderData: any) => callback(orderData));
+  },
+  onOrderStatusUpdated: (callback: any) => {
+    ipcRenderer.on('order-status-updated', (_event: any, data: any) => callback(data));
+  },
+  onOrderDeleted: (callback: any) => {
+    ipcRenderer.on('order-deleted', (_event: any, data: any) => callback(data));
+  },
+  onOrderPaymentUpdated: (callback: any) => {
+    ipcRenderer.on('order-payment-updated', (_event: any, data: any) => callback(data));
+  },
+
+  // Cleanup functions for real-time listeners
+  removeOrderRealtimeUpdateListener: (callback: any) => {
+    ipcRenderer.removeAllListeners('order-realtime-update');
+  },
+  removeOrderStatusUpdatedListener: (callback: any) => {
+    ipcRenderer.removeAllListeners('order-status-updated');
+  },
+  removeOrderDeletedListener: (callback: any) => {
+    ipcRenderer.removeAllListeners('order-deleted');
+  },
+  removeOrderPaymentUpdatedListener: (callback: any) => {
+    ipcRenderer.removeAllListeners('order-payment-updated');
+  },
+
+  // Shift operations
+  openShift: (params: { staffId: string; branchId: string; terminalId: string; roleType: string; openingCash?: number }) =>
+    ipcRenderer.invoke('shift:open', params),
+  closeShift: (params: { shiftId: string; closingCash: number; closedBy: string }) =>
+    ipcRenderer.invoke('shift:close', params),
+  getActiveShift: (staffId: string) =>
+    ipcRenderer.invoke('shift:get-active', staffId),
+  getShiftSummary: (shiftId: string) =>
+    ipcRenderer.invoke('shift:get-summary', shiftId),
+
+  // Expense operations
+  recordExpense: (params: { shiftId: string; staffId: string; branchId: string; expenseType: string; amount: number; description: string; receiptNumber?: string }) =>
+    ipcRenderer.invoke('shift:record-expense', params),
+  getShiftExpenses: (shiftId: string) =>
+    ipcRenderer.invoke('shift:get-expenses', shiftId),
+
+  // Real-time shift updates
+  onShiftUpdated: (callback: any) =>
+    ipcRenderer.on('shift-updated', (_event: any, data: any) => callback(data)),
+  removeShiftUpdatedListener: () =>
+    ipcRenderer.removeAllListeners('shift-updated'),
+
+  // Driver operations
+  recordDriverEarning: (params: {
+    driverId: string;
+    shiftId: string;
+    orderId: string;
+    deliveryFee: number;
+    tipAmount: number;
+    paymentMethod: 'cash' | 'card' | 'mixed';
+    cashCollected: number;
+    cardAmount: number
+  }) => ipcRenderer.invoke('driver:record-earning', params),
+  getDriverEarnings: (shiftId: string) => ipcRenderer.invoke('driver:get-earnings', shiftId),
+  getDriverShiftSummary: (shiftId: string) => ipcRenderer.invoke('driver:get-shift-summary', shiftId),
+  getActiveDrivers: (branchId: string) => ipcRenderer.invoke('driver:get-active', branchId),
+
+  // Report operations
+  generateZReport: (params: { branchId: string; date?: string }) =>
+    ipcRenderer.invoke('report:generate-z-report', params),
+  getDailyStaffPerformance: (params: { branchId: string; date?: string }) =>
+    ipcRenderer.invoke('report:get-daily-staff-performance', params),
+  getTodayStatistics: (branchId: string) =>
+    ipcRenderer.invoke('report:get-today-statistics', { branchId }),
+  getSalesTrend: (params: { branchId: string; days: number }) =>
+    ipcRenderer.invoke('report:get-sales-trend', params),
+  getTopItems: (params: { branchId: string; date?: string; limit: number }) =>
+    ipcRenderer.invoke('report:get-top-items', params),
+
+  // ---- Sync/Network status (safe fallbacks) ----
+  getSyncStatus: async () => {
+    try { return await ipcRenderer.invoke('sync:get-status'); }
+    catch { return { isOnline: navigator.onLine, lastSync: null, pendingItems: 0, syncInProgress: false, error: null, terminalHealth: 0.8, settingsVersion: 0, menuVersion: 0 }; }
+  },
+  onSyncStatus: (callback: (status: any) => void) => {
+    ipcRenderer.on('sync:status', (_e, data) => callback(data));
+  },
+  onNetworkStatus: (callback: (status: any) => void) => {
+    ipcRenderer.on('network:status', (_e, data) => callback(data));
+  },
+  removeSyncStatusListener: () => { ipcRenderer.removeAllListeners('sync:status'); },
+  removeNetworkStatusListener: () => { ipcRenderer.removeAllListeners('network:status'); },
+  forceSync: async () => { try { await ipcRenderer.invoke('sync:force'); } catch {} },
+  openSyncLogs: () => { try { ipcRenderer.invoke('sync:open-logs'); } catch {} },
+
+  // ---- Sync notifications (safe listeners) ----
+  onSettingsUpdate: (cb: (settings: any) => void) => { ipcRenderer.on('settings:update', (_e, d) => cb(d)); },
+  onStaffPermissionUpdate: (cb: (p: any) => void) => { ipcRenderer.on('staff:permission-update', (_e, d) => cb(d)); },
+  onHardwareConfigUpdate: (cb: (c: any) => void) => { ipcRenderer.on('hardware-config:update', (_e, d) => cb(d)); },
+  onRestartRequired: (cb: (n: any) => void) => { ipcRenderer.on('app:restart-required', (_e, d) => cb(d)); },
+  onSyncError: (cb: (err: any) => void) => { ipcRenderer.on('sync:error', (_e, d) => cb(d)); },
+  onSyncComplete: (cb: (res: any) => void) => { ipcRenderer.on('sync:complete', (_e, d) => cb(d)); },
+  removeSettingsUpdateListener: () => { ipcRenderer.removeAllListeners('settings:update'); },
+  removeStaffPermissionUpdateListener: () => { ipcRenderer.removeAllListeners('staff:permission-update'); },
+  removeHardwareConfigUpdateListener: () => { ipcRenderer.removeAllListeners('hardware-config:update'); },
+  removeRestartRequiredListener: () => { ipcRenderer.removeAllListeners('app:restart-required'); },
+  removeSyncErrorListener: () => { ipcRenderer.removeAllListeners('sync:error'); },
+  removeSyncCompleteListener: () => { ipcRenderer.removeAllListeners('sync:complete'); },
+  requestRestart: () => { try { ipcRenderer.invoke('app:request-restart'); } catch {} },
+
+  // ---- Notifications ----
+  showNotification: (options: { title: string; body: string; type?: string } | string, body?: string) => {
+    try { ipcRenderer.invoke('notification:show', options, body); }
+    catch {
+      const title = typeof options === 'string' ? options : options.title;
+      const noteBody = typeof options === 'string' ? (body || '') : options.body;
+      if ('Notification' in window) new Notification(title, { body: noteBody }); else console.log('Notification:', title, noteBody);
+    }
+  },
+
+  // ---- Pending orders (safe fallbacks) ----
+  getPendingOrders: async () => {
+    try { return await ipcRenderer.invoke('order:get-pending'); }
+    catch {
+      const stored = localStorage.getItem('pendingOrder');
+      return stored ? [JSON.parse(stored)] : [];
+    }
+  },
+
+  // ---- Control command listeners (Comment 4) ----
+  onControlCommandReceived: (callback: (data: any) => void) => {
+    ipcRenderer.on('control-command-received', (_event, data) => callback(data));
+  },
+  onAppShutdownInitiated: (callback: (data: any) => void) => {
+    ipcRenderer.on('app-shutdown-initiated', (_event, data) => callback(data));
+  },
+  onAppRestartInitiated: (callback: (data: any) => void) => {
+    ipcRenderer.on('app-restart-initiated', (_event, data) => callback(data));
+  },
+  onTerminalDisabled: (callback: (data: any) => void) => {
+    ipcRenderer.on('terminal-disabled', (_event, data) => callback(data));
+  },
+  onTerminalEnabled: (callback: (data: any) => void) => {
+    ipcRenderer.on('terminal-enabled', (_event, data) => callback(data));
+  },
+  removeControlCommandReceivedListener: () => {
+    ipcRenderer.removeAllListeners('control-command-received');
+  },
+  removeAppShutdownInitiatedListener: () => {
+    ipcRenderer.removeAllListeners('app-shutdown-initiated');
+  },
+  removeAppRestartInitiatedListener: () => {
+    ipcRenderer.removeAllListeners('app-restart-initiated');
+  },
+  removeTerminalDisabledListener: () => {
+    ipcRenderer.removeAllListeners('terminal-disabled');
+  },
+  removeTerminalEnabledListener: () => {
+    ipcRenderer.removeAllListeners('terminal-enabled');
+  },
+
+  // ---- App control methods (Comment 4) ----
+  shutdownApp: async () => {
+    try { return await ipcRenderer.invoke('app:shutdown'); }
+    catch (error) { return { success: false, error: 'Failed to shutdown app' }; }
+  },
+  restartApp: async () => {
+    try { return await ipcRenderer.invoke('app:restart'); }
+    catch (error) { return { success: false, error: 'Failed to restart app' }; }
+  },
+
+});

@@ -1,0 +1,74 @@
+import React from 'react';
+import { toast, Toast } from 'react-hot-toast';
+
+/**
+ * UpdateToast Component
+ * 
+ * A clickable toast notification for background update availability.
+ * When clicked, it dismisses the toast and triggers the onOpenDialog callback.
+ * 
+ * Requirements: 3.3, 3.4
+ */
+
+interface UpdateToastProps {
+  t: Toast;
+  version: string;
+  onOpenDialog: () => void;
+}
+
+export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDialog }) => {
+  const handleClick = () => {
+    toast.dismiss(t.id);
+    onOpenDialog();
+  };
+
+  return (
+    <div
+      onClick={handleClick}
+      className="cursor-pointer flex items-start gap-3 p-1"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          handleClick();
+        }
+      }}
+    >
+      <span className="text-2xl">🔄</span>
+      <div>
+        <div className="font-semibold text-white">Update Available</div>
+        <div className="text-sm text-white/80">
+          Version {version} is ready to download
+        </div>
+        <div className="text-xs text-white/60 mt-1">Click to view details</div>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Show an update notification toast
+ * 
+ * @param version - The version number of the available update
+ * @param onOpenDialog - Callback to open the UpdateDialog when toast is clicked
+ * @returns The toast ID
+ */
+export function showUpdateToast(version: string, onOpenDialog: () => void): string {
+  return toast.custom(
+    (t) => (
+      <div
+        className={`${
+          t.visible ? 'animate-enter' : 'animate-leave'
+        } max-w-md w-full bg-cyan-600/90 backdrop-blur-sm shadow-lg rounded-xl pointer-events-auto border border-white/20`}
+      >
+        <UpdateToast t={t} version={version} onOpenDialog={onOpenDialog} />
+      </div>
+    ),
+    {
+      duration: 10000, // Show for 10 seconds
+      position: 'top-right',
+    }
+  );
+}
+
+export default UpdateToast;

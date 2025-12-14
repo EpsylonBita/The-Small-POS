@@ -1,0 +1,209 @@
+{
+  "name": "the-small-pos-system",
+  "version": "1.1.0",
+  "description": "Point of Sale system for The Small with offline capabilities",
+  "main": "dist/main/main.js",
+  "homepage": "./",
+  "sideEffects": [
+    "*.css",
+    "**/*.css",
+    "./src/renderer/index.css",
+    "./src/renderer/polyfills.ts"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "dev:electron": "concurrently \"npm run dev:renderer\" \"npm run dev:main\" \"npm run wait-and-start\"",
+    "wait-and-start": "wait-on http://localhost:3002 && electron .",
+    "dev:main": "webpack --config webpack.main.config.js --mode development --watch",
+    "dev:renderer": "npx webpack serve --config webpack.renderer.config.js --mode development",
+    "build": "npm run build:main && npm run build:renderer",
+    "build:main": "webpack --config webpack.main.config.js --mode production",
+    "build:renderer": "webpack --config webpack.renderer.config.js --mode production",
+    "type-check": "tsc --noEmit",
+    "start": "electron .",
+    "start:debug": "electron . --remote-debugging-port=9222",
+    "pack": "electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "publish": "npm run build && electron-builder --publish always",
+    "test": "jest",
+    "test:e2e": "playwright test",
+    "test:electron-e2e": "playwright test -c tests/e2e/playwright.electron.config.ts tests/e2e/shift-behavior.spec.ts",
+    "test:loading-states": "playwright test tests/playwright/loading-states.spec.js",
+    "test:error-handling": "playwright test tests/playwright/error-handling.spec.js",
+    "test:timeouts": "playwright test tests/playwright/timeout-scenarios.spec.js",
+    "test:money-flow": "playwright test tests/e2e/money-flow-*.spec.ts",
+    "test:money-flow:cashier": "playwright test tests/e2e/money-flow-cashier.spec.ts",
+    "test:money-flow:driver": "playwright test tests/e2e/money-flow-driver.spec.ts",
+    "test:money-flow:waiter": "playwright test tests/e2e/money-flow-waiter.spec.ts",
+    "test:money-flow:handover": "playwright test tests/e2e/money-flow-cashier-handover.spec.ts",
+    "test:money-flow:z-report": "playwright test tests/e2e/money-flow-z-report.spec.ts",
+    "test:money-flow:all": "playwright test tests/e2e/money-flow-suite.spec.ts",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [
+    "electron",
+    "react",
+    "pos",
+    "the-small",
+    "offline",
+    "supabase"
+  ],
+  "author": "The Small Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.10.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@typescript-eslint/eslint-plugin": "^6.14.0",
+    "@typescript-eslint/parser": "^6.14.0",
+    "buffer": "^6.0.3",
+    "compression-webpack-plugin": "^11.1.0",
+    "concurrently": "^8.2.2",
+    "crypto": "^1.0.1",
+    "crypto-browserify": "^3.12.1",
+    "css-loader": "^6.8.1",
+    "dotenv": "^17.2.3",
+    "electron": "^35.7.5",
+    "electron-builder": "^24.9.1",
+    "eslint": "^8.55.0",
+    "eslint-plugin-react": "^7.33.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "fast-check": "^4.3.0",
+    "html-webpack-plugin": "^5.6.0",
+    "jest": "^30.2.0",
+    "node-gyp": "^12.1.0",
+    "os-browserify": "^0.3.0",
+    "path-browserify": "^1.0.1",
+    "process": "^0.11.10",
+    "sharp": "^0.34.5",
+    "stream-browserify": "^3.0.0",
+    "style-loader": "^3.3.3",
+    "ts-jest": "^29.4.5",
+    "ts-loader": "^9.5.1",
+    "typescript": "5.8.3",
+    "url": "^0.11.4",
+    "util": "^0.12.5",
+    "wait-on": "^9.0.1",
+    "webpack": "^5.89.0",
+    "webpack-bundle-analyzer": "^5.1.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^5.2.2"
+  },
+  "dependencies": {
+    "@point-of-sale/network-receipt-printer": "^2.0.1",
+    "@point-of-sale/receipt-printer-encoder": "^3.0.3",
+    "@point-of-sale/system-receipt-printer": "^2.0.1",
+    "@supabase/supabase-js": "^2.50.0",
+    "@types/react-virtualized-auto-sizer": "^1.0.4",
+    "@types/react-window": "^1.8.8",
+    "autoprefixer": "^10.4.16",
+    "better-sqlite3": "^12.4.1",
+    "bonjour-service": "^1.3.0",
+    "dotenv": "^17.2.0",
+    "electron-updater": "^6.1.7",
+    "framer-motion": "^12.23.24",
+    "i18next": "^23.12.0",
+    "lucide-react": "^0.427.0",
+    "pdf-to-printer": "^5.6.1",
+    "postcss": "^8.4.32",
+    "postcss-loader": "^7.3.3",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "react-hot-toast": "^2.4.1",
+    "react-i18next": "^15.0.0",
+    "react-router-dom": "^6.30.1",
+    "react-virtualized-auto-sizer": "^1.0.26",
+    "react-window": "^2.2.3",
+    "recharts": "^2.15.3",
+    "serialport": "^13.0.0",
+    "tailwindcss": "^3.3.6",
+    "usb": "^2.16.0",
+    "uuid": "^11.1.0",
+    "webbluetooth": "^3.3.2",
+    "zustand": "^4.4.7"
+  },
+  "build": {
+    "appId": "com.thesmall.pos",
+    "productName": "The Small POS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "EpsylonBita",
+      "repo": "The-Small-POS",
+      "releaseType": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "public/icon.ico",
+      "publisherName": "The Small"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "The Small POS"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "public/icon.png",
+      "category": "public.app-category.business",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "public/icon.png",
+      "category": "Office"
+    },
+    "npmRebuild": true,
+    "buildDependenciesFromSource": false,
+    "nodeGypRebuild": false,
+    "npmArgs": ["--ignore-scripts"]
+  },
+  "optionalDependencies": {
+    "bluetooth-serial-port": "^3.0.2",
+    "bufferutil": "^4.0.9",
+    "utf-8-validate": "^5.0.10"
+  },
+  "overrides": {
+    "lucide-react": "$lucide-react"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.renderer.json",
+  "include": [
+    "./**/*",
+    "../shared/**/*",
+    "./types/**/*"
+  ],
+  "exclude": [
+    "../main/**/*",
+    "../../node_modules",
+    "../../dist"
+  ]
+}
+

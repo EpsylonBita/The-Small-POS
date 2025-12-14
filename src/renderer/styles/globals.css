@@ -1,0 +1,340 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* NEUTRAL BACKGROUND - NO FORCED COLORS */
+html, body, #root {
+  background: #f8fafc;
+  min-height: 100vh;
+  min-height: 100dvh; /* Dynamic viewport height for mobile */
+  margin: 0;
+  padding: 0;
+}
+
+/* Base styles for touch interface */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  
+  html {
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    /* Prevent iOS zoom on input focus */
+    touch-action: manipulation;
+  }
+  
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+      'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #f8fafc;
+    overflow-x: hidden;
+    /* Prevent pull-to-refresh on mobile */
+    overscroll-behavior-y: contain;
+  }
+  
+  /* Disable text selection for touch interface */
+  body, button, input {
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+  }
+  
+  /* Allow text selection for input fields */
+  input[type="text"], input[type="number"], input[type="tel"], input[type="email"], textarea {
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+    user-select: text;
+    /* Minimum font size to prevent iOS zoom */
+    font-size: 16px !important;
+  }
+  
+  /* Remove tap highlight */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+  
+  /* Touch-friendly minimum sizes for interactive elements */
+  button, 
+  [role="button"],
+  a,
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Exception for inline/small buttons that explicitly opt out */
+  .btn-inline,
+  .btn-sm {
+    min-height: auto;
+    min-width: auto;
+  }
+}
+
+/* Component styles */
+@layer components {
+  /* Touch-friendly button base */
+  .btn-touch {
+    @apply min-h-touch min-w-touch px-4 py-3 rounded-lg font-medium transition-all duration-150 ease-in-out;
+    @apply active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2;
+    touch-action: manipulation;
+  }
+  
+  /* Primary button */
+  .btn-primary {
+    @apply btn-touch bg-gray-600 text-white hover:bg-gray-700 focus:ring-gray-500;
+  }
+  
+  /* Secondary button */
+  .btn-secondary {
+    @apply btn-touch bg-gray-200 text-gray-900 hover:bg-gray-300 focus:ring-gray-500;
+  }
+  
+  /* Success button */
+  .btn-success {
+    @apply btn-touch bg-pos-success text-white hover:bg-green-700 focus:ring-green-500;
+  }
+  
+  /* Warning button */
+  .btn-warning {
+    @apply btn-touch bg-pos-warning text-white hover:bg-yellow-600 focus:ring-yellow-500;
+  }
+  
+  /* Error button */
+  .btn-error {
+    @apply btn-touch bg-pos-error text-white hover:bg-red-700 focus:ring-red-500;
+  }
+  
+  /* Touch-friendly input */
+  .input-touch {
+    @apply min-h-touch px-4 py-3 border border-gray-300 rounded-lg;
+    @apply focus:outline-none focus:ring-2 focus:ring-pos-primary focus:border-transparent;
+    @apply transition-all duration-150 ease-in-out;
+    font-size: 16px !important; /* Prevent iOS zoom */
+  }
+  
+  /* Card component */
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6;
+  }
+  
+  /* Order status badges */
+  .status-pending {
+    @apply bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  .status-preparing {
+    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  .status-ready {
+    @apply bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  .status-completed {
+    @apply bg-gray-100 text-gray-800 px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  /* Grid layouts for touch - responsive */
+  .grid-touch {
+    @apply grid gap-2 sm:gap-4;
+  }
+  
+  .grid-touch-sm {
+    @apply grid gap-1 sm:gap-2;
+  }
+  
+  /* Scrollable areas with touch-friendly scrollbars */
+  .scroll-touch {
+    @apply overflow-auto;
+    scrollbar-width: thick;
+    scrollbar-color: #cbd5e1 #f1f5f9;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  
+  .scroll-touch::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  
+  .scroll-touch::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 6px;
+  }
+  
+  .scroll-touch::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 6px;
+  }
+  
+  .scroll-touch::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+  }
+  
+  /* Mobile-first responsive container */
+  .pos-container {
+    @apply w-full px-2 sm:px-4 md:px-6;
+    max-width: 100%;
+  }
+  
+  /* Touch-friendly modal */
+  .modal-touch {
+    @apply fixed inset-0 z-50 flex items-end sm:items-center justify-center;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  
+  .modal-touch-content {
+    @apply w-full sm:max-w-lg md:max-w-2xl lg:max-w-4xl;
+    @apply rounded-t-2xl sm:rounded-2xl;
+    @apply max-h-[90vh] sm:max-h-[85vh];
+    @apply overflow-hidden;
+  }
+  
+  /* Touch-friendly tabs */
+  .tabs-touch {
+    @apply flex overflow-x-auto gap-1 sm:gap-2 pb-2;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  
+  .tabs-touch::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .tab-touch {
+    @apply flex-shrink-0 px-4 py-3 rounded-lg font-medium;
+    @apply min-w-[80px] text-center;
+    touch-action: manipulation;
+  }
+}
+
+/* Utility classes */
+@layer utilities {
+  /* Touch feedback animation */
+  .touch-feedback {
+    @apply transition-transform duration-100 ease-in-out active:scale-95;
+    touch-action: manipulation;
+  }
+  
+  /* Prevent text selection */
+  .no-select {
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+  }
+  
+  /* Enable text selection */
+  .select-text {
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+    user-select: text;
+  }
+  
+  /* Hide scrollbars */
+  .hide-scrollbar,
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar,
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  /* Full height minus header - with safe area support */
+  .h-screen-header {
+    height: calc(100vh - 4rem);
+    height: calc(100dvh - 4rem);
+  }
+  
+  /* Safe area padding for notched devices */
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  
+  .safe-area-left {
+    padding-left: env(safe-area-inset-left);
+  }
+  
+  .safe-area-right {
+    padding-right: env(safe-area-inset-right);
+  }
+  
+  .safe-area-all {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  
+  /* Touch-safe z-index values */
+  .z-modal {
+    z-index: 1000;
+  }
+  
+  .z-dropdown {
+    z-index: 100;
+  }
+  
+  .z-header {
+    z-index: 50;
+  }
+  
+  /* Touch-optimized scrolling */
+  .touch-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+  }
+  
+  .touch-scroll-x {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x;
+  }
+  
+  /* Prevent accidental zoom */
+  .no-zoom {
+    touch-action: manipulation;
+  }
+  
+  /* Mobile-friendly text sizes */
+  .text-mobile-sm {
+    @apply text-xs sm:text-sm;
+  }
+  
+  .text-mobile-base {
+    @apply text-sm sm:text-base;
+  }
+  
+  .text-mobile-lg {
+    @apply text-base sm:text-lg;
+  }
+  
+  .text-mobile-xl {
+    @apply text-lg sm:text-xl;
+  }
+  
+  /* Responsive spacing */
+  .p-mobile {
+    @apply p-2 sm:p-4 md:p-6;
+  }
+  
+  .gap-mobile {
+    @apply gap-2 sm:gap-3 md:gap-4;
+  }
+}
