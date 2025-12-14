@@ -9,14 +9,14 @@
  * - Real-time validation with UI feedback
  */
 
-import { DeliveryValidationService } from '../../../shared/services/DeliveryValidationService';
+import { DeliveryValidationService } from '../shared/services/DeliveryValidationService';
 import type {
   DeliveryBoundaryValidationRequest,
   DeliveryBoundaryValidationResponse,
   DeliveryOverrideRequest,
   DeliveryOverrideResponse,
   ValidationEvent
-} from '../../../shared/types/delivery-validation';
+} from '../shared/types/delivery-validation';
 import { environment } from '../config/environment';
 
 interface ValidatorConfig {
@@ -139,6 +139,7 @@ export class DeliveryZoneValidator {
 
       // Return error response matching shared type
       return {
+        isValid: false,
         success: false,
         deliveryAvailable: false,
         message: error instanceof Error ? error.message : 'Validation failed',

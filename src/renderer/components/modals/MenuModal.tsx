@@ -10,7 +10,7 @@ import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { menuService } from '../../services/MenuService';
-import type { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 
 interface MenuModalProps {
   isOpen: boolean;

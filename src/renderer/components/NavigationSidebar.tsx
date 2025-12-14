@@ -270,7 +270,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
               {navigationModules.map((navModule) => {
                 const { module, isEnabled, isLocked, requiredPlan } = navModule;
                 const isActive = currentView === module.id;
-                const color = getModuleColor(module.id, module.category);
+                const color = getModuleColor(module.id, module.category || 'other');
                 const isComingSoon = isModuleComingSoon(module.id);
                 
                 // Different titles for locked, coming soon, or unlocked modules
@@ -313,7 +313,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                     }`}
                     title={title}
                   >
-                    {getModuleIcon(module.icon)}
+                    {getModuleIcon(module.icon || 'Package')}
                     {/* Coming Soon badge for unimplemented modules */}
                     {isComingSoon && (
                       <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-600/90 flex items-center justify-center">

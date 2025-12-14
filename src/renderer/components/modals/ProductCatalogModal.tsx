@@ -16,7 +16,7 @@ import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barco
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { PaymentModal } from './PaymentModal';
 import type { Product, ProductFilters } from '../../services/ProductCatalogService';
-import type { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 
 // Debounce hook for search input
 function useDebounce<T>(value: T, delay: number): T {

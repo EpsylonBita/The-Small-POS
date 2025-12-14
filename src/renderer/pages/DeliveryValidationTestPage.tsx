@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DeliveryValidationComponent } from '../components/delivery/DeliveryValidationComponent';
-import { DeliveryBoundaryValidationResponse } from '../../../../shared/types/delivery-validation';
+import { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 
 export function DeliveryValidationTestPage() {
   const [validationResult, setValidationResult] = useState<DeliveryBoundaryValidationResponse | null>(null);

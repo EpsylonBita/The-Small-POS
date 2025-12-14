@@ -2,7 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Edit, Trash2, MapPin, CheckCircle, AlertTriangle, Clock } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
-import type { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 
 interface Address {
   id: string;

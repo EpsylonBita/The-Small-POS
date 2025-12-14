@@ -17,7 +17,7 @@ import { supabase } from '../lib/supabase';
 import type {
   DeliveryBoundaryValidationResponse,
   DeliveryOverrideResponse
-} from '../../../../shared/types/delivery-validation';
+} from '../../shared/types/delivery-validation';
 
 interface UseDeliveryValidationOptions {
   debounceMs?: number;
@@ -183,6 +183,7 @@ export function useDeliveryValidation(
         const errorMsg = 'Validator not initialized. Please ensure shift is active.';
         setError(errorMsg);
         return {
+          isValid: false,
           success: false,
           deliveryAvailable: false,
           message: errorMsg,
@@ -226,6 +227,7 @@ export function useDeliveryValidation(
             setIsValidating(false);
 
             const errorResult: DeliveryBoundaryValidationResponse = {
+              isValid: false,
               success: false,
               deliveryAvailable: false,
               message: errorMsg,

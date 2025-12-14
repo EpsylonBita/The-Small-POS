@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { mapStatusForPOS, isValidOrderStatus } from '../../../../shared/types/order-status';
+import { mapStatusForPOS, isValidOrderStatus } from '../../shared/types/order-status';
 import toast from 'react-hot-toast';
 import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
 import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';

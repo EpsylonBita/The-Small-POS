@@ -14,7 +14,7 @@
 
 import { useMemo, useCallback } from 'react';
 import { useModules } from '../contexts/module-context';
-import type { AcquiredModule } from '../../../../shared/services/ModuleService';
+import type { AcquiredModule } from '../../shared/services/ModuleService';
 
 /**
  * Module IDs for common modules

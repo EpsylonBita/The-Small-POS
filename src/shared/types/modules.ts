@@ -1,13 +1,7 @@
 /**
- * Module types for POS system
- * 
- * These types mirror the shared/types/modules.ts definitions
- * for use within the POS system's isolated TypeScript context.
+ * Module types for POS system (flexible stubs)
  */
 
-/**
- * Module category types
- */
 export type ModuleCategory = 
   | 'core'
   | 'operations'
@@ -18,26 +12,13 @@ export type ModuleCategory =
   | 'staff'
   | 'inventory'
   | 'marketing'
-  | 'finance';
+  | 'finance'
+  | 'vertical'
+  | 'addon'
+  | 'other';
 
-/**
- * Business type for module compatibility
- */
-export type BusinessType = 
-  | 'fast_food'
-  | 'restaurant'
-  | 'hotel'
-  | 'salon'
-  | 'retail'
-  | 'cafe'
-  | 'bar'
-  | 'bakery'
-  | 'food_truck'
-  | 'catering';
+export type BusinessType = string;
 
-/**
- * Module information returned by POS sync endpoints
- */
 export interface POSModuleInfo {
   id: string;
   module_id: string;
@@ -57,17 +38,12 @@ export interface POSModuleInfo {
   compatible_business_types: BusinessType[];
   purchased_at?: string;
   updated_at: string;
-  /** Module dependencies (only returned by /sync endpoint) */
   dependencies?: unknown[];
-  /** Required features for this module (only returned by /sync endpoint) */
   required_features?: string[];
-  /** Timestamp when module was last synced to POS (only returned by /sync endpoint) */
   last_synced_at?: string;
+  [key: string]: any;
 }
 
-/**
- * Response from POS modules enabled endpoint
- */
 export interface POSModulesEnabledResponse {
   success: boolean;
   modules: POSModuleInfo[];
@@ -82,18 +58,46 @@ export interface POSModulesEnabledResponse {
   processing_time_ms: number;
 }
 
-/**
- * Cache data structure for storing modules locally
- */
 export interface ModuleCacheData {
-  /** Modules fetched from admin dashboard API */
   apiModules: POSModuleInfo[];
-  /** Organization ID */
   organizationId: string;
-  /** Terminal ID */
   terminalId: string;
-  /** Cache timestamp (Unix ms) */
   timestamp: number;
-  /** API response timestamp for sync tracking */
   apiTimestamp: string;
 }
+
+export type ModuleId = string;
+
+export interface ModuleMetadata {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  category?: string;
+  route?: string;
+  requiredFeatures?: string[];
+  compatibleBusinessTypes?: BusinessType[];
+  isCore?: boolean;
+  sortOrder?: number;
+  showInNavigation?: boolean;
+  posEnabled?: boolean;
+  [key: string]: unknown;
+}
+
+export interface EnabledModule {
+  module: ModuleMetadata;
+  isEnabled: boolean;
+  isLocked: boolean;
+  moduleId?: string;
+  moduleName?: string;
+  isActive?: boolean;
+  isPosEnabled?: boolean;
+  isPurchased?: boolean;
+  purchasedAt?: string;
+  expiresAt?: string | null;
+  requiredPlan?: string;
+  [key: string]: any;
+}
+
+// FeatureFlag is just a string identifier in POS
+export type FeatureFlag = string;

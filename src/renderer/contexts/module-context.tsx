@@ -10,7 +10,7 @@ import React, {
   useRef,
   ReactNode,
 } from 'react';
-import type { BusinessType } from '../../../../shared/types/organization';
+import type { BusinessType } from '../../shared/types/organization';
 import type {
   ModuleId,
   EnabledModule,
@@ -18,16 +18,16 @@ import type {
   FeatureFlag,
   POSModuleInfo,
   POSModulesEnabledResponse,
-} from '../../../../shared/types/modules';
+} from '../../shared/types/modules';
 import {
   resolveEnabledModules,
   getModuleMetadata,
   type FeatureAccessChecker,
-} from '../../../../shared/services/moduleRegistry';
+} from '../../shared/services/moduleRegistry';
 import {
   FEATURE_PLAN_MAP,
   STARTER_FEATURES,
-} from '../../../../shared/types/features';
+} from '../../shared/types/features';
 import {
   POS_IMPLEMENTED_MODULES,
   POS_COMING_SOON_MODULES,

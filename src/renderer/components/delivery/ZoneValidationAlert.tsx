@@ -6,7 +6,7 @@
  */
 
 import React, { useState } from 'react';
-import type { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import { useTheme } from '../../contexts/theme-context';
 
 interface ZoneValidationAlertProps {

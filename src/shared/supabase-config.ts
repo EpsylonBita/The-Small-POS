@@ -4,10 +4,40 @@
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { getSupabaseConfig } from '../../../shared/config/supabase-config';
 
-// Export getSupabaseConfig for use in other parts of the POS system
-export { getSupabaseConfig };
+// Desktop-specific client options
+const DESKTOP_OPTIONS = {
+  auth: {
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: false,
+  },
+  realtime: {
+    params: {
+      eventsPerSecond: 15,
+    },
+  },
+};
+
+// Get Supabase configuration from environment
+export function getSupabaseConfig(platform: string = 'desktop') {
+  const envUrl = process.env['SUPABASE_URL'] || 
+                 process.env['VITE_SUPABASE_URL'] ||
+                 process.env['NEXT_PUBLIC_SUPABASE_URL'];
+                 
+  const envAnonKey = process.env['SUPABASE_ANON_KEY'] || 
+                     process.env['VITE_SUPABASE_ANON_KEY'] ||
+                     process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
+
+  const envServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+
+  return {
+    url: envUrl || '',
+    anonKey: envAnonKey || '',
+    serviceRoleKey: envServiceKey,
+    options: DESKTOP_OPTIONS,
+  };
+}
 
 // Lazy-load configuration to avoid crash at module load time
 let _config: ReturnType<typeof getSupabaseConfig> | null = null;

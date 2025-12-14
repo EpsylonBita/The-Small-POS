@@ -3,7 +3,7 @@ import { toast } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal, POSGlassButton, POSGlassInput } from '../ui/pos-glass-components';
 import { DeliveryValidationComponent } from '../delivery/DeliveryValidationComponent';
-import { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 
 interface CustomerInfo {
   name: string;

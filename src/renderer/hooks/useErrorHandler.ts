@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { errorHandler, ErrorDetails, ErrorHandlerOptions } from '../../../../shared/services/ErrorHandlingService'
+import { errorHandler, ErrorDetails, ErrorHandlerOptions } from '../../shared/services/ErrorHandlingService'
 
 interface UseErrorHandlerReturn {
   handleError: (error: any, context: string, options?: ErrorHandlerOptions) => Promise<ErrorDetails>

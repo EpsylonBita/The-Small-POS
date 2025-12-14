@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2025-12-14
+
+### Fixed
+- Fixed standalone build crash due to external shared module dependency
+- Supabase configuration now self-contained within pos-system
+
 ## [1.1.0] - 2025-12-14
 
 ### Changed

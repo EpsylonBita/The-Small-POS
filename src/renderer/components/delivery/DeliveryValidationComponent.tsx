@@ -3,10 +3,25 @@ import { MapPin, AlertTriangle, CheckCircle, Clock, Shield, Settings } from 'luc
 import { 
   DeliveryBoundaryValidationRequest,
   DeliveryBoundaryValidationResponse,
-  DeliveryValidationUIState 
-} from '../../../../../shared/types/delivery-validation';
-import { DeliveryValidationService } from '../../../../../shared/services/DeliveryValidationService';
+} from '../../../shared/types/delivery-validation';
+import { DeliveryValidationService } from '../../../shared/services/DeliveryValidationService';
 import { useTranslation } from 'react-i18next';
+
+// UI State type for delivery validation
+interface DeliveryValidationUIState {
+  isValidating: boolean;
+  indicator?: 'success' | 'warning' | 'error' | 'info';
+  showOverrideOption?: boolean;
+  requiresManagerApproval?: boolean;
+  canProceed?: boolean;
+  message?: string;
+  showOverrideModal?: boolean;
+  showZoneSelector?: boolean;
+  showManagerApproval?: boolean;
+  addressInput?: string;
+  error?: string;
+  validationResult?: DeliveryBoundaryValidationResponse;
+}
 
 interface DeliveryValidationComponentProps {
   orderAmount: number;

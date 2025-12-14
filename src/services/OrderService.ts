@@ -1,6 +1,6 @@
 // OrderService for POS system - API integration with admin dashboard
 import { Order, OrderStatus } from '../shared/types/orders';
-import { mapStatusForSupabase, mapStatusForPOS } from '../../../shared/types/order-status';
+import { mapStatusForSupabase, mapStatusForPOS } from '../shared/types/order-status';
 import { environment, getApiUrl, isDevelopment } from '../config/environment';
 import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';

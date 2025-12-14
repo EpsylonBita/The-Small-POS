@@ -14,7 +14,7 @@ import { MenuPageSkeleton } from '../components/skeletons';
 import { ErrorDisplay } from '../components/error';
 import { POSError } from '../../shared/utils/error-handler';
 import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
-import { getMenuItemPrice, type OrderType } from '../../../../shared/services/PricingService';
+import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
 
 interface SelectedIngredient {
   ingredient: Ingredient;

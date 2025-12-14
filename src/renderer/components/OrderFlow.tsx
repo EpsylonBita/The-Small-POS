@@ -19,7 +19,7 @@ import { useModules } from '../contexts/module-context';
 import { useFeatures } from '../hooks/useFeatures';
 import toast from 'react-hot-toast';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
-import type { DeliveryBoundaryValidationResponse } from '../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';

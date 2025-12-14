@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { AddressSelectionCard } from '../forms/AddressSelectionCard';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
-import type { DeliveryBoundaryValidationResponse } from '../../../../../shared/types/delivery-validation';
+import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import EditAddressModal from './EditAddressModal';
 import { getApiUrl } from '../../../config/environment';
 
