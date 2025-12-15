@@ -24,6 +24,8 @@ export class WindowManager {
         const primaryDisplay = screen.getPrimaryDisplay();
         const { width, height } = primaryDisplay.workAreaSize;
 
+        console.log('[WindowManager] Creating window with dimensions:', { width, height });
+
         // Create the browser window with touch-optimized settings
         this.mainWindow = new BrowserWindow({
             width: Math.min(1200, width),
@@ -43,7 +45,7 @@ export class WindowManager {
             // Windows-specific optimizations
             titleBarStyle: process.platform === 'win32' ? 'default' : 'hiddenInset',
             frame: true,
-            show: true, // Show immediately for debugging - will show blank then content
+            show: false, // Start hidden, show after content loads
             icon: path.join(__dirname, '../../public/icon.png'), // Add app icon
             // Touch-friendly window behavior
             resizable: true,
@@ -51,8 +53,19 @@ export class WindowManager {
             fullscreenable: true // Allow fullscreen toggle via F11 or menu
         });
 
+        console.log('[WindowManager] Window created, setting up handlers...');
+
         this.setupEventHandlers();
         this.loadContent();
+
+        // Force show window after a short delay to ensure it appears
+        setTimeout(() => {
+            if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                console.log('[WindowManager] Force showing window after 2s delay');
+                this.mainWindow.show();
+                this.mainWindow.focus();
+            }
+        }, 2000);
 
         return this.mainWindow;
     }
@@ -238,25 +251,38 @@ export class WindowManager {
     private loadContent() {
         if (!this.mainWindow) return;
 
+        console.log('[WindowManager] loadContent called, isDev:', this.isDev);
+
         // Add error handling for content loading failures
         this.mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
-            console.error('Failed to load content:', { errorCode, errorDescription, validatedURL });
+            console.error('[WindowManager] Failed to load content:', { errorCode, errorDescription, validatedURL });
             // Show window anyway so user can see something
             if (this.mainWindow && !this.mainWindow.isVisible()) {
+                console.log('[WindowManager] Showing window after load failure');
                 this.mainWindow.show();
+            }
+        });
+
+        // Add successful load handler
+        this.mainWindow.webContents.on('did-finish-load', () => {
+            console.log('[WindowManager] Content finished loading successfully');
+            if (this.mainWindow && !this.mainWindow.isVisible()) {
+                console.log('[WindowManager] Showing window after successful load');
+                this.mainWindow.show();
+                this.mainWindow.focus();
             }
         });
 
         // Add crash handler
         this.mainWindow.webContents.on('render-process-gone', (event, details) => {
-            console.error('Renderer process gone:', details);
+            console.error('[WindowManager] Renderer process gone:', details);
         });
 
-        // Add console message handler for debugging
+        // Add console message handler for debugging - log ALL messages in production
         this.mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-            if (level >= 2) { // Warning and above
-                console.log(`[Renderer ${level}] ${message}`);
-            }
+            // Log all console messages to help debug
+            const levelNames = ['verbose', 'info', 'warning', 'error'];
+            console.log(`[Renderer:${levelNames[level] || level}] ${message}`);
         });
 
         // Load the app
@@ -264,10 +290,11 @@ export class WindowManager {
             // Development mode: Load from webpack-dev-server and open DevTools
             const loadContentAsync = async () => {
                 try {
+                    console.log('[WindowManager] Loading dev server URL...');
                     await this.mainWindow!.loadURL('http://localhost:3002');
                     this.mainWindow!.webContents.openDevTools();
                 } catch (error) {
-                    console.error('Failed to load React app:', error);
+                    console.error('[WindowManager] Failed to load React app:', error);
                     // Show window anyway
                     if (this.mainWindow && !this.mainWindow.isVisible()) {
                         this.mainWindow.show();
@@ -283,13 +310,31 @@ export class WindowManager {
                 await new Promise(resolve => setTimeout(resolve, 500));
                 
                 const indexPath = path.join(__dirname, '../renderer/index.html');
-                console.log('Loading production content from:', indexPath);
+                console.log('[WindowManager] Loading production content from:', indexPath);
+                
+                // Check if file exists
+                const fs = require('fs');
+                if (!fs.existsSync(indexPath)) {
+                    console.error('[WindowManager] ERROR: index.html not found at:', indexPath);
+                    console.log('[WindowManager] __dirname is:', __dirname);
+                    console.log('[WindowManager] Listing directory contents...');
+                    try {
+                        const parentDir = path.join(__dirname, '..');
+                        console.log('[WindowManager] Parent dir contents:', fs.readdirSync(parentDir));
+                        const rendererDir = path.join(__dirname, '../renderer');
+                        if (fs.existsSync(rendererDir)) {
+                            console.log('[WindowManager] Renderer dir contents:', fs.readdirSync(rendererDir));
+                        }
+                    } catch (e) {
+                        console.error('[WindowManager] Failed to list directories:', e);
+                    }
+                }
                 
                 try {
                     await this.mainWindow!.loadFile(indexPath);
-                    console.log('Production content loaded successfully');
+                    console.log('[WindowManager] Production content loaded successfully');
                 } catch (error) {
-                    console.error('Failed to load production content:', error);
+                    console.error('[WindowManager] Failed to load production content:', error);
                     // Show window anyway so user can see the error
                     if (this.mainWindow && !this.mainWindow.isVisible()) {
                         this.mainWindow.show();

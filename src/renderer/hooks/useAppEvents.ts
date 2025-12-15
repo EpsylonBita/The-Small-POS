@@ -70,40 +70,9 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             });
         };
 
-        const handleUpdateAvailable = (data: any) => {
-            console.log('Update available:', data);
-            toast.success(tRef.current('system.updateAvailable'), {
-                duration: 5000,
-                icon: '📥',
-            });
-        };
-
-        const handleUpdateDownloaded = (data: any) => {
-            console.log('Update downloaded:', data);
-            toast.success(tRef.current('system.updateDownloaded'), {
-                duration: Infinity,
-                icon: '✅',
-            });
-        };
-
-        const handleUpdateError = (data: any) => {
-            // Don't show toast for non-critical errors (404 = no releases, network issues)
-            const message = data?.message || '';
-            const isNonCritical = message.includes('404') || 
-                                  message.includes('net::') ||
-                                  message.includes('ENOTFOUND');
-            
-            if (isNonCritical) {
-                console.log('Update check failed (non-critical):', message);
-                return;
-            }
-            
-            console.error('Update error:', data);
-            toast.error(tRef.current('system.updateError'), {
-                duration: 5000,
-                icon: '❌',
-            });
-        };
+        // Note: Update event handlers (handleUpdateAvailable, handleUpdateDownloaded, handleUpdateError)
+        // have been removed - they are now handled exclusively by useAutoUpdater hook
+        // to prevent listener conflicts and duplicate notifications
 
         const handleSessionTimeout = (data: any) => {
             console.warn('Session timeout received:', data);
@@ -126,14 +95,15 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             'app-restart-initiated',
             'terminal-disabled',
             'terminal-enabled',
-            'update-available',
-            'update-downloaded',
-            'update-error',
             'session-timeout',
             'terminal-settings-updated',
         ];
 
+        // Note: update-available, update-downloaded, update-error are managed by useAutoUpdater
+        // We don't clear those listeners here to avoid conflicts
+
         // Clear any existing listeners first to prevent duplicates
+        // But NOT update channels - those are managed by useAutoUpdater
         channels.forEach(channel => {
             try {
                 window.electron?.ipcRenderer.removeAllListeners(channel);
@@ -149,9 +119,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
         window.electron.ipcRenderer.on('app-restart-initiated', handleRestartInitiated);
         window.electron.ipcRenderer.on('terminal-disabled', handleTerminalDisabled);
         window.electron.ipcRenderer.on('terminal-enabled', handleTerminalEnabled);
-        window.electron.ipcRenderer.on('update-available', handleUpdateAvailable);
-        window.electron.ipcRenderer.on('update-downloaded', handleUpdateDownloaded);
-        window.electron.ipcRenderer.on('update-error', handleUpdateError);
+        // Don't register update listeners here - useAutoUpdater handles them
         window.electron.ipcRenderer.on('session-timeout', handleSessionTimeout);
         window.electron.ipcRenderer.on('terminal-settings-updated', handleTerminalSettingsUpdated);
 

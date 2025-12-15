@@ -1,41 +1,92 @@
-export const ORDER_STATUSES = [
-    'pending',
-    'confirmed',
-    'preparing',
-    'ready',
-    'out_for_delivery',
-    'delivered',
-    'completed',
-    'cancelled'
-] as const;
+/**
+ * Order Status Types (POS-local stub)
+ */
 
-export type OrderStatus = typeof ORDER_STATUSES[number];
+export type OrderStatus = 
+  | 'pending'
+  | 'confirmed'
+  | 'preparing'
+  | 'ready'
+  | 'delivered'
+  | 'cancelled'
+  | 'completed';
 
+export type SupabaseOrderStatus = 
+  | 'pending'
+  | 'confirmed'
+  | 'preparing'
+  | 'ready'
+  | 'out_for_delivery'
+  | 'delivered'
+  | 'cancelled'
+  | 'completed';
+
+export const ORDER_STATUSES: OrderStatus[] = [
+  'pending',
+  'confirmed',
+  'preparing',
+  'ready',
+  'delivered',
+  'cancelled',
+  'completed',
+];
+
+/**
+ * Check if a status is valid
+ */
 export function isValidOrderStatus(status: string): status is OrderStatus {
-    return ORDER_STATUSES.includes(status as OrderStatus);
+  return ORDER_STATUSES.includes(status as OrderStatus);
 }
 
-export function mapStatusForSupabase(status: string): string {
-    // Map legacy or POS-specific statuses to Supabase schema
-    // Allowed statuses in orders_status_check: pending, confirmed, preparing, ready, completed, cancelled
-    const s = status.toLowerCase().trim();
-    if (s === 'in_kitchen') return 'preparing';
-    if (s === 'done') return 'ready';
-    // Map delivery-related statuses to 'completed' (not allowed in Supabase check constraint)
-    if (s === 'delivered' || s === 'out_for_delivery') return 'completed';
-    // Only allow statuses that are in the database check constraint
-    const allowedStatuses = ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled'];
-    if (allowedStatuses.includes(s)) return s;
-    return 'pending'; // Fallback
+/**
+ * Map POS status to Supabase status
+ */
+export function mapStatusForSupabase(status: string): SupabaseOrderStatus {
+  const statusMap: Record<string, SupabaseOrderStatus> = {
+    pending: 'pending',
+    confirmed: 'confirmed',
+    preparing: 'preparing',
+    ready: 'ready',
+    out_for_delivery: 'out_for_delivery',
+    delivered: 'delivered',
+    cancelled: 'cancelled',
+    completed: 'completed',
+  };
+  
+  return statusMap[status] || 'pending';
 }
 
+/**
+ * Map Supabase status to POS status
+ */
+export function mapStatusFromSupabase(status: string): OrderStatus {
+  return mapStatusForPOS(status);
+}
+
+/**
+ * Map any status to POS status
+ */
 export function mapStatusForPOS(status: string): OrderStatus {
-    // Map Supabase statuses to POS
-    const s = status.toLowerCase().trim();
-    if (isValidOrderStatus(s)) return s as OrderStatus;
-    return 'pending';
+  const statusMap: Record<string, OrderStatus> = {
+    pending: 'pending',
+    confirmed: 'confirmed',
+    preparing: 'preparing',
+    ready: 'ready',
+    out_for_delivery: 'delivered',
+    delivered: 'delivered',
+    cancelled: 'cancelled',
+    completed: 'completed',
+  };
+  
+  return statusMap[status] || 'pending';
 }
 
+/**
+ * Coerce incoming status to valid OrderStatus
+ */
 export function coerceIncomingStatus(status: string): OrderStatus {
-    return mapStatusForPOS(status);
+  if (isValidOrderStatus(status)) {
+    return status;
+  }
+  return mapStatusForPOS(status);
 }

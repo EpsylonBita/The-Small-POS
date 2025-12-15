@@ -58,6 +58,10 @@ export class AutoUpdaterService extends EventEmitter {
     // Enable differential updates for faster downloads
     autoUpdater.autoRunAppAfterInstall = true;
 
+    // Disable signature verification since we don't have a code signing certificate
+    // This is required for unsigned builds to update properly
+    (autoUpdater as any).verifyUpdateCodeSignature = () => Promise.resolve(null);
+
     // Event listeners
     autoUpdater.on('checking-for-update', () => {
       this.setState({ status: 'checking' });
@@ -66,7 +70,9 @@ export class AutoUpdaterService extends EventEmitter {
     });
 
     autoUpdater.on('update-available', (info: UpdateInfo) => {
+      this.logger.log(`[AutoUpdater] update-available event received from electron-updater, version: ${info.version}`);
       this.setState({ status: 'available', updateInfo: info });
+      this.logger.log(`[AutoUpdater] About to emit update-available to renderer...`);
       this.emitToRenderer('update-available', info);
       this.logger.log(`[AutoUpdater] Update available: ${info.version}`);
     });
@@ -204,12 +210,18 @@ export class AutoUpdaterService extends EventEmitter {
    * Install the update (quit and install)
    */
   public installUpdate(): void {
+    this.logger.log(`[AutoUpdater] installUpdate called, current status: ${this.state.status}`);
+    
     if (this.state.status !== 'downloaded') {
-      throw new Error('Update not downloaded');
+      this.logger.error(`[AutoUpdater] Cannot install - status is ${this.state.status}, not 'downloaded'`);
+      throw new Error(`Update not downloaded (status: ${this.state.status})`);
     }
 
-    this.logger.log('[AutoUpdater] Quitting to install...');
-    autoUpdater.quitAndInstall();
+    this.logger.log('[AutoUpdater] Calling quitAndInstall...');
+    // Use setImmediate to ensure the IPC response is sent before quitting
+    setImmediate(() => {
+      autoUpdater.quitAndInstall(false, true);
+    });
   }
 
   /**
@@ -241,8 +253,12 @@ export class AutoUpdaterService extends EventEmitter {
    */
   private emitToRenderer(channel: string, data?: any): void {
     const mainWindow = serviceRegistry.mainWindow;
+    this.logger.log(`[AutoUpdater] emitToRenderer: ${channel}, mainWindow exists: ${!!mainWindow}, destroyed: ${mainWindow?.isDestroyed()}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(channel, data);
+      this.logger.log(`[AutoUpdater] Sent ${channel} to renderer`);
+    } else {
+      this.logger.warn(`[AutoUpdater] Cannot send ${channel} - mainWindow not available`);
     }
   }
 

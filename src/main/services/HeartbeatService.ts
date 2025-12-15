@@ -1,8 +1,7 @@
 // POS Terminal Heartbeat Service
 // Handles terminal registration, heartbeat monitoring, and sync status reporting
 
-import { getSupabaseClient, SUPABASE_CONFIG } from '../../shared/supabase-config'
-import { SUPABASE_TABLES } from '../../../../shared/config/supabase-config'
+import { getSupabaseClient, SUPABASE_CONFIG, SUPABASE_TABLES } from '../../shared/supabase-config'
 import { app, ipcMain, BrowserWindow } from 'electron'
 import * as os from 'os'
 import * as crypto from 'crypto'

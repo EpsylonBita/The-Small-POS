@@ -57,8 +57,8 @@ export class OrderService {
       const api = (window as any).electronAPI;
       if (api?.invoke) {
         try {
-          // Try dedicated organization IPC
-          const orgId = await api.invoke('getTerminalOrganizationId');
+          // Try dedicated organization IPC (correct channel name)
+          const orgId = await api.invoke('terminal-config:get-organization-id');
           if (orgId) {
             this.cachedOrganizationId = orgId;
             return orgId;
@@ -68,8 +68,8 @@ export class OrderService {
         }
 
         try {
-          // Try terminal settings
-          const settingsOrgId = await api.invoke('getTerminalSetting', 'terminal', 'organization_id');
+          // Try terminal settings (correct channel name)
+          const settingsOrgId = await api.invoke('terminal-config:get-setting', 'terminal', 'organization_id');
           if (settingsOrgId) {
             this.cachedOrganizationId = settingsOrgId;
             return settingsOrgId;

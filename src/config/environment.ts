@@ -1,6 +1,5 @@
 // Environment configuration service for POS system
-import { getSupabaseClient } from '../shared/supabase-config';
-import { SUPABASE_CONFIG } from '../../../shared/config/supabase-config';
+import { getSupabaseClient, SUPABASE_CONFIG } from '../shared/supabase-config';
 
 // Window interface for electron API
 interface WindowWithElectronAPI {

@@ -527,10 +527,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 px-4 py-3 transition-all`}>
           <div className="flex flex-col gap-3">
             {/* Clear Sync Queue - Less destructive */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Database className="w-5 h-5 text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.6)]" />
-                <div className="text-left">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <Database className="w-5 h-5 flex-shrink-0 text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.6)]" />
+                <div className="text-left min-w-0">
                   <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
                   <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
                 </div>
@@ -540,33 +540,33 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   try {
                     const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all')
                     if (result?.success) {
-                      toast.success(t('settings.database.syncQueueCleared', `Cleared ${result.cleared} sync items`))
+                      toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
                     } else {
-                      toast.error(result?.error || 'Failed to clear sync queue')
+                      toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
                     }
                   } catch (e) {
                     console.error('Failed to clear sync queue:', e)
-                    toast.error('Failed to clear sync queue')
+                    toast.error(t('settings.database.syncQueueClearFailed'))
                   }
                 }}
-                className={`px-4 py-2 rounded-lg transition-all font-medium text-sm bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
               >
-                {t('settings.database.clearSyncButton', 'Clear Sync')}
+                {t('settings.database.clearSyncButton')}
               </button>
             </div>
 
             {/* Factory Reset - Destructive */}
-            <div className="flex items-center justify-between pt-2 border-t liquid-glass-modal-border">
-              <div className="flex items-center gap-3">
-                <Database className="w-5 h-5 text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.6)]" />
-                <div className="text-left">
+            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <Database className="w-5 h-5 flex-shrink-0 text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.6)]" />
+                <div className="text-left min-w-0">
                   <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.label')}</span>
                   <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.helpText')}</span>
                 </div>
               </div>
               <button
                 onClick={handleClearDatabase}
-                className={`px-4 py-2 rounded-lg transition-all font-medium text-sm bg-red-600/30 border-2 border-red-500 hover:bg-red-600/50 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.5)]`}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-red-600/30 border-2 border-red-500 hover:bg-red-600/50 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.5)]`}
               >
                 {t('settings.database.clearButton')}
               </button>

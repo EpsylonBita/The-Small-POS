@@ -12,7 +12,7 @@
 import { supabase } from '../../shared/supabase';
 import { DatabaseManager } from '../database';
 import { RealtimeChannel } from '@supabase/supabase-js';
-import type { BusinessType } from '../../../../shared/types/organization';
+import type { BusinessType } from '../../shared/types/organization';
 
 export interface TerminalSettings {
   terminal_id: string;

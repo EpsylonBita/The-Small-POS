@@ -2,7 +2,7 @@ import { DatabaseManager, SyncQueue } from '../../database';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { BrowserWindow } from 'electron';
 import { mapStatusForSupabase } from '../../../shared/types/order-status';
-import { getSupabaseConfig } from '../../../../../shared/config/supabase-config';
+import { getSupabaseConfig } from '../../../shared/supabase-config';
 import { InterTerminalCommunicationService } from './InterTerminalCommunicationService';
 import { FeatureService } from '../FeatureService';
 import { deriveOrderFinancials } from '../OrderService';

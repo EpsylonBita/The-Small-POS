@@ -2,9 +2,9 @@ import Database from 'better-sqlite3';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Customer, CustomerAddress } from '../../shared/types/customer';
 import { CustomerCacheService } from './CustomerCacheService';
-import { CustomerSyncService } from '../../../../shared/services/CustomerSyncService';
-import type { ConflictResult } from '../../../../shared/types/customer-sync';
-import { isConflictResult } from '../../../../shared/types/customer-sync';
+import { CustomerSyncService } from '../../shared/services/CustomerSyncService';
+import type { ConflictResult } from '../../shared/types/customer-sync';
+import { isConflictResult } from '../../shared/types/customer-sync';
 
 /**
  * CustomerService - Three-tier customer lookup system
@@ -35,7 +35,10 @@ export class CustomerService {
     posApiKey?: string
   ) {
     // Initialize Supabase client with provided credentials
-    this.supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+    // Use placeholder values if not configured to allow app to start for onboarding
+    const url = supabaseUrl || 'https://placeholder.supabase.co';
+    const key = supabaseAnonKey || 'placeholder-key';
+    this.supabaseClient = createClient(url, key);
     this.cacheService = new CustomerCacheService(database);
     this.ADMIN_API_BASE_URL = adminApiBaseUrl || 'http://localhost:3001/api';
     this.terminalId = terminalId;

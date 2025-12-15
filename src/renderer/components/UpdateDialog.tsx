@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
 
@@ -32,6 +33,7 @@ export interface UpdateDialogProps {
   updateInfo?: UpdateInfo | null;
   progress?: ProgressInfo;
   error?: string | null;
+  currentVersion?: string;
   onDownload: () => void;
   onCancel: () => void;
   onInstall: () => void;
@@ -45,27 +47,30 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
   updateInfo,
   progress,
   error,
+  currentVersion,
   onDownload,
   onCancel,
   onInstall,
   onRetry,
 }) => {
+  const { t } = useTranslation();
+
   const getTitle = (): string => {
     switch (status) {
       case 'checking':
-        return 'Checking for Updates';
+        return t('updates.title.checking');
       case 'available':
-        return 'Update Available';
+        return t('updates.title.available');
       case 'downloading':
-        return 'Downloading Update';
+        return t('updates.title.downloading');
       case 'downloaded':
-        return 'Update Ready';
+        return t('updates.title.downloaded');
       case 'error':
-        return 'Update Error';
+        return t('updates.title.error');
       case 'not-available':
       case 'idle':
       default:
-        return 'Software Update';
+        return t('updates.title.upToDate');
     }
   };
 
@@ -79,6 +84,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
             updateInfo={updateInfo} 
             onDownload={onDownload}
             onClose={onClose}
+            currentVersion={currentVersion}
           />
         );
       case 'downloading':
@@ -107,7 +113,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
       case 'not-available':
       case 'idle':
       default:
-        return <UpToDateState onClose={onClose} />;
+        return <UpToDateState onClose={onClose} currentVersion={currentVersion} />;
     }
   };
 
@@ -129,27 +135,33 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
 };
 
 // Checking state - spinner while checking for updates
-const CheckingState: React.FC = () => (
-  <div className="flex flex-col items-center justify-center py-8 space-y-4">
-    <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
-    <p className="text-gray-300 text-center">
-      Checking for updates...
-    </p>
-  </div>
-);
+const CheckingState: React.FC = () => {
+  const { t } = useTranslation();
+  return (
+    <div className="flex flex-col items-center justify-center py-8 space-y-4">
+      <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+      <p className="text-gray-300 text-center">
+        {t('updates.checking')}
+      </p>
+    </div>
+  );
+};
 
 // Available state - shows version info and release notes
 interface AvailableStateProps {
   updateInfo?: UpdateInfo | null;
   onDownload: () => void;
   onClose: () => void;
+  currentVersion?: string;
 }
 
 const AvailableState: React.FC<AvailableStateProps> = ({ 
   updateInfo, 
   onDownload,
-  onClose 
+  onClose,
+  currentVersion
 }) => {
+  const { t } = useTranslation();
   const releaseNotes = getReleaseNotesHtml(updateInfo?.releaseNotes);
   
   return (
@@ -166,11 +178,16 @@ const AvailableState: React.FC<AvailableStateProps> = ({
         </svg>
         <div>
           <h3 className="text-lg font-bold text-white">
-            Version {updateInfo?.version || 'Unknown'}
+            {t('updates.available.version', { version: updateInfo?.version || 'Unknown' })}
           </h3>
+          {currentVersion && (
+            <p className="text-sm text-gray-400">
+              {t('updates.available.currentVersion', { current: currentVersion, new: updateInfo?.version })}
+            </p>
+          )}
           {updateInfo?.releaseDate && (
             <p className="text-sm text-gray-300">
-              Released: {new Date(updateInfo.releaseDate).toLocaleDateString()}
+              {t('updates.available.released', { date: new Date(updateInfo.releaseDate).toLocaleDateString() })}
             </p>
           )}
         </div>
@@ -179,7 +196,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
       {/* Release notes */}
       {releaseNotes && (
         <div className="bg-black/20 rounded-lg p-4 max-h-48 overflow-y-auto">
-          <h4 className="text-sm font-semibold text-gray-300 mb-2">What's New:</h4>
+          <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
           <div
             className="text-sm text-gray-400 prose prose-invert prose-sm"
             dangerouslySetInnerHTML={{ __html: releaseNotes }}
@@ -194,14 +211,14 @@ const AvailableState: React.FC<AvailableStateProps> = ({
           onClick={onDownload}
           fullWidth
         >
-          Download Update
+          {t('updates.actions.download')}
         </POSGlassButton>
         <POSGlassButton
           variant="secondary"
           onClick={onClose}
           fullWidth
         >
-          Later
+          {t('updates.actions.later')}
         </POSGlassButton>
       </div>
     </div>
@@ -219,6 +236,7 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
   progress, 
   onCancel 
 }) => {
+  const { t } = useTranslation();
   const percent = progress?.percent || 0;
   const speed = (progress?.bytesPerSecond || 0) / 1024 / 1024; // MB/s
   const transferred = (progress?.transferred || 0) / 1024 / 1024; // MB
@@ -237,19 +255,19 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
       {/* Stats grid */}
       <div className="grid grid-cols-2 gap-4 text-sm">
         <div className="bg-white/5 p-3 rounded-lg">
-          <span className="block text-gray-400">Progress</span>
+          <span className="block text-gray-400">{t('updates.downloading.progress')}</span>
           <span className="block text-xl font-bold text-white">
             {percent.toFixed(0)}%
           </span>
         </div>
         <div className="bg-white/5 p-3 rounded-lg">
-          <span className="block text-gray-400">Speed</span>
+          <span className="block text-gray-400">{t('updates.downloading.speed')}</span>
           <span className="block text-xl font-bold text-white">
             {speed.toFixed(1)} MB/s
           </span>
         </div>
         <div className="col-span-2 bg-white/5 p-3 rounded-lg">
-          <span className="block text-gray-400">Downloaded</span>
+          <span className="block text-gray-400">{t('updates.downloading.downloaded')}</span>
           <span className="block text-xl font-bold text-white">
             {transferred.toFixed(1)} / {total.toFixed(1)} MB
           </span>
@@ -263,7 +281,7 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
           onClick={onCancel}
           className="px-8"
         >
-          Cancel Download
+          {t('updates.actions.cancel')}
         </POSGlassButton>
       </div>
     </div>
@@ -282,7 +300,27 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
   onInstall,
   onClose 
 }) => {
+  const { t } = useTranslation();
   const version = updateInfo?.version || 'New Version';
+
+  const handleInstall = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[UpdateDialog] Install button clicked - calling onInstall');
+    try {
+      onInstall();
+      console.log('[UpdateDialog] onInstall called successfully');
+    } catch (err) {
+      console.error('[UpdateDialog] Error calling onInstall:', err);
+    }
+  };
+
+  const handleClose = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[UpdateDialog] Install Later button clicked - calling onClose');
+    onClose();
+  };
 
   return (
     <div className="space-y-6 text-center">
@@ -300,36 +338,33 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white">Version {version} is ready!</h3>
+      <h3 className="text-xl font-bold text-white">{t('updates.downloaded.ready', { version })}</h3>
 
       <p className="text-gray-300">
-        The update has been downloaded successfully.
-        You can install it now (requires restart) or it will be installed automatically the next time you restart the app.
+        {t('updates.downloaded.description')}
       </p>
 
       {/* Warning note */}
       <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-sm text-yellow-200">
-        ⚠️ Note: The application will restart immediately if you choose "Install Now".
+        {t('updates.downloaded.warning')}
       </div>
 
-      {/* Action buttons */}
+      {/* Action buttons - using regular buttons for reliability */}
       <div className="flex flex-col gap-3 pt-4">
-        <POSGlassButton
-          variant="success"
-          onClick={onInstall}
-          size="large"
-          fullWidth
-          className="font-bold"
+        <button
+          type="button"
+          onClick={handleInstall}
+          className="w-full px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-bold transition-colors cursor-pointer"
         >
-          Restart & Install Now
-        </POSGlassButton>
-        <POSGlassButton
-          variant="secondary"
-          onClick={onClose}
-          fullWidth
+          {t('updates.actions.installNow')}
+        </button>
+        <button
+          type="button"
+          onClick={handleClose}
+          className="w-full px-6 py-3 bg-gray-600 hover:bg-gray-700 text-white rounded-xl transition-colors cursor-pointer"
         >
-          Install on Next Restart
-        </POSGlassButton>
+          {t('updates.actions.installLater')}
+        </button>
       </div>
     </div>
   );
@@ -346,91 +381,105 @@ const ErrorState: React.FC<ErrorStateProps> = ({
   error, 
   onRetry,
   onClose 
-}) => (
-  <div className="space-y-6 text-center">
-    {/* Error icon */}
-    <div className="flex justify-center mb-4">
-      <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center text-red-400">
-        <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path 
-            strokeLinecap="round" 
-            strokeLinejoin="round" 
-            strokeWidth={2} 
-            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
-          />
-        </svg>
+}) => {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-6 text-center">
+      {/* Error icon */}
+      <div className="flex justify-center mb-4">
+        <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center text-red-400">
+          <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              strokeWidth={2} 
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
+            />
+          </svg>
+        </div>
+      </div>
+
+      <h3 className="text-xl font-bold text-white">{t('updates.error.title')}</h3>
+
+      <p className="text-gray-300">
+        {error || t('updates.error.generic')}
+      </p>
+
+      <p className="text-sm text-gray-400">
+        {t('updates.error.network')}
+      </p>
+
+      {/* Action buttons */}
+      <div className="flex flex-col sm:flex-row gap-3 pt-4">
+        <POSGlassButton
+          variant="primary"
+          onClick={onRetry}
+          fullWidth
+        >
+          {t('updates.actions.retry')}
+        </POSGlassButton>
+        <POSGlassButton
+          variant="secondary"
+          onClick={onClose}
+          fullWidth
+        >
+          {t('updates.actions.close')}
+        </POSGlassButton>
       </div>
     </div>
-
-    <h3 className="text-xl font-bold text-white">Update Failed</h3>
-
-    <p className="text-gray-300">
-      {error || 'An error occurred while checking for or downloading updates.'}
-    </p>
-
-    <p className="text-sm text-gray-400">
-      Please check your internet connection and try again.
-    </p>
-
-    {/* Action buttons */}
-    <div className="flex flex-col sm:flex-row gap-3 pt-4">
-      <POSGlassButton
-        variant="primary"
-        onClick={onRetry}
-        fullWidth
-      >
-        Retry
-      </POSGlassButton>
-      <POSGlassButton
-        variant="secondary"
-        onClick={onClose}
-        fullWidth
-      >
-        Close
-      </POSGlassButton>
-    </div>
-  </div>
-);
+  );
+};
 
 // Up to date state - application is current
 interface UpToDateStateProps {
   onClose: () => void;
+  currentVersion?: string;
 }
 
-const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose }) => (
-  <div className="space-y-6 text-center">
-    {/* Check icon */}
-    <div className="flex justify-center mb-4">
-      <div className="w-16 h-16 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400">
-        <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path 
-            strokeLinecap="round" 
-            strokeLinejoin="round" 
-            strokeWidth={2} 
-            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" 
-          />
-        </svg>
+const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-6 text-center">
+      {/* Check icon */}
+      <div className="flex justify-center mb-4">
+        <div className="w-16 h-16 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400">
+          <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              strokeWidth={2} 
+              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" 
+            />
+          </svg>
+        </div>
+      </div>
+
+      <h3 className="text-xl font-bold text-white">{t('updates.upToDate.title')}</h3>
+
+      <p className="text-gray-300">
+        {t('updates.upToDate.description')}
+      </p>
+
+      {/* Current version display */}
+      {currentVersion && (
+        <div className="bg-white/5 rounded-lg p-3">
+          <span className="text-sm text-gray-400">{t('updates.upToDate.currentVersion', { version: currentVersion })}</span>
+        </div>
+      )}
+
+      {/* Close button */}
+      <div className="pt-4">
+        <POSGlassButton
+          variant="primary"
+          onClick={onClose}
+          fullWidth
+        >
+          {t('updates.actions.ok')}
+        </POSGlassButton>
       </div>
     </div>
-
-    <h3 className="text-xl font-bold text-white">You're Up to Date!</h3>
-
-    <p className="text-gray-300">
-      The Small POS is running the latest version.
-    </p>
-
-    {/* Close button */}
-    <div className="pt-4">
-      <POSGlassButton
-        variant="primary"
-        onClick={onClose}
-        fullWidth
-      >
-        OK
-      </POSGlassButton>
-    </div>
-  </div>
-);
+  );
+};
 
 // Helper function to extract release notes as HTML
 function getReleaseNotesHtml(

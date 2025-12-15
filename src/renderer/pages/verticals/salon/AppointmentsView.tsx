@@ -488,19 +488,19 @@ export const AppointmentsView: React.FC = memo(() => {
       <div className="flex items-center justify-between mb-4">
         <div className="flex gap-4">
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>Total</div>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className="text-sm text-green-500">Confirmed</div>
+            <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className="text-sm text-yellow-500">In Progress</div>
+            <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className="text-sm text-gray-500">Completed</div>
+            <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
           </div>
         </div>
@@ -518,7 +518,7 @@ export const AppointmentsView: React.FC = memo(() => {
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search..."
+              placeholder={t('appointments.searchPlaceholder', 'Search...')}
               className={`pl-10 pr-4 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
             />
           </div>
@@ -538,7 +538,7 @@ export const AppointmentsView: React.FC = memo(() => {
                   : isDark ? 'bg-gray-800 text-gray-300 hover:bg-gray-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              {filter.charAt(0).toUpperCase() + filter.slice(1)}
+              {t(`appointments.filters.${filter}`, filter.charAt(0).toUpperCase() + filter.slice(1))}
             </button>
           ))}
         </div>
@@ -572,7 +572,7 @@ export const AppointmentsView: React.FC = memo(() => {
             onChange={(e) => setStaffFilter(e.target.value)}
             className={`px-3 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
           >
-            <option value="all">All Staff</option>
+            <option value="all">{t('appointments.filters.allStaff', 'All Staff')}</option>
             {staff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
           <div className={`flex rounded-lg overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
@@ -582,7 +582,7 @@ export const AppointmentsView: React.FC = memo(() => {
                 onClick={() => setViewMode(mode)}
                 className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-blue-600 text-white' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
               >
-                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                {t(`appointments.view.${mode}`, mode.charAt(0).toUpperCase() + mode.slice(1))}
               </button>
             ))}
           </div>
@@ -593,7 +593,7 @@ export const AppointmentsView: React.FC = memo(() => {
       {isLoading && appointments.length === 0 && (
         <div className={`flex-1 flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <RefreshCw className="w-6 h-6 animate-spin mr-2" />
-          Loading appointments...
+          {t('appointments.loading', 'Loading appointments...')}
         </div>
       )}
 

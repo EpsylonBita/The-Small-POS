@@ -113,6 +113,9 @@ function isAllowedChannel(channel: string): channel is AllowedChannel {
   return ALLOWED_CHANNELS.includes(channel as AllowedChannel);
 }
 
+// Map to track callback -> subscription wrapper for proper removal
+const listenerMap = new Map<string, Map<(data: any) => void, (event: IpcRendererEvent, data: any) => void>>();
+
 /**
  * Secure IPC API exposed to renderer process
  */
@@ -133,10 +136,31 @@ const electronAPI = {
       }
 
       const subscription = (_event: IpcRendererEvent, data: any) => {
+        // Debug logging for update events
+        if (channel.startsWith('update-')) {
+          console.log(`[Preload] Received ${channel} event:`, data);
+        }
         // Some events (like update-checking) don't send data - that's OK
-        callback(data);
+        try {
+          callback(data);
+          if (channel.startsWith('update-')) {
+            console.log(`[Preload] Successfully called callback for ${channel}`);
+          }
+        } catch (err) {
+          console.error(`[Preload] Error in callback for ${channel}:`, err);
+        }
       };
+      
+      // Store the mapping so we can remove it later
+      if (!listenerMap.has(channel)) {
+        listenerMap.set(channel, new Map());
+      }
+      listenerMap.get(channel)!.set(callback, subscription);
+      
       ipcRenderer.on(channel, subscription);
+      if (channel.startsWith('update-')) {
+        console.log(`[Preload] Registered listener for ${channel}`);
+      }
     },
 
     /**
@@ -150,7 +174,18 @@ const electronAPI = {
         return;
       }
 
-      ipcRenderer.removeListener(channel, callback);
+      // Get the actual subscription wrapper that was registered
+      const channelListeners = listenerMap.get(channel);
+      if (channelListeners) {
+        const subscription = channelListeners.get(callback);
+        if (subscription) {
+          ipcRenderer.removeListener(channel, subscription);
+          channelListeners.delete(callback);
+          if (channel.startsWith('update-')) {
+            console.log(`[Preload] Removed listener for ${channel}`);
+          }
+        }
+      }
     },
 
     /**
@@ -164,6 +199,8 @@ const electronAPI = {
       }
 
       ipcRenderer.removeAllListeners(channel);
+      // Clear the listener map for this channel
+      listenerMap.delete(channel);
     },
 
     /**

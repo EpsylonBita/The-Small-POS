@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import {
   TrendingUp,
   TrendingDown,
-  DollarSign,
+  Euro,
   ShoppingCart,
   Users,
   Clock,
@@ -169,7 +169,7 @@ const AnalyticsPage: React.FC = () => {
       {/* Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard
-          icon={DollarSign}
+          icon={Euro}
           label={t('analytics.totalRevenue', 'Total Revenue')}
           value={currency.format(analytics?.totalRevenue || 0)}
           change={analytics?.revenueChange}

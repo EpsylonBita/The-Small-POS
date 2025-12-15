@@ -29,50 +29,54 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
   // Convert error to POSError if needed
   const posError: POSError = typeof error === 'string'
     ? {
-        type: ErrorType.UNKNOWN,
-        severity: ErrorSeverity.MEDIUM,
+        name: 'POSError',
+        type: 'unknown',
+        severity: 'medium',
         code: 'UNKNOWN_ERROR',
         message: error,
         timestamp: new Date().toISOString(),
         context: {}
-      }
+      } as POSError
     : error instanceof Error && !('type' in error)
     ? {
-        type: ErrorType.SYSTEM,
-        severity: ErrorSeverity.MEDIUM,
+        name: error.name || 'POSError',
+        type: 'system',
+        severity: 'medium',
         code: 'SYSTEM_ERROR',
         message: error.message,
         timestamp: new Date().toISOString(),
         context: {},
         stack: error.stack
-      }
+      } as POSError
     : error as POSError;
 
-  // Determine severity color
-  const getSeverityColor = (severity: ErrorSeverity): string => {
-    switch (severity) {
-      case 'CRITICAL':
+  // Determine severity color (handle both lowercase and uppercase)
+  const getSeverityColor = (severity: ErrorSeverity | undefined): string => {
+    const s = (severity || 'medium').toLowerCase();
+    switch (s) {
+      case 'critical':
         return '#d32f2f'; // Red
-      case 'HIGH':
+      case 'high':
         return '#f57c00'; // Orange
-      case 'MEDIUM':
+      case 'medium':
         return '#ffa726'; // Light orange
-      case 'LOW':
+      case 'low':
         return '#fbc02d'; // Yellow
       default:
         return '#757575'; // Gray
     }
   };
 
-  const getSeverityIcon = (severity: ErrorSeverity): string => {
-    switch (severity) {
-      case 'CRITICAL':
+  const getSeverityIcon = (severity: ErrorSeverity | undefined): string => {
+    const s = (severity || 'medium').toLowerCase();
+    switch (s) {
+      case 'critical':
         return '🚨';
-      case 'HIGH':
+      case 'high':
         return '⚠️';
-      case 'MEDIUM':
+      case 'medium':
         return '⚡';
-      case 'LOW':
+      case 'low':
         return 'ℹ️';
       default:
         return '❓';
@@ -114,10 +118,13 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
               fontWeight: '600'
             }}
           >
-            {posError.severity === 'CRITICAL' ? 'Critical Error' :
-             posError.severity === 'HIGH' ? 'Error' :
-             posError.severity === 'MEDIUM' ? 'Warning' :
-             'Notice'}
+            {(() => {
+              const s = (posError.severity || 'medium').toLowerCase();
+              return s === 'critical' ? 'Critical Error' :
+                     s === 'high' ? 'Error' :
+                     s === 'medium' ? 'Warning' :
+                     'Notice';
+            })()}
           </h3>
           <p
             style={{

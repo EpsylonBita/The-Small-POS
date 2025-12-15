@@ -1,6 +1,6 @@
 {
   "name": "the-small-pos-system",
-  "version": "1.1.2",
+  "version": "1.1.23",
   "description": "Point of Sale system for The Small with offline capabilities",
   "main": "dist/main/main.js",
   "homepage": "./",
@@ -131,6 +131,7 @@
   "build": {
     "appId": "com.thesmall.pos",
     "productName": "The Small POS",
+    "artifactName": "The-Small-POS-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -150,7 +151,7 @@
         "nsis"
       ],
       "icon": "public/icon.ico",
-      "publisherName": "The Small"
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,

@@ -1,168 +1,131 @@
-// Enhanced Error Handling Utilities for POS System
-import { ERROR_MESSAGES } from '../constants';
+/**
+ * Error Handler Utilities (POS-local stub)
+ */
 
-// Error types for better categorization
-export enum ErrorType {
-  VALIDATION = 'VALIDATION',
-  AUTHENTICATION = 'AUTHENTICATION',
-  AUTHORIZATION = 'AUTHORIZATION',
-  NETWORK = 'NETWORK',
-  DATABASE = 'DATABASE',
-  BUSINESS_LOGIC = 'BUSINESS_LOGIC',
-  SYSTEM = 'SYSTEM',
-  UNKNOWN = 'UNKNOWN',
-}
+export type ErrorSeverity = 'low' | 'medium' | 'high' | 'critical' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+export type ErrorType = 'network' | 'validation' | 'database' | 'auth' | 'unknown' | 'system' | 'business';
 
-// Error severity levels
-export enum ErrorSeverity {
-  LOW = 'LOW',
-  MEDIUM = 'MEDIUM',
-  HIGH = 'HIGH',
-  CRITICAL = 'CRITICAL',
-}
+// Export as values for runtime use
+export const ErrorSeverity = {
+  LOW: 'low' as ErrorSeverity,
+  MEDIUM: 'medium' as ErrorSeverity,
+  HIGH: 'high' as ErrorSeverity,
+  CRITICAL: 'critical' as ErrorSeverity,
+};
 
-// Enhanced error interface
-export interface POSError {
-  type: ErrorType;
-  severity: ErrorSeverity;
-  code: string;
-  message: string;
+export const ErrorType = {
+  NETWORK: 'network' as ErrorType,
+  VALIDATION: 'validation' as ErrorType,
+  DATABASE: 'database' as ErrorType,
+  AUTH: 'auth' as ErrorType,
+  UNKNOWN: 'unknown' as ErrorType,
+  SYSTEM: 'system' as ErrorType,
+  BUSINESS: 'business' as ErrorType,
+};
+
+export interface POSError extends Error {
+  code?: string;
+  severity?: ErrorSeverity;
+  type?: ErrorType;
+  context?: string | Record<string, any>;
+  retryable?: boolean;
+  originalError?: Error;
+  errors?: any[];
+  dbPath?: string;
+  timestamp?: string;
   details?: any;
-  timestamp: string;
-  context?: {
-    userId?: string;
-    orderId?: string;
-    action?: string;
-    component?: string;
-  };
+  componentStack?: string;
   stack?: string;
+  [key: string]: any;
 }
 
-// Error factory class
 export class ErrorFactory {
-  static create(
-    type: ErrorType,
-    severity: ErrorSeverity,
-    code: string,
-    message: string,
-    details?: any,
-    context?: POSError['context']
-  ): POSError {
-    return {
-      type,
-      severity,
-      code,
-      message,
-      details,
-      context,
-      timestamp: new Date().toISOString(),
-      stack: new Error().stack,
-    };
+  static create(message: string, options?: Partial<POSError>): POSError {
+    const error = new Error(message) as POSError;
+    Object.assign(error, options);
+    return error;
   }
 
-  static validation(message: string, details?: any): POSError {
-    return this.create(
-      ErrorType.VALIDATION,
-      ErrorSeverity.MEDIUM,
-      'VALIDATION_ERROR',
-      message,
-      details
-    );
+  static network(message: string, originalError?: Error): POSError {
+    return this.create(message, {
+      type: 'network',
+      severity: 'medium',
+      retryable: true,
+      originalError,
+    });
   }
 
-  static authentication(message: string = ERROR_MESSAGES.INVALID_CREDENTIALS): POSError {
-    return this.create(
-      ErrorType.AUTHENTICATION,
-      ErrorSeverity.HIGH,
-      'AUTH_ERROR',
-      message
-    );
-  }
-
-  static network(message: string = ERROR_MESSAGES.NETWORK_ERROR): POSError {
-    return this.create(
-      ErrorType.NETWORK,
-      ErrorSeverity.MEDIUM,
-      'NETWORK_ERROR',
-      message
-    );
+  static validation(message: string): POSError {
+    return this.create(message, {
+      type: 'validation',
+      severity: 'low',
+      retryable: false,
+    });
   }
 
   static database(message: string, details?: any): POSError {
-    return this.create(
-      ErrorType.DATABASE,
-      ErrorSeverity.HIGH,
-      'DATABASE_ERROR',
-      message,
-      details
-    );
-  }
-
-  static businessLogic(message: string, details?: any): POSError {
-    return this.create(
-      ErrorType.BUSINESS_LOGIC,
-      ErrorSeverity.MEDIUM,
-      'BUSINESS_ERROR',
-      message,
-      details
-    );
-  }
-
-  static system(message: string, details?: any): POSError {
-    return this.create(
-      ErrorType.SYSTEM,
-      ErrorSeverity.CRITICAL,
-      'SYSTEM_ERROR',
-      message,
-      details
-    );
-  }
-
-  static timeout(operation: string, timeoutMs: number): POSError {
-    return this.create(
-      ErrorType.NETWORK,
-      ErrorSeverity.MEDIUM,
-      'TIMEOUT_ERROR',
-      `${operation} timed out after ${timeoutMs}ms`,
-      { operation, timeoutMs }
-    );
+    const error = this.create(message, {
+      type: 'database',
+      severity: 'high',
+      retryable: true,
+    });
+    if (details) {
+      Object.assign(error, details);
+    }
+    return error;
   }
 
   static databaseInit(message: string, details?: any): POSError {
-    return this.create(
-      ErrorType.DATABASE,
-      ErrorSeverity.CRITICAL,
-      'DATABASE_INIT_ERROR',
-      message,
-      details
-    );
+    const error = this.create(message, {
+      type: 'database',
+      severity: 'critical',
+      retryable: false,
+    });
+    if (details) {
+      Object.assign(error, details);
+    }
+    return error;
   }
 
-  static databaseQuery(query: string, details?: any): POSError {
-    return this.create(
-      ErrorType.DATABASE,
-      ErrorSeverity.HIGH,
-      'DATABASE_QUERY_ERROR',
-      'Database query failed',
-      { query, ...details }
-    );
+  static system(message: string, details?: any): POSError {
+    const options: Partial<POSError> = {
+      type: 'system',
+      severity: 'high',
+      retryable: false,
+    };
+    // Support both Error object and details object
+    if (details instanceof Error) {
+      options.originalError = details;
+      options.stack = details.stack;
+    } else if (details) {
+      options.details = details;
+      if (details.componentStack) options.componentStack = details.componentStack;
+      if (details.stack) options.stack = details.stack;
+      if (details.name) options.name = details.name;
+    }
+    return this.create(message, options);
   }
 
-  static serviceUnavailable(serviceName: string): POSError {
-    return this.create(
-      ErrorType.SYSTEM,
-      ErrorSeverity.HIGH,
-      'SERVICE_UNAVAILABLE',
-      `${serviceName} is currently unavailable`,
-      { serviceName }
-    );
+  static businessLogic(message: string, details?: any): POSError {
+    return this.create(message, {
+      type: 'business',
+      severity: 'medium',
+      retryable: false,
+      details,
+    });
+  }
+
+  static authentication(message: string): POSError {
+    return this.create(message, {
+      type: 'auth',
+      severity: 'high',
+      retryable: false,
+    });
   }
 }
 
-// Error handler class
 export class ErrorHandler {
   private static instance: ErrorHandler;
-  private errorLog: POSError[] = [];
 
   static getInstance(): ErrorHandler {
     if (!ErrorHandler.instance) {
@@ -171,283 +134,85 @@ export class ErrorHandler {
     return ErrorHandler.instance;
   }
 
-  // Handle and log errors
-  handle(error: POSError | Error | unknown): POSError {
-    let posError: POSError;
+  handleError(error: any, context?: string): void {
+    console.error(`[ErrorHandler${context ? ` - ${context}` : ''}]`, error?.message || error);
+  }
 
-    if (this.isPOSError(error)) {
-      posError = error;
-    } else if (error instanceof Error) {
-      posError = this.convertError(error);
-    } else {
-      posError = ErrorFactory.create(
-        ErrorType.UNKNOWN,
-        ErrorSeverity.MEDIUM,
-        'UNKNOWN_ERROR',
-        ERROR_MESSAGES.UNKNOWN_ERROR,
-        error
-      );
+  handle(error: any, context?: string): POSError {
+    this.handleError(error, context);
+    // If already a POSError, return as-is
+    if (error && typeof error === 'object' && 'type' in error) {
+      return error as POSError;
     }
-
-    this.logError(posError);
+    // Convert to POSError
+    const posError = new Error(error?.message || String(error)) as POSError;
+    posError.code = error?.code;
+    posError.type = error?.type || 'unknown';
+    posError.severity = error?.severity || 'medium';
+    posError.timestamp = new Date().toISOString();
+    posError.context = context;
     return posError;
   }
 
-  // Convert standard Error to POSError
-  private convertError(error: Error): POSError {
-    // Detect error type based on message or properties
-    let type = ErrorType.UNKNOWN;
-    let severity = ErrorSeverity.MEDIUM;
-
-    // Check for timeout errors
-    if (error.name === 'AbortError' || error.message.includes('timeout') || error.message.includes('timed out')) {
-      type = ErrorType.NETWORK;
-      severity = ErrorSeverity.MEDIUM;
-    }
-    // Check for network errors
-    else if (error.message.includes('network') || error.message.includes('fetch')) {
-      type = ErrorType.NETWORK;
-    }
-    // Check for authentication errors
-    else if (error.message.includes('auth') || error.message.includes('unauthorized')) {
-      type = ErrorType.AUTHENTICATION;
-      severity = ErrorSeverity.HIGH;
-    }
-    // Check for validation errors
-    else if (error.message.includes('validation') || error.message.includes('invalid')) {
-      type = ErrorType.VALIDATION;
-    }
-    // Check for database errors (SQLite error codes)
-    else if (error.message.includes('database') || error.message.includes('sql') ||
-             error.message.includes('SQLITE_') || error.message.includes('constraint')) {
-      type = ErrorType.DATABASE;
-      severity = ErrorSeverity.HIGH;
-    }
-    // Check for Supabase errors
-    else if (error.message.includes('supabase') || error.message.includes('postgrest')) {
-      type = ErrorType.DATABASE;
-      severity = ErrorSeverity.HIGH;
-    }
-
-    return ErrorFactory.create(
-      type,
-      severity,
-      'CONVERTED_ERROR',
-      error.message,
-      { originalError: error.name },
-      undefined
-    );
+  getUserMessage(error: any): string {
+    return error?.message || 'An unexpected error occurred';
   }
 
-  // Check if error is POSError
-  private isPOSError(error: any): error is POSError {
-    return error && typeof error === 'object' && 'type' in error && 'severity' in error;
-  }
-
-  // Log error to console and storage
-  private logError(error: POSError): void {
-    // Add to in-memory log
-    this.errorLog.push(error);
-
-    // Keep only last 100 errors in memory
-    if (this.errorLog.length > 100) {
-      this.errorLog = this.errorLog.slice(-100);
-    }
-
-    // Log to console based on severity
-    const logMessage = `[${error.type}] ${error.message}`;
-    
-    switch (error.severity) {
-      case ErrorSeverity.CRITICAL:
-        console.error('🚨 CRITICAL:', logMessage, error);
-        break;
-      case ErrorSeverity.HIGH:
-        console.error('❌ ERROR:', logMessage, error);
-        break;
-      case ErrorSeverity.MEDIUM:
-        console.warn('⚠️ WARNING:', logMessage, error);
-        break;
-      case ErrorSeverity.LOW:
-        console.info('ℹ️ INFO:', logMessage, error);
-        break;
-    }
-
-    // In production, you might want to send critical errors to a logging service
-    if (error.severity === ErrorSeverity.CRITICAL) {
-      this.reportCriticalError(error);
-    }
-  }
-
-  // Report critical errors (placeholder for external logging service)
-  private reportCriticalError(error: POSError): void {
-    // TODO: Implement external error reporting
-    // This could send errors to Sentry, LogRocket, or custom logging service
-    console.error('Critical error reported:', error);
-  }
-
-  // Get recent errors for debugging
-  getRecentErrors(count: number = 10): POSError[] {
-    return this.errorLog.slice(-count);
-  }
-
-  // Clear error log
-  clearErrors(): void {
-    this.errorLog = [];
-  }
-
-  // Get user-friendly error message
-  getUserMessage(error: POSError): string {
-    // Check for timeout-specific messages
-    if (error.code === 'TIMEOUT_ERROR') {
-      return 'This operation is taking longer than expected. Please check your connection and try again.';
-    }
-
-    // Check for database-specific messages
-    if (error.code === 'DATABASE_INIT_ERROR') {
-      return 'Unable to access local database. Please restart the application.';
-    }
-
-    if (error.code === 'DATABASE_QUERY_ERROR') {
-      return 'There was a problem accessing your data. Please try again.';
-    }
-
-    // Type-based messages with actionable steps
-    switch (error.type) {
-      case ErrorType.NETWORK:
-        return 'Please check your internet connection and try again. If the problem persists, contact support.';
-      case ErrorType.AUTHENTICATION:
-        return 'Please log in again to continue.';
-      case ErrorType.VALIDATION:
-        return error.message; // Validation messages are usually user-friendly
-      case ErrorType.DATABASE:
-        return 'There was a problem saving your data. Please try again or contact support.';
-      case ErrorType.BUSINESS_LOGIC:
-        return error.message; // Business logic messages are usually user-friendly
-      case ErrorType.SYSTEM:
-        return 'A system error occurred. Please restart the application or contact support.';
-      default:
-        return 'Something went wrong. Please try again or contact support.';
-    }
+  async handleApiError(error: any, context?: string): Promise<void> {
+    this.handleError(error, context);
   }
 }
 
-// Utility functions for common error scenarios
-export const handleAsyncError = async <T>(
-  operation: () => Promise<T>,
-  context?: POSError['context']
-): Promise<{ data?: T; error?: POSError }> => {
-  try {
-    const data = await operation();
-    return { data };
-  } catch (error) {
-    const posError = ErrorHandler.getInstance().handle(error);
-    if (context) {
-      posError.context = { ...posError.context, ...context };
-    }
-    return { error: posError };
-  }
-};
-
-export const handleSyncError = (error: unknown, operation: string): POSError => {
-  const posError = ErrorHandler.getInstance().handle(error);
-  posError.context = { ...posError.context, action: operation };
-  return posError;
-};
-
-export const handleValidationError = (field: string, message: string): POSError => {
-  return ErrorFactory.validation(`${field}: ${message}`, { field });
-};
-
-// Timeout utility - wraps any promise with timeout handling
-export const withTimeout = <T>(
+/**
+ * Wrap a promise with a timeout
+ */
+export async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  operation: string
-): Promise<T> => {
-  return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => {
-      reject(ErrorFactory.timeout(operation, timeoutMs));
+  errorMessage?: string
+): Promise<T> {
+  let timeoutId: NodeJS.Timeout;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(errorMessage || `Operation timed out after ${timeoutMs}ms`));
     }, timeoutMs);
-
-    promise
-      .then((result) => {
-        clearTimeout(timeoutId);
-        resolve(result);
-      })
-      .catch((error) => {
-        clearTimeout(timeoutId);
-        reject(error);
-      });
   });
-};
 
-// Retry utility - adds retry logic with exponential backoff
-export const withRetry = async <T>(
-  operation: () => Promise<T>,
-  maxAttempts: number = 3,
-  delayMs: number = 1000
-): Promise<T> => {
-  let lastError: any;
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timeoutId!);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId!);
+    throw error;
+  }
+}
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+/**
+ * Retry a function with exponential backoff
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  initialDelay: number = 1000
+): Promise<T> {
+  let lastError: Error | undefined;
+  let delay = initialDelay;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await operation();
+      return await fn();
     } catch (error) {
-      lastError = error;
-
-      // Don't retry on last attempt
-      if (attempt === maxAttempts) {
-        break;
+      lastError = error as Error;
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay = Math.min(delay * 2, 10000);
       }
-
-      // Check if error is retryable
-      const posError = ErrorHandler.getInstance().handle(error);
-      if (!isRetryableError(posError)) {
-        throw error;
-      }
-
-      // Wait before retrying with exponential backoff
-      const delay = delayMs * Math.pow(2, attempt - 1);
-      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 
   throw lastError;
-};
+}
 
-// Determine if an error should trigger retry
-export const isRetryableError = (error: POSError): boolean => {
-  // Retry network errors and timeouts
-  if (error.type === ErrorType.NETWORK) {
-    return true;
-  }
-
-  // Retry timeout errors
-  if (error.code === 'TIMEOUT_ERROR') {
-    return true;
-  }
-
-  // Retry certain database errors (connection issues, not constraint violations)
-  if (error.type === ErrorType.DATABASE) {
-    const message = error.message.toLowerCase();
-    // Don't retry constraint violations or validation errors
-    if (message.includes('constraint') || message.includes('unique') || message.includes('foreign key')) {
-      return false;
-    }
-    // Retry connection issues
-    if (message.includes('connection') || message.includes('timeout')) {
-      return true;
-    }
-  }
-
-  // Don't retry validation or authentication errors
-  if (error.type === ErrorType.VALIDATION || error.type === ErrorType.AUTHENTICATION) {
-    return false;
-  }
-
-  // Default: don't retry
-  return false;
-};
-
-// Export singleton instance
 export const errorHandler = ErrorHandler.getInstance();

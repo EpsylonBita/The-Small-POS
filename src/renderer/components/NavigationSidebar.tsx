@@ -32,6 +32,17 @@ import {
   Lock,
   CreditCard,
   Hourglass,
+  Truck,
+  Link,
+  Coffee,
+  ShoppingCart,
+  Boxes,
+  Tag,
+  Percent,
+  Gift,
+  Heart,
+  ChefHat,
+  UtensilsCrossed,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
@@ -113,6 +124,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <MapPin className={iconClass} strokeWidth={2} />;
       case 'Utensils':
         return <Utensils className={iconClass} strokeWidth={2} />;
+      case 'UtensilsCrossed':
+        return <UtensilsCrossed className={iconClass} strokeWidth={2} />;
       case 'Calendar':
         return <Calendar className={iconClass} strokeWidth={2} />;
       case 'Bed':
@@ -135,8 +148,30 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <BarChart3 className={iconClass} strokeWidth={2} />;
       case 'FileText':
         return <FileText className={iconClass} strokeWidth={2} />;
+      case 'ShoppingCart':
+        return <ShoppingCart className={iconClass} strokeWidth={2} />;
+      case 'Truck':
+        return <Truck className={iconClass} strokeWidth={2} />;
+      case 'Link':
+        return <Link className={iconClass} strokeWidth={2} />;
+      case 'Coffee':
+        return <Coffee className={iconClass} strokeWidth={2} />;
+      case 'Boxes':
+        return <Boxes className={iconClass} strokeWidth={2} />;
+      case 'Tag':
+        return <Tag className={iconClass} strokeWidth={2} />;
+      case 'Percent':
+        return <Percent className={iconClass} strokeWidth={2} />;
+      case 'Gift':
+        return <Gift className={iconClass} strokeWidth={2} />;
+      case 'Heart':
+        return <Heart className={iconClass} strokeWidth={2} />;
+      case 'ChefHat':
+        return <ChefHat className={iconClass} strokeWidth={2} />;
       default:
-        return <LayoutDashboard className={iconClass} strokeWidth={2} />;
+        // Log unknown icons for debugging
+        console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);
+        return <Package className={iconClass} strokeWidth={2} />;
     }
   };
 

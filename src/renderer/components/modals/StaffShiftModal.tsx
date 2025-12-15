@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Clock, DollarSign, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense } from '../../types';
@@ -1839,7 +1839,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <div className={liquidGlassModalCard()}>
                     <div className="flex items-center gap-4">
                       <div className="w-14 h-14 rounded-xl bg-white/10 dark:bg-gray-800/20 shadow-[0_4px_12px_0_rgba(16,185,129,0.4)] flex items-center justify-center">
-                        <DollarSign className="w-8 h-8 text-green-400" />
+                        <Euro className="w-8 h-8 text-green-400" />
                       </div>
                       <input
                         type="number"
@@ -2863,7 +2863,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           )}
                         </label>
                         <div className="relative">
-                          <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                          <Euro className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <input
                             type="number"
                             step="0.01"
@@ -3076,7 +3076,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </label>
                   <div className="flex items-center gap-4">
                     <div className="w-14 h-14 rounded-xl bg-white/10 dark:bg-gray-800/20 shadow-[0_4px_12px_0_rgba(16,185,129,0.4)] flex items-center justify-center">
-                      <DollarSign className="w-8 h-8 text-green-400" />
+                      <Euro className="w-8 h-8 text-green-400" />
                     </div>
                     <input
                       type="number"

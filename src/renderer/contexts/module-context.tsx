@@ -335,6 +335,10 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Transform POSModuleInfo[] from API to EnabledModule[] format.
    * Filters modules using POS_IMPLEMENTED_MODULES registry.
    * 
+   * Only shows modules that are:
+   * 1. Core modules (dashboard, settings) - always shown
+   * 2. Purchased modules that are POS-enabled and implemented
+   * 
    * Requirements: 1.1, 1.2, 2.1
    */
   const transformApiModules = useCallback(
@@ -344,21 +348,21 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         .filter((m) => m.pos_enabled)
         // Filter to only modules implemented in POS or coming soon (Requirement 2.1)
         .filter((m) => shouldShowInNavigation(m.module_id))
+        // Filter to only purchased modules OR core modules (core modules always show)
+        .filter((m) => m.is_purchased || m.is_core || isCoreModule(m.module_id))
         .map((apiModule): EnabledModule => {
-          // Try to get metadata from registry first
-          const registryMetadata = getModuleMetadata(apiModule.module_id as ModuleId);
-          
-          // Build module metadata from API data or registry
           // Map API category to ModuleMetadata category
           const apiCategory = apiModule.category as string;
           const mappedCategory = apiCategory === 'core' ? 'core' as const : 
                                  apiCategory === 'vertical' ? 'vertical' as const : 'addon' as const;
           
-          const moduleMetadata: ModuleMetadata = registryMetadata || {
+          // Build module metadata from API data
+          // API data takes precedence - use API icon, name, etc.
+          const moduleMetadata: ModuleMetadata = {
             id: apiModule.module_id as ModuleId,
             name: apiModule.display_name,
             description: apiModule.description || '',
-            icon: apiModule.icon,
+            icon: apiModule.icon, // Use API icon directly
             route: apiModule.route,
             category: mappedCategory,
             requiredFeatures: [],

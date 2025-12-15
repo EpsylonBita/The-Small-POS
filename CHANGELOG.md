@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.3] - 2025-12-14
+
+### Fixed
+- Fixed app not showing window (running in background only)
+- Fixed TypeScript errors in error handling utilities
+- Added missing GENERIC_ERROR constant to ERROR_MESSAGES
+- Fixed ErrorFactory.businessLogic() signature to accept details parameter
+- Fixed ErrorFactory.system() to properly handle componentStack and details
+- Fixed POSError interface with timestamp, details, and componentStack properties
+- Fixed ErrorDisplay component severity handling for case-insensitive comparison
+
+## [1.1.2] - 2025-12-14
+
+### Fixed
+- Additional stub files for standalone build
+- Fixed more external shared module dependencies
+
 ## [1.1.1] - 2025-12-14
 
 ### Fixed

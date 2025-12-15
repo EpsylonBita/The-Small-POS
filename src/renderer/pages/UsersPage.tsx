@@ -567,7 +567,7 @@ const UsersPage: React.FC = () => {
                 resolvedTheme === 'dark' ? 'bg-gray-700 text-white border-gray-600' : 'bg-gray-50 text-gray-900 border-gray-300'
               }`}
             >
-              <option value="all">All</option>
+              <option value="all">{t('filters.all', 'All')}</option>
               <option value="customer">Customers</option>
               <option value="app_user">App Users</option>
             </select>

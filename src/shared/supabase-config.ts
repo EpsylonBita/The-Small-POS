@@ -153,4 +153,39 @@ export const handleSupabaseError = (error: any): string => {
   return error?.message || 'An unexpected error occurred';
 };
 
+// Export table names for consistency across platforms
+export const SUPABASE_TABLES = {
+  // Core business tables
+  BRANCHES: 'branches',
+  CUSTOMERS: 'customers',
+  CUSTOMER_ADDRESSES: 'customer_addresses',
+  ORDERS: 'orders',
+  ORDER_ITEMS: 'order_items',
+  MENU_CATEGORIES: 'menu_categories',
+  MENU_ITEMS: 'subcategories',
+  INGREDIENTS: 'ingredients',
+
+  // POS system tables
+  APP_CONTROL_COMMANDS: 'app_control_commands',
+  POS_TERMINALS: 'pos_terminals',
+  POS_HEARTBEATS: 'pos_heartbeats',
+  POS_CONFIGURATIONS: 'pos_configurations',
+  POS_SETTINGS_SYNC_HISTORY: 'pos_settings_sync_history',
+
+  // Admin configuration tables
+  WEB_CONFIGURATIONS: 'web_configurations',
+  APP_CONFIGURATIONS_ENHANCED: 'app_configurations_enhanced',
+  PUSH_NOTIFICATION_SETTINGS: 'push_notification_settings',
+
+  // Analytics tables
+  USER_ANALYTICS: 'user_analytics',
+  DELIVERY_ZONE_ANALYTICS: 'delivery_zone_analytics',
+
+  // Auth and user management
+  PROFILES: 'profiles',
+  USER_PROFILES: 'user_profiles',
+  ROLES: 'roles',
+  STAFF: 'staff',
+} as const;
+
 export default getSupabaseClient; 

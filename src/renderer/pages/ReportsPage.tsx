@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import {
   TrendingUp,
-  DollarSign,
+  Euro,
   ShoppingCart,
   CheckCircle,
   Download,
@@ -243,7 +243,7 @@ const ReportsPage: React.FC = () => {
             delay={0.1}
           />
           <MetricCard
-            icon={DollarSign}
+            icon={Euro}
             title={t('reports.sales.totalSales')}
             value={currency.format(todayStats?.totalSales ?? 0)}
             subtitle={t('reports.trends.revenueChange')}
@@ -326,14 +326,14 @@ const ReportsPage: React.FC = () => {
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  Cash Payments
+                  {t('reports.payments.cashPayments')}
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 {currency.format(paymentBreakdown?.cash.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {paymentBreakdown?.cash.count ?? 0} transactions
+                {paymentBreakdown?.cash.count ?? 0} {t('reports.payments.transactions')}
               </p>
             </motion.div>
 
@@ -350,14 +350,14 @@ const ReportsPage: React.FC = () => {
                   <CreditCard className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  Card Payments
+                  {t('reports.payments.cardPayments')}
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 {currency.format(paymentBreakdown?.card.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {paymentBreakdown?.card.count ?? 0} transactions
+                {paymentBreakdown?.card.count ?? 0} {t('reports.payments.transactions')}
               </p>
             </motion.div>
 
@@ -374,14 +374,14 @@ const ReportsPage: React.FC = () => {
                   <Package className="w-6 h-6 text-white" />
                 </div>
                 <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                  Delivery Orders
+                  {t('reports.deliveryOrders')}
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 {currency.format(orderTypeBreakdown?.delivery.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {orderTypeBreakdown?.delivery.count ?? 0} orders
+                {orderTypeBreakdown?.delivery.count ?? 0} {t('reports.payments.orders')}
               </p>
             </motion.div>
           </div>

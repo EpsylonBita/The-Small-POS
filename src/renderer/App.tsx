@@ -555,6 +555,7 @@ function AppContent() {
               updateInfo={autoUpdater.updateInfo}
               progress={autoUpdater.progress}
               error={autoUpdater.error}
+              currentVersion={autoUpdater.currentVersion}
               onDownload={autoUpdater.downloadUpdate}
               onCancel={autoUpdater.cancelDownload}
               onInstall={autoUpdater.installUpdate}

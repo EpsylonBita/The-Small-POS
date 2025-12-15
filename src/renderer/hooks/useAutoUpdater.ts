@@ -27,6 +27,9 @@ export function useAutoUpdater() {
         return localStorage.getItem('dismissedUpdateVersion');
     });
 
+    // Current app version
+    const [currentVersion, setCurrentVersion] = useState<string>('');
+
     // State for UpdateDialog visibility (triggered by menu)
     const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
 
@@ -34,25 +37,71 @@ export function useAutoUpdater() {
     const ipcRenderer = window.electron?.ipcRenderer;
     const electronAPI = (window as any).electronAPI;
 
+    // Timeout ref for checking state
+    const checkingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    // Ref to track if we received a response (to prevent timeout from firing after response)
+    const receivedResponseRef = useRef<boolean>(false);
+
     useEffect(() => {
         if (!ipcRenderer) return;
 
         // Listen for IPC events
         const listeners = {
-            'update-checking': () => setState(s => ({ ...s, checking: true, error: null })),
+            'update-checking': () => {
+                console.log('[useAutoUpdater] Received update-checking event');
+                receivedResponseRef.current = false; // Reset on new check
+                setState(s => ({ ...s, checking: true, error: null }));
+                // Set a timeout to prevent stuck "checking" state (30 seconds)
+                if (checkingTimeoutRef.current) {
+                    clearTimeout(checkingTimeoutRef.current);
+                }
+                checkingTimeoutRef.current = setTimeout(() => {
+                    // Check the ref value at timeout execution time
+                    console.log('[useAutoUpdater] Timeout fired, receivedResponse:', receivedResponseRef.current);
+                    if (!receivedResponseRef.current) {
+                        console.warn('[useAutoUpdater] Check timed out after 30s');
+                        setState(s => {
+                            // Double-check we're still in checking state
+                            if (s.checking && !s.available && !s.error) {
+                                return { ...s, checking: false, error: 'Update check timed out. Please try again.' };
+                            }
+                            return s;
+                        });
+                    }
+                }, 30000);
+            },
             'update-available': (info: UpdateInfo) => {
+                console.log('[useAutoUpdater] Received update-available event:', info?.version);
+                receivedResponseRef.current = true; // Mark that we received a response
+                if (checkingTimeoutRef.current) {
+                    clearTimeout(checkingTimeoutRef.current);
+                    checkingTimeoutRef.current = null;
+                }
                 setState(s => ({ ...s, checking: false, available: true, updateInfo: info, error: null }));
             },
             'update-not-available': (info: UpdateInfo) => {
+                console.log('[useAutoUpdater] Received update-not-available event');
+                receivedResponseRef.current = true; // Mark that we received a response
+                if (checkingTimeoutRef.current) {
+                    clearTimeout(checkingTimeoutRef.current);
+                    checkingTimeoutRef.current = null;
+                }
                 setState(s => ({ ...s, checking: false, available: false, updateInfo: info, error: null }));
             },
             'download-progress': (progress: ProgressInfo) => {
                 setState(s => ({ ...s, downloading: true, progress }));
             },
             'update-downloaded': (info: UpdateInfo) => {
+                console.log('[useAutoUpdater] Received update-downloaded event');
                 setState(s => ({ ...s, downloading: false, ready: true, updateInfo: info, progress: undefined }));
             },
             'update-error': (err: any) => {
+                console.log('[useAutoUpdater] Received update-error event:', err);
+                receivedResponseRef.current = true; // Mark that we received a response
+                if (checkingTimeoutRef.current) {
+                    clearTimeout(checkingTimeoutRef.current);
+                    checkingTimeoutRef.current = null;
+                }
                 const message = err?.message || 'Update failed';
                 // Don't treat 404 (no releases) or network errors as real errors
                 const isNonCritical = message.includes('404') || 
@@ -68,7 +117,9 @@ export function useAutoUpdater() {
         };
 
         // Register listeners
+        console.log('[useAutoUpdater] Registering listeners, ipcRenderer:', !!ipcRenderer);
         Object.entries(listeners).forEach(([channel, listener]) => {
+            console.log(`[useAutoUpdater] Registering listener for ${channel}`);
             ipcRenderer.on(channel, listener);
         });
 
@@ -82,7 +133,25 @@ export function useAutoUpdater() {
             Object.entries(listeners).forEach(([channel, listener]) => {
                 ipcRenderer.removeListener(channel, listener);
             });
+            // Clear timeout on cleanup
+            if (checkingTimeoutRef.current) {
+                clearTimeout(checkingTimeoutRef.current);
+                checkingTimeoutRef.current = null;
+            }
         };
+    }, [ipcRenderer]);
+
+    // Fetch current app version on mount
+    useEffect(() => {
+        if (!ipcRenderer) return;
+        ipcRenderer.invoke('system:get-info').then((info: any) => {
+            if (info?.version) {
+                setCurrentVersion(info.version);
+            }
+        }).catch(() => {
+            // Fallback: try to get from package.json or env
+            setCurrentVersion('Unknown');
+        });
     }, [ipcRenderer]);
 
     // Listen for menu-triggered update check event (Requirements: 2.1)
@@ -142,8 +211,13 @@ export function useAutoUpdater() {
     }, [ipcRenderer]);
 
     const installUpdate = useCallback(() => {
-        ipcRenderer?.invoke('update:install');
-    }, [ipcRenderer]);
+        console.log('[useAutoUpdater] installUpdate called, state.ready:', state.ready);
+        ipcRenderer?.invoke('update:install').then(() => {
+            console.log('[useAutoUpdater] update:install invoke completed');
+        }).catch((err: any) => {
+            console.error('[useAutoUpdater] update:install error:', err);
+        });
+    }, [ipcRenderer, state.ready]);
 
     const dismissUpdate = useCallback(() => {
         if (state.updateInfo?.version) {
@@ -171,6 +245,7 @@ export function useAutoUpdater() {
 
     return {
         ...state,
+        currentVersion,
         checkForUpdates,
         downloadUpdate,
         cancelDownload,
