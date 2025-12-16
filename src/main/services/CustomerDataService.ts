@@ -111,7 +111,7 @@ export class CustomerDataService extends BaseService {
     try {
       // Check existing version for optimistic locking
       const existing = this.getCustomerById(customer.id);
-      
+
       if (existing) {
         const localVersion = existing.version || 1;
         const remoteVersion = customer.version || 1;
@@ -165,6 +165,24 @@ export class CustomerDataService extends BaseService {
       }
 
       console.log(`[CustomerDataService] Upserted customer ${customer.id}`);
+
+      // Queue for sync to Supabase
+      this.addToSyncQueue('customers', customer.id, existing ? 'update' : 'insert', {
+        id: customer.id,
+        full_name: customer.full_name || customer.name,
+        name: customer.name || customer.full_name,
+        phone: customer.phone,
+        email: customer.email || null,
+        address: (customer as any).address || null,
+        postal_code: (customer as any).postal_code || null,
+        loyalty_points: customer.loyalty_points || 0,
+        total_orders: customer.total_orders || 0,
+        last_order_date: customer.last_order_date || null,
+        version: customer.version || 1,
+        updated_by: customer.updated_by || 'pos-system',
+        created_at: customer.created_at,
+        updated_at: customer.updated_at
+      });
     } catch (error) {
       console.error('[CustomerDataService] Failed to upsert customer:', error);
       throw error;
@@ -204,6 +222,24 @@ export class CustomerDataService extends BaseService {
       );
 
       console.log(`[CustomerDataService] Upserted address ${address.id}`);
+
+      // Queue for sync to Supabase
+      this.addToSyncQueue('customer_addresses', address.id, 'update', {
+        id: address.id,
+        customer_id: address.customer_id,
+        street_address: address.street,
+        street: address.street,
+        city: address.city || '',
+        postal_code: address.postal_code || null,
+        country: address.country || null,
+        floor_number: address.floor_number || null,
+        address_type: address.address_type || 'delivery',
+        is_default: !!address.is_default,
+        delivery_notes: address.delivery_notes || null,
+        version: address.version || 1,
+        created_at: address.created_at,
+        updated_at: address.updated_at
+      });
     } catch (error) {
       console.error('[CustomerDataService] Failed to upsert address:', error);
       throw error;

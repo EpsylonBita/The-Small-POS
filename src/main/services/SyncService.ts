@@ -302,10 +302,80 @@ export class SyncService {
         await this.syncShiftExpense(item.operation, item.record_id, data);
         break;
       case 'customers':
-        // Placeholder: In a real refactor, this would go to CustomerSyncService
+        await this.syncCustomer(item.operation, item.record_id, data);
+        break;
+      case 'customer_addresses':
+        await this.syncCustomerAddress(item.operation, item.record_id, data);
         break;
       default:
         break;
+    }
+  }
+
+  private async syncCustomer(operation: string, recordId: string, data: any): Promise<void> {
+    if (operation === 'insert' || operation === 'update') {
+      const { error } = await this.supabase
+        .from('customers')
+        .upsert({
+          id: data.id,
+          full_name: data.full_name || data.name,
+          phone: data.phone,
+          email: data.email || null,
+          address: data.address || null,
+          postal_code: data.postal_code || null,
+          loyalty_points: data.loyalty_points || 0,
+          total_orders: data.total_orders || 0,
+          last_order_date: data.last_order_date || null,
+          version: data.version || 1,
+          updated_by: data.updated_by || 'pos-system',
+          last_synced_at: new Date().toISOString(),
+          created_at: data.created_at || new Date().toISOString(),
+          updated_at: data.updated_at || new Date().toISOString()
+        });
+
+      if (error) throw new Error(`Failed to sync customer: ${error.message}`);
+      this.updateLocalSupabaseId('customers', data.id, data.id);
+
+    } else if (operation === 'delete') {
+      const { error } = await this.supabase
+        .from('customers')
+        .delete()
+        .eq('id', recordId);
+
+      if (error) throw new Error(`Failed to delete customer: ${error.message}`);
+    }
+  }
+
+  private async syncCustomerAddress(operation: string, recordId: string, data: any): Promise<void> {
+    if (operation === 'insert' || operation === 'update') {
+      const { error } = await this.supabase
+        .from('customer_addresses')
+        .upsert({
+          id: data.id,
+          customer_id: data.customer_id,
+          street_address: data.street_address || data.street,
+          city: data.city,
+          postal_code: data.postal_code || null,
+          country: data.country || null,
+          floor_number: data.floor_number || null,
+          address_type: data.address_type || 'delivery',
+          is_default: data.is_default || false,
+          delivery_notes: data.delivery_notes || null,
+          version: data.version || 1,
+          created_at: data.created_at || new Date().toISOString(),
+          updated_at: data.updated_at || new Date().toISOString()
+        });
+
+      if (error) throw new Error(`Failed to sync customer address: ${error.message}`);
+      this.updateLocalSupabaseId('customer_addresses', data.id, data.id);
+
+    } else if (operation === 'delete') {
+      const { error } = await this.supabase
+        .from('customer_addresses')
+        .delete()
+        .eq('id', recordId);
+
+      if (error) throw new Error(`Failed to delete customer address: ${error.message}`);
     }
   }
 
