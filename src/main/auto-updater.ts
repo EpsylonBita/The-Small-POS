@@ -3,6 +3,7 @@
  *
  * Handles application updates for production builds using electron-updater.
  * Implements channel support (stable/beta), progress tracking, and OTA updates.
+ * Version: 1.1.24 - CI Build v2
  */
 
 import { app, ipcMain } from 'electron';

@@ -9,11 +9,14 @@ module.exports = (env, argv) => {
   // Load appropriate .env file based on mode
   // Production builds should NOT include org-specific data
   const envFile = isProduction ? '.env.production' : '.env';
-  require('dotenv').config({ path: envFile });
+  require('dotenv').config({ path: path.resolve(__dirname, envFile) });
   console.log(`[Webpack Renderer] Loading environment from: ${envFile}`);
 
   return {
-    entry: ['./src/renderer/polyfills.ts', './src/renderer/index.tsx'],
+    entry: [
+      path.resolve(__dirname, 'src/renderer/polyfills.ts'),
+      path.resolve(__dirname, 'src/renderer/index.tsx')
+    ],
     target: 'web',
     output: {
       path: path.resolve(__dirname, 'dist/renderer'),
@@ -83,7 +86,7 @@ module.exports = (env, argv) => {
   },
   plugins: [
     new HtmlWebpackPlugin({
-      template: './public/index.html',
+      template: path.join(__dirname, 'public', 'index.html'),
       filename: 'index.html',
       inject: 'body'
     }),

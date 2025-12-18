@@ -138,7 +138,7 @@ export function deriveOrderFinancials(
   // If explicit values are provided, use them directly
   if (explicitData?.subtotal !== undefined && explicitData?.tax_amount !== undefined) {
     return {
-      subtotal: explicitData.subtotal + discountAmount,
+      subtotal: explicitData.subtotal,
       tax_amount: explicitData.tax_amount,
       delivery_fee: explicitData.delivery_fee ?? 0
     };
@@ -221,7 +221,8 @@ export class OrderService extends BaseService {
         items: orderData.items || [],
         total_amount: orderData.total_amount || 0,
         status: orderData.status || 'pending',
-        order_type: orderData.order_type || 'takeaway',
+        status: orderData.status || 'pending',
+        order_type: orderData.order_type === 'takeaway' ? 'pickup' : (orderData.order_type || 'pickup'),
         table_number: orderData.table_number,
         delivery_address: orderData.delivery_address,
         special_instructions: orderData.special_instructions,
@@ -303,7 +304,8 @@ export class OrderService extends BaseService {
         customer_name: order.customer_name ?? null,
         customer_email: order.customer_email ?? null,
         customer_phone: order.customer_phone ?? null,
-        order_type: order.order_type ?? 'takeaway',
+        customer_phone: order.customer_phone ?? null,
+        order_type: order.order_type ?? 'pickup',
         status: order.status,
         // Financial fields - use explicit values if provided, otherwise derived
         total_amount: order.total_amount,
@@ -653,7 +655,7 @@ export class OrderService extends BaseService {
         console.log(`[OrderService.mapRowToOrder] Order ${row.id}, Item ${idx} (${item.name}): customizations count =`, item.customizations?.length || (item.customizations ? Object.keys(item.customizations).length : 0));
       });
     }
-    
+
     return {
       id: row.id,
       order_number: row.order_number,
