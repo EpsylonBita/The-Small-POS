@@ -8,7 +8,7 @@
  */
 
 import * as fc from 'fast-check';
-import { CustomerSyncService } from '../../../shared/services/CustomerSyncService';
+import { CustomerSyncService } from '../shared/services/CustomerSyncService';
 import './propertyTestConfig';
 
 /**

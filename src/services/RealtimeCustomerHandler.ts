@@ -2,7 +2,7 @@ import type { BrowserWindow } from 'electron'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getSupabaseClient } from '../shared/supabase-config'
 import type { DatabaseManager } from '../main/database'
-import { CustomerSyncService } from '../../../shared/services/CustomerSyncService'
+import { CustomerSyncService } from '../shared/services/CustomerSyncService'
 
 /**
  * RealtimeCustomerHandler

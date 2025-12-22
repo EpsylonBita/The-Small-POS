@@ -268,7 +268,7 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
 
     // Initialize Screen Capture service
     // Only initialize if Supabase is configured
-    const { isSupabaseConfigured } = await import('../../shared/supabase-config.js');
+    const { isSupabaseConfigured } = await import('../../shared/supabase-config');
     if (isSupabaseConfigured()) {
       console.log('🎥 Calling screenCaptureService.initialize()...');
       await screenCaptureService.initialize();
@@ -418,7 +418,7 @@ export function startSync(): void {
   const syncService = serviceRegistry.syncService;
   if (syncService) {
     // Import isSupabaseConfigured dynamically to avoid circular dependencies
-    import('../../shared/supabase-config.js').then(({ isSupabaseConfigured }) => {
+    import('../../shared/supabase-config').then(({ isSupabaseConfigured }) => {
       if (isSupabaseConfigured()) {
         console.log('🔄 Starting auto-sync and realtime subscriptions...');
         syncService.startAutoSync();

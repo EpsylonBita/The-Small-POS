@@ -11,7 +11,7 @@
  */
 
 import * as fc from 'fast-check';
-import { CustomerSyncService } from '../../../shared/services/CustomerSyncService';
+import { CustomerSyncService } from '../shared/services/CustomerSyncService';
 
 // Configure fast-check for minimum 100 iterations
 fc.configureGlobal({
