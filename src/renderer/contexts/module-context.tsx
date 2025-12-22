@@ -366,11 +366,11 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
             route: apiModule.route,
             category: mappedCategory,
             requiredFeatures: [],
-            compatibleBusinessTypes: apiModule.compatible_business_types as BusinessType[],
+            compatibleBusinessTypes: apiModule.compatible_business_types as BusinessType[] || [],
             isCore: apiModule.is_core,
             sortOrder: apiModule.sort_order,
-            showInNavigation: apiModule.show_in_navigation,
-            posEnabled: apiModule.pos_enabled,
+            showInNavigation: apiModule.show_in_navigation ?? true,
+            posEnabled: apiModule.pos_enabled ?? false,
           };
 
           return {
