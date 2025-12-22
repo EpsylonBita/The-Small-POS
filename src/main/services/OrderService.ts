@@ -569,8 +569,7 @@ export class OrderService extends BaseService {
         const __tid_s = (this.getLocalSetting('terminal', 'terminal_id') as string | null) || (process.env.TERMINAL_ID || null);
         const __bid_s = (this.getLocalSetting('terminal', 'branch_id') as string | null) || null;
         // Map local POS status to Supabase-compatible status to prevent status drift
-        const { mapStatusForSupabase } = require('../../../../shared/types/order-status');
-        const supaStatus = mapStatusForSupabase(nextStatus as any);
+        const supaStatus = this.mapStatusForSupabase(nextStatus);
         const staffShiftIdRow = this.db.prepare('SELECT staff_shift_id FROM orders WHERE id = ?').get(id) as any;
         const isUuid = (v: any) => typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v);
         const staffShiftId = isUuid(staffShiftIdRow?.staff_shift_id) ? staffShiftIdRow.staff_shift_id : null;
@@ -708,5 +707,20 @@ export class OrderService extends BaseService {
     const stmt = this.db.prepare('SELECT * FROM orders WHERE staff_shift_id = ? ORDER BY created_at DESC');
     const rows = stmt.all(shiftId) as OrderRow[];
     return rows.map(row => this.mapRowToOrder(row));
+  }
+
+  /**
+   * Maps a POS/local status to a Supabase-compatible status.
+   * Ensures we never violate the orders_status_check constraint.
+   */
+  private mapStatusForSupabase(status: Order['status']): string {
+    const SUPABASE_ALLOWED_STATUSES = ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled'];
+    
+    if (status === 'out_for_delivery') return 'ready';
+    if (status === 'delivered') return 'completed';
+    if (SUPABASE_ALLOWED_STATUSES.includes(status)) return status;
+    
+    // Fallback for any unknown status
+    return 'ready';
   }
 }
