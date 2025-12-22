@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Customer, CustomerAddress } from '../../shared/types/customer';
 import { CustomerCacheService } from './CustomerCacheService';
-import { CustomerSyncService } from '../../shared/services/CustomerSyncService';
+import { CustomerSyncService } from '../../../../shared/services/CustomerSyncService';
 import type { ConflictResult } from '../../shared/types/customer-sync';
 import { isConflictResult } from '../../shared/types/customer-sync';
 

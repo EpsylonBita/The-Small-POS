@@ -1,28 +1,28 @@
 /**
- * Customer Sync Types (POS-local stub)
+ * Customer Sync Types
+ * 
+ * Re-exports all types from the shared customer-sync module for POS system use.
+ * This ensures type consistency across all platforms (Admin Dashboard, POS, Mobile).
+ * 
+ * @see shared/types/customer-sync.ts for the canonical type definitions
  */
 
-export interface ConflictResult {
-  isConflict: true;
-  conflictId: string;
-  localVersion: number;
-  remoteVersion: number;
-  localData: any;
-  remoteData: any;
-  conflictType: string;
-  message?: string;
-}
+// Re-export types from shared module
+export type {
+  Customer,
+  CustomerAddress,
+  CustomerConflict,
+  ConflictResult,
+  ConflictResolutionResult,
+  ConflictFilters,
+  ConflictType,
+  ResolutionStrategy,
+  CustomerLookupOptions,
+} from '../../../../shared/types/customer-sync';
 
-export interface SyncResult<T> {
-  success: boolean;
-  data?: T;
-  conflict?: ConflictResult;
-  error?: string;
-}
+// Re-export type guard functions (runtime values)
+export { isConflictResult, isCustomer } from '../../../../shared/types/customer-sync';
 
-/**
- * Type guard to check if a result is a conflict
- */
-export function isConflictResult(result: any): result is ConflictResult {
-  return result && typeof result === 'object' && result.isConflict === true;
-}
+// Re-export types for backward compatibility
+export type { Customer as CustomerType } from '../../../../shared/types/customer-sync';
+export type { CustomerAddress as CustomerAddressType } from '../../../../shared/types/customer-sync';

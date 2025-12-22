@@ -475,7 +475,7 @@ export class TerminalConfigService {
       }
 
       // Check if Supabase is configured before attempting validation
-      const { isSupabaseConfigured } = await import('../../shared/supabase-config');
+      const { isSupabaseConfigured } = await import('../../shared/supabase-config.js');
       if (!isSupabaseConfigured()) {
         console.log('[TerminalConfigService] Supabase not configured, skipping backend validation (onboarding mode)');
         return true;

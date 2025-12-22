@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { getSupabaseClient } from '../../../shared/supabase-config';
 import { serviceRegistry } from '../../service-registry';
+import { isConflictResult } from '../../../shared/types/customer-sync';
 
 export function registerCustomerHandlers(): void {
   const customerService = serviceRegistry.customerService;
@@ -101,7 +102,7 @@ export function registerCustomerHandlers(): void {
     try {
       if (!customerService) return { success: false, error: 'Customer service not available' };
       const result = await customerService.updateCustomer(customerId, updates, currentVersion);
-      if (result && (result as any).conflict) {
+      if (isConflictResult(result as any)) {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('customer-sync-conflict', {
             eventType: 'CONFLICT',
@@ -179,7 +180,7 @@ export function registerCustomerHandlers(): void {
     try {
       if (!customerService) return { success: false, error: 'Customer service not available' };
       const result = await customerService.updateAddress(addressId, updates, currentVersion);
-      if (result && (result as any).conflict) {
+      if (isConflictResult(result as any)) {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('customer-sync-conflict', {
             eventType: 'CONFLICT',
