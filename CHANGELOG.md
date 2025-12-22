@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.27] - 2025-12-22
+
+### Fixed
+- Fixed customer update failing with "Failed to update customer" error
+- Added version increment in CustomerSyncService update methods for optimistic locking
+- Fixed corrupted type definitions in POSSystemMobile CustomerSyncService
+
 ## [1.1.26] - 2025-12-22
 
 ### Added
