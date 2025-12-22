@@ -1,11 +1,26 @@
 /**
- * Module Registry Stub for POS System
+ * Module Registry Service for POS System
  * 
- * Minimal stub to satisfy imports. The POS system doesn't use the full
- * module registry - this is just for components that reference it.
+ * Provides module resolution and metadata lookup for the POS system.
  */
 
-import type { ModuleId, ModuleMetadata } from '../types/modules';
+import type { 
+  ModuleId, 
+  ModuleMetadata, 
+  EnabledModule,
+  ModuleResolutionResult,
+  ModuleResolutionOptions,
+  BusinessType,
+  FeatureFlag
+} from '../types/modules';
+
+/**
+ * Feature access checker type
+ */
+export type FeatureAccessChecker = (
+  organizationId: string,
+  feature: FeatureFlag
+) => Promise<{ allowed: boolean; currentPlan?: string; requiredPlan?: string }>;
 
 /**
  * Get module metadata by ID - stub implementation
@@ -17,10 +32,67 @@ export function getModuleMetadata(moduleId: ModuleId): ModuleMetadata | null {
     name: moduleId.charAt(0).toUpperCase() + moduleId.slice(1).replace(/-/g, ' '),
     description: '',
     category: 'addon',
-    isCore: false,
-    showInNavigation: false,
+    isCore: moduleId === 'dashboard' || moduleId === 'settings',
+    showInNavigation: true,
     sortOrder: 0,
     requiredFeatures: [],
     compatibleBusinessTypes: [],
+  };
+}
+
+/**
+ * Resolve enabled modules for an organization - stub implementation
+ * In POS, modules are fetched from admin dashboard API, so this is a fallback
+ */
+export async function resolveEnabledModules(
+  _organizationId: string,
+  businessType: BusinessType,
+  _checkFeatureAccess: FeatureAccessChecker,
+  _options: ModuleResolutionOptions = {}
+): Promise<ModuleResolutionResult> {
+  // Return minimal default modules for POS
+  const coreModules: EnabledModule[] = [
+    {
+      module: {
+        id: 'dashboard',
+        name: 'Dashboard',
+        description: 'Main dashboard',
+        category: 'core',
+        isCore: true,
+        showInNavigation: true,
+        sortOrder: 0,
+        requiredFeatures: [],
+        compatibleBusinessTypes: [],
+        route: '/dashboard',
+        icon: 'LayoutDashboard',
+      },
+      isEnabled: true,
+      isLocked: false,
+    },
+    {
+      module: {
+        id: 'settings',
+        name: 'Settings',
+        description: 'System settings',
+        category: 'core',
+        isCore: true,
+        showInNavigation: true,
+        sortOrder: 999,
+        requiredFeatures: [],
+        compatibleBusinessTypes: [],
+        route: '/settings',
+        icon: 'Settings',
+      },
+      isEnabled: true,
+      isLocked: false,
+    },
+  ];
+
+  return {
+    enabledModules: coreModules,
+    lockedModules: [],
+    businessType,
+    currentPlan: 'Starter',
+    totalModulesForVertical: coreModules.length,
   };
 }

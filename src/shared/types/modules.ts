@@ -1,14 +1,16 @@
 /**
  * Module Types for POS System
  * 
- * Type definitions for module management in the POS system.
+ * Complete type definitions for module management in the POS system.
  */
 
 export type ModuleId = string;
 
 export type ModuleCategory = 'core' | 'vertical' | 'addon';
 
-export type BusinessType = 'restaurant' | 'hotel' | 'retail' | 'cafe' | 'bar' | 'bakery' | 'food_truck';
+export type BusinessType = 'restaurant' | 'hotel' | 'retail' | 'cafe' | 'bar' | 'bakery' | 'food_truck' | 'fast_food' | 'salon' | 'bar_cafe' | 'chain' | 'franchise';
+
+export type FeatureFlag = string;
 
 export interface ModuleMetadata {
   id: ModuleId;
@@ -19,8 +21,23 @@ export interface ModuleMetadata {
   showInNavigation: boolean;
   sortOrder: number;
   requiredFeatures: string[];
-  compatibleBusinessTypes: string[];
+  compatibleBusinessTypes: string[] | BusinessType[];
   route?: string;
+  icon?: string;
+  posEnabled?: boolean;
+}
+
+/**
+ * Enabled module with access status
+ */
+export interface EnabledModule {
+  module: ModuleMetadata;
+  isEnabled: boolean;
+  isLocked: boolean;
+  requiredPlan?: string;
+  isPurchased?: boolean;
+  isPosEnabled?: boolean;
+  missingFeatures?: FeatureFlag[];
 }
 
 /**
@@ -28,17 +45,22 @@ export interface ModuleMetadata {
  */
 export interface POSModuleInfo {
   id: string;
+  module_id: string;
   name: string;
+  display_name: string;
   description: string;
-  category: ModuleCategory;
+  category: ModuleCategory | string;
   is_core: boolean;
   is_enabled: boolean;
   is_locked: boolean;
   is_purchased?: boolean;
+  pos_enabled?: boolean;
   required_plan?: string;
   route?: string;
   icon?: string;
   sort_order: number;
+  show_in_navigation?: boolean;
+  compatible_business_types?: string[];
 }
 
 /**
@@ -56,4 +78,24 @@ export interface POSModulesEnabledResponse {
     purchased_modules_count: number;
   };
   processing_time_ms?: number;
+}
+
+/**
+ * Module resolution result
+ */
+export interface ModuleResolutionResult {
+  enabledModules: EnabledModule[];
+  lockedModules: EnabledModule[];
+  businessType: BusinessType;
+  currentPlan: string;
+  totalModulesForVertical: number;
+}
+
+/**
+ * Module resolution options
+ */
+export interface ModuleResolutionOptions {
+  includeLocked?: boolean;
+  category?: ModuleCategory;
+  navigationOnly?: boolean;
 }
