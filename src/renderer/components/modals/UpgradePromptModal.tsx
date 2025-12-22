@@ -3,9 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { Lock, Sparkles, Check } from 'lucide-react';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { liquidGlassModalButton } from '../../styles/designSystem';
-import { getModuleMetadata } from '../../../../../shared/services/moduleRegistry';
+import { getModuleMetadata } from '../../../shared/services/moduleRegistry';
 import { useTheme } from '../../contexts/theme-context';
-import type { ModuleId } from '../../../../../shared/types/modules';
+import type { ModuleId } from '../../../shared/types/modules';
 
 interface UpgradePromptModalProps {
   isOpen: boolean;
