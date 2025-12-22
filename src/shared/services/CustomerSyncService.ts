@@ -276,6 +276,9 @@ export class CustomerSyncService {
         }
       })
 
+      // Increment version for optimistic locking
+      updateData.version = currentVersion + 1
+
       // Attempt update with version check
       const { data: updated, error } = await this.supabase
         .from('customers')
@@ -422,6 +425,9 @@ export class CustomerSyncService {
           delete updateData[key]
         }
       })
+
+      // Increment version for optimistic locking
+      updateData.version = currentVersion + 1
 
       const { data: updated, error } = await this.supabase
         .from('customer_addresses')
