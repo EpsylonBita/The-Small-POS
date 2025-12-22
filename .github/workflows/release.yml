@@ -10,6 +10,9 @@ jobs:
   release:
     runs-on: windows-latest
     
+    env:
+      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,29 +23,10 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Set Electron mirror
-        run: |
-          npm config set electron_mirror https://npmmirror.com/mirrors/electron/
-
-      - name: Install dependencies with retry
-        run: |
-          $maxRetries = 3
-          $retryCount = 0
-          $success = $false
-          while (-not $success -and $retryCount -lt $maxRetries) {
-            try {
-              npm ci
-              $success = $true
-            } catch {
-              $retryCount++
-              Write-Host "Attempt $retryCount failed. Retrying in 30 seconds..."
-              Start-Sleep -Seconds 30
-            }
-          }
-          if (-not $success) {
-            throw "npm ci failed after $maxRetries attempts"
-          }
-        shell: pwsh
+      - name: Install dependencies
+        run: npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
       - name: Build and Publish
         env:
