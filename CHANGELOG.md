@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.26] - 2025-12-22
+
+### Added
+- Turkey (+90) country code support for phone normalization
+- All Balkan country codes for customer phone lookup
+- Cross-platform phone normalization consistency with POSSystemMobile
+
+### Fixed
+- Customer address sync now works correctly with Turkish phone numbers
+- Phone normalization handles 0090 and +90 prefixes properly
+
 ## [1.1.3] - 2025-12-14
 
 ### Fixed
