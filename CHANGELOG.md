@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.29] - 2025-12-22
+
+### Fixed
+- Fixed build failure by removing external monorepo imports
+- Made customer-sync types self-contained for standalone POS repo
+- Added local mapStatusForSupabase method to OrderService
+
 ## [1.1.28] - 2025-12-22
 
 ### Fixed
