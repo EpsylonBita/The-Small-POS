@@ -12,9 +12,11 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 30
     
     env:
-      ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+      ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     
     steps:
       - name: Checkout
@@ -26,8 +28,39 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Cache Electron
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ${{ github.workspace }}/.cache
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-cache-${{ runner.os }}-
+
+      - name: Install dependencies (attempt 1)
+        id: npm-install-1
+        continue-on-error: true
         run: npm ci
+        env:
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+      - name: Install dependencies (attempt 2)
+        if: steps.npm-install-1.outcome == 'failure'
+        id: npm-install-2
+        continue-on-error: true
+        run: |
+          npm cache clean --force
+          npm ci
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+
+      - name: Install dependencies (attempt 3)
+        if: steps.npm-install-2.outcome == 'failure'
+        run: |
+          npm cache clean --force
+          npm ci --prefer-offline
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
 
