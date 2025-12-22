@@ -271,9 +271,9 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               updatedOrders[existingOrderIndex] = { ...updatedOrders[existingOrderIndex], ...orderData };
               return { orders: updatedOrders };
             } else {
-              console.log('📡 [useOrderStore] New remote order will be loaded from local DB, avoiding duplicate temp record');
-              // Avoid adding remote-only record; local DB merge will load it on next refresh
-              return { orders: state.orders };
+              console.log('📡 [useOrderStore] Adding new order to state:', orderData.id);
+              // Add the new order to the beginning of the list (most recent first)
+              return { orders: [orderData, ...state.orders] };
             }
           });
 
