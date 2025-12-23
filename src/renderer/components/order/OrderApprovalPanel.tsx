@@ -2,7 +2,7 @@ import React, { useState, useCallback, useMemo } from 'react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
-import type { Order } from '../../types/orders';
+import type { Order, OrderItem } from '../../types/orders';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -13,6 +13,138 @@ interface OrderApprovalPanelProps {
 }
 
 const ESTIMATED_TIME_OPTIONS = [15, 20, 25, 30, 45, 60];
+
+/**
+ * Safely parses items from JSON string format.
+ * Handles parsing errors gracefully.
+ * Requirements: 2.6
+ * 
+ * @param items - Items that may be a JSON string or array
+ * @returns Parsed array of items
+ */
+function parseItemsFromJson(items: any): any[] {
+  if (!items) return [];
+  
+  // If already an array, return as-is
+  if (Array.isArray(items)) return items;
+  
+  // If it's a string, try to parse as JSON
+  if (typeof items === 'string') {
+    try {
+      const parsed = JSON.parse(items);
+      if (Array.isArray(parsed)) return parsed;
+      console.warn('[OrderApprovalPanel] Parsed JSON is not an array:', typeof parsed);
+      return [];
+    } catch (e) {
+      console.warn('[OrderApprovalPanel] Failed to parse items JSON:', items, e);
+      return [];
+    }
+  }
+  
+  console.warn('[OrderApprovalPanel] Items is not an array or string:', typeof items);
+  return [];
+}
+
+/**
+ * Calculates subtotal from order items using total_price values.
+ * Requirements: 2.3, 6.1, 6.3
+ * 
+ * @param items - Array of order items
+ * @returns Calculated subtotal
+ */
+export function calculateSubtotalFromItems(items: any[]): number {
+  if (!Array.isArray(items) || items.length === 0) return 0;
+  
+  return items.reduce((sum: number, item: any) => {
+    // Prefer total_price which includes customizations
+    // Fall back to unit_price * quantity or price * quantity
+    const quantity = item.quantity || 1;
+    
+    if (typeof item.total_price === 'number' && item.total_price > 0) {
+      return sum + item.total_price;
+    }
+    
+    if (typeof item.totalPrice === 'number' && item.totalPrice > 0) {
+      return sum + item.totalPrice;
+    }
+    
+    // Calculate from unit price and quantity
+    const unitPrice = typeof item.unit_price === 'number' ? item.unit_price :
+                      typeof item.price === 'number' ? item.price : 0;
+    
+    return sum + (unitPrice * quantity);
+  }, 0);
+}
+
+/**
+ * Fetches order items with a clear fallback chain:
+ * 1. Try local order items first
+ * 2. Then local DB fetch
+ * 3. Then Supabase fetch
+ * 
+ * Requirements: 2.1, 2.5, 2.6
+ * 
+ * @param order - The order object
+ * @returns Promise resolving to array of order items
+ */
+async function fetchOrderItems(order: Order): Promise<any[]> {
+  // 1. Check local order first - handle JSON string format
+  const localItems = order.items || (order as any).order_items || (order as any).orderItems;
+  const parsedLocalItems = parseItemsFromJson(localItems);
+  
+  if (parsedLocalItems.length > 0) {
+    console.log('[OrderApprovalPanel] Using local order items:', parsedLocalItems.length);
+    return parsedLocalItems;
+  }
+  
+  // Need to fetch from backend
+  if (!order.id || typeof window === 'undefined') {
+    console.log('[OrderApprovalPanel] Cannot fetch items - no order ID or not in browser');
+    return [];
+  }
+  
+  const api: any = (window as any).electronAPI;
+  if (!api?.invoke) {
+    console.log('[OrderApprovalPanel] electronAPI not available');
+    return [];
+  }
+  
+  // 2. Fetch from local DB by order ID
+  try {
+    console.log('[OrderApprovalPanel] Fetching from local DB for order:', order.id);
+    const response = await api.invoke('order:get-by-id', { orderId: order.id });
+    const fetchedOrder = response?.data || response;
+    
+    if (fetchedOrder) {
+      const dbItems = parseItemsFromJson(fetchedOrder.items);
+      if (dbItems.length > 0) {
+        console.log('[OrderApprovalPanel] Fetched items from local DB:', dbItems.length);
+        return dbItems;
+      }
+    }
+  } catch (e) {
+    console.warn('[OrderApprovalPanel] Local DB fetch failed:', e);
+  }
+  
+  // 3. Fetch from Supabase using supabase_id
+  try {
+    const supabaseId = order.supabase_id || (order as any).supabaseId || order.id;
+    console.log('[OrderApprovalPanel] Fetching from Supabase for order:', supabaseId);
+    
+    const response = await api.invoke('order:fetch-items-from-supabase', { orderId: supabaseId });
+    const itemsResult = response?.data || response;
+    
+    if (Array.isArray(itemsResult) && itemsResult.length > 0) {
+      console.log('[OrderApprovalPanel] Fetched items from Supabase:', itemsResult.length);
+      return itemsResult;
+    }
+  } catch (e) {
+    console.warn('[OrderApprovalPanel] Supabase fetch failed:', e);
+  }
+  
+  console.log('[OrderApprovalPanel] No items found after all fetch attempts');
+  return [];
+}
 
 export function OrderApprovalPanel({
   order,
@@ -30,6 +162,8 @@ export function OrderApprovalPanel({
   const [showDeclineModal, setShowDeclineModal] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
   const [isPrinting, setIsPrinting] = useState(false);
+  const [isLoadingItems, setIsLoadingItems] = useState(false);
+  const [itemsLoadError, setItemsLoadError] = useState<string | null>(null);
 
   // Normalize fields to handle different shapes
   const orderNumber = order.order_number || order.orderNumber || '';
@@ -43,55 +177,38 @@ export function OrderApprovalPanel({
   const [fullOrder, setFullOrder] = React.useState<any>(order);
   
   // Fetch full order details if items are missing
+  // Requirements: 2.1, 2.5, 2.6
   React.useEffect(() => {
-    const fetchFullOrder = async () => {
-      // Check if items are missing or empty
-      const currentItems: any = order.items || (order as any).order_items || (order as any).orderItems;
-      const hasItems = Array.isArray(currentItems) ? currentItems.length > 0 : 
-                       (typeof currentItems === 'string' && currentItems.length > 2);
+    const loadOrderItems = async () => {
+      // Check if items are missing or empty using the parse function
+      const currentItems = parseItemsFromJson(order.items || (order as any).order_items || (order as any).orderItems);
       
-      if (!hasItems && order.id && typeof window !== 'undefined') {
-        console.log('[OrderApprovalPanel] Items missing, fetching full order...');
-        try {
-          const api: any = (window as any).electronAPI;
-          if (api?.invoke) {
-            // First try to get from local database
-            const response = await api.invoke('order:get-by-id', { orderId: order.id });
-            console.log('[OrderApprovalPanel] Local DB response:', response);
-            // Handle both wrapped response { success, data } and direct object
-            const fetchedOrder = response?.data || response;
-            if (fetchedOrder && fetchedOrder.items && Array.isArray(fetchedOrder.items) && fetchedOrder.items.length > 0) {
-              console.log('[OrderApprovalPanel] Fetched full order with items from local DB:', fetchedOrder.items);
-              setFullOrder({ ...order, ...fetchedOrder });
-              return;
-            }
-            
-            // If local DB doesn't have items, try fetching from Supabase directly
-            console.log('[OrderApprovalPanel] Local DB has no items, trying Supabase...');
-            try {
-              const supabaseOrderId = order.supabase_id || (order as any).supabaseId || order.id;
-              console.log('[OrderApprovalPanel] Fetching items for supabaseOrderId:', supabaseOrderId);
-              const response = await api.invoke('order:fetch-items-from-supabase', { orderId: supabaseOrderId });
-              console.log('[OrderApprovalPanel] Supabase response:', response);
-              // Handle both wrapped response { success, data } and direct array
-              const itemsResult = response?.data || response;
-              if (itemsResult && Array.isArray(itemsResult) && itemsResult.length > 0) {
-                console.log('[OrderApprovalPanel] Fetched items from Supabase:', itemsResult);
-                setFullOrder({ ...order, items: itemsResult });
-                return;
-              } else {
-                console.log('[OrderApprovalPanel] No items found in Supabase for order:', supabaseOrderId);
-              }
-            } catch (supabaseErr) {
-              console.warn('[OrderApprovalPanel] Supabase items fetch failed:', supabaseErr);
-            }
-          }
-        } catch (e) {
-          console.warn('[OrderApprovalPanel] Failed to fetch full order:', e);
+      if (currentItems.length > 0) {
+        // Items already present, update fullOrder
+        setFullOrder({ ...order, items: currentItems });
+        return;
+      }
+      
+      // Need to fetch items
+      setIsLoadingItems(true);
+      setItemsLoadError(null);
+      
+      try {
+        const items = await fetchOrderItems(order);
+        if (items.length > 0) {
+          setFullOrder({ ...order, items });
+        } else {
+          setItemsLoadError('No items found');
         }
+      } catch (e) {
+        console.error('[OrderApprovalPanel] Failed to load order items:', e);
+        setItemsLoadError('Failed to load items');
+      } finally {
+        setIsLoadingItems(false);
       }
     };
-    fetchFullOrder();
+    
+    loadOrderItems();
   }, [order.id]);
   
   React.useEffect(() => {
@@ -118,63 +235,51 @@ export function OrderApprovalPanel({
     })();
   }, [deliveryAddressRaw, order.customer_phone, order.customerPhone]);
 
-  // Parse items - handle both array and JSON string formats
-  const parseItems = () => {
+  /**
+   * Retry loading items when user clicks retry button
+   * Requirements: 2.5
+   */
+  const handleRetryLoadItems = useCallback(async () => {
+    setIsLoadingItems(true);
+    setItemsLoadError(null);
+    
+    try {
+      const items = await fetchOrderItems(order);
+      if (items.length > 0) {
+        setFullOrder({ ...order, items });
+      } else {
+        setItemsLoadError('No items found');
+      }
+    } catch (e) {
+      console.error('[OrderApprovalPanel] Retry failed:', e);
+      setItemsLoadError('Failed to load items');
+    } finally {
+      setIsLoadingItems(false);
+    }
+  }, [order]);
+
+  /**
+   * Normalizes order items for display.
+   * Extracts customizations/ingredients as sub-items with prices.
+   * Requirements: 2.1, 2.2
+   */
+  const normalizedItems = useMemo(() => {
     // Use fullOrder which may have been fetched with complete data
     const orderToUse = fullOrder || order;
     
-    // Debug: log the entire order object to see what we're working with
-    console.log('[OrderApprovalPanel] Order object for items:', JSON.stringify(orderToUse, null, 2));
+    // Parse items using the helper function
+    const items = parseItemsFromJson(orderToUse.items || (orderToUse as any).order_items || (orderToUse as any).orderItems);
     
-    // Try multiple possible field names
-    let items = orderToUse.items || (orderToUse as any).order_items || (orderToUse as any).orderItems;
+    console.log('[OrderApprovalPanel] Normalizing items:', items.length);
     
-    console.log('[OrderApprovalPanel] Raw items field:', typeof items, items);
-    
-    // If items is a string, try to parse it as JSON
-    if (typeof items === 'string') {
-      try {
-        items = JSON.parse(items);
-        console.log('[OrderApprovalPanel] Parsed items from JSON string:', items);
-      } catch (e) {
-        console.warn('[OrderApprovalPanel] Failed to parse items JSON:', items, e);
-        items = [];
-      }
-    }
-    
-    // Ensure items is an array
-    if (!Array.isArray(items)) {
-      console.warn('[OrderApprovalPanel] Items is not an array:', typeof items, items);
-      items = [];
-    }
-    
-    // Debug: log each item's customizations
-    items.forEach((item: any, idx: number) => {
-      console.log(`[OrderApprovalPanel] Item ${idx} (${item.name}):`, {
-        hasCustomizations: !!item.customizations,
-        customizationsType: typeof item.customizations,
-        customizationsIsArray: Array.isArray(item.customizations),
-        customizationsLength: Array.isArray(item.customizations) ? item.customizations.length : (item.customizations ? Object.keys(item.customizations).length : 0),
-        customizationsData: item.customizations
-      });
-    });
-    
-    console.log('[OrderApprovalPanel] Final parsed items:', items.length, items);
-    return items;
-  };
-
-  const normalizedItems = useMemo(() => {
-    return parseItems().map((item: any) => {
+    return items.map((item: any) => {
       // Extract customizations/ingredients - handle both array and object formats
+      // Requirements: 2.2 - Display customizations as sub-items with prices
       let customizationsList: { name: string; price: number }[] = [];
       const rawCustomizations = item.customizations || item.modifiers || item.ingredients || item.selectedIngredients;
       
-      console.log('[OrderApprovalPanel] Raw customizations for item:', item.name, 'type:', typeof rawCustomizations, 'isArray:', Array.isArray(rawCustomizations), 'keys:', rawCustomizations ? Object.keys(rawCustomizations) : 'null');
-      console.log('[OrderApprovalPanel] Full customizations data:', JSON.stringify(rawCustomizations, null, 2));
-      
       // Helper to extract price from ingredient object - check all possible price fields
       const extractPrice = (c: any): number => {
-        // Helper to safely parse price (handles strings, numbers, null, undefined)
         const parsePrice = (val: any): number => {
           if (val === null || val === undefined) return 0;
           const num = typeof val === 'string' ? parseFloat(val) : Number(val);
@@ -184,13 +289,11 @@ export function OrderApprovalPanel({
         // Check ingredient object first (most common structure from Supabase)
         if (c.ingredient) {
           const ing = c.ingredient;
-          // Try all possible price field names - check each explicitly
           const pickupPrice = parsePrice(ing.pickup_price);
           const deliveryPrice = parsePrice(ing.delivery_price);
           const price = parsePrice(ing.price);
           const basePrice = parsePrice(ing.base_price);
           
-          // Return first non-zero price found
           if (pickupPrice > 0) return pickupPrice;
           if (deliveryPrice > 0) return deliveryPrice;
           if (price > 0) return price;
@@ -217,11 +320,9 @@ export function OrderApprovalPanel({
       
       // Helper to extract name from customization object
       const extractName = (c: any): string => {
-        // Try ingredient.name first (most common)
         if (c.ingredient?.name) return c.ingredient.name;
         if (c.ingredient?.name_en) return c.ingredient.name_en;
         if (c.ingredient?.name_el) return c.ingredient.name_el;
-        // Try direct name fields
         if (c.name) return c.name;
         if (c.name_en) return c.name_en;
         if (c.name_el) return c.name_el;
@@ -232,29 +333,16 @@ export function OrderApprovalPanel({
       
       if (rawCustomizations) {
         if (Array.isArray(rawCustomizations)) {
-          // Array format: [{ ingredient: { name: 'Nutella', pickup_price: 1.50 }, quantity: 1 }, ...]
-          // OR: [{ customizationId: 'uuid', name: 'Nutella', price: 1.50 }, ...]
-          console.log('[OrderApprovalPanel] Processing array customizations, count:', rawCustomizations.length);
           customizationsList = rawCustomizations
-            .filter((c: any) => {
-              const passes = c && (c.ingredient || c.name || c.name_en || c.customizationId);
-              console.log('[OrderApprovalPanel] Filter check:', c?.name || c?.ingredient?.name, 'passes:', passes);
-              return passes;
-            })
+            .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
             .map((c: any) => ({
               name: extractName(c),
               price: extractPrice(c)
             }));
         } else if (typeof rawCustomizations === 'object' && rawCustomizations !== null) {
-          // Object format: { "uuid-1": { ingredient: { name: 'Nutella', pickup_price: 2.50 }, quantity: 1 }, ... }
           const values = Object.values(rawCustomizations);
-          console.log('[OrderApprovalPanel] Processing object customizations, count:', values.length);
           customizationsList = values
-            .filter((c: any) => {
-              const passes = c && (c.ingredient || c.name || c.name_en || c.customizationId);
-              console.log('[OrderApprovalPanel] Filter check:', c?.name || c?.ingredient?.name, 'passes:', passes);
-              return passes;
-            })
+            .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
             .map((c: any) => ({
               name: extractName(c),
               price: extractPrice(c)
@@ -262,19 +350,30 @@ export function OrderApprovalPanel({
         }
       }
       
-      console.log('[OrderApprovalPanel] Parsed customizations:', customizationsList);
+      // Get item price - prefer unit_price, then price
+      const unitPrice = typeof item.unit_price === 'number' ? item.unit_price :
+                        typeof item.price === 'number' ? item.price : 0;
       
       return {
         name: item.name || item.menu_item_name || item.menuItemName || item.title || item.product_name || 'Item',
         quantity: item.quantity || 1,
-        price: typeof item.price === 'number' ? item.price : (typeof item.unit_price === 'number' ? item.unit_price : (typeof item.total_price === 'number' ? item.total_price / (item.quantity || 1) : 0)),
+        price: unitPrice,
+        total_price: item.total_price || item.totalPrice || (unitPrice * (item.quantity || 1)),
         special_instructions: item.special_instructions || item.notes || item.instructions || undefined,
         customizations: customizationsList
       };
     });
   }, [fullOrder, order]);
 
-  const subtotal = normalizedItems.reduce((sum: number, it: { price: number; quantity: number }) => sum + (it.price * it.quantity), 0);
+  // Calculate subtotal from items using total_price values
+  // Requirements: 2.3, 6.1, 6.3
+  const subtotal = useMemo(() => {
+    return calculateSubtotalFromItems(normalizedItems.map(item => ({
+      total_price: item.total_price,
+      unit_price: item.price,
+      quantity: item.quantity
+    })));
+  }, [normalizedItems]);
   const taxAmount = (order as any).tax_amount || (order as any).taxAmount || 0;
   const deliveryFee = (order as any).delivery_fee || (order as any).deliveryFee || 0;
   const discountAmount = (order as any).discount_amount || (order as any).discountAmount || 0;
@@ -429,9 +528,15 @@ export function OrderApprovalPanel({
               {t('orderApprovalPanel.orderItems') || 'Order Items'}
             </h3>
             <div className={`${isDark ? 'bg-gray-800/50' : 'bg-gray-50'} rounded-xl overflow-hidden`}>
-              {normalizedItems.length > 0 ? (
+              {/* Loading state */}
+              {isLoadingItems ? (
+                <div className={`p-6 text-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                  <p>{t('orderApprovalPanel.loadingItems') || 'Loading items...'}</p>
+                </div>
+              ) : normalizedItems.length > 0 ? (
                 <div className={`divide-y ${isDark ? 'divide-gray-700' : 'divide-gray-200'}`}>
-                  {normalizedItems.map((item: { name: string; quantity: number; price: number; special_instructions?: string; customizations?: any[] }, idx: number) => (
+                  {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[] }, idx: number) => (
                     <div key={idx} className="p-4">
                       <div className="flex justify-between items-start">
                         <div className="flex-1">
@@ -449,7 +554,7 @@ export function OrderApprovalPanel({
                               📝 {item.special_instructions}
                             </p>
                           )}
-                          {/* Customizations/Ingredients */}
+                          {/* Customizations/Ingredients - Requirements: 2.2 */}
                           {item.customizations && item.customizations.length > 0 && (
                             <div className={`mt-2 ml-11 space-y-1`}>
                               {item.customizations.map((c: { name: string; price: number }, i: number) => (
@@ -463,9 +568,9 @@ export function OrderApprovalPanel({
                             </div>
                           )}
                         </div>
-                        {/* Price */}
+                        {/* Price - Use total_price which includes customizations */}
                         <div className="text-right ml-4">
-                          <span className="font-bold text-base">€{(item.price * item.quantity).toFixed(2)}</span>
+                          <span className="font-bold text-base">€{item.total_price.toFixed(2)}</span>
                           {item.quantity > 1 && (
                             <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                               €{item.price.toFixed(2)} each
@@ -477,8 +582,20 @@ export function OrderApprovalPanel({
                   ))}
                 </div>
               ) : (
+                /* No items found - show retry button (Requirements: 2.5) */
                 <div className={`p-6 text-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {t('orderApprovalPanel.noItems') || 'No items in this order'}
+                  <p className="mb-3">{itemsLoadError || t('orderApprovalPanel.noItems') || 'No items in this order'}</p>
+                  <button
+                    onClick={handleRetryLoadItems}
+                    disabled={isLoadingItems}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
+                      isDark
+                        ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                        : 'bg-blue-500 hover:bg-blue-600 text-white'
+                    } disabled:opacity-50`}
+                  >
+                    {t('orderApprovalPanel.retryLoadItems') || 'Retry'}
+                  </button>
                 </div>
               )}
             </div>

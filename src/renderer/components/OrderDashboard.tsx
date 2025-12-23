@@ -1187,11 +1187,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     try {
       // Update order items for all pending edit orders
       for (const orderId of pendingEditOrders) {
-        // Here you would typically call an API to update the order
-        // await updateOrderItems(orderId, { items, orderNotes });
+        const result = await window.electronAPI?.invoke('order:update-items', {
+          orderId,
+          items,
+          orderNotes
+        });
+        
+        if (!result?.success) {
+          throw new Error(result?.error || 'Failed to update order items');
+        }
       }
 
       toast.success(t('orderDashboard.orderItemsUpdated', { count: pendingEditOrders.length }));
+
+      // Refresh orders to show updated data
+      await loadOrders();
 
       // Close modal and clear state
       setShowEditOrderModal(false);
@@ -1229,6 +1239,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
     const firstOrder = orders.find(order => order.id === pendingEditOrders[0]);
     return firstOrder?.items || [];
+  };
+
+  // Get order number for the first selected order (for display in edit modal)
+  // Requirements: 7.7 - Display same order_number in edit modal as shown in grid
+  const getSelectedOrderNumber = (): string | undefined => {
+    if (pendingEditOrders.length === 0) return undefined;
+
+    const firstOrder = orders.find(order => order.id === pendingEditOrders[0]);
+    // Handle both snake_case and camelCase field names
+    return firstOrder?.order_number || firstOrder?.orderNumber;
   };
 
   // Get error from store
@@ -1603,6 +1623,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       <EditOrderItemsModal
         isOpen={showEditOrderModal}
         orderCount={pendingEditOrders.length}
+        orderId={pendingEditOrders.length > 0 ? pendingEditOrders[0] : undefined}
+        orderNumber={getSelectedOrderNumber()}
         initialItems={getSelectedOrderItems()}
         onSave={handleOrderItemsSave}
         onClose={handleEditOrderClose}
