@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { serviceRegistry } from '../../service-registry';
 import { handleIPCError, IPCError } from '../utils/error-handler';
 import type { RecordStaffPaymentParams, RecordStaffPaymentResponse, StaffPayment } from '../../../renderer/types/shift';
+import { getSupabaseClient, SUPABASE_CONFIG } from '../../../shared/supabase-config';
 
 export function registerShiftHandlers(): void {
     // Handler: shift:open
@@ -367,5 +368,143 @@ export function registerShiftHandlers(): void {
                 total: shiftsToProcess.length
             };
         }, 'shift:backfill-driver-earnings');
+    });
+
+    // Handler: shift:list-staff-for-checkin
+    /**
+     * List staff members available for check-in at a specific branch
+     * This runs in the main process where Supabase config is available
+     */
+    ipcMain.handle('shift:list-staff-for-checkin', async (_event, branchId: string) => {
+        return handleIPCError(async () => {
+            const supabaseUrl = SUPABASE_CONFIG.url;
+            const supabaseKey = SUPABASE_CONFIG.anonKey;
+
+            console.log('[shift:list-staff-for-checkin] Supabase config:', {
+                url: supabaseUrl?.substring(0, 30) + '...',
+                hasKey: !!supabaseKey,
+                branchId
+            });
+
+            if (!supabaseUrl || !supabaseKey) {
+                throw new IPCError('Supabase configuration missing', 'SERVICE_UNAVAILABLE');
+            }
+
+            if (!branchId) {
+                throw new IPCError('Branch ID is required', 'VALIDATION_ERROR');
+            }
+
+            // Call the RPC function to list staff for check-in
+            const rpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_list_staff_for_checkin`, {
+                method: 'POST',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ p_branch_id: branchId })
+            });
+
+            if (!rpcRes.ok) {
+                const txt = await rpcRes.text();
+                throw new IPCError(`Failed to fetch staff: ${rpcRes.status} ${rpcRes.statusText} - ${txt}`, 'NETWORK_ERROR');
+            }
+
+            const data = await rpcRes.json();
+            console.log('[shift:list-staff-for-checkin] Fetched', data?.length || 0, 'staff members');
+
+            // Map to consistent format
+            const staffList = (data || []).map((s: any) => ({
+                id: s.id,
+                name: (s.name || `${s.first_name ?? ''} ${s.last_name ?? ''}` || 'Staff').trim(),
+                first_name: s.first_name,
+                last_name: s.last_name,
+                email: s.email,
+                role_id: s.role_id,
+                role_name: s.role_name || s.roles?.name || 'staff',
+                role_display_name: s.role_display_name || s.roles?.display_name || 'Staff',
+                roles: [], // Will be loaded separately by renderer
+                can_login_pos: (s.can_login_pos ?? true),
+                is_active: (s.is_active ?? true),
+                hourly_rate: s.hourly_rate
+            }));
+
+            return staffList;
+        }, 'shift:list-staff-for-checkin');
+    });
+
+    // Handler: shift:get-staff-roles
+    /**
+     * Get all roles for a list of staff members
+     * This runs in the main process where Supabase config is available
+     */
+    ipcMain.handle('shift:get-staff-roles', async (_event, staffIds: string[]) => {
+        return handleIPCError(async () => {
+            const supabaseUrl = SUPABASE_CONFIG.url;
+            const supabaseKey = SUPABASE_CONFIG.anonKey;
+
+            if (!supabaseUrl || !supabaseKey) {
+                throw new IPCError('Supabase configuration missing', 'SERVICE_UNAVAILABLE');
+            }
+
+            if (!staffIds || staffIds.length === 0) {
+                return {};
+            }
+
+            // First, fetch all roles for lookup
+            const rolesLookupUrl = `${supabaseUrl}/rest/v1/roles?select=id,name,display_name,color&is_active=eq.true`;
+            const rolesLookupRes = await fetch(rolesLookupUrl, {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            const rolesMap = new Map<string, { name: string; display_name: string; color: string }>();
+            if (rolesLookupRes.ok) {
+                const allRoles = await rolesLookupRes.json();
+                allRoles.forEach((r: any) => {
+                    rolesMap.set(r.id, {
+                        name: r.name || 'staff',
+                        display_name: r.display_name || 'Staff',
+                        color: r.color || '#6B7280'
+                    });
+                });
+            }
+
+            // Fetch staff_roles for the given staff IDs
+            const fetchUrl = `${supabaseUrl}/rest/v1/staff_roles?staff_id=in.(${staffIds.join(',')})&select=staff_id,role_id,is_primary`;
+            const rolesRes = await fetch(fetchUrl, {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            const rolesByStaff: Record<string, any[]> = {};
+
+            if (rolesRes.ok) {
+                const rolesData = await rolesRes.json();
+                rolesData.forEach((sr: any) => {
+                    if (!rolesByStaff[sr.staff_id]) {
+                        rolesByStaff[sr.staff_id] = [];
+                    }
+                    const roleDetails = rolesMap.get(sr.role_id);
+                    rolesByStaff[sr.staff_id].push({
+                        role_id: sr.role_id,
+                        role_name: roleDetails?.name || 'staff',
+                        role_display_name: roleDetails?.display_name || 'Staff',
+                        role_color: roleDetails?.color || '#6B7280',
+                        is_primary: sr.is_primary || false
+                    });
+                });
+            }
+
+            return rolesByStaff;
+        }, 'shift:get-staff-roles');
     });
 }

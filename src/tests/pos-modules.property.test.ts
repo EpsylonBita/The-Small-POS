@@ -30,31 +30,26 @@ fc.configureGlobal({
  */
 const moduleCategoryArb: fc.Arbitrary<ModuleCategory> = fc.constantFrom(
   'core',
-  'operations',
-  'management',
-  'analytics',
-  'integrations',
-  'customer',
-  'staff',
-  'inventory',
-  'marketing',
-  'finance'
+  'vertical',
+  'addon'
 );
 
 /**
  * Arbitrary for generating valid business types
  */
 const businessTypeArb: fc.Arbitrary<BusinessType> = fc.constantFrom(
-  'fast_food',
   'restaurant',
   'hotel',
-  'salon',
   'retail',
   'cafe',
   'bar',
   'bakery',
   'food_truck',
-  'catering'
+  'fast_food',
+  'salon',
+  'bar_cafe',
+  'chain',
+  'franchise'
 );
 
 /**
@@ -92,19 +87,18 @@ const posModuleInfoArb = (moduleIdArb: fc.Arbitrary<string>): fc.Arbitrary<POSMo
     module_id: moduleIdArb,
     name: moduleIdArb,
     display_name: fc.string({ minLength: 1, maxLength: 50 }),
-    description: fc.option(fc.string({ maxLength: 200 }), { nil: null }),
+    description: fc.string({ maxLength: 200 }),
     icon: fc.stringMatching(/^[a-z-]+$/),
     category: moduleCategoryArb,
     route: fc.stringMatching(/^\/[a-z-]+$/),
     is_core: fc.boolean(),
+    is_enabled: fc.boolean(),
+    is_locked: fc.boolean(),
     is_purchased: fc.boolean(),
     pos_enabled: fc.boolean(),
     show_in_navigation: fc.boolean(),
     sort_order: fc.integer({ min: 0, max: 100 }),
-    features: fc.constant({}),
-    metadata: fc.constant({}),
     compatible_business_types: fc.array(businessTypeArb, { minLength: 1, maxLength: 5 }),
-    updated_at: fc.constant(new Date().toISOString()),
   });
 
 /**

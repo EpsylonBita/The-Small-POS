@@ -22,7 +22,7 @@ import { ScreenCaptureService } from '../services/ScreenCaptureService';
 import { CustomerService } from '../services/CustomerService';
 import { WindowManager } from '../window-manager';
 import { ModuleSyncService } from '../services/ModuleSyncService';
-import { getSupabaseClient } from '../../shared/supabase-config';
+import { getSupabaseClient, isSupabaseConfigured } from '../../shared/supabase-config';
 import {
   initializePrinterManager,
   registerPrinterManagerHandlers,
@@ -268,7 +268,6 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
 
     // Initialize Screen Capture service
     // Only initialize if Supabase is configured
-    const { isSupabaseConfigured } = await import('../../shared/supabase-config');
     if (isSupabaseConfigured()) {
       console.log('🎥 Calling screenCaptureService.initialize()...');
       await screenCaptureService.initialize();
@@ -417,18 +416,13 @@ export function setupServiceCallbacks(mainWindow: BrowserWindow): void {
 export function startSync(): void {
   const syncService = serviceRegistry.syncService;
   if (syncService) {
-    // Import isSupabaseConfigured dynamically to avoid circular dependencies
-    import('../../shared/supabase-config').then(({ isSupabaseConfigured }) => {
-      if (isSupabaseConfigured()) {
-        console.log('🔄 Starting auto-sync and realtime subscriptions...');
-        syncService.startAutoSync();
-        syncService.setupRealtimeSubscriptions();
-      } else {
-        console.log('⏭️ Skipping sync services (Supabase not configured - onboarding mode)');
-      }
-    }).catch(err => {
-      console.warn('Failed to check Supabase configuration:', err);
-    });
+    if (isSupabaseConfigured()) {
+      console.log('🔄 Starting auto-sync and realtime subscriptions...');
+      syncService.startAutoSync();
+      syncService.setupRealtimeSubscriptions();
+    } else {
+      console.log('⏭️ Skipping sync services (Supabase not configured - onboarding mode)');
+    }
   }
 }
 

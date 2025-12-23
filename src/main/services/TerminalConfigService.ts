@@ -10,6 +10,7 @@
  */
 
 import { supabase } from '../../shared/supabase';
+import { isSupabaseConfigured } from '../../shared/supabase-config';
 import { DatabaseManager } from '../database';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import type { BusinessType } from '../../shared/types/organization';
@@ -475,7 +476,6 @@ export class TerminalConfigService {
       }
 
       // Check if Supabase is configured before attempting validation
-      const { isSupabaseConfigured } = await import('../../shared/supabase-config');
       if (!isSupabaseConfigured()) {
         console.log('[TerminalConfigService] Supabase not configured, skipping backend validation (onboarding mode)');
         return true;

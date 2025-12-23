@@ -304,21 +304,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setLoading(true);
     setError('');
     try {
-      // Fetch staff from Supabase via Electron API
-      const supabaseUrl = SUPABASE_CONFIG.url;
-      const supabaseKey = SUPABASE_CONFIG.anonKey;
-
-      console.log('[loadStaff] Supabase config:', {
-        url: supabaseUrl?.substring(0, 30) + '...',
-        hasKey: !!supabaseKey
-      });
-
-      if (!supabaseUrl || !supabaseKey) {
-        throw new Error('Supabase configuration missing');
-      }
-
-      // Use PostgREST syntax for joining with roles table
-      // Note: We don't fetch pin_hash for security reasons - PIN verification is done server-side
       // Determine branch for this terminal; prefer settings hook, then IPC
       let branchId: string | undefined;
 
@@ -346,84 +331,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
       }
 
-      // 3) Skipped: branch-id IPC to avoid console noise when handler not registered in older builds
-
-      // Resolve terminalId candidates for further fallbacks
-      let terminalId = getSetting?.('terminal', 'terminal_id') as string | undefined;
-      if (!terminalId && (window as any).electronAPI?.getTerminalSetting) {
-        try {
-          const tid = await (window as any).electronAPI.getTerminalSetting('terminal', 'terminal_id');
-          if (tid) terminalId = tid as string;
-        } catch (e) {
-          console.warn('[StaffShiftModal] getTerminalSetting terminal_id failed:', e);
-        }
-      }
-      if (!terminalId) {
-        try {
-          const local = await (window as any).electronAPI?.invoke?.('get-settings');
-          const flatTid = local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id;
-          if (flatTid) terminalId = flatTid as string;
-          // Also consider local branch_id if still missing
-          if (!branchId) {
-            const flatBid = local?.['terminal.branch_id'] ?? local?.terminal?.branch_id;
-            if (flatBid) branchId = flatBid as string;
-          }
-        } catch (e) {
-          console.warn('[StaffShiftModal] local settings terminal_id fallback failed:', e);
-        }
-      }
-
-      // 3b) Renderer fallback: derive branch via pos_configurations using terminal_id
-      if (!branchId && terminalId) {
-        try {
-          const cfgUrl = `${supabaseUrl}/rest/v1/pos_configurations?select=branch_id&terminal_id=eq.${encodeURIComponent(terminalId)}&is_active=eq.true&order=updated_at.desc&limit=1`;
-          const cfgRes = await fetch(cfgUrl, {
-            headers: {
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-            }
-          });
-          if (cfgRes.ok) {
-            const arr = await cfgRes.json();
-            if (Array.isArray(arr) && arr.length > 0 && arr[0]?.branch_id) {
-              branchId = arr[0].branch_id as string;
-            }
-          } else {
-            const txt = await cfgRes.text();
-            console.warn('[StaffShiftModal] pos_configurations fetch failed:', cfgRes.status, txt);
-          }
-        } catch (e) {
-          console.warn('[StaffShiftModal] Renderer fallback to pos_configurations failed:', e);
-        }
-      }
-
-      // 3c) Final fallback: pos_terminals lookup (anon SELECT allowed by RLS)
-      if (!branchId && terminalId) {
-        try {
-          const termUrl = `${supabaseUrl}/rest/v1/pos_terminals?select=branch_id,terminal_id&terminal_id=eq.${encodeURIComponent(terminalId)}&limit=1`;
-          const termRes = await fetch(termUrl, {
-            headers: {
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-            }
-          });
-          if (termRes.ok) {
-            const arr = await termRes.json();
-            if (Array.isArray(arr) && arr.length > 0 && arr[0]?.branch_id) {
-              branchId = arr[0].branch_id as string;
-            }
-          } else {
-            const txt = await termRes.text();
-            console.warn('[StaffShiftModal] pos_terminals fetch failed:', termRes.status, txt);
-          }
-        } catch (e) {
-          console.warn('[StaffShiftModal] Renderer fallback to pos_terminals failed:', e);
-        }
-      }
-
-      // 3d) Best-effort IPC for branchId (safe, wrapped)
+      // 3) Try IPC for branchId
       if (!branchId && (window as any).electronAPI?.getTerminalBranchId) {
         try {
           const bid = await (window as any).electronAPI.getTerminalBranchId();
@@ -439,130 +347,62 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         throw new Error('This POS is not assigned to a branch. Configure terminal → branch in Admin or POS settings.');
       }
 
-      // Helper function to load all roles for staff members
-      const loadStaffRoles = async (staffList: StaffMember[]) => {
-        console.log('[loadStaffRoles] Starting to load roles for staff list:', staffList.length, 'members');
+      console.log('[loadStaff] Using branchId:', branchId);
+
+      // Use IPC to fetch staff from main process (where Supabase config is available)
+      let staffList: StaffMember[] = [];
+      
+      // Try the new IPC handler first
+      if ((window as any).electronAPI?.invoke) {
         try {
-          // supabaseUrl and supabaseKey are already available in parent scope
-          if (!supabaseUrl || !supabaseKey) {
-            console.warn('[loadStaffRoles] Supabase credentials not available for loading staff roles');
-            return;
+          console.log('[loadStaff] Trying IPC handler shift:list-staff-for-checkin...');
+          const result = await (window as any).electronAPI.invoke('shift:list-staff-for-checkin', branchId);
+          
+          // Handle IPC response format
+          const data = result?.data || result;
+          if (Array.isArray(data)) {
+            staffList = data;
+            console.log('[loadStaff] IPC returned', staffList.length, 'staff members');
+          } else if (result?.error) {
+            throw new Error(result.error);
           }
+        } catch (ipcError: any) {
+          console.warn('[loadStaff] IPC handler failed, falling back to direct fetch:', ipcError?.message || ipcError);
+          // Fall back to direct fetch if IPC fails (for backward compatibility)
+          staffList = await loadStaffDirectFetch(branchId);
+        }
+      } else {
+        // No IPC available, use direct fetch
+        staffList = await loadStaffDirectFetch(branchId);
+      }
 
-          // First, fetch all roles to have a lookup map (this avoids RLS issues with embedded joins)
-          const rolesLookupUrl = `${supabaseUrl}/rest/v1/roles?select=id,name,display_name,color&is_active=eq.true`;
-          console.log('[loadStaffRoles] Fetching all roles for lookup...');
-          const rolesLookupRes = await fetch(rolesLookupUrl, {
-            method: 'GET',
-            headers: {
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
+      // Load roles for staff members via IPC
+      if (staffList.length > 0) {
+        const staffIds = staffList.map(s => s.id);
+        try {
+          console.log('[loadStaff] Loading roles via IPC for', staffIds.length, 'staff members');
+          const rolesResult = await (window as any).electronAPI?.invoke?.('shift:get-staff-roles', staffIds);
+          const rolesByStaff = rolesResult?.data || rolesResult || {};
+          
+          // Assign roles to staff members
+          staffList.forEach(staff => {
+            const staffRoles = rolesByStaff[staff.id] || [];
+            if (staffRoles.length > 0) {
+              staff.roles = staffRoles;
+            } else if (staff.role_id) {
+              // Fallback to primary role
+              staff.roles = [{
+                role_id: staff.role_id,
+                role_name: staff.role_name || 'staff',
+                role_display_name: staff.role_display_name || 'Staff',
+                role_color: '#6B7280',
+                is_primary: true
+              }];
             }
           });
-
-          const rolesMap = new Map<string, { name: string; display_name: string; color: string }>();
-          if (rolesLookupRes.ok) {
-            const allRoles = await rolesLookupRes.json();
-            console.log('[loadStaffRoles] Fetched', allRoles.length, 'roles for lookup');
-            allRoles.forEach((r: any) => {
-              rolesMap.set(r.id, {
-                name: r.name || 'staff',
-                display_name: r.display_name || 'Staff',
-                color: r.color || '#6B7280'
-              });
-            });
-          } else {
-            console.warn('[loadStaffRoles] Failed to fetch roles lookup:', rolesLookupRes.status);
-          }
-
-          // Fetch all staff roles for the staff members
-          const staffIds = staffList.map(s => s.id);
-          console.log('[loadStaffRoles] Staff IDs to fetch roles for:', staffIds);
-
-          // Fetch staff_roles without embedded join (simpler, avoids RLS issues)
-          const fetchUrl = `${supabaseUrl}/rest/v1/staff_roles?staff_id=in.(${staffIds.join(',')})&select=staff_id,role_id,is_primary`;
-          console.log('[loadStaffRoles] Fetching staff_roles from URL:', fetchUrl);
-
-          const rolesRes = await fetch(fetchUrl, {
-            method: 'GET',
-            headers: {
-              'apikey': supabaseKey,
-              'Authorization': `Bearer ${supabaseKey}`,
-              'Content-Type': 'application/json',
-            }
-          });
-
-          console.log('[loadStaffRoles] Fetch response status:', rolesRes.status, rolesRes.statusText);
-          if (rolesRes.ok) {
-            const rolesData = await rolesRes.json();
-            console.log('[loadStaffRoles] Fetched staff_roles data:', rolesData.length, 'records');
-
-            // Group roles by staff_id, using the rolesMap lookup for role details
-            const rolesByStaff = new Map<string, StaffRole[]>();
-            rolesData.forEach((sr: any) => {
-              if (!rolesByStaff.has(sr.staff_id)) {
-                rolesByStaff.set(sr.staff_id, []);
-              }
-              // Look up role details from our pre-fetched rolesMap
-              const roleDetails = rolesMap.get(sr.role_id);
-              console.log('[loadStaffRoles] Role lookup for role_id', sr.role_id, ':', roleDetails);
-
-              rolesByStaff.get(sr.staff_id)!.push({
-                role_id: sr.role_id,
-                role_name: roleDetails?.name || 'staff',
-                role_display_name: roleDetails?.display_name || 'Staff',
-                role_color: roleDetails?.color || '#6B7280',
-                is_primary: sr.is_primary || false
-              });
-            });
-
-            console.log('[loadStaffRoles] Grouped roles by staff:', rolesByStaff);
-
-            // Assign roles to staff members
-            staffList.forEach(staff => {
-              const staffRoles = rolesByStaff.get(staff.id) || [];
-
-              console.log(`[loadStaffRoles] Staff ${staff.name} (${staff.id}):`, staffRoles.length, 'roles from staff_roles table');
-
-              // If no roles in staff_roles table, use primary role from staff table with rolesMap lookup
-              if (staffRoles.length === 0 && staff.role_id) {
-                // Look up role details from rolesMap
-                const roleDetails = rolesMap.get(staff.role_id);
-                staff.roles = [{
-                  role_id: staff.role_id,
-                  role_name: roleDetails?.name || staff.role_name || 'staff',
-                  role_display_name: roleDetails?.display_name || staff.role_display_name || 'Staff',
-                  role_color: roleDetails?.color || '#6B7280',
-                  is_primary: true
-                }];
-                console.log(`[loadStaffRoles] No roles in staff_roles, using primary role for ${staff.name}:`, staff.roles[0].role_display_name);
-              } else {
-                staff.roles = staffRoles;
-                console.log(`[loadStaffRoles] Assigned ${staffRoles.length} roles to ${staff.name}:`, staffRoles.map(r => r.role_display_name).join(', '));
-              }
-            });
-          } else {
-            console.error('[loadStaffRoles] Failed to fetch staff_roles, status:', rolesRes.status);
-            const errorText = await rolesRes.text();
-            console.error('[loadStaffRoles] Error response:', errorText);
-            // Fallback: use rolesMap with primary role_id from staff table
-            staffList.forEach(staff => {
-              if (staff.role_id) {
-                const roleDetails = rolesMap.get(staff.role_id);
-                staff.roles = [{
-                  role_id: staff.role_id,
-                  role_name: roleDetails?.name || staff.role_name || 'staff',
-                  role_display_name: roleDetails?.display_name || staff.role_display_name || 'Staff',
-                  role_color: roleDetails?.color || '#6B7280',
-                  is_primary: true
-                }];
-              }
-            });
-          }
-        } catch (error) {
-          console.error('[loadStaffRoles] Exception loading staff roles:', error);
-          // Fallback: use primary role from staff table (already set from RPC)
+        } catch (rolesError) {
+          console.warn('[loadStaff] Failed to load roles via IPC:', rolesError);
+          // Fallback: use primary role from staff data
           staffList.forEach(staff => {
             if (staff.role_id && (!staff.roles || staff.roles.length === 0)) {
               staff.roles = [{
@@ -575,47 +415,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             }
           });
         }
-      };
-
-      // RPC-only fetch for POS-eligible staff in this branch
-      let data: any[] = [];
-      const rpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_list_staff_for_checkin`, {
-        method: 'POST',
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ p_branch_id: branchId })
-      });
-      if (!rpcRes.ok) {
-        const txt = await rpcRes.text();
-        throw new Error(`Failed to fetch staff via RPC: ${rpcRes.status} ${rpcRes.statusText} - ${txt}`);
       }
-      data = await rpcRes.json();
 
-      console.log('Fetched staff data:', data);
-
-
-      const staffList: StaffMember[] = (data || []).map((s: any) => ({
-        id: s.id,
-        name: (s.name || `${s.first_name ?? ''} ${s.last_name ?? ''}` || 'Staff').trim(),
-        first_name: s.first_name,
-        last_name: s.last_name,
-        email: s.email,
-        role_id: s.role_id,
-        role_name: s.role_name || s.roles?.name || 'staff',
-        role_display_name: s.role_display_name || s.roles?.display_name || 'Staff',
-        roles: [], // Will be loaded separately
-        can_login_pos: (s.can_login_pos ?? true),
-        is_active: (s.is_active ?? true),
-        hourly_rate: s.hourly_rate
-      }));
-
-      // Load all roles for each staff member
-      console.log('[loadStaff] About to call loadStaffRoles for', staffList.length, 'staff members');
-      await loadStaffRoles(staffList);
-      console.log('[loadStaff] After loadStaffRoles, staff roles:', staffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
+      console.log('[loadStaff] Final staff list:', staffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
 
       // Create a new array reference to trigger React re-render
       setAvailableStaff([...staffList]);
@@ -630,6 +432,54 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } finally {
       setLoading(false);
     }
+  };
+
+  // Fallback direct fetch for backward compatibility with older builds
+  const loadStaffDirectFetch = async (branchId: string): Promise<StaffMember[]> => {
+    const supabaseUrl = SUPABASE_CONFIG.url;
+    const supabaseKey = SUPABASE_CONFIG.anonKey;
+
+    console.log('[loadStaffDirectFetch] Supabase config:', {
+      url: supabaseUrl?.substring(0, 30) + '...',
+      hasKey: !!supabaseKey
+    });
+
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error('Supabase configuration missing');
+    }
+
+    const rpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_list_staff_for_checkin`, {
+      method: 'POST',
+      headers: {
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_branch_id: branchId })
+    });
+
+    if (!rpcRes.ok) {
+      const txt = await rpcRes.text();
+      throw new Error(`Failed to fetch staff via RPC: ${rpcRes.status} ${rpcRes.statusText} - ${txt}`);
+    }
+
+    const data = await rpcRes.json();
+    console.log('[loadStaffDirectFetch] Fetched staff data:', data?.length || 0, 'members');
+
+    return (data || []).map((s: any) => ({
+      id: s.id,
+      name: (s.name || `${s.first_name ?? ''} ${s.last_name ?? ''}` || 'Staff').trim(),
+      first_name: s.first_name,
+      last_name: s.last_name,
+      email: s.email,
+      role_id: s.role_id,
+      role_name: s.role_name || s.roles?.name || 'staff',
+      role_display_name: s.role_display_name || s.roles?.display_name || 'Staff',
+      roles: [],
+      can_login_pos: (s.can_login_pos ?? true),
+      is_active: (s.is_active ?? true),
+      hourly_rate: s.hourly_rate
+    }));
   };
 
   const loadExpenses = async (shiftId?: string) => {
