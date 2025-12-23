@@ -671,11 +671,42 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
     silentRefresh: async () => {
       try {
         const orderService = OrderService.getInstance();
-        const orders = await orderService.fetchOrders();
+        const fetchedOrders = await orderService.fetchOrders();
 
         // Only update if we got valid data
-        if (orders && Array.isArray(orders)) {
-          set({ orders });
+        if (fetchedOrders && Array.isArray(fetchedOrders)) {
+          set((state) => {
+            // Create a map of fetched orders by ID for quick lookup
+            const fetchedOrdersMap = new Map(fetchedOrders.map(o => [o.id, o]));
+            
+            // Preserve any orders in current state that aren't in the fetched list
+            // This prevents race conditions where a newly created order hasn't been
+            // committed to the database yet when silentRefresh runs
+            const preservedOrders = state.orders.filter(order => {
+              // Keep orders that are not in the fetched list AND were created recently (within last 30 seconds)
+              // This handles the race condition where order is created but not yet in DB query results
+              if (!fetchedOrdersMap.has(order.id)) {
+                const createdAt = new Date(order.createdAt || order.created_at || 0).getTime();
+                const now = Date.now();
+                const isRecent = (now - createdAt) < 30000; // 30 seconds
+                if (isRecent) {
+                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}`);
+                  return true;
+                }
+              }
+              return false;
+            });
+            
+            // Merge: fetched orders + preserved recent orders
+            const mergedOrders = [...fetchedOrders, ...preservedOrders];
+            
+            // Remove duplicates (prefer fetched version if exists)
+            const uniqueOrders = Array.from(
+              new Map(mergedOrders.map(o => [o.id, o])).values()
+            );
+            
+            return { orders: uniqueOrders };
+          });
           get()._invalidateCache();
         }
       } catch (error) {
