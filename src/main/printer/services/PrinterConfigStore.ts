@@ -24,7 +24,7 @@ import {
   serializePrinterConfig,
   deserializePrinterConfig,
 } from '../types/serialization';
-import { initializePrinterTables, checkPrinterTablesExist } from './PrinterDatabaseSchema';
+import { initializePrinterTables, checkPrinterTablesExist, migratePrintersTableForSystemType } from './PrinterDatabaseSchema';
 
 /**
  * Database row type for printers table
@@ -84,6 +84,9 @@ export class PrinterConfigStore {
     const tables = checkPrinterTablesExist(this.db);
     if (!tables.printers || !tables.printQueue || !tables.printJobHistory) {
       initializePrinterTables(this.db);
+    } else {
+      // Run migration to add 'system' type support if needed
+      migratePrintersTableForSystemType(this.db);
     }
 
     this.initialized = true;

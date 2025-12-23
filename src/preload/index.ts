@@ -415,6 +415,7 @@ const electronAPI = {
         'printer:retry-job',
         'printer:test',
         'printer:diagnostics',
+        'printer:bluetooth-status',
 
         // Clipboard
         'clipboard:read-text',
@@ -476,6 +477,19 @@ const electronAPI = {
 
   removeOrderPaymentUpdatedListener: (callback: (data: any) => void) => {
     ipcRenderer.removeListener('order-payment-updated', callback);
+  },
+
+  onOrderUpdated: (callback: (data: any) => void) => {
+    const subscription = (_event: IpcRendererEvent, data: any) => {
+      console.log('📥 Preload received order-updated:', data);
+      callback(data);
+    };
+    ipcRenderer.on('order-updated', subscription);
+    return () => ipcRenderer.removeListener('order-updated', subscription);
+  },
+
+  removeOrderUpdatedListener: (callback: (data: any) => void) => {
+    ipcRenderer.removeListener('order-updated', callback);
   },
 
   onOrderCreated: (callback: (data: any) => void) => {
@@ -996,6 +1010,14 @@ const electronAPI = {
    */
   printerGetDiagnostics: (printerId: string) => {
     return ipcRenderer.invoke('printer:diagnostics', printerId);
+  },
+
+  /**
+   * Get Bluetooth availability status
+   * @returns Object with available flag and optional error message
+   */
+  printerGetBluetoothStatus: () => {
+    return ipcRenderer.invoke('printer:bluetooth-status');
   },
 
   /**

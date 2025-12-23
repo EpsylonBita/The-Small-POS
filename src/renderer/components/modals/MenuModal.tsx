@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
@@ -31,6 +30,18 @@ interface MenuModalProps {
     discountPercentage?: number;
     discountAmount?: number;
   }) => void;
+  // Edit mode props
+  editMode?: boolean;
+  editOrderId?: string;
+  editSupabaseId?: string;
+  editOrderNumber?: string;
+  initialCartItems?: any[];
+  onEditComplete?: (orderData: {
+    orderId: string;
+    items: any[];
+    total: number;
+    notes?: string;
+  }) => void;
 }
 
 export const MenuModal: React.FC<MenuModalProps> = ({
@@ -41,7 +52,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   orderType = 'delivery',
   isProcessingOrder = false,
   deliveryZoneInfo,
-  onOrderComplete
+  onOrderComplete,
+  // Edit mode props
+  editMode = false,
+  editOrderId,
+  editSupabaseId,
+  editOrderNumber,
+  initialCartItems = [],
+  onEditComplete
 }) => {
 
 
@@ -54,6 +72,194 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [isLoadingItems, setIsLoadingItems] = useState(false);
+  
+  // State for editing a cart item
+  const [editingCartItem, setEditingCartItem] = useState<any>(null);
+  
+  // Track if we've loaded items for this edit session to prevent infinite loops
+  const hasLoadedItemsRef = React.useRef(false);
+  const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
+
+  // Fetch order items from backend
+  const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
+    try {
+      console.log('[MenuModal] fetchOrderItems - orderId:', orderId, 'supabaseId:', supabaseId);
+      
+      // First try to get order from local DB using local ID
+      const localOrder = await window.electronAPI?.invoke('order:get-by-id', { orderId });
+      console.log('[MenuModal] Local order result:', localOrder?.id, 'items:', localOrder?.items?.length);
+      if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
+        console.log('[MenuModal] Loaded items from local DB:', localOrder.items.length);
+        return localOrder.items;
+      }
+
+      // Fallback: fetch from Supabase using supabaseId if available, otherwise use orderId
+      const supabaseOrderId = supabaseId || orderId;
+      console.log('[MenuModal] Fetching from Supabase with ID:', supabaseOrderId);
+      const supabaseResult = await window.electronAPI?.invoke('order:fetch-items-from-supabase', { orderId: supabaseOrderId });
+      console.log('[MenuModal] Supabase result:', supabaseResult);
+      
+      // Handle both direct array response and {success, data} response format
+      const supabaseItems = Array.isArray(supabaseResult) ? supabaseResult : supabaseResult?.data;
+      console.log('[MenuModal] Supabase items:', supabaseItems?.length, supabaseItems);
+      
+      if (supabaseItems && Array.isArray(supabaseItems) && supabaseItems.length > 0) {
+        console.log('[MenuModal] Loaded items from Supabase:', supabaseItems.length);
+        return supabaseItems;
+      }
+
+      return [];
+    } catch (error) {
+      console.error('[MenuModal] Failed to fetch items:', error);
+      return [];
+    }
+  }, []);
+
+  // Reset refs and cart when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      hasLoadedItemsRef.current = false;
+      lastEditOrderIdRef.current = undefined;
+      // Reset cart when modal closes to ensure clean state for next open
+      setCartItems([]);
+    }
+  }, [isOpen]);
+
+  // Transform customizations from Supabase format to MenuCart format
+  const transformCustomizations = (customizations: any): any[] => {
+    if (!customizations) return [];
+    
+    // If already an array in the expected format, return as-is
+    if (Array.isArray(customizations)) {
+      // Check if it's already in the correct format
+      if (customizations.length > 0 && customizations[0]?.ingredient) {
+        return customizations;
+      }
+      // If it's an array but not in the right format, try to transform each item
+      return customizations.map(c => {
+        if (c?.ingredient) return c;
+        // Try to create the expected format
+        return {
+          ingredient: {
+            id: c?.id || c?.ingredient_id || '',
+            name: c?.name || c?.ingredient_name || 'Unknown',
+            name_en: c?.name_en || c?.name || '',
+            name_el: c?.name_el || '',
+          },
+          quantity: c?.quantity || 1,
+          isLittle: c?.isLittle || c?.is_little || false
+        };
+      });
+    }
+    
+    // If it's an object (keyed by ingredient ID or index), convert to array
+    if (typeof customizations === 'object') {
+      return Object.values(customizations).map((c: any) => {
+        if (c?.ingredient) return c;
+        return {
+          ingredient: {
+            id: c?.id || c?.ingredient_id || '',
+            name: c?.name || c?.ingredient_name || c?.ingredient?.name || 'Unknown',
+            name_en: c?.name_en || c?.ingredient?.name_en || c?.name || '',
+            name_el: c?.name_el || c?.ingredient?.name_el || '',
+          },
+          quantity: c?.quantity || 1,
+          isLittle: c?.isLittle || c?.is_little || false
+        };
+      });
+    }
+    
+    return [];
+  };
+
+  // Initialize cart items when in edit mode
+  useEffect(() => {
+    // Skip if not open or already loaded for this order
+    if (!isOpen) return;
+    if (editMode && hasLoadedItemsRef.current && lastEditOrderIdRef.current === editOrderId) {
+      console.log('[MenuModal] Skipping load - already loaded for order:', editOrderId);
+      return;
+    }
+    
+    const loadItems = async () => {
+      console.log('[MenuModal] loadItems called - editMode:', editMode, 'editOrderId:', editOrderId, 'editSupabaseId:', editSupabaseId, 'initialCartItems:', initialCartItems?.length);
+      
+      if (editMode) {
+        // Mark as loaded to prevent re-running
+        hasLoadedItemsRef.current = true;
+        lastEditOrderIdRef.current = editOrderId;
+        
+        // If we have initialCartItems, use them
+        if (initialCartItems && initialCartItems.length > 0) {
+          console.log('[MenuModal] Using initialCartItems:', initialCartItems.length);
+          const transformedItems = initialCartItems.map((item, index) => ({
+            id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+            menuItemId: item.menu_item_id || item.menuItemId || item.id,
+            name: item.name || 'Unknown Item',
+            price: item.unit_price || item.price || 0,
+            quantity: item.quantity || 1,
+            customizations: transformCustomizations(item.customizations),
+            notes: item.notes || '',
+            totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
+            basePrice: item.unit_price || item.price || 0,
+            unitPrice: item.unit_price || item.price || 0,
+          }));
+          console.log('[MenuModal] Transformed items:', transformedItems);
+          setCartItems(transformedItems);
+        } 
+        // Otherwise fetch from backend if we have an orderId
+        else if (editOrderId) {
+          console.log('[MenuModal] Fetching items from backend for order:', editOrderId, 'supabaseId:', editSupabaseId);
+          setIsLoadingItems(true);
+          try {
+            const fetchedItems = await fetchOrderItems(editOrderId, editSupabaseId);
+            console.log('[MenuModal] Fetched items:', fetchedItems?.length, fetchedItems);
+            if (fetchedItems.length > 0) {
+              const transformedItems = fetchedItems.map((item, index) => {
+                console.log('[MenuModal] Item customizations raw:', item.customizations);
+                const transformedCustomizations = transformCustomizations(item.customizations);
+                console.log('[MenuModal] Item customizations transformed:', transformedCustomizations);
+                return {
+                  id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+                  menuItemId: item.menu_item_id || item.menuItemId || item.id,
+                  name: item.name || 'Unknown Item',
+                  price: item.unit_price || item.price || 0,
+                  quantity: item.quantity || 1,
+                  customizations: transformedCustomizations,
+                  notes: item.notes || '',
+                  totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
+                  basePrice: item.unit_price || item.price || 0,
+                  unitPrice: item.unit_price || item.price || 0,
+                };
+              });
+              console.log('[MenuModal] Setting cart items:', transformedItems);
+              setCartItems(transformedItems);
+            } else {
+              console.log('[MenuModal] No items fetched from backend');
+            }
+          } catch (error) {
+            console.error('[MenuModal] Error loading items:', error);
+            toast.error(t('modals.menu.loadItemsFailed') || 'Failed to load order items');
+          } finally {
+            setIsLoadingItems(false);
+          }
+        } else {
+          console.log('[MenuModal] No editOrderId provided');
+        }
+      } else {
+        // Reset cart when opening in non-edit mode (only on first open)
+        if (!hasLoadedItemsRef.current) {
+          hasLoadedItemsRef.current = true;
+          // Don't reset cart here - let it be managed by handleAddToCart
+        }
+      }
+    };
+
+    loadItems();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editMode, editOrderId, editSupabaseId]);
 
   // Load categories on mount
   useEffect(() => {
@@ -127,7 +333,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     // Calculate customization price per item
     // customizations is an array of SelectedIngredient objects: { ingredient: Ingredient, quantity: number }
+    // Only count ingredients that are NOT marked as "without"
     const customizationPrice = customizations.reduce((sum, c) => {
+      // Skip "without" items - they don't add to price
+      if (c.isWithout) return sum;
+      
       // Get the ingredient price based on order type
       const ingredientPrice = orderType === 'pickup'
         ? (c.ingredient?.pickup_price ?? c.ingredient?.price ?? 0)
@@ -138,7 +348,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const pricePerItem = basePrice + customizationPrice;
 
     // Generate truly unique ID using timestamp, random number, and counter
-    const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${Math.random().toString(36).substr(2, 9)}`;
+    const uniqueId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}-${Math.random().toString(36).slice(2, 11)}`;
 
     // totalPrice should be the TOTAL price for this cart item (including quantity)
     const totalPriceWithQuantity = pricePerItem * itemQuantity;
@@ -158,11 +368,53 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       basePrice: basePrice, // Store base price separately (without customizations)
       unitPrice: pricePerItem, // Store unit price (base + customizations, without quantity)
     };
-    setCartItems(prev => [...prev, cartItem]);
+
+    // If we're editing an existing cart item, remove the old one first
+    if (editingCartItem) {
+      setCartItems(prev => [...prev.filter(ci => ci.id !== editingCartItem.id), cartItem]);
+      setEditingCartItem(null);
+    } else {
+      setCartItems(prev => [...prev, cartItem]);
+    }
   };
 
   const handleCheckout = async () => {
     if (cartItems.length === 0) {
+      return;
+    }
+
+    // In edit mode, save changes directly without payment
+    if (editMode && editOrderId && onEditComplete) {
+      setIsSavingEdit(true);
+      try {
+        const total = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+        await onEditComplete({
+          orderId: editOrderId,
+          items: cartItems.map(item => ({
+            id: item.menuItemId || item.id,
+            menu_item_id: item.menuItemId || item.id,
+            name: item.name,
+            quantity: item.quantity,
+            unit_price: item.unitPrice || item.price,
+            total_price: item.totalPrice,
+            notes: item.notes,
+            customizations: item.customizations
+          })),
+          total,
+          notes: ''
+        });
+        
+        // Reset state
+        setCartItems([]);
+        setSelectedCategory("all");
+        setSelectedSubcategory("");
+        onClose();
+      } catch (error) {
+        console.error('Error saving order edit:', error);
+        toast.error(t('modals.menu.editFailed') || 'Failed to save changes');
+      } finally {
+        setIsSavingEdit(false);
+      }
       return;
     }
 
@@ -175,8 +427,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Fetch the menu item from the database
       const menuItem = await menuService.getMenuItemById(item.menuItemId || item.id);
       if (menuItem) {
-        // Remove the item from cart
-        setCartItems(prev => prev.filter(ci => ci.id !== item.id));
+        // Store the cart item being edited (don't remove from cart yet)
+        setEditingCartItem(item);
         // Open the menu item modal for re-customization
         setSelectedMenuItem(menuItem);
       } else {
@@ -244,16 +496,34 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   };
 
+  // Generate modal title based on mode
+  const getModalTitle = () => {
+    if (editMode && editOrderNumber) {
+      return `${t('modals.menu.editOrder') || 'Edit Order'} #${editOrderNumber} - ${orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup')}`;
+    }
+    return t('modals.menu.title') + ' - ' + (orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup')) + ' ' + t('modals.menu.order');
+  };
+
   return (
     <>
       <LiquidGlassModal
         isOpen={isOpen}
         onClose={onClose}
-        title={t('modals.menu.title') + ' - ' + (orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup')) + ' ' + t('modals.menu.order')}
+        title={getModalTitle()}
         size="full"
         closeOnBackdrop={false}
         closeOnEscape={true}
       >
+        {/* Edit Mode Banner */}
+        {editMode && (
+          <div className="bg-amber-500/20 border border-amber-500/30 rounded-lg p-3 mb-4 flex items-center gap-2">
+            <span className="text-amber-600 dark:text-amber-400">✏️</span>
+            <span className="text-sm text-amber-700 dark:text-amber-300">
+              {t('modals.menu.editModeMessage') || 'You are editing an existing order. Add, remove, or modify items as needed.'}
+            </span>
+          </div>
+        )}
+
         {/* Customer/Address Info Section */}
         {(selectedCustomer || selectedAddress) && (
           <div className="liquid-glass-modal-card p-4 mb-4">
@@ -316,7 +586,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onRemoveItem={handleRemoveCartItem}
               discountPercentage={discountPercentage}
               maxDiscountPercentage={maxDiscountPercentage}
-              onDiscountChange={setDiscountPercentage}
+              onDiscountChange={editMode ? undefined : setDiscountPercentage}
+              editMode={editMode}
+              isSaving={isSavingEdit}
             />
           </div>
         </div>
@@ -328,9 +600,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           isOpen={!!selectedMenuItem}
           menuItem={selectedMenuItem}
           orderType={orderType}
-          onClose={() => setSelectedMenuItem(null)}
+          onClose={() => {
+            setSelectedMenuItem(null);
+            setEditingCartItem(null); // Clear editing state when modal closes
+          }}
           onAddToCart={handleAddToCart}
           isCustomizable={selectedMenuItem.is_customizable || false}
+          initialCustomizations={editingCartItem?.customizations || []}
+          initialQuantity={editingCartItem?.quantity || 1}
+          initialNotes={editingCartItem?.notes || ''}
+          isEditMode={!!editingCartItem}
         />
       )}
 

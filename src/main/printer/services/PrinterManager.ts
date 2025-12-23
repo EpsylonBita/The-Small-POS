@@ -32,6 +32,7 @@ import {
   isNetworkConnectionDetails,
   isBluetoothConnectionDetails,
   isUSBConnectionDetails,
+  isSystemConnectionDetails,
   isRawEscPosData,
 } from '../types';
 import { validatePrinterConfig } from '../types/validation';
@@ -66,6 +67,7 @@ import {
   NetworkTransport,
   BluetoothTransport,
   USBTransport,
+  SystemTransport,
   TransportState,
   TransportEvent,
 } from '../transport';
@@ -388,6 +390,16 @@ export class PrinterManager
   }
 
   /**
+   * Get Bluetooth availability status
+   * @returns Object with available flag and optional error message
+   *
+   * Requirements: 1.2
+   */
+  async getBluetoothStatus(): Promise<{ available: boolean; error?: string }> {
+    return this.bluetoothDiscovery.isBluetoothAvailable();
+  }
+
+  /**
    * Get address string from printer config for comparison
    */
   private getAddressFromConfig(config: PrinterConfig): string {
@@ -398,6 +410,8 @@ export class PrinterManager
       return details.address;
     } else if (isUSBConnectionDetails(details)) {
       return `${details.vendorId}:${details.productId}`;
+    } else if (isSystemConnectionDetails(details)) {
+      return details.systemName;
     }
     return '';
   }
@@ -976,6 +990,8 @@ export class PrinterManager
       return new BluetoothTransport(details);
     } else if (isUSBConnectionDetails(details)) {
       return new USBTransport(details);
+    } else if (isSystemConnectionDetails(details)) {
+      return new SystemTransport(details);
     }
 
     throw new Error(`Unsupported connection type: ${(details as any).type}`);

@@ -415,20 +415,29 @@ export function OrderApprovalPanel({
   }, [order.id, declineReason, onDecline, onClose, t]);
 
   const handlePrint = useCallback(async () => {
+    console.log('[OrderApprovalPanel] Print button clicked, order ID:', order.id);
     setIsPrinting(true);
     try {
       const api: any = (window as any).electronAPI;
+      console.log('[OrderApprovalPanel] electronAPI available:', !!api);
+      console.log('[OrderApprovalPanel] printReceipt available:', !!api?.printReceipt);
+
       if (api?.printReceipt) {
-        await api.printReceipt(order.id);
+        console.log('[OrderApprovalPanel] Calling printReceipt with order ID:', order.id);
+        const result = await api.printReceipt(order.id);
+        console.log('[OrderApprovalPanel] printReceipt result:', result);
         toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
       } else if (api?.printOrder) {
+        console.log('[OrderApprovalPanel] Using printOrder fallback');
         await api.printOrder(order.id);
         toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
       } else {
+        console.log('[OrderApprovalPanel] No print API available, using window.print()');
         // Fallback to browser print
         window.print();
       }
     } catch (error) {
+      console.error('[OrderApprovalPanel] Print error:', error);
       toast.error(t('orderApprovalPanel.printFailed') || 'Failed to print receipt');
     } finally {
       setIsPrinting(false);

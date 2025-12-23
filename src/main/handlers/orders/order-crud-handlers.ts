@@ -19,6 +19,8 @@ import { getSupabaseConfig } from '../../../shared/supabase-config';
 function transformOrder(order: any) {
   return {
     id: order.id,
+    supabase_id: order.supabase_id, // Include Supabase ID for edit operations
+    order_number: order.order_number, // Include snake_case for compatibility
     orderNumber: order.order_number || `ORD-${order.id.slice(-6)}`,
     status: order.status,
     items: order.items,
@@ -280,6 +282,178 @@ export function registerOrderCrudHandlers(): void {
         mainWindow.webContents.send('order-created', transformOrder(createdOrder));
       }
 
+      // Auto-print receipt for newly created order
+      if (createdOrder && createdOrder.id) {
+        console.log('🖨️ [Auto-Print] Starting auto-print for order:', createdOrder.id);
+        setTimeout(async () => {
+          try {
+            // Import print handler dynamically to avoid circular dependencies
+            const { getPrinterManagerInstance } = await import('../printer-manager-handlers');
+            const printerManager = getPrinterManagerInstance();
+
+            if (!printerManager) {
+              console.warn('[Auto-Print] PrinterManager not available, skipping auto-print');
+              return;
+            }
+
+            // Get the first enabled receipt printer
+            const printers = await printerManager.getPrinters();
+            const receiptPrinter = printers.find(p => p.role === 'receipt' && p.enabled) || printers.find(p => p.enabled);
+
+            if (!receiptPrinter) {
+              console.warn('[Auto-Print] No enabled printers configured, skipping auto-print');
+              return;
+            }
+
+            console.log('[Auto-Print] Using printer:', receiptPrinter.id, receiptPrinter.name);
+
+            // Fetch complete order with items from database
+            const dbManager = serviceRegistry.dbManager;
+            if (!dbManager) {
+              console.error('[Auto-Print] DatabaseManager not available');
+              return;
+            }
+
+            const order = await dbManager.getOrderById(createdOrder.id);
+            if (!order) {
+              console.error('[Auto-Print] Order not found:', createdOrder.id);
+              return;
+            }
+
+            console.log('[Auto-Print] Order loaded:', {
+              id: order.id,
+              orderNumber: order.order_number,
+              items: order.items?.length || 0,
+              total: order.total_amount
+            });
+
+            // Debug: Log the full item structure to see what fields are available
+            if (order.items && order.items.length > 0) {
+              console.log('[Auto-Print] First item structure:', JSON.stringify(order.items[0], null, 2));
+            }
+
+            // Import print types and generator
+            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
+            const { PaperSize, PrintJobType } = await import('../../printer/types');
+
+            // Transform order items to PrintOrderItem format
+            const printItems: any[] = (order.items || []).map((item: any) => {
+              const modifiers: any[] = [];
+
+              // Handle customizations
+              if (item.customizations) {
+                const customizations = typeof item.customizations === 'string'
+                  ? JSON.parse(item.customizations)
+                  : item.customizations;
+
+                // Process customizations object
+                Object.values(customizations || {}).forEach((custom: any) => {
+                  if (custom && typeof custom === 'object') {
+                    const quantity = custom.quantity || 1;
+                    const name = custom.name || custom.ingredient?.name || 'Unknown';
+                    const isLittle = custom.isLittle || custom.is_little;
+                    // Get price from ingredient
+                    const price = order.order_type === 'delivery'
+                      ? custom.ingredient?.delivery_price
+                      : custom.ingredient?.pickup_price || custom.ingredient?.price;
+
+                    let modName = name;
+                    if (isLittle) modName += ' (λίγο)';
+
+                    modifiers.push({
+                      name: modName,
+                      quantity: quantity > 1 ? quantity : undefined,
+                      price: price || undefined
+                    });
+                  }
+                });
+              }
+
+              // Try multiple ways to get the item name
+              let itemName = item.name || item.item_name || item.product_name;
+
+              // If still no name, try to get from menu_item data if embedded
+              if (!itemName && item.menu_item) {
+                itemName = item.menu_item.name || item.menu_item.item_name;
+              }
+
+              // Last resort: use menu_item_id or 'Item'
+              if (!itemName) {
+                itemName = item.menu_item_id ? `Item ${item.menu_item_id.substring(0, 8)}` : 'Item';
+              }
+
+              return {
+                name: itemName,
+                quantity: item.quantity || 1,
+                unitPrice: item.unit_price || item.price || 0,
+                total: item.total_price || (item.price * item.quantity) || 0,
+                modifiers: modifiers.length > 0 ? modifiers : undefined,
+                specialInstructions: item.notes || item.special_instructions || undefined
+              };
+            });
+
+            // Map order type to receipt format
+            let orderType: 'dine-in' | 'takeout' | 'delivery' = 'takeout';
+            if (order.order_type === 'dine-in' || order.order_type === 'delivery') {
+              orderType = order.order_type;
+            }
+
+            // Build receipt data
+            const receiptData: any = {
+              orderNumber: order.order_number || order.id.substring(0, 8),
+              orderType: orderType,
+              timestamp: new Date(order.created_at || new Date()),
+              items: printItems,
+              subtotal: order.subtotal || 0,
+              tax: (order as any).tax || 0,
+              tip: (order as any).tip || 0,
+              deliveryFee: order.delivery_fee || 0,
+              total: order.total_amount || 0,
+              paymentMethod: order.payment_method || 'cash',
+              customerName: order.customer_name || undefined,
+              customerPhone: order.customer_phone || undefined,
+              deliveryAddress: order.delivery_address || undefined,
+              tableName: order.table_number || undefined
+            };
+
+            console.log('[Auto-Print] Receipt data prepared:', {
+              orderNumber: receiptData.orderNumber,
+              itemCount: receiptData.items.length,
+              total: receiptData.total
+            });
+
+            // Generate receipt buffer
+            const generator = new ReceiptGenerator({
+              paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
+              storeName: 'The Small',
+              currency: '€'
+            });
+
+            const receiptBuffer = generator.generateReceipt(receiptData);
+            console.log('[Auto-Print] Receipt buffer generated:', receiptBuffer.length, 'bytes');
+
+            // Submit print job
+            const jobResult = await printerManager.submitPrintJob({
+              id: `receipt-${createdOrder.id}-${Date.now()}`,
+              type: PrintJobType.RECEIPT,
+              data: receiptData,
+              priority: 2,
+              createdAt: new Date()
+            });
+
+            console.log('[Auto-Print] Print job submitted:', jobResult);
+
+            if (jobResult.success) {
+              console.log('✅ [Auto-Print] Receipt printed successfully for order:', createdOrder.id);
+            } else {
+              console.error('❌ [Auto-Print] Print job failed:', jobResult.error);
+            }
+          } catch (printError) {
+            console.error('❌ [Auto-Print] Error printing receipt:', printError);
+          }
+        }, 500); // Small delay to ensure order is fully saved
+      }
+
       // Fire-and-forget: trigger immediate sync
       if (syncService && createdOrder) {
         setTimeout(() => {
@@ -475,18 +649,51 @@ export function registerOrderCrudHandlers(): void {
 
       console.log('[order:update-items] Updating order:', { orderId, itemCount: items.length, newTotal: newTotalAmount });
 
-      // Update order in local database
+      // Try to find the order - first by local ID, then by supabase_id
+      let actualOrderId = orderId;
+      console.log('[order:update-items] Looking up order by local ID:', orderId);
+      let existingOrder = await withTimeout(
+        dbManager.getOrderById(orderId),
+        TIMING.DATABASE_QUERY_TIMEOUT,
+        'Get order by ID',
+      );
+      console.log('[order:update-items] getOrderById result:', existingOrder ? `found (id=${existingOrder.id})` : 'not found');
+      
+      // If not found by local ID, try by supabase_id
+      if (!existingOrder) {
+        console.log('[order:update-items] Order not found by local ID, trying supabase_id:', orderId);
+        existingOrder = await withTimeout(
+          dbManager.getOrderBySupabaseId(orderId),
+          TIMING.DATABASE_QUERY_TIMEOUT,
+          'Get order by Supabase ID',
+        );
+        console.log('[order:update-items] getOrderBySupabaseId result:', existingOrder ? `found (id=${existingOrder.id})` : 'not found');
+        if (existingOrder) {
+          actualOrderId = existingOrder.id;
+          console.log('[order:update-items] Found order by supabase_id, local ID:', actualOrderId);
+        }
+      }
+
+      if (!existingOrder) {
+        throw new IPCError(`Order not found: ${orderId}`, 'NOT_FOUND');
+      }
+
+      console.log('[order:update-items] Found order, actualOrderId:', actualOrderId, 'existingOrder.id:', existingOrder.id);
+
+      // Update order in local database using the actual local ID
       const updatedOrder = await withTimeout(
-        dbManager.updateOrder(orderId, updateData),
+        dbManager.updateOrder(actualOrderId, updateData),
         TIMING.DATABASE_QUERY_TIMEOUT,
         'Update order items',
       );
 
+      console.log('[order:update-items] updateOrder result:', updatedOrder ? 'success' : 'null/undefined');
+
       if (!updatedOrder) {
-        throw new IPCError('Failed to update order', 'DATABASE_ERROR');
+        throw new IPCError(`Failed to update order: ${actualOrderId}`, 'DATABASE_ERROR');
       }
 
-      console.log('[order:update-items] Order updated successfully:', orderId);
+      console.log('[order:update-items] Order updated successfully:', actualOrderId);
 
       // Update activity for session management
       authService?.updateActivity();
@@ -496,18 +703,18 @@ export function registerOrderCrudHandlers(): void {
         mainWindow.webContents.send('order-updated', transformOrder(updatedOrder));
       }
 
-      // Fire-and-forget: trigger immediate sync
+      // Fire-and-forget: trigger immediate sync using the local order ID
       if (syncService) {
         setTimeout(() => {
           try {
-            syncService.pushSingleOrderNow?.(orderId, 4000)?.catch(() => { });
+            syncService.pushSingleOrderNow?.(actualOrderId, 4000)?.catch(() => { });
           } catch (e) {
             console.warn('[order:update-items] Immediate sync scheduling failed:', e);
           }
         }, 0);
       }
 
-      return { success: true, orderId };
+      return { success: true, orderId: actualOrderId };
     }, 'order:update-items');
   });
 }

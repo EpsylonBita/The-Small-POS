@@ -20,7 +20,7 @@ export const CREATE_PRINTERS_TABLE = `
   CREATE TABLE IF NOT EXISTS printers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('network', 'bluetooth', 'usb', 'wifi')),
+    type TEXT NOT NULL CHECK (type IN ('network', 'bluetooth', 'usb', 'wifi', 'system')),
     connection_details TEXT NOT NULL,
     paper_size TEXT NOT NULL CHECK (paper_size IN ('58mm', '80mm', '112mm')),
     character_set TEXT NOT NULL DEFAULT 'PC437_USA',
@@ -152,4 +152,91 @@ export function checkPrinterTablesExist(db: import('better-sqlite3').Database): 
     printQueue: checkTable('print_queue'),
     printJobHistory: checkTable('print_job_history'),
   };
+}
+
+/**
+ * Migrate the printers table to add 'system' type support
+ * SQLite doesn't support ALTER TABLE to modify CHECK constraints,
+ * so we need to recreate the table with the new constraint.
+ * 
+ * @param db - better-sqlite3 Database instance
+ */
+export function migratePrintersTableForSystemType(db: import('better-sqlite3').Database): void {
+  // Check if migration is needed by trying to insert a test value
+  // If the constraint already includes 'system', this will succeed
+  try {
+    // Check the current schema
+    const tableInfo = db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type='table' AND name='printers'`
+    ).get() as { sql: string } | undefined;
+    
+    if (!tableInfo) {
+      // Table doesn't exist, no migration needed
+      return;
+    }
+    
+    // Check if 'system' is already in the CHECK constraint
+    if (tableInfo.sql.includes("'system'")) {
+      console.log('[PrinterDatabaseSchema] Printers table already supports system type');
+      return;
+    }
+    
+    console.log('[PrinterDatabaseSchema] Migrating printers table to add system type support...');
+    
+    // Begin transaction
+    db.exec('BEGIN TRANSACTION');
+    
+    try {
+      // 1. Create new table with updated constraint
+      db.exec(`
+        CREATE TABLE printers_new (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL CHECK (type IN ('network', 'bluetooth', 'usb', 'wifi', 'system')),
+          connection_details TEXT NOT NULL,
+          paper_size TEXT NOT NULL CHECK (paper_size IN ('58mm', '80mm', '112mm')),
+          character_set TEXT NOT NULL DEFAULT 'PC437_USA',
+          role TEXT NOT NULL CHECK (role IN ('receipt', 'kitchen', 'bar', 'label')),
+          is_default INTEGER NOT NULL DEFAULT 0,
+          fallback_printer_id TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY (fallback_printer_id) REFERENCES printers_new(id) ON DELETE SET NULL
+        )
+      `);
+      
+      // 2. Copy data from old table
+      db.exec(`
+        INSERT INTO printers_new 
+        SELECT * FROM printers
+      `);
+      
+      // 3. Drop old table
+      db.exec('DROP TABLE printers');
+      
+      // 4. Rename new table
+      db.exec('ALTER TABLE printers_new RENAME TO printers');
+      
+      // 5. Recreate indexes
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_printers_role ON printers(role);
+        CREATE INDEX IF NOT EXISTS idx_printers_type ON printers(type);
+        CREATE INDEX IF NOT EXISTS idx_printers_enabled ON printers(enabled);
+        CREATE INDEX IF NOT EXISTS idx_printers_is_default ON printers(is_default);
+      `);
+      
+      // Commit transaction
+      db.exec('COMMIT');
+      
+      console.log('[PrinterDatabaseSchema] ✅ Migration completed successfully');
+    } catch (error) {
+      // Rollback on error
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } catch (error) {
+    console.error('[PrinterDatabaseSchema] Migration failed:', error);
+    throw error;
+  }
 }

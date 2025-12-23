@@ -93,6 +93,44 @@ export class EscPosBuilder {
     return this;
   }
 
+  /**
+   * Set character code page (ESC t n)
+   * Selects the character code page for printing special characters.
+   *
+   * Common code pages:
+   * - 0: CP437 (USA, Standard Europe)
+   * - 16: CP737 (Greek)
+   * - 17: CP851 (Greek)
+   * - 18: CP869 (Greek)
+   * - 19: CP866 (Cyrillic)
+   * - 32: CP852 (Latin 2)
+   * - 255: Custom (depends on printer)
+   *
+   * @param codePage - code page number (0-255)
+   */
+  setCodePage(codePage: number): this {
+    this.buffer.push(ESC, 0x74, codePage); // ESC t n
+    return this;
+  }
+
+  /**
+   * Set international character set (ESC R n)
+   * Selects one of the international character sets.
+   *
+   * Common character sets:
+   * - 0: USA
+   * - 1: France
+   * - 2: Germany
+   * - 3: UK
+   * - 13: Greece
+   *
+   * @param charset - character set number (0-15)
+   */
+  setCharacterSet(charset: number): this {
+    this.buffer.push(ESC, 0x52, charset); // ESC R n
+    return this;
+  }
+
   // ==========================================================================
   // Text Formatting Commands
   // ==========================================================================

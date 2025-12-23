@@ -89,7 +89,10 @@ export class ReceiptGenerator {
   generateReceipt(data: ReceiptData): Buffer {
     const builder = new EscPosBuilder(this.config.paperSize);
 
-    builder.initialize();
+    builder
+      .initialize()
+      .setCodePage(18) // CP869 - Greek code page (ISO 8859-7)
+      .setCharacterSet(13); // Greece character set
 
     // Header
     this.addReceiptHeader(builder, data);
@@ -222,7 +225,16 @@ export class ReceiptGenerator {
     // Modifiers (indented)
     if (item.modifiers && item.modifiers.length > 0) {
       for (const modifier of item.modifiers) {
-        builder.textLine(`  + ${modifier}`);
+        // Check if modifier is an object with price or just a string
+        if (typeof modifier === 'string') {
+          builder.textLine(`  + ${modifier}`);
+        } else {
+          // Modifier with price
+          const modName = modifier.name;
+          const modQty = modifier.quantity && modifier.quantity > 1 ? ` ×${modifier.quantity}` : '';
+          const modPrice = modifier.price ? ` +${this.formatCurrency(modifier.price)}` : '';
+          builder.textLine(`  + ${modName}${modQty}${modPrice}`);
+        }
       }
     }
 
@@ -302,7 +314,10 @@ export class ReceiptGenerator {
   generateKitchenTicket(data: KitchenTicketData): Buffer {
     const builder = new EscPosBuilder(this.config.paperSize);
 
-    builder.initialize();
+    builder
+      .initialize()
+      .setCodePage(18) // CP869 - Greek code page (ISO 8859-7)
+      .setCharacterSet(13); // Greece character set
 
     // Header with station and order info
     this.addKitchenHeader(builder, data);
@@ -436,7 +451,10 @@ export class ReceiptGenerator {
   generateTestPrint(printerName: string = 'Test Printer'): Buffer {
     const builder = new EscPosBuilder(this.config.paperSize);
 
-    builder.initialize();
+    builder
+      .initialize()
+      .setCodePage(18) // CP869 - Greek code page (ISO 8859-7)
+      .setCharacterSet(13); // Greece character set
 
     // Header
     builder

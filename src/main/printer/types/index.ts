@@ -24,6 +24,7 @@ export enum PrinterType {
   BLUETOOTH = 'bluetooth',
   USB = 'usb',
   WIFI = 'wifi',
+  SYSTEM = 'system',
 }
 
 /**
@@ -125,12 +126,22 @@ export interface USBConnectionDetails {
 }
 
 /**
+ * Connection details for System (Windows) printers
+ * Uses the Windows print spooler for printing
+ */
+export interface SystemConnectionDetails {
+  type: 'system';
+  systemName: string; // Windows printer name as shown in Printers & Scanners
+}
+
+/**
  * Union type for all connection details
  */
 export type ConnectionDetails =
   | NetworkConnectionDetails
   | BluetoothConnectionDetails
-  | USBConnectionDetails;
+  | USBConnectionDetails
+  | SystemConnectionDetails;
 
 // ============================================================================
 // Printer Configuration
@@ -161,12 +172,18 @@ export interface PrinterConfig {
 /**
  * Order item for receipt/kitchen ticket printing
  */
+export interface PrintOrderItemModifier {
+  name: string;
+  price?: number;
+  quantity?: number;
+}
+
 export interface PrintOrderItem {
   name: string;
   quantity: number;
   unitPrice: number;
   total: number;
-  modifiers?: string[];
+  modifiers?: string[] | PrintOrderItemModifier[]; // Support both formats
   specialInstructions?: string;
   category?: string; // For routing to category-specific printers
 }
@@ -418,6 +435,15 @@ export function isUSBConnectionDetails(
   details: ConnectionDetails
 ): details is USBConnectionDetails {
   return details.type === 'usb';
+}
+
+/**
+ * Type guard for SystemConnectionDetails
+ */
+export function isSystemConnectionDetails(
+  details: ConnectionDetails
+): details is SystemConnectionDetails {
+  return details.type === 'system';
 }
 
 /**

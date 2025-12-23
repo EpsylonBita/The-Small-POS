@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Edit2, Trash2 } from 'lucide-react';
+import { ShoppingCart, Trash2 } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatCurrency } from '../../utils/format';
@@ -36,6 +36,8 @@ interface MenuCartProps {
   discountPercentage?: number;
   maxDiscountPercentage?: number;
   onDiscountChange?: (percentage: number) => void;
+  editMode?: boolean; // When true, shows "Save Changes" instead of "Complete Order"
+  isSaving?: boolean; // When true, shows loading state on save button
 }
 
 export const MenuCart: React.FC<MenuCartProps> = ({
@@ -46,7 +48,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   onRemoveItem,
   discountPercentage = 0,
   maxDiscountPercentage = 30,
-  onDiscountChange
+  onDiscountChange,
+  editMode = false,
+  isSaving = false
 }) => {
   const { t } = useTranslation();
 
@@ -125,11 +129,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {uniqueCartItems.map((item) => (
               <div
                 key={item.id}
-                className={`p-3 rounded-lg border ${
+                className={`p-3 rounded-lg border transition-all duration-200 ${
                   resolvedTheme === 'dark'
-                    ? 'bg-gray-800/50 border-gray-700/50'
-                    : 'bg-white/50 border-gray-200/50'
-                }`}
+                    ? 'bg-gray-800/50 border-gray-700/50 hover:border-blue-500/50 hover:bg-gray-800/70'
+                    : 'bg-white/50 border-gray-200/50 hover:border-blue-400/50 hover:bg-white/70'
+                } ${onEditItem ? 'cursor-pointer' : ''}`}
+                onClick={() => onEditItem?.(item)}
               >
                 <div className="flex justify-between items-start mb-2">
                   <h4 className={`font-medium flex-1 ${
@@ -143,40 +148,34 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     }`}>
                       {formatCurrency(item.totalPrice || 0)}
                     </span>
-                    {/* Edit and Delete buttons */}
-                    <div className="flex gap-1">
-                      {onEditItem && (
-                        <button
-                          onClick={() => onEditItem(item)}
-                          className={`p-1 rounded hover:bg-blue-500/20 transition-colors ${
-                            resolvedTheme === 'dark' ? 'text-blue-400' : 'text-blue-600'
-                          }`}
-                          title={t('common.actions.edit')}
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                      )}
-                      {onRemoveItem && (
-                        <button
-                          onClick={() => onRemoveItem(item.id)}
-                          className={`p-1 rounded hover:bg-red-500/20 transition-colors ${
-                            resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-600'
-                          }`}
-                          title={t('common.actions.delete')}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
+                    {/* Delete button - positioned away from main click area */}
+                    {onRemoveItem && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation(); // Prevent card click
+                          onRemoveItem(item.id);
+                        }}
+                        className={`p-1.5 rounded-full hover:bg-red-500/20 transition-colors ml-2 ${
+                          resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-600'
+                        }`}
+                        title={t('common.actions.delete')}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {/* Quantity controls */}
-                <div className={`flex items-center justify-between mt-2 ${
-                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-                }`}>
+                <div 
+                  className={`flex items-center justify-between mt-2 ${
+                    resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
+                  }`}
+                  onClick={(e) => e.stopPropagation()} // Prevent card click when using quantity controls
+                >
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         if (item.quantity <= 1) {
                           onRemoveItem?.(item.id);
                         } else {
@@ -196,7 +195,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     </button>
                     <span className="min-w-[24px] text-center font-medium">{item.quantity}</span>
                     <button
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         const updatedItems = cartItems.map(ci =>
                           ci.id === item.id ? { ...ci, quantity: ci.quantity + 1, totalPrice: (ci.totalPrice / ci.quantity) * (ci.quantity + 1) } : ci
                         );
@@ -347,14 +347,28 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         <button
           onClick={onCheckout}
-          disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage}
+          disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving}
           className={`w-full py-3 rounded-xl font-semibold transition-all duration-300 ${
-            uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage
+            uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving
               ? 'bg-gray-400/50 text-gray-500 cursor-not-allowed'
-              : 'bg-blue-600/80 text-white hover:bg-blue-600/90 hover:scale-[1.02]'
+              : editMode
+                ? 'bg-amber-600/80 text-white hover:bg-amber-600/90 hover:scale-[1.02]'
+                : 'bg-blue-600/80 text-white hover:bg-blue-600/90 hover:scale-[1.02]'
           } backdrop-blur-sm`}
         >
-          {t('menu.cart.completeOrder')}
+          {isSaving ? (
+            <span className="flex items-center justify-center gap-2">
+              <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              {t('common.saving')}
+            </span>
+          ) : editMode ? (
+            t('modals.menu.saveChanges') || t('common.saveChanges')
+          ) : (
+            t('menu.cart.completeOrder')
+          )}
         </button>
       </div>
     </div>

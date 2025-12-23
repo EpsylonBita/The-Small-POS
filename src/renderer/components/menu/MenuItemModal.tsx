@@ -8,6 +8,7 @@ interface SelectedIngredient {
   ingredient: Ingredient;
   quantity: number;
   isLittle?: boolean; // Flag for "little" portion
+  isWithout?: boolean; // Flag for "without" - ingredient removed, no price change
 }
 
 interface MenuItemModalProps {
@@ -17,6 +18,11 @@ interface MenuItemModalProps {
   orderType?: 'pickup' | 'delivery';
   onAddToCart: (item: MenuItem, quantity: number, customizations: SelectedIngredient[], notes: string) => void;
   isCustomizable?: boolean;
+  // Edit mode props - pre-populate with existing customizations
+  initialCustomizations?: SelectedIngredient[];
+  initialQuantity?: number;
+  initialNotes?: string;
+  isEditMode?: boolean;
 }
 
 export const MenuItemModal: React.FC<MenuItemModalProps> = ({
@@ -25,7 +31,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   menuItem,
   orderType = 'delivery',
   onAddToCart,
-  isCustomizable = false
+  isCustomizable = false,
+  initialCustomizations = [],
+  initialQuantity = 1,
+  initialNotes = '',
+  isEditMode = false
 }) => {
   const { t, language } = useI18n();
   const { resolvedTheme } = useTheme();
@@ -37,17 +47,26 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   const [ingredientsByColor, setIngredientsByColor] = useState<{[color: string]: Ingredient[]}>({});
   const [activeFlavorType, setActiveFlavorType] = useState<'all' | 'savory' | 'sweet'>('all');
   const [isLittleMode, setIsLittleMode] = useState(false);
+  const [isWithoutMode, setIsWithoutMode] = useState(false); // New: "without" mode for removing ingredients
 
   useEffect(() => {
     if (isOpen && menuItem) {
-      setSelectedIngredients([]);
-      setQuantity(1);
-      setNotes("");
+      // In edit mode, use initial values; otherwise reset
+      if (isEditMode && initialCustomizations.length > 0) {
+        setSelectedIngredients(initialCustomizations);
+        setQuantity(initialQuantity);
+        setNotes(initialNotes);
+      } else {
+        setSelectedIngredients([]);
+        setQuantity(initialQuantity || 1);
+        setNotes(initialNotes || '');
+      }
       setActiveFlavorType('all');
       setIsLittleMode(false);
+      setIsWithoutMode(false);
       loadAvailableIngredients();
     }
-  }, [isOpen, menuItem]);
+  }, [isOpen, menuItem, isEditMode, initialCustomizations, initialQuantity, initialNotes]);
 
 
 	  // Guard: don't render if closed or no item provided
@@ -60,25 +79,25 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
     setLoading(true);
     try {
-      // Only load ingredients for customizable items
-      if (menuItem.is_customizable === true) {
-        // Load all ingredients
-        const ingredients = await menuService.getIngredients();
-        setAvailableIngredients(ingredients);
+      // Always load ingredients - even non-customizable items can have extras or "without"
+      const ingredients = await menuService.getIngredients();
+      setAvailableIngredients(ingredients);
 
-        // Group ingredients by item_color
-        const byColor = ingredients.reduce((acc, ingredient) => {
-          const color = ingredient.item_color || '#6B7280'; // Default gray if no color
-          if (!acc[color]) {
-            acc[color] = [];
-          }
-          acc[color].push(ingredient);
-          return acc;
-        }, {} as {[key: string]: Ingredient[]});
+      // Group ingredients by item_color
+      const byColor = ingredients.reduce((acc, ingredient) => {
+        const color = ingredient.item_color || '#6B7280'; // Default gray if no color
+        if (!acc[color]) {
+          acc[color] = [];
+        }
+        acc[color].push(ingredient);
+        return acc;
+      }, {} as {[key: string]: Ingredient[]});
 
-        setIngredientsByColor(byColor);
+      setIngredientsByColor(byColor);
 
-        // Load default ingredients for this item
+      // Only load default ingredients for customizable items when NOT in edit mode
+      // In edit mode, we use the initialCustomizations passed in
+      if (menuItem.is_customizable === true && !isEditMode) {
         const defaultIngredients = await menuService.getMenuItemIngredients(menuItem.id);
         const defaultSelected = defaultIngredients
           .filter(mi => mi.is_default)
@@ -87,18 +106,19 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             return ingredient ? {
               ingredient,
               quantity: mi.quantity,
-              isLittle: false
+              isLittle: false,
+              isWithout: false
             } : null;
           })
           .filter(Boolean) as SelectedIngredient[];
 
         setSelectedIngredients(defaultSelected);
-      } else {
-        // Clear ingredients for non-customizable items
-        setAvailableIngredients([]);
-        setIngredientsByColor({});
+      } else if (!isEditMode) {
+        // For non-customizable items not in edit mode, start with empty selection
+        // User can add extras or mark items as "without"
         setSelectedIngredients([]);
       }
+      // In edit mode, selectedIngredients is already set from initialCustomizations
     } catch (error) {
       console.error('Error loading ingredients:', error);
       toast.error(t('menu.messages.loadFailed'));
@@ -123,15 +143,20 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
   const handleIngredientToggle = (ingredient: Ingredient, isSelected: boolean) => {
     if (isSelected) {
-      // Check if we've reached the max ingredients limit
-      if (menuItem.max_ingredients && selectedIngredients.length >= menuItem.max_ingredients) {
+      // Check if we've reached the max ingredients limit (only for customizable items)
+      if (menuItem?.is_customizable && menuItem.max_ingredients && selectedIngredients.length >= menuItem.max_ingredients) {
         toast.error(t('menu.validation.maxIngredients', { count: menuItem.max_ingredients }));
         return;
       }
 
       setSelectedIngredients(prev => [
         ...prev,
-        { ingredient, quantity: 1, isLittle: isLittleMode }
+        { 
+          ingredient, 
+          quantity: 1, 
+          isLittle: isLittleMode,
+          isWithout: isWithoutMode // Mark as "without" if in without mode
+        }
       ]);
     } else {
       setSelectedIngredients(prev =>
@@ -179,9 +204,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     if (orderType === 'delivery' && (ing as any).delivery_price !== undefined) return (ing as any).delivery_price as number;
     return ing.price || 0;
   };
-  const ingredientPrice = selectedIngredients.reduce((sum, si) =>
-    sum + (getIngredientUnitPrice(si.ingredient) * si.quantity), 0
-  );
+  // Only charge for ingredients that are NOT marked as "without"
+  const ingredientPrice = selectedIngredients
+    .filter(si => !si.isWithout)
+    .reduce((sum, si) => sum + (getIngredientUnitPrice(si.ingredient) * si.quantity), 0);
   const totalPrice = (basePrice + ingredientPrice) * quantity;
 
   const isIngredientSelected = (ingredient: Ingredient) => {
@@ -259,42 +285,73 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
-          {/* Customizable Ingredients */}
-          {menuItem.is_customizable && (
-            <div className="mb-6">
-              {/* Header with Little Switch */}
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h3 className="text-lg font-semibold liquid-glass-modal-text">
-                    {t('menu.itemModal.customizeTitle', { item: menuItem.name })}
-                  </h3>
-                  {menuItem.max_ingredients && (
-                    <p className="text-sm liquid-glass-modal-text-muted mt-1">
-                      {t('menu.itemModal.maxIngredientsHint', { count: menuItem.max_ingredients })}
-                    </p>
-                  )}
-                </div>
+          {/* Ingredients Section - Show for ALL items (customizable or not) */}
+          <div className="mb-6">
+            {/* Header with Little and Without Switches */}
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-semibold liquid-glass-modal-text">
+                  {menuItem.is_customizable 
+                    ? t('menu.itemModal.customizeTitle', { item: menuItem.name })
+                    : t('menu.itemModal.extrasTitle') || 'Extras & Modifications'}
+                </h3>
+                {menuItem.is_customizable && menuItem.max_ingredients && (
+                  <p className="text-sm liquid-glass-modal-text-muted mt-1">
+                    {t('menu.itemModal.maxIngredientsHint', { count: menuItem.max_ingredients })}
+                  </p>
+                )}
+                {!menuItem.is_customizable && (
+                  <p className="text-sm liquid-glass-modal-text-muted mt-1">
+                    {t('menu.itemModal.extrasHint') || 'Add extras or mark ingredients as "without"'}
+                  </p>
+                )}
+              </div>
+
+              {/* Mode Toggles */}
+              <div className="flex items-center gap-4">
+                {/* Without Mode Toggle */}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <span className="text-sm liquid-glass-modal-text">{t('menu.itemModal.without') || 'Without'}</span>
+                  <button
+                    onClick={() => {
+                      setIsWithoutMode(!isWithoutMode);
+                      if (!isWithoutMode) setIsLittleMode(false); // Turn off little mode when enabling without
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      isWithoutMode ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600'
+                    }`}
+                    title={t('menu.itemModal.withoutHint') || 'Mark ingredients to remove (no price change)'}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        isWithoutMode ? 'translate-x-6' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </label>
 
                 {/* Little Mode Toggle */}
-                <div className="flex items-center gap-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <span className="text-sm liquid-glass-modal-text">{t('menu.itemModal.little')}</span>
-                    <button
-                      onClick={() => setIsLittleMode(!isLittleMode)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        isLittleMode ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <span className="text-sm liquid-glass-modal-text">{t('menu.itemModal.little')}</span>
+                  <button
+                    onClick={() => {
+                      setIsLittleMode(!isLittleMode);
+                      if (!isLittleMode) setIsWithoutMode(false); // Turn off without mode when enabling little
+                    }}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      isLittleMode ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'
+                    }`}
+                    title={t('menu.itemModal.littleHint')}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        isLittleMode ? 'translate-x-6' : 'translate-x-1'
                       }`}
-                      title={t('menu.itemModal.littleHint')}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                          isLittleMode ? 'translate-x-6' : 'translate-x-1'
-                        }`}
-                      />
-                    </button>
-                  </label>
-                </div>
+                    />
+                  </button>
+                </label>
               </div>
+            </div>
 
               {loading ? (
                 <div className="space-y-3">
@@ -366,6 +423,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             const selectedItem = selectedIngredients.find(si => si.ingredient.id === ingredient.id);
                             const currentQuantity = selectedItem?.quantity || 0;
                             const isLittle = selectedItem?.isLittle || false;
+                            const isWithout = selectedItem?.isWithout || false;
 
                             // Helper function to convert hex to rgba
                             const hexToRgba = (hex: string, alpha: number) => {
@@ -380,14 +438,18 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                 key={ingredient.id}
                                 className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left backdrop-blur-sm ${
                                   isSelected
-                                    ? 'border-white/40 shadow-lg scale-[1.02]'
+                                    ? isWithout 
+                                      ? 'border-red-400/60 shadow-lg scale-[1.02]'
+                                      : 'border-white/40 shadow-lg scale-[1.02]'
                                     : 'border-white/10 hover:border-white/30'
                                 }`}
                                 style={{
                                   backgroundColor: isSelected
-                                    ? hexToRgba(color, 0.3)
+                                    ? isWithout
+                                      ? 'rgba(239, 68, 68, 0.2)' // Red tint for "without"
+                                      : hexToRgba(color, 0.3)
                                     : hexToRgba(color, 0.15),
-                                  borderColor: isSelected ? hexToRgba(color, 0.6) : undefined
+                                  borderColor: isSelected && !isWithout ? hexToRgba(color, 0.6) : undefined
                                 }}
                               >
                                 {/* Main clickable area for toggle */}
@@ -396,22 +458,30 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                   className="w-full text-left"
                                 >
                                   <div className="flex flex-col gap-1 pr-8">
-                                    <span className="font-medium text-sm liquid-glass-modal-text line-clamp-2">
+                                    <span className={`font-medium text-sm line-clamp-2 ${
+                                      isWithout ? 'line-through text-red-400' : 'liquid-glass-modal-text'
+                                    }`}>
+                                      {isWithout && <span className="no-underline mr-1">🚫</span>}
                                       {getIngredientName(ingredient)}
-                                      {isLittle && isSelected && (
+                                      {isLittle && isSelected && !isWithout && (
                                         <span className="ml-1 text-xs text-blue-400">({t('menu.itemModal.little')})</span>
                                       )}
                                     </span>
-                                    {getIngredientUnitPrice(ingredient) > 0 && (
+                                    {getIngredientUnitPrice(ingredient) > 0 && !isWithout && (
                                       <span className="text-xs text-green-500 font-semibold">
                                         +€{getIngredientUnitPrice(ingredient).toFixed(2)}
+                                      </span>
+                                    )}
+                                    {isWithout && (
+                                      <span className="text-xs text-red-400 font-medium">
+                                        {t('menu.itemModal.withoutLabel') || 'Without'}
                                       </span>
                                     )}
                                   </div>
                                 </button>
 
-                                {/* Quantity controls - show when selected */}
-                                {isSelected ? (
+                                {/* Quantity controls - show when selected and NOT "without" */}
+                                {isSelected && !isWithout ? (
                                   <div className="absolute top-1/2 right-2 -translate-y-1/2 flex items-center gap-1">
                                     {/* Decrease button */}
                                     <button
@@ -442,6 +512,18 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       <span className="text-white font-bold text-sm">+</span>
                                     </button>
                                   </div>
+                                ) : isSelected && isWithout ? (
+                                  /* X button to remove "without" selection */
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleIngredientToggle(ingredient, false);
+                                    }}
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-7 h-7 rounded-full bg-red-500/30 hover:bg-red-500/50 flex items-center justify-center transition-all"
+                                    title={t('common.actions.remove')}
+                                  >
+                                    <span className="text-white font-bold text-sm">×</span>
+                                  </button>
                                 ) : (
                                   /* Plus button when not selected - tap to add */
                                   <button
@@ -466,7 +548,6 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 </div>
               )}
             </div>
-          )}
 
           {/* Special Instructions */}
           <div className="mb-6">
@@ -520,26 +601,49 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
           {selectedIngredients.length > 0 && (
             <div className="text-sm mb-4 liquid-glass-modal-text-muted">
-              {/* Show total ingredient count including quantities */}
+              {/* Show extras and "without" items separately */}
               {(() => {
-                const totalIngredientCount = selectedIngredients.reduce((sum, si) => sum + si.quantity, 0);
-                return t('menu.itemModal.ingredientsSelected', { count: totalIngredientCount });
+                const extras = selectedIngredients.filter(si => !si.isWithout);
+                const withoutItems = selectedIngredients.filter(si => si.isWithout);
+                const totalExtrasCount = extras.reduce((sum, si) => sum + si.quantity, 0);
+                
+                return (
+                  <div className="space-y-1">
+                    {totalExtrasCount > 0 && (
+                      <div>
+                        {t('menu.itemModal.ingredientsSelected', { count: totalExtrasCount })}
+                        {ingredientPrice > 0 && (
+                          <span className="ml-1 text-green-500 font-semibold">
+                            {t('menu.itemModal.extraPrice', {
+                              price: new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(ingredientPrice)
+                            })}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {withoutItems.length > 0 && (
+                      <div className="text-red-400">
+                        🚫 {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
+                      </div>
+                    )}
+                  </div>
+                );
               })()}
-              {ingredientPrice > 0 && (
-                <span className="ml-1 text-green-500 font-semibold">
-                  {t('menu.itemModal.extraPrice', {
-                    price: new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(ingredientPrice)
-                  })}
-                </span>
-              )}
             </div>
           )}
 
           <button
             onClick={handleAddToCart}
-            className="liquid-glass-modal-button w-full py-4 rounded-xl font-bold text-lg bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700 shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98"
+            className={`liquid-glass-modal-button w-full py-4 rounded-xl font-bold text-lg text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${
+              isEditMode 
+                ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700'
+                : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
+            }`}
           >
-            🛒 {t('menu.itemModal.addToCart')}
+            {isEditMode 
+              ? `✓ ${t('menu.itemModal.updateItem') || 'Update Item'}`
+              : `🛒 ${t('menu.itemModal.addToCart')}`
+            }
           </button>
         </div>
       </div>

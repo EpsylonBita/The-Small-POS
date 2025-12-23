@@ -475,20 +475,9 @@ export function registerPaymentHandlers() {
         }, 'payment:get-receipt');
     });
 
-    // Simulate receipt printing
-    ipcMain.handle('payment:print-receipt', async (event, receiptData, type = 'customer') => {
-        return handleIPCError(async () => {
-            // In a real implementation, you would:
-            // 1. Format the receipt data for the printer
-            // 2. Send to thermal printer via USB/network
-            // 3. Handle printer errors
-
-            // Simulate printing delay
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            return { message: 'Receipt printed successfully' };
-        }, 'payment:print-receipt');
-    });
+    // Receipt printing is now handled by print-handlers.ts
+    // This handler is kept for backwards compatibility but delegates to the print service
+    // The actual implementation is in src/main/handlers/print/print-handlers.ts
 
     // Kitchen ticket printing
     ipcMain.handle('kitchen:print-ticket', async (event, orderData) => {

@@ -72,6 +72,9 @@ export const PRINTER_IPC_CHANNELS = {
   // Testing and diagnostics
   TEST: 'printer:test',
   DIAGNOSTICS: 'printer:diagnostics',
+  
+  // Bluetooth status
+  BLUETOOTH_STATUS: 'printer:bluetooth-status',
 } as const;
 
 /**
@@ -525,6 +528,30 @@ export function registerPrinterManagerHandlers(db?: Database.Database): void {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to get diagnostics',
+        };
+      }
+    }
+  );
+
+  /**
+   * Get Bluetooth availability status
+   * @returns Bluetooth availability and any error message
+   *
+   * Requirements: 1.2
+   */
+  ipcMain.handle(
+    PRINTER_IPC_CHANNELS.BLUETOOTH_STATUS,
+    async () => {
+      try {
+        const manager = getPrinterManager();
+        const status = await manager.getBluetoothStatus();
+        return { success: true, ...status };
+      } catch (error) {
+        console.error('[printer:bluetooth-status] Error:', error);
+        return {
+          success: false,
+          available: false,
+          error: error instanceof Error ? error.message : 'Failed to get Bluetooth status',
         };
       }
     }

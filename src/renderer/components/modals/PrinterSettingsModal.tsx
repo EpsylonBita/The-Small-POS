@@ -5,7 +5,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 
 // Types matching the printer module types
-type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi'
+type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
 type PrinterRole = 'receipt' | 'kitchen' | 'bar' | 'label'
 type PrinterState = 'online' | 'offline' | 'error' | 'busy'
 type PaperSize = '58mm' | '80mm' | '112mm'
@@ -119,6 +119,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     usbProductId: 0,
     usbSystemName: '',
     usbPath: '',
+    systemPrinterName: '',
     paperSize: '80mm' as PaperSize,
     characterSet: 'PC437_USA',
     role: 'receipt' as PrinterRole,
@@ -190,6 +191,9 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   // Add printer from discovered
   const handleAddFromDiscovered = (discovered: DiscoveredPrinter) => {
     const connectionDetails: ConnectionDetails = { type: discovered.type }
+    let usbVendorId = 0
+    let usbProductId = 0
+    
     if (discovered.type === 'network' || discovered.type === 'wifi') {
       connectionDetails.ip = discovered.address
       connectionDetails.port = discovered.port || 9100
@@ -198,6 +202,12 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       connectionDetails.channel = 1
     } else if (discovered.type === 'usb') {
       connectionDetails.path = discovered.address
+      // Parse USB address format "vendorId:productId" (e.g., "1046:20497")
+      const usbParts = discovered.address.split(':')
+      if (usbParts.length === 2) {
+        usbVendorId = parseInt(usbParts[0], 10) || 0
+        usbProductId = parseInt(usbParts[1], 10) || 0
+      }
     }
 
     setFormData({
@@ -207,10 +217,11 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       port: connectionDetails.port || 9100,
       bluetoothAddress: connectionDetails.address || '',
       bluetoothChannel: connectionDetails.channel || 1,
-      usbVendorId: 0,
-      usbProductId: 0,
+      usbVendorId,
+      usbProductId,
       usbSystemName: '',
       usbPath: connectionDetails.path || '',
+      systemPrinterName: '',
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       role: 'receipt',
@@ -244,6 +255,11 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           productId: formData.usbProductId,
           systemName: formData.usbSystemName,
           path: formData.usbPath,
+        }
+      case 'system':
+        return {
+          type: 'system',
+          systemName: formData.systemPrinterName,
         }
       default:
         return { type: formData.type }
@@ -379,6 +395,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       usbProductId: conn.productId || 0,
       usbSystemName: conn.systemName || '',
       usbPath: conn.path || '',
+      systemPrinterName: printer.type === 'system' ? (conn.systemName || '') : '',
       paperSize: printer.paperSize,
       characterSet: printer.characterSet,
       role: printer.role,
@@ -402,6 +419,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       usbProductId: 0,
       usbSystemName: '',
       usbPath: '',
+      systemPrinterName: '',
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       role: 'receipt',
@@ -662,6 +680,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           <option value="wifi">{t('settings.printer.typeWifi')}</option>
           <option value="bluetooth">{t('settings.printer.typeBluetooth')}</option>
           <option value="usb">{t('settings.printer.typeUsb')}</option>
+          <option value="system">{t('settings.printer.typeSystem', 'System Printer')}</option>
         </select>
       </div>
 
@@ -733,6 +752,23 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             className="liquid-glass-modal-input"
             placeholder={t('settings.printer.usbPathPlaceholder') as string}
           />
+        </div>
+      )}
+
+      {formData.type === 'system' && (
+        <div>
+          <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+            {t('settings.printer.systemName', 'Windows Printer Name')}
+          </label>
+          <input
+            value={formData.systemPrinterName || ''}
+            onChange={e => setFormData(prev => ({ ...prev, systemPrinterName: e.target.value }))}
+            className="liquid-glass-modal-input"
+            placeholder={t('settings.printer.systemNamePlaceholder', 'e.g., POS-58 Printer') as string}
+          />
+          <p className="text-xs text-gray-400 mt-1">
+            {t('settings.printer.systemNameHint', 'Enter the exact printer name as shown in Windows Printers & Scanners')}
+          </p>
         </div>
       )}
 

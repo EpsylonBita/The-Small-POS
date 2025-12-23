@@ -554,7 +554,14 @@
       "specialInstructionsPlaceholder": "Any special instructions for the order (allergies, preferences, etc.)",
       "quantity": "Quantity",
       "total": "Total",
-      "addToCart": "Add to Cart"
+      "addToCart": "Add to Cart",
+      "extrasTitle": "Extras & Modifications",
+      "extrasHint": "Add extras or mark ingredients as \"without\"",
+      "without": "Without",
+      "withoutHint": "Mark ingredients to remove (no price change)",
+      "withoutLabel": "Without",
+      "withoutCount": "Without: {{count}} item(s)",
+      "updateItem": "Update Item"
     },
     "ingredients": {
       "otherCategory": "Other"
@@ -1819,7 +1826,11 @@
       "orderSuccess": "Order completed successfully!",
       "orderFailed": "Failed to complete order. Please try again.",
       "processingOrder": "Processing Order...",
-      "pleaseWait": "Please wait while we create your order"
+      "pleaseWait": "Please wait while we create your order",
+      "editOrder": "Edit Order",
+      "editModeMessage": "You are editing an existing order. Add, remove, or modify items as needed.",
+      "editFailed": "Failed to save changes. Please try again.",
+      "saveChanges": "Save Changes"
     },
     "customerSearch": {
       "title": "Search Customer",

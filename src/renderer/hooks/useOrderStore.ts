@@ -286,6 +286,48 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           });
         };
 
+        // Listen for order updates (e.g., after editing items)
+        const handleOrderUpdated = (orderData: any) => {
+          console.log('📡 [useOrderStore] Received order updated:', orderData);
+
+          // Validate order data
+          if (!orderData || !orderData.id) {
+            console.warn('⚠️ [useOrderStore] Invalid order update data received:', orderData);
+            return;
+          }
+
+          set((state) => {
+            // Find order by id, supabase_id, or order_number
+            const existingOrderIndex = state.orders.findIndex(order =>
+              order.id === orderData.id ||
+              (order as any).supabase_id === orderData.id ||
+              (order as any).supabase_id === orderData.supabase_id ||
+              (order.order_number && orderData.order_number && order.order_number === orderData.order_number) ||
+              (order.orderNumber && orderData.orderNumber && order.orderNumber === orderData.orderNumber)
+            );
+
+            if (existingOrderIndex >= 0) {
+              console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
+              const updatedOrders = [...state.orders];
+              // Merge the update with existing order data
+              updatedOrders[existingOrderIndex] = {
+                ...updatedOrders[existingOrderIndex],
+                ...orderData,
+                // Ensure items are updated
+                items: orderData.items || updatedOrders[existingOrderIndex].items,
+                // Update total amount
+                totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
+              };
+              return { orders: updatedOrders };
+            } else {
+              console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
+              return { orders: state.orders };
+            }
+          });
+
+          get()._invalidateCache();
+        };
+
         // Listen for order deletions
         const handleOrderDelete = ({ orderId }: { orderId: string }) => {
           console.log('📡 Received order deletion:', { orderId });
@@ -385,6 +427,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           console.log('✅ Registered order-created listener');
         }
 
+        // Register listener for order updates (e.g., after editing items)
+        let unsubscribeOrderUpdated: (() => void) | undefined;
+        if (window.electronAPI.onOrderUpdated) {
+          unsubscribeOrderUpdated = window.electronAPI.onOrderUpdated(handleOrderUpdated);
+          console.log('✅ Registered order-updated listener');
+        }
+
         // Listen for orders cleared event
         const handleOrdersCleared = () => {
           console.log('🗑️  Orders cleared, refreshing...');
@@ -409,6 +458,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           () => window.electronAPI?.removeOrderDeletedListener?.(handleOrderDelete),
           () => window.electronAPI?.removeOrderPaymentUpdatedListener?.(handlePaymentUpdate),
           () => unsubscribeOrderCreated?.(),
+          () => unsubscribeOrderUpdated?.(),
           () => window.electronAPI?.ipcRenderer?.removeAllListeners('order-sync-conflict'),
           () => window.electronAPI?.ipcRenderer?.removeAllListeners('order-conflict-resolved'),
           () => window.electronAPI?.ipcRenderer?.removeAllListeners('sync-retry-scheduled'),
@@ -671,11 +721,64 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
     silentRefresh: async () => {
       try {
         const orderService = OrderService.getInstance();
-        const orders = await orderService.fetchOrders();
+        const fetchedOrders = await orderService.fetchOrders();
 
         // Only update if we got valid data
-        if (orders && Array.isArray(orders)) {
-          set({ orders });
+        if (fetchedOrders && Array.isArray(fetchedOrders)) {
+          set((state) => {
+            // Create lookup maps using multiple identifiers for proper deduplication
+            // Orders can have different IDs locally vs in Supabase, but order_number is consistent
+            const fetchedOrdersById = new Map(fetchedOrders.map(o => [o.id, o]));
+            const fetchedOrdersByOrderNumber = new Map(
+              fetchedOrders.filter(o => o.orderNumber || o.order_number)
+                .map(o => [o.orderNumber || o.order_number, o])
+            );
+            const fetchedOrdersBySupabaseId = new Map(
+              fetchedOrders.filter(o => (o as any).supabase_id)
+                .map(o => [(o as any).supabase_id, o])
+            );
+            
+            // Helper to check if an order exists in fetched results using any identifier
+            const existsInFetched = (order: Order) => {
+              const orderNum = order.orderNumber || (order as any).order_number;
+              const supabaseId = (order as any).supabase_id;
+              return fetchedOrdersById.has(order.id) ||
+                     (orderNum && fetchedOrdersByOrderNumber.has(orderNum)) ||
+                     (supabaseId && fetchedOrdersBySupabaseId.has(supabaseId));
+            };
+            
+            // Preserve any orders in current state that aren't in the fetched list
+            // This prevents race conditions where a newly created order hasn't been
+            // committed to the database yet when silentRefresh runs
+            const preservedOrders = state.orders.filter(order => {
+              // Keep orders that are not in the fetched list AND were created recently (within last 30 seconds)
+              // This handles the race condition where order is created but not yet in DB query results
+              if (!existsInFetched(order)) {
+                const createdAt = new Date(order.createdAt || (order as any).created_at || 0).getTime();
+                const now = Date.now();
+                const isRecent = (now - createdAt) < 30000; // 30 seconds
+                if (isRecent) {
+                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}, orderNumber: ${order.orderNumber || (order as any).order_number}`);
+                  return true;
+                }
+              }
+              return false;
+            });
+            
+            // Merge: fetched orders + preserved recent orders
+            const mergedOrders = [...fetchedOrders, ...preservedOrders];
+            
+            // Remove duplicates using order_number as primary key (consistent across local and remote)
+            // Fall back to id if order_number is not available
+            const uniqueOrders = Array.from(
+              new Map(mergedOrders.map(o => {
+                const key = o.orderNumber || (o as any).order_number || o.id;
+                return [key, o];
+              })).values()
+            );
+            
+            return { orders: uniqueOrders };
+          });
           get()._invalidateCache();
         }
       } catch (error) {

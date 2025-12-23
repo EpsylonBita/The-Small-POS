@@ -7,16 +7,67 @@
  * @module printer/types/validation
  */
 
-import {
-  PrinterConfig,
-  ConnectionDetails,
-  NetworkConnectionDetails,
-  BluetoothConnectionDetails,
-  USBConnectionDetails,
-  isNetworkConnectionDetails,
-  isBluetoothConnectionDetails,
-  isUSBConnectionDetails,
-} from './index';
+// NOTE: We cannot import type guards from './index' due to circular dependency
+// (index.ts re-exports from validation.ts before defining the type guards)
+// Instead, we define local type checking logic here.
+
+/**
+ * Connection details for network/WiFi printers
+ */
+interface NetworkConnectionDetails {
+  type: 'network' | 'wifi';
+  ip: string;
+  port: number;
+  hostname?: string;
+}
+
+/**
+ * Connection details for Bluetooth printers
+ */
+interface BluetoothConnectionDetails {
+  type: 'bluetooth';
+  address: string;
+  channel: number;
+  deviceName?: string;
+}
+
+/**
+ * Connection details for USB printers
+ */
+interface USBConnectionDetails {
+  type: 'usb';
+  vendorId: number;
+  productId: number;
+  systemName?: string;
+  path?: string;
+}
+
+/**
+ * Connection details for System (Windows) printers
+ */
+interface SystemConnectionDetails {
+  type: 'system';
+  systemName: string;
+}
+
+/**
+ * Union type for all connection details
+ */
+type ConnectionDetails =
+  | NetworkConnectionDetails
+  | BluetoothConnectionDetails
+  | USBConnectionDetails
+  | SystemConnectionDetails;
+
+/**
+ * Printer configuration interface (minimal for validation)
+ */
+interface PrinterConfig {
+  id: string;
+  name: string;
+  connectionDetails: ConnectionDetails;
+  fallbackPrinterId?: string;
+}
 
 // ============================================================================
 // Validation Result Types
@@ -364,21 +415,45 @@ export function validateUSBConnectionDetails(
 }
 
 /**
+ * Validate System connection details
+ */
+export function validateSystemConnectionDetails(
+  details: SystemConnectionDetails
+): ValidationResult {
+  const errors: string[] = [];
+
+  if (!details.systemName || typeof details.systemName !== 'string') {
+    errors.push('System printer name is required');
+  } else if (details.systemName.trim().length === 0) {
+    errors.push('System printer name cannot be empty');
+  }
+
+  return errors.length > 0 ? invalidResult(errors) : validResult();
+}
+
+/**
  * Validate any connection details based on type
  */
 export function validateConnectionDetails(
   details: ConnectionDetails
 ): ValidationResult {
-  if (isNetworkConnectionDetails(details)) {
-    return validateNetworkConnectionDetails(details);
+  // Check type directly to avoid circular dependency issues
+  const connectionType = details.type;
+
+  if (connectionType === 'network' || connectionType === 'wifi') {
+    return validateNetworkConnectionDetails(details as NetworkConnectionDetails);
   }
 
-  if (isBluetoothConnectionDetails(details)) {
-    return validateBluetoothConnectionDetails(details);
+  if (connectionType === 'bluetooth') {
+    return validateBluetoothConnectionDetails(details as BluetoothConnectionDetails);
   }
 
-  if (isUSBConnectionDetails(details)) {
-    return validateUSBConnectionDetails(details);
+  if (connectionType === 'usb') {
+    return validateUSBConnectionDetails(details as USBConnectionDetails);
+  }
+
+  if (connectionType === 'system') {
+    return validateSystemConnectionDetails(details as SystemConnectionDetails);
   }
 
   return invalidResult(['Unknown connection type']);

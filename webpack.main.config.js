@@ -100,7 +100,14 @@ module.exports = (env, argv) => {
     /Module not found: Error: Can't resolve 'utf-8-validate'/,
     /Module not found: Error: Can't resolve 'bluetooth-serial-port'/,
     /Module not found: Error: Can't resolve 'usb'/,
-    /Module not found: Error: Can't resolve 'serialport'/
+    /Module not found: Error: Can't resolve 'serialport'/,
+    // Ignore warnings from node-pre-gyp and node-gyp
+    /Module not found: Error: Can't resolve 'npm'/,
+    /Module not found: Error: Can't resolve 'mock-aws-s3'/,
+    /Module not found: Error: Can't resolve 'aws-sdk'/,
+    /Module not found: Error: Can't resolve 'nock'/,
+    /Module parse failed:.*Find-VisualStudio\.cs/,
+    /Unexpected token.*nw-pre-gyp.*index\.html/
   ]
   };
 };

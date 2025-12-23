@@ -120,8 +120,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   const [showEditOptionsModal, setShowEditOptionsModal] = useState(false);
   const [showEditCustomerModal, setShowEditCustomerModal] = useState(false);
   const [showEditOrderModal, setShowEditOrderModal] = useState(false);
+  const [showEditMenuModal, setShowEditMenuModal] = useState(false); // New: Menu-based edit modal
   const [pendingEditOrders, setPendingEditOrders] = useState<string[]>([]);
   const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(null);
+  const [editingOrderType, setEditingOrderType] = useState<'pickup' | 'delivery'>('pickup'); // Track order type for editing
+  // Store edit order details separately to persist while modal is open
+  const [currentEditOrderId, setCurrentEditOrderId] = useState<string | undefined>(undefined);
+  const [currentEditOrderNumber, setCurrentEditOrderNumber] = useState<string | undefined>(undefined);
+  const [currentEditSupabaseId, setCurrentEditSupabaseId] = useState<string | undefined>(undefined);
 
   // State for new order flow
   const [showOrderTypeModal, setShowOrderTypeModal] = useState(false);
@@ -916,19 +922,31 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         
         // Auto-print receipt/ticket for new orders
         if (result.orderId) {
+          console.log('[OrderDashboard] Starting auto-print for order:', result.orderId);
           try {
             const api: any = (window as any).electronAPI;
+            console.log('[OrderDashboard] electronAPI available:', !!api, 'printReceipt:', !!api?.printReceipt);
+
             if (api?.printReceipt) {
-              await api.printReceipt(result.orderId);
-              console.log('[OrderDashboard] Receipt printed for order:', result.orderId);
+              // Small delay to ensure order is saved to local DB
+              await new Promise(resolve => setTimeout(resolve, 500));
+              console.log('[OrderDashboard] Calling printReceipt for order:', result.orderId);
+              const printResult = await api.printReceipt(result.orderId);
+              console.log('[OrderDashboard] Receipt print result:', printResult);
             } else if (api?.printOrder) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+              console.log('[OrderDashboard] Calling printOrder for order:', result.orderId);
               await api.printOrder(result.orderId);
               console.log('[OrderDashboard] Order ticket printed for order:', result.orderId);
+            } else {
+              console.warn('[OrderDashboard] No print API available');
             }
           } catch (printError) {
-            console.warn('[OrderDashboard] Auto-print failed:', printError);
+            console.error('[OrderDashboard] Auto-print error:', printError);
             // Don't show error toast - printing is optional
           }
+        } else {
+          console.warn('[OrderDashboard] No orderId in result, skipping auto-print');
         }
       } else {
         toast.error(result.error || t('orderDashboard.orderCreateFailed'));
@@ -1145,7 +1163,31 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   const handleEditOrder = () => {
     setShowEditOptionsModal(false);
-    setShowEditOrderModal(true);
+    
+    // Get the order being edited to determine its type
+    if (pendingEditOrders.length > 0) {
+      const orderToEdit = orders.find(order => order.id === pendingEditOrders[0]);
+      if (orderToEdit) {
+        // Store the order ID, supabase ID, and number before opening the modal
+        // This ensures they persist even if pendingEditOrders gets cleared
+        setCurrentEditOrderId(orderToEdit.id);
+        setCurrentEditSupabaseId(orderToEdit.supabase_id || (orderToEdit as any).supabaseId);
+        setCurrentEditOrderNumber(orderToEdit.order_number || orderToEdit.orderNumber);
+        
+        console.log('[OrderDashboard] handleEditOrder - orderId:', orderToEdit.id, 'supabaseId:', orderToEdit.supabase_id, 'orderNumber:', orderToEdit.order_number || orderToEdit.orderNumber);
+        
+        // Determine order type - handle both camelCase and snake_case
+        const orderTypeValue = (orderToEdit.orderType || (orderToEdit as any).order_type || 'pickup') as string;
+        // Map dine-in to pickup for menu display purposes
+        const menuOrderType = (orderTypeValue === 'dine-in' || orderTypeValue === 'dine_in')
+          ? 'pickup' 
+          : (orderTypeValue === 'delivery' ? 'delivery' : 'pickup');
+        setEditingOrderType(menuOrderType);
+      }
+    }
+    
+    // Open the menu-based edit modal instead of the simple edit modal
+    setShowEditMenuModal(true);
   };
 
   const handleEditOptionsClose = () => {
@@ -1220,6 +1262,54 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     setEditingSingleOrder(null);
   };
 
+  // Handle menu-based order edit completion
+  const handleEditMenuComplete = async (orderData: {
+    orderId: string;
+    items: any[];
+    total: number;
+    notes?: string;
+  }) => {
+    try {
+      const result = await window.electronAPI?.invoke('order:update-items', {
+        orderId: orderData.orderId,
+        items: orderData.items,
+        orderNotes: orderData.notes
+      });
+      
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to update order items');
+      }
+
+      toast.success(t('orderDashboard.orderItemsUpdated', { count: 1 }));
+
+      // Refresh orders to show updated data
+      await loadOrders();
+
+      // Close modal and clear state
+      setShowEditMenuModal(false);
+      setPendingEditOrders([]);
+      setEditingSingleOrder(null);
+      setSelectedOrders([]);
+      // Clear the persisted edit order details
+      setCurrentEditOrderId(undefined);
+      setCurrentEditOrderNumber(undefined);
+      setCurrentEditSupabaseId(undefined);
+    } catch (error) {
+      console.error('Failed to update order items:', error);
+      toast.error(t('orderDashboard.orderItemsFailed'));
+    }
+  };
+
+  const handleEditMenuClose = () => {
+    setShowEditMenuModal(false);
+    setPendingEditOrders([]);
+    setEditingSingleOrder(null);
+    // Clear the persisted edit order details
+    setCurrentEditOrderId(undefined);
+    setCurrentEditOrderNumber(undefined);
+    setCurrentEditSupabaseId(undefined);
+  };
+
   // Get customer info for the first selected order (for editing)
   const getSelectedOrderCustomerInfo = () => {
     if (pendingEditOrders.length === 0) return { name: '', phone: '', address: '', notes: '' };
@@ -1235,9 +1325,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   // Get order items for the first selected order (for editing)
   const getSelectedOrderItems = () => {
-    if (pendingEditOrders.length === 0) return [];
+    if (pendingEditOrders.length === 0) {
+      console.log('[OrderDashboard] getSelectedOrderItems: No pending edit orders');
+      return [];
+    }
 
     const firstOrder = orders.find(order => order.id === pendingEditOrders[0]);
+    console.log('[OrderDashboard] getSelectedOrderItems: firstOrder:', firstOrder?.id, 'items:', firstOrder?.items?.length, firstOrder?.items);
     return firstOrder?.items || [];
   };
 
@@ -1628,6 +1722,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         initialItems={getSelectedOrderItems()}
         onSave={handleOrderItemsSave}
         onClose={handleEditOrderClose}
+      />
+
+      {/* Menu-based Edit Order Modal */}
+      <MenuModal
+        isOpen={showEditMenuModal}
+        onClose={handleEditMenuClose}
+        orderType={editingOrderType}
+        editMode={true}
+        editOrderId={currentEditOrderId}
+        editSupabaseId={currentEditSupabaseId}
+        editOrderNumber={currentEditOrderNumber}
+        initialCartItems={[]}
+        onEditComplete={handleEditMenuComplete}
       />
     </div>
   );

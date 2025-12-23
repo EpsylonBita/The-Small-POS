@@ -1,9 +1,12 @@
 /**
  * Bluetooth Printer Discovery Service
  * 
- * Discovers Bluetooth printers using:
- * - bluetooth-serial-port for SPP device enumeration
- * - Filters for Serial Port Profile (SPP) capable devices
+ * Discovers Bluetooth printers. This implementation provides a graceful
+ * fallback when the native bluetooth-serial-port module is not available.
+ * 
+ * For full Bluetooth support, the native module needs to be compiled for
+ * the specific Electron version. When unavailable, users can manually
+ * add Bluetooth printers by entering the device address.
  * 
  * @module printer/discovery
  * Requirements: 1.2, 3.1
@@ -50,7 +53,10 @@ interface BluetoothDevice {
 }
 
 /**
- * Bluetooth printer discovery service using bluetooth-serial-port
+ * Bluetooth printer discovery service
+ * 
+ * This implementation attempts to use the native bluetooth-serial-port module
+ * when available, and gracefully falls back to manual configuration when not.
  */
 export class BluetoothDiscovery implements PrinterDiscovery {
   private discovering = false;
@@ -59,6 +65,8 @@ export class BluetoothDiscovery implements PrinterDiscovery {
   private configuredAddresses: Set<string> = new Set();
   private btSerial: unknown = null;
   private inquireTimeout: ReturnType<typeof setTimeout> | null = null;
+  private bluetoothAvailable: boolean | null = null;
+  private bluetoothError: string | null = null;
 
   /**
    * Create a new BluetoothDiscovery instance
@@ -86,16 +94,66 @@ export class BluetoothDiscovery implements PrinterDiscovery {
       return this.btSerial;
     }
 
+    // If we already know Bluetooth is unavailable, return early
+    if (this.bluetoothAvailable === false) {
+      return null;
+    }
+
     try {
       // Dynamic import to handle optional dependency
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const BluetoothSerialPort = require('bluetooth-serial-port');
-      this.btSerial = new BluetoothSerialPort.BluetoothSerialPort();
+      const btModule = require('bluetooth-serial-port');
+      
+      // Handle different export formats from bluetooth-serial-port
+      let BluetoothSerialPortClass;
+      
+      if (btModule.BluetoothSerialPort && typeof btModule.BluetoothSerialPort === 'function') {
+        BluetoothSerialPortClass = btModule.BluetoothSerialPort;
+      } else if (btModule.default?.BluetoothSerialPort && typeof btModule.default.BluetoothSerialPort === 'function') {
+        BluetoothSerialPortClass = btModule.default.BluetoothSerialPort;
+      } else if (typeof btModule === 'function') {
+        BluetoothSerialPortClass = btModule;
+      } else if (btModule.default && typeof btModule.default === 'function') {
+        BluetoothSerialPortClass = btModule.default;
+      } else {
+        throw new Error('Could not find BluetoothSerialPort constructor in module');
+      }
+      
+      this.btSerial = new BluetoothSerialPortClass();
+      this.bluetoothAvailable = true;
       return this.btSerial;
-    } catch (error) {
-      console.warn('Bluetooth serial port module not available:', error);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check if it's a native module binding error
+      if (errorMessage.includes('Could not locate the bindings file') || 
+          errorMessage.includes('.node') ||
+          errorMessage.includes('not a constructor') ||
+          errorMessage.includes('Cannot find module')) {
+        this.bluetoothError = 
+          'Bluetooth native module not available. ' +
+          'Bluetooth printer discovery is disabled. ' +
+          'You can still manually add Bluetooth printers by entering their MAC address.';
+        console.warn('[BluetoothDiscovery]', this.bluetoothError);
+      } else {
+        this.bluetoothError = `Bluetooth initialization failed: ${errorMessage}`;
+        console.warn('[BluetoothDiscovery]', this.bluetoothError);
+      }
+      
+      this.bluetoothAvailable = false;
       return null;
     }
+  }
+
+  /**
+   * Check if Bluetooth discovery is available
+   */
+  async isBluetoothAvailable(): Promise<{ available: boolean; error?: string }> {
+    await this.initBluetooth();
+    return {
+      available: this.bluetoothAvailable === true,
+      error: this.bluetoothError || undefined,
+    };
   }
 
   /**
@@ -113,14 +171,15 @@ export class BluetoothDiscovery implements PrinterDiscovery {
       const btSerial = await this.initBluetooth();
       
       if (!btSerial) {
-        console.warn('Bluetooth not available on this system');
+        console.log('[BluetoothDiscovery] Bluetooth not available - returning empty list');
+        console.log('[BluetoothDiscovery] Users can manually add Bluetooth printers by MAC address');
         return [];
       }
 
       await this.performInquiry(btSerial, timeout);
       return Array.from(this.discoveredPrinters.values());
     } catch (error) {
-      console.error('Bluetooth discovery error:', error);
+      console.error('[BluetoothDiscovery] Discovery error:', error);
       return Array.from(this.discoveredPrinters.values());
     } finally {
       this.stopDiscovery();
@@ -175,7 +234,7 @@ export class BluetoothDiscovery implements PrinterDiscovery {
       try {
         bt.inquire();
       } catch (error) {
-        console.error('Failed to start Bluetooth inquiry:', error);
+        console.error('[BluetoothDiscovery] Failed to start inquiry:', error);
         resolve();
       }
     });
@@ -306,7 +365,7 @@ export class BluetoothDiscovery implements PrinterDiscovery {
       try {
         callback(printer);
       } catch (error) {
-        console.error('Error in printer found callback:', error);
+        console.error('[BluetoothDiscovery] Error in printer found callback:', error);
       }
     }
   }
@@ -344,8 +403,18 @@ export class BluetoothDiscovery implements PrinterDiscovery {
         });
       });
     } catch (error) {
-      console.error('Error listing paired devices:', error);
+      console.error('[BluetoothDiscovery] Error listing paired devices:', error);
       return printers;
     }
+  }
+
+  /**
+   * Get the Bluetooth availability status and any error message
+   */
+  getStatus(): { available: boolean; error?: string } {
+    return {
+      available: this.bluetoothAvailable === true,
+      error: this.bluetoothError || undefined,
+    };
   }
 }

@@ -54,6 +54,7 @@
   "author": "The Small Team",
   "license": "MIT",
   "devDependencies": {
+    "@electron/rebuild": "^4.0.2",
     "@playwright/test": "^1.44.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jest": "^30.0.0",
@@ -71,6 +72,7 @@
     "dotenv": "^17.2.3",
     "electron": "^35.7.5",
     "electron-builder": "^24.9.1",
+    "electron-rebuild": "^3.2.9",
     "eslint": "^8.55.0",
     "eslint-plugin-react": "^7.33.2",
     "eslint-plugin-react-hooks": "^4.6.0",
@@ -98,7 +100,6 @@
   "dependencies": {
     "@point-of-sale/network-receipt-printer": "^2.0.1",
     "@point-of-sale/receipt-printer-encoder": "^3.0.3",
-    "@point-of-sale/system-receipt-printer": "^2.0.1",
     "@supabase/supabase-js": "^2.50.0",
     "@types/react-virtualized-auto-sizer": "^1.0.4",
     "@types/react-window": "^1.8.8",
@@ -197,7 +198,9 @@
     "npmRebuild": true,
     "buildDependenciesFromSource": false,
     "nodeGypRebuild": false,
-    "npmArgs": ["--ignore-scripts"]
+    "npmArgs": [
+      "--ignore-scripts"
+    ]
   },
   "optionalDependencies": {
     "bluetooth-serial-port": "^3.0.2",

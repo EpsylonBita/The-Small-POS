@@ -6,6 +6,7 @@
  * - NetworkTransport (TCP/IP)
  * - BluetoothTransport (SPP)
  * - USBTransport (direct USB / system spooler)
+ * - SystemTransport (Windows print spooler)
  *
  * @module printer/transport
  *
@@ -37,3 +38,7 @@ export { BluetoothTransport } from './BluetoothTransport';
 // USB transport (direct USB / system spooler)
 export type { USBTransportOptions } from './USBTransport';
 export { USBTransport } from './USBTransport';
+
+// System transport (Windows print spooler)
+export type { SystemTransportOptions } from './SystemTransport';
+export { SystemTransport } from './SystemTransport';
