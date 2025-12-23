@@ -676,8 +676,26 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         // Only update if we got valid data
         if (fetchedOrders && Array.isArray(fetchedOrders)) {
           set((state) => {
-            // Create a map of fetched orders by ID for quick lookup
-            const fetchedOrdersMap = new Map(fetchedOrders.map(o => [o.id, o]));
+            // Create lookup maps using multiple identifiers for proper deduplication
+            // Orders can have different IDs locally vs in Supabase, but order_number is consistent
+            const fetchedOrdersById = new Map(fetchedOrders.map(o => [o.id, o]));
+            const fetchedOrdersByOrderNumber = new Map(
+              fetchedOrders.filter(o => o.orderNumber || o.order_number)
+                .map(o => [o.orderNumber || o.order_number, o])
+            );
+            const fetchedOrdersBySupabaseId = new Map(
+              fetchedOrders.filter(o => (o as any).supabase_id)
+                .map(o => [(o as any).supabase_id, o])
+            );
+            
+            // Helper to check if an order exists in fetched results using any identifier
+            const existsInFetched = (order: Order) => {
+              const orderNum = order.orderNumber || (order as any).order_number;
+              const supabaseId = (order as any).supabase_id;
+              return fetchedOrdersById.has(order.id) ||
+                     (orderNum && fetchedOrdersByOrderNumber.has(orderNum)) ||
+                     (supabaseId && fetchedOrdersBySupabaseId.has(supabaseId));
+            };
             
             // Preserve any orders in current state that aren't in the fetched list
             // This prevents race conditions where a newly created order hasn't been
@@ -685,12 +703,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             const preservedOrders = state.orders.filter(order => {
               // Keep orders that are not in the fetched list AND were created recently (within last 30 seconds)
               // This handles the race condition where order is created but not yet in DB query results
-              if (!fetchedOrdersMap.has(order.id)) {
-                const createdAt = new Date(order.createdAt || order.created_at || 0).getTime();
+              if (!existsInFetched(order)) {
+                const createdAt = new Date(order.createdAt || (order as any).created_at || 0).getTime();
                 const now = Date.now();
                 const isRecent = (now - createdAt) < 30000; // 30 seconds
                 if (isRecent) {
-                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}`);
+                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}, orderNumber: ${order.orderNumber || (order as any).order_number}`);
                   return true;
                 }
               }
@@ -700,9 +718,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             // Merge: fetched orders + preserved recent orders
             const mergedOrders = [...fetchedOrders, ...preservedOrders];
             
-            // Remove duplicates (prefer fetched version if exists)
+            // Remove duplicates using order_number as primary key (consistent across local and remote)
+            // Fall back to id if order_number is not available
             const uniqueOrders = Array.from(
-              new Map(mergedOrders.map(o => [o.id, o])).values()
+              new Map(mergedOrders.map(o => {
+                const key = o.orderNumber || (o as any).order_number || o.id;
+                return [key, o];
+              })).values()
             );
             
             return { orders: uniqueOrders };
