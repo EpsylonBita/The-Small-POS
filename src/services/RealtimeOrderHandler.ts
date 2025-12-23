@@ -4,6 +4,45 @@ import { getSupabaseClient } from '../shared/supabase-config'
 import type { DatabaseManager } from '../main/database'
 
 /**
+ * OrderItem interface for local storage format
+ */
+export interface OrderItem {
+  id: string;
+  menu_item_id?: string;
+  name: string;
+  quantity: number;
+  price: number;
+  unit_price: number;
+  total_price: number;
+  notes?: string;
+  customizations?: any;
+}
+
+/**
+ * Supabase order_items response with nested subcategories
+ */
+interface SupabaseOrderItemResponse {
+  id: string;
+  menu_item_id: string | null;
+  quantity: number;
+  unit_price: number | string;
+  total_price: number | string;
+  notes?: string;
+  customizations?: any;
+  subcategories?: {
+    id: string;
+    name: string;
+    name_en?: string;
+    name_el?: string;
+  } | {
+    id: string;
+    name: string;
+    name_en?: string;
+    name_el?: string;
+  }[] | null;
+}
+
+/**
  * RealtimeOrderHandler
  * Subscribes to Supabase real-time changes for orders and forwards events to renderer.
  * Designed to run in Electron main process.
@@ -33,6 +72,142 @@ export class RealtimeOrderHandler {
     this.mainWindow = mainWindow
     this.dbManager = dbManager
     this.client = getSupabaseClient()
+  }
+
+  /**
+   * Fetches order items from Supabase with nested subcategories select.
+   * Transforms Supabase response to local OrderItem format.
+   * Resolves menu_item_id to subcategory names for display.
+   * 
+   * @param orderId - The Supabase order ID to fetch items for
+   * @returns Array of OrderItem objects in local format
+   * 
+   * Requirements: 1.1, 1.2, 1.4
+   */
+  async fetchOrderItemsFromSupabase(orderId: string): Promise<OrderItem[]> {
+    try {
+      console.log(`[RealtimeOrderHandler] Fetching order items for order ${orderId}`)
+      
+      // Fetch order_items with nested subcategories select
+      const { data: items, error } = await this.client
+        .from('order_items')
+        .select(`
+          id,
+          menu_item_id,
+          quantity,
+          unit_price,
+          total_price,
+          notes,
+          customizations,
+          subcategories (
+            id,
+            name,
+            name_en,
+            name_el
+          )
+        `)
+        .eq('order_id', orderId)
+      
+      if (error) {
+        console.error(`[RealtimeOrderHandler] Error fetching order items for ${orderId}:`, error)
+        return []
+      }
+      
+      if (!items || items.length === 0) {
+        console.log(`[RealtimeOrderHandler] No items found for order ${orderId}`)
+        return []
+      }
+      
+      // Transform Supabase response to local OrderItem format
+      const transformedItems = this.transformOrderItems(items as SupabaseOrderItemResponse[], orderId)
+      
+      console.log(`[RealtimeOrderHandler] Fetched and transformed ${transformedItems.length} items for order ${orderId}`)
+      return transformedItems
+    } catch (e) {
+      console.error(`[RealtimeOrderHandler] Failed to fetch order items for ${orderId}:`, e)
+      return []
+    }
+  }
+
+  /**
+   * Transforms Supabase order_items response to local OrderItem format.
+   * Resolves menu_item_id to subcategory names.
+   * 
+   * @param items - Array of Supabase order_items with nested subcategories
+   * @param _orderId - The order ID for logging purposes (unused but kept for future debugging)
+   * @returns Array of OrderItem objects in local format
+   * 
+   * Requirements: 1.4
+   */
+  private transformOrderItems(items: SupabaseOrderItemResponse[], _orderId: string): OrderItem[] {
+    return items.map((item, index) => {
+      // Resolve name from subcategories (menu_item_id references subcategories.id)
+      let itemName: string = ''
+      
+      // First try to get name from nested subcategories
+      if (item.subcategories) {
+        // Handle both single object and array formats from Supabase
+        const subcategory = Array.isArray(item.subcategories) ? item.subcategories[0] : item.subcategories
+        if (subcategory) {
+          itemName = subcategory.name || subcategory.name_en || subcategory.name_el || ''
+        }
+      }
+      
+      // If no name from subcategories, try to extract from customizations
+      if (!itemName) {
+        itemName = this.extractNameFromCustomizations(item.customizations)
+      }
+      
+      // Fallback to generic name with price
+      if (!itemName) {
+        const price = parseFloat(String(item.unit_price)) || 0
+        itemName = `Item ${index + 1} (€${price.toFixed(2)})`
+      }
+      
+      const unitPrice = parseFloat(String(item.unit_price)) || 0
+      const quantity = item.quantity || 1
+      const totalPrice = parseFloat(String(item.total_price)) || (unitPrice * quantity)
+      
+      return {
+        id: item.id,
+        menu_item_id: item.menu_item_id || undefined,
+        name: itemName,
+        quantity: quantity,
+        price: unitPrice,
+        unit_price: unitPrice,
+        total_price: totalPrice,
+        notes: item.notes,
+        customizations: item.customizations
+      }
+    })
+  }
+
+  /**
+   * Extracts item name from customizations object.
+   * Customizations may contain ingredient names that can be used as fallback.
+   * 
+   * @param customizations - The customizations object from order_items
+   * @returns The extracted name or empty string
+   */
+  private extractNameFromCustomizations(customizations: any): string {
+    if (!customizations || typeof customizations !== 'object') return ''
+    
+    // Handle array format
+    if (Array.isArray(customizations)) {
+      for (const cust of customizations) {
+        if (cust?.ingredient?.name) return cust.ingredient.name
+        if (cust?.name) return cust.name
+      }
+      return ''
+    }
+    
+    // Handle object format
+    for (const key of Object.keys(customizations)) {
+      const cust = customizations[key]
+      if (cust?.ingredient?.name) return cust.ingredient.name
+      if (cust?.name) return cust.name
+    }
+    return ''
   }
 
   async initialize(): Promise<void> {
@@ -260,71 +435,11 @@ export class RealtimeOrderHandler {
       }
 
       // Fetch order items from Supabase if not included in the order object
+      // Requirements: 1.2, 1.3 - Check if incoming order has empty items array and fetch if missing
       let orderItems = order.items
       if (!orderItems || (Array.isArray(orderItems) && orderItems.length === 0)) {
-        try {
-          const { data: items, error } = await this.client
-            .from('order_items')
-            .select('id, menu_item_id, quantity, unit_price, total_price, notes, customizations')
-            .eq('order_id', order.id)
-          
-          if (!error && items && items.length > 0) {
-            // Also fetch menu item names from subcategories table (order_items.menu_item_id references subcategories.id)
-            const menuItemIds = items.map((item: any) => item.menu_item_id).filter(Boolean)
-            let menuItemNames: Record<string, string> = {}
-            
-            if (menuItemIds.length > 0) {
-              const { data: subcategories } = await this.client
-                .from('subcategories')
-                .select('id, name, name_en, name_el')
-                .in('id', menuItemIds)
-              
-              if (subcategories) {
-                menuItemNames = subcategories.reduce((acc: Record<string, string>, sc: any) => {
-                  acc[sc.id] = sc.name || sc.name_en || sc.name_el || 'Item'
-                  return acc
-                }, {})
-              }
-            }
-
-            // Helper function to extract name from customizations
-            const extractNameFromCustomizations = (customizations: any): string | null => {
-              if (!customizations || typeof customizations !== 'object') return null
-              for (const key of Object.keys(customizations)) {
-                const cust = customizations[key]
-                if (cust?.ingredient?.name) return cust.ingredient.name
-                if (cust?.name) return cust.name
-              }
-              return null
-            }
-            
-            orderItems = items.map((item: any, index: number) => {
-              let itemName: string = menuItemNames[item.menu_item_id] || ''
-              if (!itemName) {
-                const custName = extractNameFromCustomizations(item.customizations)
-                if (custName) itemName = custName
-              }
-              if (!itemName) {
-                const price = parseFloat(item.unit_price) || 0
-                itemName = `Item ${index + 1} (€${price.toFixed(2)})`
-              }
-              return {
-                id: item.id,
-                menu_item_id: item.menu_item_id,
-                name: itemName,
-                quantity: item.quantity || 1,
-                price: parseFloat(item.unit_price) || 0,
-                unit_price: parseFloat(item.unit_price) || 0,
-                total_price: parseFloat(item.total_price) || (parseFloat(item.unit_price) * (item.quantity || 1)),
-                notes: item.notes,
-                customizations: item.customizations
-              }
-            })
-            console.log(`[RealtimeOrderHandler] Fetched ${orderItems.length} items for order ${order.id}`)
-          }
-        } catch (e) {
-          console.warn(`[RealtimeOrderHandler] Failed to fetch order items for ${order.id}:`, e)
-        }
+        // Use the dedicated fetchOrderItemsFromSupabase function
+        orderItems = await this.fetchOrderItemsFromSupabase(order.id)
       }
 
       // Create or update order with items
@@ -344,7 +459,7 @@ export class RealtimeOrderHandler {
       }
     } else if (eventType === 'DELETE') {
       // Mark as deleted or remove
-      await orderService.deleteOrder(order.id)
+      orderService.deleteOrder(order.id)
     }
   }
 

@@ -66,7 +66,10 @@ export function registerOrderStatusHandlers(): void {
       const terminalTrusted = !!terminalApiKey || !!envApiKey;
 
       const desiredStatus = String(status || '').toLowerCase();
-      const coercedStatus = desiredStatus === 'out_for_delivery' ? 'completed' : desiredStatus;
+      // Map POS-local statuses to Supabase-compatible statuses
+      let coercedStatus = desiredStatus;
+      if (desiredStatus === 'out_for_delivery') coercedStatus = 'completed';
+      if (desiredStatus === 'delivered') coercedStatus = 'completed';
       const allowByStatus = coercedStatus === 'cancelled' || coercedStatus === 'canceled';
 
       console.log('[IPC order:update-status] 🔐 Permission check', {

@@ -235,6 +235,7 @@ const electronAPI = {
         'order:get-by-id',
         'order:create',
         'order:update-status',
+        'order:update-items',
         'order:delete',
         'order:save-for-retry',
         'order:get-retry-queue',

@@ -512,21 +512,46 @@ export class OrderService extends BaseService {
   }
 
   updateOrderStatus(id: string, status: Order['status']): boolean {
-    // Coerce deprecated out_for_delivery to completed for consistency system-wide
-    const nextStatus: Order['status'] = (status === 'out_for_delivery' ? 'completed' : status) as Order['status'];
+    // Coerce deprecated/transient statuses to canonical ones for consistency system-wide
+    let nextStatus: Order['status'] = status;
+    if (status === 'out_for_delivery') nextStatus = 'completed';
+    if (status === 'delivered') nextStatus = 'delivered'; // Keep as delivered locally, mapped to 'completed' for Supabase in mapStatusForSupabase
     console.log('[MAIN OrderService] 🔄 updateOrderStatus called', { id, status: nextStatus, timestamp: new Date().toISOString() });
 
-    // Validate before finalizing
+    // Check if order exists in local DB first
+    const existingOrder = this.getOrder(id);
+    if (!existingOrder) {
+      // Try to find by supabase_id
+      const orderBySupabaseId = this.getOrderBySupabaseId(id);
+      if (orderBySupabaseId) {
+        console.log('[MAIN OrderService] 🔄 Found order by supabase_id, using local ID', { supabaseId: id, localId: orderBySupabaseId.id });
+        return this.updateOrderStatus(orderBySupabaseId.id, status); // Recursive call with local ID
+      }
+      console.error('[MAIN OrderService] ❌ Order not found in local DB', { id });
+      return false;
+    }
+
+    // Validate before finalizing - only enforce critical validations
     if (nextStatus === 'completed' || nextStatus === 'delivered') {
       const order = this.getOrder(id);
       if (order) {
         const validationErrors = this.validateOrderForFinalization(order);
         if (validationErrors.length > 0) {
-          console.error('[OrderService] ❌ Order validation failed preventing finalization', {
+          console.warn('[OrderService] ⚠️ Order validation warnings for finalization', {
             orderId: id,
             errors: validationErrors
           });
-          return false;
+          // Only block if there are NO items (critical error)
+          const hasCriticalError = validationErrors.some(err => err.includes('no items'));
+          if (hasCriticalError) {
+            console.error('[OrderService] ❌ Critical validation error preventing finalization', {
+              orderId: id,
+              errors: validationErrors
+            });
+            return false;
+          }
+          // For other errors (missing address/table), log warning but allow the update
+          // This handles orders created via admin dashboard or other sources
         }
       }
     }

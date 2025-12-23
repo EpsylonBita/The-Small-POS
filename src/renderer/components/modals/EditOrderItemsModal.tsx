@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -10,12 +10,17 @@ interface OrderItem {
   name: string;
   quantity: number;
   price: number;
+  unit_price?: number;
+  total_price?: number;
   notes?: string;
+  customizations?: any[];
 }
 
 interface EditOrderItemsModalProps {
   isOpen: boolean;
   orderCount: number;
+  orderId?: string; // Added orderId prop to fetch items if initialItems is empty
+  orderNumber?: string; // Order number for display in modal header (Requirements: 7.7)
   initialItems: OrderItem[];
   onSave: (items: OrderItem[], orderNotes?: string) => void;
   onClose: () => void;
@@ -24,6 +29,8 @@ interface EditOrderItemsModalProps {
 export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   isOpen,
   orderCount,
+  orderId,
+  orderNumber,
   initialItems,
   onSave,
   onClose
@@ -33,14 +40,75 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   const [items, setItems] = useState<OrderItem[]>(initialItems);
   const [orderNotes, setOrderNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingItems, setIsLoadingItems] = useState(false);
 
-  // Reset form when modal opens
+  // Fetch items from backend when modal opens with empty initialItems
+  const fetchOrderItems = useCallback(async (id: string): Promise<OrderItem[]> => {
+    try {
+      // First try to get order from local DB
+      const localOrder = await window.electronAPI?.invoke('order:get-by-id', { orderId: id });
+      if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
+        console.log('[EditOrderItemsModal] Loaded items from local DB:', localOrder.items.length);
+        return localOrder.items.map((item: any) => ({
+          id: item.id,
+          name: item.name || 'Unknown Item',
+          quantity: item.quantity || 1,
+          price: item.price || item.unit_price || 0,
+          unit_price: item.unit_price || item.price || 0,
+          total_price: item.total_price || (item.price || item.unit_price || 0) * (item.quantity || 1),
+          notes: item.notes,
+          customizations: item.customizations
+        }));
+      }
+
+      // Fallback: fetch from Supabase
+      const supabaseItems = await window.electronAPI?.invoke('order:fetch-items-from-supabase', { orderId: id });
+      if (supabaseItems && Array.isArray(supabaseItems) && supabaseItems.length > 0) {
+        console.log('[EditOrderItemsModal] Loaded items from Supabase:', supabaseItems.length);
+        return supabaseItems.map((item: any) => ({
+          id: item.id,
+          name: item.name || 'Unknown Item',
+          quantity: item.quantity || 1,
+          price: item.price || item.unit_price || 0,
+          unit_price: item.unit_price || item.price || 0,
+          total_price: item.total_price || (item.price || item.unit_price || 0) * (item.quantity || 1),
+          notes: item.notes,
+          customizations: item.customizations
+        }));
+      }
+
+      return [];
+    } catch (error) {
+      console.error('[EditOrderItemsModal] Failed to fetch items:', error);
+      return [];
+    }
+  }, []);
+
+  // Reset form and fetch items when modal opens
   useEffect(() => {
     if (isOpen) {
-      setItems([...initialItems]);
       setOrderNotes('');
+      
+      // If initialItems is empty but we have an orderId, fetch items
+      if ((!initialItems || initialItems.length === 0) && orderId) {
+        setIsLoadingItems(true);
+        fetchOrderItems(orderId)
+          .then(fetchedItems => {
+            setItems(fetchedItems);
+          })
+          .catch(error => {
+            console.error('[EditOrderItemsModal] Error fetching items:', error);
+            toast.error(t('modals.editOrderItems.loadFailed') || 'Failed to load order items');
+            setItems([]);
+          })
+          .finally(() => {
+            setIsLoadingItems(false);
+          });
+      } else {
+        setItems([...initialItems]);
+      }
     }
-  }, [isOpen, initialItems]);
+  }, [isOpen, initialItems, orderId, fetchOrderItems, t]);
 
 
 
@@ -73,11 +141,19 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   };
 
   const updateItemQuantity = (itemId: string, quantity: number) => {
-    setItems(prev => prev.map(item =>
-      item.id === itemId
-        ? { ...item, quantity: Math.max(0, quantity) }
-        : item
-    ));
+    setItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        const newQuantity = Math.max(0, quantity);
+        const unitPrice = item.unit_price || item.price || 0;
+        const newTotalPrice = unitPrice * newQuantity;
+        return { 
+          ...item, 
+          quantity: newQuantity,
+          total_price: newTotalPrice
+        };
+      }
+      return item;
+    }));
   };
 
   const updateItemNotes = (itemId: string, notes: string) => {
@@ -93,14 +169,18 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   };
 
   const calculateTotal = () => {
-    return items.reduce((total, item) => total + (item.price * item.quantity), 0);
+    return items.reduce((total, item) => {
+      // Use total_price if available (includes customizations), otherwise calculate from price * quantity
+      const itemTotal = item.total_price || ((item.unit_price || item.price || 0) * item.quantity);
+      return total + itemTotal;
+    }, 0);
   };
 
   return (
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={handleClose}
-      title={t('modals.editOrderItems.title')}
+      title={orderNumber ? `${t('modals.editOrderItems.title')} - #${orderNumber}` : t('modals.editOrderItems.title')}
       size="lg"
       closeOnBackdrop={false}
       closeOnEscape={true}
@@ -118,7 +198,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
               <div className="flex items-center justify-between mb-3">
                 <div className="flex-1">
                   <h4 className="font-medium liquid-glass-modal-text">{item.name}</h4>
-                  <p className="text-sm liquid-glass-modal-text-muted">${item.price.toFixed(2)} {t('modals.editOrderItems.each')}</p>
+                  <p className="text-sm liquid-glass-modal-text-muted">${(item.unit_price || item.price || 0).toFixed(2)} {t('modals.editOrderItems.each')}</p>
                 </div>
 
                 {/* Quantity Controls */}
@@ -168,11 +248,29 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
               {/* Item Total */}
               <div className="mt-2 text-right">
                 <span className="text-sm font-medium liquid-glass-modal-text">
-                  {t('modals.editOrderItems.subtotal')}: ${(item.price * item.quantity).toFixed(2)}
+                  {t('modals.editOrderItems.subtotal')}: ${(item.total_price || ((item.unit_price || item.price || 0) * item.quantity)).toFixed(2)}
                 </span>
               </div>
             </div>
           ))}
+          
+          {/* Loading state */}
+          {isLoadingItems && (
+            <div className="flex items-center justify-center py-8">
+              <svg className="animate-spin h-8 w-8 text-blue-500" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span className="ml-2 liquid-glass-modal-text">{t('modals.editOrderItems.loading') || 'Loading items...'}</span>
+            </div>
+          )}
+          
+          {/* Empty state */}
+          {!isLoadingItems && items.length === 0 && (
+            <div className="text-center py-8 liquid-glass-modal-text-muted">
+              {t('modals.editOrderItems.noItems') || 'No items in this order'}
+            </div>
+          )}
         </div>
 
         {/* Order Notes */}

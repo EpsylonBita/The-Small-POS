@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.35] - 2025-12-23
+
+### Fixed
+- Fixed order items not loading when viewing/editing orders in POS Electron
+- Fixed subtotal calculation showing €0.00 in order view modal
+- Enhanced RealtimeOrderHandler to fetch order_items when processing incoming orders
+- Improved OrderApprovalPanel and EditOrderItemsModal to reliably load and display items
+- Ensured consistent order number display across all platforms (POS Electron, POS Mobile, Admin Dashboard)
+- Added shared utility functions for subtotal calculation and order item transformation
+- All 81 property-based tests passing for order items functionality
+
 ## [1.1.29] - 2025-12-22
 
 ### Fixed

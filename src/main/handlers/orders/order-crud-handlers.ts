@@ -52,6 +52,7 @@ export function registerOrderCrudHandlers(): void {
     'order:create',
     'order:delete',
     'order:fetch-items-from-supabase',
+    'order:update-items',
   ];
   handlers.forEach(handler => ipcMain.removeHandler(handler));
 
@@ -423,5 +424,90 @@ export function registerOrderCrudHandlers(): void {
       console.log(`[order:fetch-items-from-supabase] Fetched ${transformedItems.length} items for order ${orderId}:`, transformedItems);
       return transformedItems;
     }, 'order:fetch-items-from-supabase');
+  });
+
+  // Update order items
+  ipcMain.handle('order:update-items', async (_event, { orderId, items, orderNotes }) => {
+    return handleIPCError(async () => {
+      const dbManager = serviceRegistry.requireService('dbManager');
+      const syncService = serviceRegistry.get('syncService');
+      const authService = serviceRegistry.get('authService');
+      const staffAuthService = serviceRegistry.get('staffAuthService');
+      const settingsService = serviceRegistry.get('settingsService');
+      const mainWindow = serviceRegistry.get('mainWindow');
+
+      if (!orderId) {
+        throw new IPCError('orderId is required', 'VALIDATION_ERROR');
+      }
+
+      if (!items || !Array.isArray(items)) {
+        throw new IPCError('items array is required', 'VALIDATION_ERROR');
+      }
+
+      // Authorization check
+      const hasPermission =
+        (staffAuthService && await staffAuthService.hasPermission('edit_order')) ||
+        (authService && await authService.hasPermission('edit_order'));
+      const currentSession = staffAuthService?.getCurrentSession();
+      const terminalApiKey = settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string;
+      const terminalTrusted = !!terminalApiKey && terminalApiKey.length > 0;
+
+      if (!hasPermission && !currentSession && !terminalTrusted) {
+        throw new IPCError('Insufficient permissions', 'PERMISSION_DENIED');
+      }
+
+      // Calculate new total from items
+      const newTotalAmount = items.reduce((sum: number, item: any) => {
+        const itemTotal = item.total_price || ((item.unit_price || item.price || 0) * (item.quantity || 1));
+        return sum + itemTotal;
+      }, 0);
+
+      // Prepare update data
+      const updateData: any = {
+        items: items,
+        total_amount: newTotalAmount,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (orderNotes) {
+        updateData.special_instructions = orderNotes;
+      }
+
+      console.log('[order:update-items] Updating order:', { orderId, itemCount: items.length, newTotal: newTotalAmount });
+
+      // Update order in local database
+      const updatedOrder = await withTimeout(
+        dbManager.updateOrder(orderId, updateData),
+        TIMING.DATABASE_QUERY_TIMEOUT,
+        'Update order items',
+      );
+
+      if (!updatedOrder) {
+        throw new IPCError('Failed to update order', 'DATABASE_ERROR');
+      }
+
+      console.log('[order:update-items] Order updated successfully:', orderId);
+
+      // Update activity for session management
+      authService?.updateActivity();
+
+      // Notify renderer about the updated order
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('order-updated', transformOrder(updatedOrder));
+      }
+
+      // Fire-and-forget: trigger immediate sync
+      if (syncService) {
+        setTimeout(() => {
+          try {
+            syncService.pushSingleOrderNow?.(orderId, 4000)?.catch(() => { });
+          } catch (e) {
+            console.warn('[order:update-items] Immediate sync scheduling failed:', e);
+          }
+        }, 0);
+      }
+
+      return { success: true, orderId };
+    }, 'order:update-items');
   });
 }
