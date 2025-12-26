@@ -11,11 +11,31 @@
 import Database from 'better-sqlite3';
 import { getWaiterShiftData } from './helpers/ShiftHelpers';
 import { ShiftSummary } from '../../renderer/types/shift';
-import { generateKitchenCheckoutReceipt } from '../templates/kitchen-checkout-template';
-import { generateDriverCheckoutReceipt } from '../templates/driver-checkout-template';
-import { generateCashierCheckoutReceipt } from '../templates/cashier-checkout-template';
-import { generateZReportReceipt } from '../templates/z-report-template';
-import { generateWaiterCheckoutReceipt } from '../templates/waiter-checkout-template';
+import {
+  generateKitchenCheckoutReceipt,
+  generateKitchenCheckoutReceiptBuffer
+} from '../templates/kitchen-checkout-template';
+import {
+  generateDriverCheckoutReceipt,
+  generateDriverCheckoutReceiptBuffer
+} from '../templates/driver-checkout-template';
+import {
+  generateCashierCheckoutReceipt,
+  generateCashierCheckoutReceiptBuffer
+} from '../templates/cashier-checkout-template';
+import {
+  generateZReportReceipt,
+  generateZReportReceiptBuffer
+} from '../templates/z-report-template';
+import {
+  generateWaiterCheckoutReceipt,
+  generateWaiterCheckoutReceiptBuffer
+} from '../templates/waiter-checkout-template';
+import {
+  generateAssignOrderReceipt,
+  generateAssignOrderReceiptBuffer,
+  AssignOrderData
+} from '../templates/assign-order-template';
 import net from 'net';
 import { nativeImage, app } from 'electron';
 import * as fs from 'fs';
@@ -23,7 +43,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { SettingsService } from './SettingsService';
 import { PrinterManager } from '../printer/services/PrinterManager';
-import { PrintJob, PrintJobType, PrinterRole } from '../printer/types';
+import { PrintJob, PrintJobType, PrinterRole, PaperSize } from '../printer/types';
 import { v4 as uuidv4 } from 'uuid';
 
 
@@ -306,8 +326,23 @@ export class PrintService {
   // Route a single job to the configured printer based on printer_type
   private async sendJobToConfiguredPrinter(job: Buffer): Promise<void> {
     const printer = this.getPrinterConfig();
+    console.log('[PrintService] sendJobToConfiguredPrinter - printer config:', {
+      printer_type: printer.printer_type,
+      printer_ip: printer.printer_ip || '(not set)',
+      printer_system_name: printer.printer_system_name || '(not set)',
+      printer_port: printer.printer_port
+    });
+
     if (printer.printer_type === 'network') {
-      if (!printer.printer_ip) throw new Error('Network printer IP not configured');
+      if (!printer.printer_ip) {
+        // Fallback to system printer if available
+        if (printer.printer_system_name) {
+          console.log('[PrintService] Network IP not configured, falling back to system printer:', printer.printer_system_name);
+          await this.sendEscPosToSystemPrinter(printer.printer_system_name, job);
+          return;
+        }
+        throw new Error('Network printer IP not configured. Please configure printer IP in Settings → Printer, or select a USB printer.');
+      }
       await this.sendEscPosToNetwork(printer.printer_ip, Number(printer.printer_port || 9100), job);
       return;
     }
@@ -318,7 +353,7 @@ export class PrintService {
       await this.sendEscPosToSystemPrinter(printer.printer_system_name, job);
       return;
     }
-    throw new Error('Printer type not configured');
+    throw new Error('Printer type not configured. Please configure printer in Settings → Printer.');
   }
 
   // Print labeled copies and generic copy_count using the configured transport
@@ -341,6 +376,30 @@ export class PrintService {
     for (let i = 0; i < (printer.copy_count || 1); i++) {
       await this.sendJobToConfiguredPrinter(baseJob);
     }
+  }
+
+  /**
+   * Print ESC/POS Buffer directly with configured copy count
+   * 
+   * Used by Buffer-based templates that already contain full ESC/POS formatting.
+   * Sends the buffer directly to the printer without additional processing.
+   * 
+   * @param buffer - Pre-formatted ESC/POS buffer from template generators
+   */
+  private async printBufferWithCopies(buffer: Buffer): Promise<void> {
+    const printer = this.getPrinterConfig();
+
+    console.log('[PrintService] printBufferWithCopies called');
+    console.log('[PrintService] Buffer size:', buffer.length, 'bytes');
+    console.log('[PrintService] Copy count:', printer.copy_count || 1);
+
+    // Send buffer for each configured copy
+    for (let i = 0; i < (printer.copy_count || 1); i++) {
+      console.log(`[PrintService] Sending copy ${i + 1}/${printer.copy_count || 1} to printer`);
+      await this.sendJobToConfiguredPrinter(buffer);
+    }
+
+    console.log('[PrintService] printBufferWithCopies completed');
   }
 
   private buildText(text: string): Buffer {
@@ -444,37 +503,42 @@ export class PrintService {
   /**
    * Print kitchen staff checkout slip
    *
-   * Uses PrinterManager for job routing when available, falls back to legacy printing.
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Routes through PrinterManager when available, falls back to direct printing.
    * Requirements: 2.4, 9.2
    */
   async printKitchenCheckout(shiftSummary: ShiftSummary, terminalName?: string): Promise<{ success: boolean; error?: string }> {
     try {
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      const receiptBuffer = generateKitchenCheckoutReceiptBuffer(shiftSummary, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
+
+      // Log legacy text version for debugging
       const width = this.getPaperCharWidth();
       const txtReceipt = generateKitchenCheckoutReceipt(shiftSummary, terminalName, width);
-
-      // Fallback log for visibility
       console.log('=== KITCHEN CHECKOUT PRINT ===');
       console.log(txtReceipt);
       console.log('=== END KITCHEN CHECKOUT ===');
 
       // Try PrinterManager first if available
       if (this.shouldUsePrinterManager()) {
-        const job = await this.buildEscPosJob(txtReceipt);
-        if (job) {
-          const result = await this.submitToPrinterManager(
-            PrintJobType.KITCHEN_TICKET,
-            { text: txtReceipt, shiftSummary, terminalName },
-            job
-          );
-          if (result.success) return result;
-          // Fall through to legacy printing if PrinterManager fails
-          console.warn('[PrintService] PrinterManager failed, falling back to legacy printing:', result.error);
-        }
+        const result = await this.submitToPrinterManager(
+          PrintJobType.KITCHEN_TICKET,
+          { shiftSummary, terminalName },
+          receiptBuffer
+        );
+        if (result.success) return result;
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
       }
 
-      // Legacy printing path
-      const job = await this.buildEscPosJob(txtReceipt);
-      await this.printWithCopies(txtReceipt, job);
+      // Direct printing path - send buffer with copies
+      await this.printBufferWithCopies(receiptBuffer);
       return { success: true };
     } catch (error) {
       console.error('Error printing kitchen checkout:', error);
@@ -488,36 +552,42 @@ export class PrintService {
   /**
    * Print driver checkout slip
    *
-   * Uses PrinterManager for job routing when available, falls back to legacy printing.
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Routes through PrinterManager when available, falls back to direct printing.
    * Requirements: 2.4, 9.2
    */
   async printDriverCheckout(shiftSummary: ShiftSummary, terminalName?: string): Promise<{ success: boolean; error?: string }> {
     try {
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      const receiptBuffer = generateDriverCheckoutReceiptBuffer(shiftSummary, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
+
+      // Log legacy text version for debugging
       const width = this.getPaperCharWidth();
       const txtReceipt = generateDriverCheckoutReceipt(shiftSummary, terminalName, width);
-
       console.log('=== DRIVER CHECKOUT PRINT ===');
       console.log(txtReceipt);
       console.log('=== END DRIVER CHECKOUT ===');
 
       // Try PrinterManager first if available
       if (this.shouldUsePrinterManager()) {
-        const job = await this.buildEscPosJob(txtReceipt);
-        if (job) {
-          const result = await this.submitToPrinterManager(
-            PrintJobType.RECEIPT,
-            { text: txtReceipt, shiftSummary, terminalName },
-            job
-          );
-          if (result.success) return result;
-          console.warn('[PrintService] PrinterManager failed, falling back to legacy printing:', result.error);
-        }
+        const result = await this.submitToPrinterManager(
+          PrintJobType.RECEIPT,
+          { shiftSummary, terminalName },
+          receiptBuffer
+        );
+        if (result.success) return result;
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
       }
 
-      // Legacy printing path
-      const job = await this.buildEscPosJob(txtReceipt);
-      await this.printWithCopies(txtReceipt, job);
-
+      // Direct printing path - send buffer with copies
+      await this.printBufferWithCopies(receiptBuffer);
       return { success: true };
     } catch (error) {
       console.error('Error printing driver checkout:', error);
@@ -531,36 +601,56 @@ export class PrintService {
   /**
    * Print cashier checkout report
    *
-   * Uses PrinterManager for job routing when available, falls back to legacy printing.
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Routes through PrinterManager when available, falls back to direct printing.
    * Requirements: 2.4, 9.2
    */
   async printCashierCheckout(shiftSummary: ShiftSummary, terminalName?: string): Promise<{ success: boolean; error?: string }> {
     try {
+      console.log('[PrintService] printCashierCheckout called');
+
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      console.log('[PrintService] Template config:', JSON.stringify(config));
+
+      const receiptBuffer = generateCashierCheckoutReceiptBuffer(shiftSummary, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
+
+      console.log('[PrintService] Generated ESC/POS buffer, size:', receiptBuffer.length, 'bytes');
+
+      // Log legacy text version for debugging
       const width = this.getPaperCharWidth();
       const txtReceipt = generateCashierCheckoutReceipt(shiftSummary, terminalName, width);
-
-      console.log('=== CASHIER CHECKOUT PRINT ===');
+      console.log('=== CASHIER CHECKOUT PRINT (Legacy Text) ===');
       console.log(txtReceipt);
       console.log('=== END CASHIER CHECKOUT ===');
 
       // Try PrinterManager first if available
       if (this.shouldUsePrinterManager()) {
-        const job = await this.buildEscPosJob(txtReceipt);
-        if (job) {
-          const result = await this.submitToPrinterManager(
-            PrintJobType.RECEIPT,
-            { text: txtReceipt, shiftSummary, terminalName },
-            job
-          );
-          if (result.success) return result;
-          console.warn('[PrintService] PrinterManager failed, falling back to legacy printing:', result.error);
+        console.log('[PrintService] Using PrinterManager path for cashier checkout');
+        const result = await this.submitToPrinterManager(
+          PrintJobType.RECEIPT,
+          { shiftSummary, terminalName },
+          receiptBuffer
+        );
+        if (result.success) {
+          console.log('[PrintService] PrinterManager succeeded for cashier checkout');
+          return result;
         }
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
+      } else {
+        console.log('[PrintService] Using direct printing path for cashier checkout');
       }
 
-      // Legacy printing path
-      const job = await this.buildEscPosJob(txtReceipt);
-      await this.printWithCopies(txtReceipt, job);
-
+      // Direct printing path - send buffer with copies
+      console.log('[PrintService] Calling printBufferWithCopies for cashier checkout');
+      await this.printBufferWithCopies(receiptBuffer);
+      console.log('[PrintService] printCashierCheckout completed successfully');
       return { success: true };
     } catch (error) {
       console.error('Error printing cashier checkout:', error);
@@ -573,36 +663,56 @@ export class PrintService {
   /**
    * Print Z Report (snapshot already computed)
    *
-   * Uses PrinterManager for job routing when available, falls back to legacy printing.
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Routes through PrinterManager when available, falls back to direct printing.
    * Requirements: 2.4, 9.2
    */
   async printZReport(snapshot: any, terminalName?: string): Promise<{ success: boolean; error?: string }> {
     try {
+      console.log('[PrintService] printZReport called');
+
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      console.log('[PrintService] Z-Report template config:', JSON.stringify(config));
+
+      const receiptBuffer = generateZReportReceiptBuffer(snapshot, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
+
+      console.log('[PrintService] Generated Z-Report ESC/POS buffer, size:', receiptBuffer.length, 'bytes');
+
+      // Log legacy text version for debugging
       const width = this.getPaperCharWidth();
       const txtReceipt = generateZReportReceipt(snapshot, terminalName, width);
-
-      console.log('=== Z REPORT PRINT ===');
+      console.log('=== Z REPORT PRINT (Legacy Text) ===');
       console.log(txtReceipt);
       console.log('=== END Z REPORT ===');
 
       // Try PrinterManager first if available
       if (this.shouldUsePrinterManager()) {
-        const job = await this.buildEscPosJob(txtReceipt);
-        if (job) {
-          const result = await this.submitToPrinterManager(
-            PrintJobType.REPORT,
-            { text: txtReceipt, snapshot, terminalName },
-            job
-          );
-          if (result.success) return result;
-          console.warn('[PrintService] PrinterManager failed, falling back to legacy printing:', result.error);
+        console.log('[PrintService] Using PrinterManager path for Z-Report');
+        const result = await this.submitToPrinterManager(
+          PrintJobType.REPORT,
+          { snapshot, terminalName },
+          receiptBuffer
+        );
+        if (result.success) {
+          console.log('[PrintService] PrinterManager succeeded for Z-Report');
+          return result;
         }
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
+      } else {
+        console.log('[PrintService] Using direct printing path for Z-Report');
       }
 
-      // Legacy printing path
-      const job = await this.buildEscPosJob(txtReceipt);
-      await this.printWithCopies(txtReceipt, job);
-
+      // Direct printing path - send buffer with copies
+      console.log('[PrintService] Calling printBufferWithCopies for Z-Report');
+      await this.printBufferWithCopies(receiptBuffer);
+      console.log('[PrintService] printZReport completed successfully');
       return { success: true };
     } catch (error) {
       console.error('Error printing Z report:', error);
@@ -682,33 +792,43 @@ export class PrintService {
     terminalName?: string
   ): Promise<{ success: boolean; error?: string }> {
     try {
+      console.log(`[PrintService] printCheckout called - shiftId: ${shiftId}, roleType: ${roleType}`);
+
       // Get shift summary
       const shiftSummary = this.getShiftSummary(shiftId);
 
       if (!shiftSummary) {
+        console.error(`[PrintService] Shift not found for id: ${shiftId}`);
         return { success: false, error: 'Shift not found' };
       }
+
+      console.log(`[PrintService] Shift summary found, staff_id: ${shiftSummary.shift?.staff_id}, role: ${shiftSummary.shift?.role_type}`);
 
       // Print based on role
       switch (roleType) {
         case 'cashier':
         case 'manager':
+          console.log('[PrintService] Routing to printCashierCheckout');
           return await this.printCashierCheckout(shiftSummary, terminalName);
 
         case 'driver':
+          console.log('[PrintService] Routing to printDriverCheckout');
           return await this.printDriverCheckout(shiftSummary, terminalName);
 
         case 'kitchen':
+          console.log('[PrintService] Routing to printKitchenCheckout');
           return await this.printKitchenCheckout(shiftSummary, terminalName);
 
         case 'server':
+          console.log('[PrintService] Routing to printWaiterCheckout');
           return await this.printWaiterCheckout(shiftSummary, terminalName);
 
         default:
+          console.error(`[PrintService] Unknown role type: ${roleType}`);
           return { success: false, error: `Unknown role type: ${roleType}` };
       }
     } catch (error) {
-      console.error('Error in printCheckout:', error);
+      console.error('[PrintService] Error in printCheckout:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to print checkout'
@@ -719,41 +839,109 @@ export class PrintService {
   /**
    * Print waiter checkout receipt
    * 
-   * Uses PrinterManager if available, else legacy.
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Routes through PrinterManager when available, falls back to direct printing.
+   * Requirements: 2.4, 9.2
    */
   async printWaiterCheckout(shiftSummary: ShiftSummary, terminalName?: string): Promise<{ success: boolean; error?: string }> {
     try {
-      // Lazy import removed - using static import
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      const receiptBuffer = generateWaiterCheckoutReceiptBuffer(shiftSummary, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
 
+      // Log legacy text version for debugging
       const width = this.getPaperCharWidth();
       const txtReceipt = generateWaiterCheckoutReceipt(shiftSummary, terminalName, width);
-
       console.log('=== WAITER CHECKOUT PRINT ===');
       console.log(txtReceipt);
       console.log('=== END WAITER CHECKOUT ===');
 
+      // Try PrinterManager first if available
       if (this.shouldUsePrinterManager()) {
-        const job = await this.buildEscPosJob(txtReceipt);
-        if (job) {
-          const result = await this.submitToPrinterManager(
-            PrintJobType.RECEIPT,
-            { text: txtReceipt, shiftSummary, terminalName },
-            job
-          );
-          if (result.success) return result;
-          console.warn('[PrintService] PrinterManager failed, falling back to legacy printing:', result.error);
-        }
+        const result = await this.submitToPrinterManager(
+          PrintJobType.RECEIPT,
+          { shiftSummary, terminalName },
+          receiptBuffer
+        );
+        if (result.success) return result;
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
       }
 
-      const job = await this.buildEscPosJob(txtReceipt);
-      await this.printWithCopies(txtReceipt, job);
-
+      // Direct printing path - send buffer with copies
+      await this.printBufferWithCopies(receiptBuffer);
       return { success: true };
     } catch (error) {
       console.error('Error printing waiter checkout:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to print waiter checkout'
+      };
+    }
+  }
+
+  /**
+   * Print driver assignment receipt when an order is assigned to a driver
+   *
+   * Uses ESC/POS formatted Buffer templates for professional thermal printing.
+   * Supports Greek language for i18n.
+   */
+  async printDriverAssignmentReceipt(
+    data: AssignOrderData,
+    terminalName?: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      console.log('[PrintService] printDriverAssignmentReceipt called for order:', data.orderNumber);
+
+      // Generate ESC/POS formatted receipt buffer
+      const config = this.getReceiptConfigForTemplates(terminalName);
+      console.log('[PrintService] Receipt config for driver assignment:', JSON.stringify(config));
+      const receiptBuffer = generateAssignOrderReceiptBuffer(data, {
+        paperSize: config.paperSize as PaperSize,
+        language: config.language,
+        currency: config.currency,
+        terminalName: config.terminalName,
+        receiptTemplate: config.receiptTemplate,
+      });
+
+      console.log('[PrintService] Generated driver assignment receipt, size:', receiptBuffer.length, 'bytes');
+
+      // Log legacy text version for debugging
+      const width = this.getPaperCharWidth();
+      const txtReceipt = generateAssignOrderReceipt(data, terminalName, width);
+      console.log('=== DRIVER ASSIGNMENT PRINT ===');
+      console.log(txtReceipt);
+      console.log('=== END DRIVER ASSIGNMENT ===');
+
+      // Try PrinterManager first if available
+      if (this.shouldUsePrinterManager()) {
+        console.log('[PrintService] Using PrinterManager path for driver assignment receipt');
+        const result = await this.submitToPrinterManager(
+          PrintJobType.RECEIPT,
+          { data, terminalName },
+          receiptBuffer
+        );
+        if (result.success) {
+          console.log('[PrintService] PrinterManager succeeded for driver assignment receipt');
+          return result;
+        }
+        console.warn('[PrintService] PrinterManager failed, falling back to direct printing:', result.error);
+      }
+
+      // Direct printing path - send buffer with copies
+      await this.printBufferWithCopies(receiptBuffer);
+      console.log('[PrintService] printDriverAssignmentReceipt completed successfully');
+      return { success: true };
+    } catch (error) {
+      console.error('Error printing driver assignment receipt:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to print driver assignment receipt'
       };
     }
   }
@@ -912,5 +1100,51 @@ export class PrintService {
     if (size === '58mm') return 32;
     if (size === '112mm') return 64;
     return 48;
+  }
+
+  /**
+   * Get receipt template configuration for ESC/POS formatted templates
+   * 
+   * @param terminalName - Optional terminal name override
+   * @returns ReceiptTemplateConfig object for use with Buffer-based templates
+   */
+  getReceiptConfigForTemplates(terminalName?: string): {
+    paperSize: '58mm' | '80mm' | '112mm';
+    language: 'en' | 'el';
+    currency: string;
+    terminalName?: string;
+    storeName?: string;
+    storeAddress?: string;
+    storePhone?: string;
+    receiptTemplate?: 'classic' | 'modern';
+  } {
+    const paperSize = this.getSetting<string>('printer', 'paper_size', '80mm') as '58mm' | '80mm' | '112mm';
+    // Language is stored in 'terminal' category, not 'general'
+    const language = this.getSetting<string>('terminal', 'language', 'en') as 'en' | 'el';
+    const currency = this.getSetting<string>('general', 'currency_symbol', '€');
+    const storeName = this.getSetting<string | undefined>('store', 'name', undefined);
+    const storeAddress = this.getSetting<string | undefined>('store', 'address', undefined);
+    const storePhone = this.getSetting<string | undefined>('store', 'phone', undefined);
+
+    // Get receipt template from printer settings if available
+    let receiptTemplate: 'classic' | 'modern' = 'classic';
+    if (this.printerManager) {
+      const printers = this.printerManager.getPrinters();
+      const defaultPrinter = printers.find(p => p.enabled && p.role === 'receipt');
+      if (defaultPrinter?.receiptTemplate) {
+        receiptTemplate = defaultPrinter.receiptTemplate as 'classic' | 'modern';
+      }
+    }
+
+    return {
+      paperSize,
+      language,
+      currency,
+      terminalName,
+      storeName,
+      storeAddress,
+      storePhone,
+      receiptTemplate,
+    };
   }
 }

@@ -197,6 +197,113 @@ export function registerCoreSyncHandlers(): void {
     }
   });
 
+  // Clear old/orphaned orders (orders from previous days that are stuck in non-final status)
+  ipcMain.handle('sync:clear-old-orders', async () => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      // Use the orders service to delete old orders
+      // Get all orders and filter locally, then delete
+      const allOrders = db.orders.getAllOrders();
+      const oldOrders = allOrders.filter(o => {
+        const orderDate = o.created_at?.slice(0, 10);
+        return orderDate && orderDate < today && 
+          !['delivered', 'completed', 'cancelled'].includes(o.status);
+      });
+      
+      let cleared = 0;
+      for (const order of oldOrders) {
+        try {
+          db.orders.deleteOrder(order.id);
+          cleared++;
+        } catch (e) {
+          console.warn(`[sync:clear-old-orders] Failed to delete order ${order.id}:`, e);
+        }
+      }
+      
+      console.log(`[sync:clear-old-orders] Cleared ${cleared} old/orphaned orders`);
+      return { success: true, cleared };
+    } catch (err) {
+      console.error('sync:clear-old-orders error', err);
+      return { success: false, error: (err as any).message };
+    }
+  });
+
+  // Clear ALL local orders (useful for testing or when orders are out of sync with admin)
+  ipcMain.handle('sync:clear-all-orders', async () => {
+    try {
+      const allOrders = db.orders.getAllOrders();
+      let cleared = 0;
+      for (const order of allOrders) {
+        try {
+          db.orders.deleteOrder(order.id);
+          cleared++;
+        } catch (e) {
+          console.warn(`[sync:clear-all-orders] Failed to delete order ${order.id}:`, e);
+        }
+      }
+      console.log(`[sync:clear-all-orders] Cleared ${cleared} orders`);
+      return { success: true, cleared };
+    } catch (err) {
+      console.error('sync:clear-all-orders error', err);
+      return { success: false, error: (err as any).message };
+    }
+  });
+
+  // Sync deleted orders - check which local orders no longer exist on the server and delete them
+  ipcMain.handle('sync:cleanup-deleted-orders', async () => {
+    try {
+      const { getSupabaseClient } = require('../../../shared/supabase-config');
+      const supabase = getSupabaseClient();
+      
+      if (!supabase) {
+        return { success: false, error: 'Supabase client not available' };
+      }
+
+      // Get all local orders with supabase_id
+      const allOrders = db.orders.getAllOrders();
+      const localOrders = allOrders.filter(o => o.supabase_id);
+
+      if (localOrders.length === 0) {
+        return { success: true, deleted: 0, message: 'No synced orders to check' };
+      }
+
+      // Check which orders still exist on the server (batch query)
+      const supabaseIds = localOrders.map(o => o.supabase_id);
+      const { data: serverOrders, error } = await supabase
+        .from('orders')
+        .select('id')
+        .in('id', supabaseIds);
+
+      if (error) {
+        console.error('[sync:cleanup-deleted-orders] Error fetching server orders:', error);
+        return { success: false, error: error.message };
+      }
+
+      const serverOrderIds = new Set((serverOrders || []).map((o: any) => o.id));
+      
+      // Find orders that exist locally but not on server
+      const deletedOrders = localOrders.filter(o => !serverOrderIds.has(o.supabase_id));
+      
+      // Delete them locally
+      let deletedCount = 0;
+      for (const order of deletedOrders) {
+        try {
+          db.orders.deleteOrder(order.id);
+          deletedCount++;
+          console.log(`[sync:cleanup-deleted-orders] Deleted orphaned order ${order.id} (supabase_id: ${order.supabase_id})`);
+        } catch (e) {
+          console.warn(`[sync:cleanup-deleted-orders] Failed to delete order ${order.id}:`, e);
+        }
+      }
+
+      console.log(`[sync:cleanup-deleted-orders] Cleaned up ${deletedCount} orphaned orders`);
+      return { success: true, deleted: deletedCount, checked: localOrders.length };
+    } catch (err) {
+      console.error('sync:cleanup-deleted-orders error', err);
+      return { success: false, error: (err as any).message };
+    }
+  });
+
   // Clear failed sync items for specific tables
   ipcMain.handle('sync:clear-failed', async (_e, tableNames?: string[]) => {
     try {

@@ -138,7 +138,7 @@ export function registerOrderStatusHandlers(): void {
               }
 
               const shiftRows = await dbManager.executeQuery(
-                `SELECT id FROM staff_shifts WHERE staff_id = ? AND status = 'active' AND role_type = 'driver' ORDER BY login_time DESC LIMIT 1`,
+                `SELECT id FROM staff_shifts WHERE staff_id = ? AND status = 'active' AND role_type = 'driver' ORDER BY check_in_time DESC LIMIT 1`,
                 [odr.driver_id],
               );
               const shiftId = (shiftRows && shiftRows[0] && shiftRows[0].id) ? shiftRows[0].id : null;

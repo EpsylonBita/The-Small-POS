@@ -139,10 +139,13 @@ export class OrderSyncService {
                         payment_status: o.payment_status ?? 'pending',
                         payment_method: o.payment_method ?? null,
                         notes: o.special_instructions ?? null,
+                        delivery_notes: (o as any).delivery_notes ?? null,
+                        name_on_ringer: (o as any).name_on_ringer ?? null,
                         table_number: o.table_number ?? null,
                         estimated_ready_time: o.estimated_time ?? null,
                         terminal_id: terminalId,
                         branch_id: branchId,
+                        driver_id: (o as any).driver_id ?? null,
                         created_at: o.created_at,
                         updated_at: o.updated_at
                     });
@@ -297,10 +300,13 @@ export class OrderSyncService {
             p_payment_status: data.payment_status || 'pending',
             p_payment_method: data.payment_method || null,
             p_special_instructions: data.special_instructions || data.notes || null,
+            p_delivery_notes: data.delivery_notes || null,
+            p_name_on_ringer: data.name_on_ringer || null,
             p_table_number: tableNumberInt,
             p_estimated_ready_time: estimatedReadyTimeMinutes,
             p_branch_id: branchId,
             p_terminal_id: terminalId,
+            p_driver_name: data.driver_name || null,
             p_platform: 'pos'
         });
 
@@ -341,6 +347,8 @@ export class OrderSyncService {
             payment_status: data.payment_status || 'pending',
             payment_method: data.payment_method || null,
             special_instructions: data.special_instructions || data.notes || null,
+            delivery_notes: data.delivery_notes || null,
+            name_on_ringer: data.name_on_ringer || null,
             table_number: tableNumberInt,
             estimated_ready_time: estimatedReadyTimeMinutes,
             created_at: data.created_at || new Date().toISOString(),
@@ -348,6 +356,8 @@ export class OrderSyncService {
         };
         if (branchId) payload.branch_id = branchId;
         if (terminalId) payload.terminal_id = terminalId;
+        if (data.driver_id) payload.driver_id = data.driver_id;
+        if (data.driver_name) payload.driver_name = data.driver_name;
 
         const orderClient = this.getOrderClient();
         const tryUpsert = async (p: any) =>
@@ -474,27 +484,27 @@ export class OrderSyncService {
                             total_price: it.total_price || it.totalPrice || ((it.quantity || 1) * (it.unit_price || it.unitPrice || it.price || 0)),
                             notes: it.notes || null,
                             customizations: Array.isArray(it.customizations)
-                            ? (() => {
-                                console.log('[OrderSyncService] Converting customizations array to object, count:', it.customizations.length);
-                                const result = it.customizations.reduce((acc: any, c: any, idx: number) => {
-                                    // Generate a unique key for each customization
-                                    // Priority: customizationId > optionId > name > ingredient.id > ingredient.name > fallback
-                                    // IMPORTANT: Check customizationId/optionId/name FIRST since MenuPage format doesn't have ingredient object
-                                    let key: string = `item-${idx}`;
-                                    if (c.customizationId && typeof c.customizationId === 'string') key = c.customizationId;
-                                    else if (c.optionId && typeof c.optionId === 'string') key = c.optionId;
-                                    else if (c.name && typeof c.name === 'string') key = c.name;
-                                    else if (c.ingredient?.id && typeof c.ingredient.id === 'string') key = c.ingredient.id;
-                                    else if (c.ingredient?.name && typeof c.ingredient.name === 'string') key = c.ingredient.name;
+                                ? (() => {
+                                    console.log('[OrderSyncService] Converting customizations array to object, count:', it.customizations.length);
+                                    const result = it.customizations.reduce((acc: any, c: any, idx: number) => {
+                                        // Generate a unique key for each customization
+                                        // Priority: customizationId > optionId > name > ingredient.id > ingredient.name > fallback
+                                        // IMPORTANT: Check customizationId/optionId/name FIRST since MenuPage format doesn't have ingredient object
+                                        let key: string = `item-${idx}`;
+                                        if (c.customizationId && typeof c.customizationId === 'string') key = c.customizationId;
+                                        else if (c.optionId && typeof c.optionId === 'string') key = c.optionId;
+                                        else if (c.name && typeof c.name === 'string') key = c.name;
+                                        else if (c.ingredient?.id && typeof c.ingredient.id === 'string') key = c.ingredient.id;
+                                        else if (c.ingredient?.name && typeof c.ingredient.name === 'string') key = c.ingredient.name;
 
-                                    console.log('[OrderSyncService] Customization', idx, 'key:', key, 'name:', c.name || c.ingredient?.name);
-                                    acc[key] = c;
-                                    return acc;
-                                }, {});
-                                console.log('[OrderSyncService] Result object keys:', Object.keys(result));
-                                return result;
-                            })()
-                            : (it.customizations || null)
+                                        console.log('[OrderSyncService] Customization', idx, 'key:', key, 'name:', c.name || c.ingredient?.name);
+                                        acc[key] = c;
+                                        return acc;
+                                    }, {});
+                                    console.log('[OrderSyncService] Result object keys:', Object.keys(result));
+                                    return result;
+                                })()
+                                : (it.customizations || null)
                         };
                     });
                     // Best-effort insert; if schema differs or duplicates occur, swallow and continue

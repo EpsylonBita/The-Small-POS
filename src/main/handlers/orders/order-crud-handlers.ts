@@ -14,6 +14,149 @@ import { TIMING } from '../../../shared/constants';
 import { getSupabaseConfig } from '../../../shared/supabase-config';
 
 /**
+ * Resolve item name from multiple sources with fallback chain:
+ * 1. Direct name fields (name, item_name, product_name)
+ * 2. Embedded menu_item data
+ * 3. Local subcategories cache
+ * 4. Supabase subcategories table (last resort)
+ * 5. Fallback to "Item {id}" or "Unknown Item"
+ */
+async function resolveItemName(
+  item: any,
+  dbManager: any,
+  supabaseClient?: any
+): Promise<string> {
+  // 1. Try direct name fields
+  if (item.name && typeof item.name === 'string' && item.name.trim()) {
+    return item.name;
+  }
+  if (item.item_name && typeof item.item_name === 'string' && item.item_name.trim()) {
+    return item.item_name;
+  }
+  if (item.product_name && typeof item.product_name === 'string' && item.product_name.trim()) {
+    return item.product_name;
+  }
+
+  // 2. Try embedded menu_item data
+  if (item.menu_item) {
+    if (item.menu_item.name && typeof item.menu_item.name === 'string' && item.menu_item.name.trim()) {
+      return item.menu_item.name;
+    }
+    if (item.menu_item.item_name && typeof item.menu_item.item_name === 'string') {
+      return item.menu_item.item_name;
+    }
+  }
+
+  // 3. Try local cache if we have menu_item_id
+  if (item.menu_item_id && dbManager?.getSubcategoryFromCache) {
+    try {
+      const cached = dbManager.getSubcategoryFromCache(item.menu_item_id);
+      if (cached) {
+        const cachedName = cached.name || cached.name_en || cached.name_el;
+        if (cachedName) {
+          console.log(`[resolveItemName] Found name in cache for ${item.menu_item_id}: ${cachedName}`);
+          return cachedName;
+        }
+      }
+    } catch (cacheError) {
+      console.warn('[resolveItemName] Cache lookup failed:', cacheError);
+    }
+  }
+
+  // 4. Try Supabase as last resort
+  if (item.menu_item_id && supabaseClient) {
+    try {
+      const { data: subcategory, error } = await supabaseClient
+        .from('subcategories')
+        .select('id, name, name_en, name_el')
+        .eq('id', item.menu_item_id)
+        .single();
+
+      if (!error && subcategory) {
+        const supabaseName = subcategory.name || subcategory.name_en || subcategory.name_el;
+        if (supabaseName) {
+          console.log(`[resolveItemName] Found name in Supabase for ${item.menu_item_id}: ${supabaseName}`);
+          // Cache for future use
+          if (dbManager?.cacheSubcategory) {
+            try {
+              dbManager.cacheSubcategory(
+                subcategory.id,
+                subcategory.name || '',
+                subcategory.name_en,
+                subcategory.name_el
+              );
+            } catch (cacheErr) {
+              console.warn('[resolveItemName] Failed to cache subcategory:', cacheErr);
+            }
+          }
+          return supabaseName;
+        }
+      }
+    } catch (supabaseError) {
+      console.warn('[resolveItemName] Supabase lookup failed:', supabaseError);
+    }
+  }
+
+  // 5. Final fallback
+  if (item.menu_item_id) {
+    console.warn(`[resolveItemName] Could not resolve name for menu_item_id: ${item.menu_item_id}`);
+    return `Item ${item.menu_item_id.substring(0, 8)}`;
+  }
+
+  console.warn('[resolveItemName] Item has no name and no menu_item_id');
+  return 'Unknown Item';
+}
+
+/**
+ * Enrich order items with names from cache or Supabase
+ * Used during order creation to ensure all items have names before storage
+ */
+async function enrichOrderItemsWithNames(
+  items: any[],
+  dbManager: any,
+  supabaseClient?: any
+): Promise<any[]> {
+  if (!items || items.length === 0) return items;
+
+  const enrichedItems = await Promise.all(items.map(async (item) => {
+    // If item already has a name, keep it
+    if (item.name && typeof item.name === 'string' && item.name.trim()) {
+      return item;
+    }
+
+    // Resolve the name
+    const resolvedName = await resolveItemName(item, dbManager, supabaseClient);
+
+    // Log if we had to enrich
+    if (resolvedName !== item.name) {
+      console.log(`[enrichOrderItemsWithNames] Enriched item ${item.menu_item_id || 'unknown'} with name: ${resolvedName}`);
+    }
+
+    return {
+      ...item,
+      name: resolvedName
+    };
+  }));
+
+  return enrichedItems;
+}
+
+/**
+ * Create a Supabase client for item name resolution
+ */
+function createSupabaseClientForNameResolution(): any {
+  try {
+    const config = getSupabaseConfig('server');
+    return createClient(config.url, config.serviceRoleKey || config.anonKey, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    });
+  } catch (error) {
+    console.warn('[createSupabaseClientForNameResolution] Failed to create client:', error);
+    return null;
+  }
+}
+
+/**
  * Transform database order to frontend format
  */
 function transformOrder(order: any) {
@@ -43,6 +186,10 @@ function transformOrder(order: any) {
     externalPlatformOrderId: order.external_platform_order_id,
     platformCommissionPct: order.platform_commission_pct,
     netEarnings: order.net_earnings,
+    // Driver assignment fields
+    driver_id: order.driver_id,
+    driverId: order.driver_id, // camelCase alias for frontend compatibility
+    driverName: order.driver_name, // May be populated from joins or enrichment
   };
 }
 
@@ -241,16 +388,26 @@ export function registerOrderCrudHandlers(): void {
 
       // Debug: log the items with customizations
       console.log('[order:create] Items received:', JSON.stringify(orderData.items, null, 2));
+      console.log('[order:create] Delivery data received:', {
+        delivery_notes: orderData.delivery_notes,
+        name_on_ringer: orderData.name_on_ringer,
+        deliveryNotes: orderData.deliveryNotes,
+        nameOnRinger: orderData.nameOnRinger
+      });
       if (orderData.items && orderData.items.length > 0) {
         orderData.items.forEach((item: any, idx: number) => {
           console.log(`[order:create] Item ${idx}: ${item.name}, customizations count:`, item.customizations?.length || 0);
         });
       }
 
+      // Enrich items with names if missing (for orders from external sources)
+      const supabaseClientForNames = createSupabaseClientForNameResolution();
+      const enrichedItems = await enrichOrderItemsWithNames(orderData.items, dbManager, supabaseClientForNames);
+
       // Transform frontend data to database schema
       const dbOrderData = {
         customer_name: orderData.customerName,
-        items: orderData.items,
+        items: enrichedItems,
         total_amount: orderData.totalAmount || 0,
         status: orderData.status,
         order_type: orderData.orderType,
@@ -258,6 +415,8 @@ export function registerOrderCrudHandlers(): void {
         customer_email: orderData.customerEmail,
         table_number: orderData.tableNumber,
         delivery_address: orderData.deliveryAddress,
+        delivery_notes: orderData.delivery_notes || orderData.deliveryNotes || null,
+        name_on_ringer: orderData.name_on_ringer || orderData.nameOnRinger || null,
         special_instructions: orderData.notes,
         estimated_time: orderData.estimatedTime,
         payment_status: orderData.paymentStatus,
@@ -334,10 +493,13 @@ export function registerOrderCrudHandlers(): void {
 
             // Import print types and generator
             const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
-            const { PaperSize, PrintJobType } = await import('../../printer/types');
+            const { PaperSize, PrintJobType } = await import('../../printer/types/index');
 
-            // Transform order items to PrintOrderItem format
-            const printItems: any[] = (order.items || []).map((item: any) => {
+            // Create Supabase client for name resolution fallback
+            const supabaseClientForPrint = createSupabaseClientForNameResolution();
+
+            // Transform order items to PrintOrderItem format with enhanced name resolution
+            const printItems: any[] = await Promise.all((order.items || []).map(async (item: any) => {
               const modifiers: any[] = [];
 
               // Handle customizations
@@ -369,18 +531,8 @@ export function registerOrderCrudHandlers(): void {
                 });
               }
 
-              // Try multiple ways to get the item name
-              let itemName = item.name || item.item_name || item.product_name;
-
-              // If still no name, try to get from menu_item data if embedded
-              if (!itemName && item.menu_item) {
-                itemName = item.menu_item.name || item.menu_item.item_name;
-              }
-
-              // Last resort: use menu_item_id or 'Item'
-              if (!itemName) {
-                itemName = item.menu_item_id ? `Item ${item.menu_item_id.substring(0, 8)}` : 'Item';
-              }
+              // Use enhanced name resolution with cache and Supabase fallback
+              const itemName = await resolveItemName(item, dbManager, supabaseClientForPrint);
 
               return {
                 name: itemName,
@@ -390,10 +542,10 @@ export function registerOrderCrudHandlers(): void {
                 modifiers: modifiers.length > 0 ? modifiers : undefined,
                 specialInstructions: item.notes || item.special_instructions || undefined
               };
-            });
+            }));
 
             // Map order type to receipt format
-            let orderType: 'dine-in' | 'takeout' | 'delivery' = 'takeout';
+            let orderType: 'dine-in' | 'pickup' | 'delivery' = 'pickup';
             if (order.order_type === 'dine-in' || order.order_type === 'delivery') {
               orderType = order.order_type;
             }
@@ -413,20 +565,38 @@ export function registerOrderCrudHandlers(): void {
               customerName: order.customer_name || undefined,
               customerPhone: order.customer_phone || undefined,
               deliveryAddress: order.delivery_address || undefined,
+              deliveryNotes: (order as any).delivery_notes || undefined,
+              ringerName: (order as any).name_on_ringer || undefined,
               tableName: order.table_number || undefined
             };
 
             console.log('[Auto-Print] Receipt data prepared:', {
               orderNumber: receiptData.orderNumber,
               itemCount: receiptData.items.length,
-              total: receiptData.total
+              total: receiptData.total,
+              deliveryNotes: receiptData.deliveryNotes,
+              ringerName: receiptData.ringerName,
+              orderDeliveryNotes: (order as any).delivery_notes,
+              orderNameOnRinger: (order as any).name_on_ringer
             });
+
+            // Get language and currency settings
+            const settingsService = serviceRegistry.settingsService;
+            const language = settingsService ? settingsService.getLanguage() : 'en';
+            const currency = settingsService
+              ? (settingsService.getSetting('restaurant', 'currency', '€') || settingsService.getSetting('terminal', 'currency', '€') || '€')
+              : '€';
+
+            // Get Greek render mode from printer config
+            const greekRenderMode = receiptPrinter.greekRenderMode || 'text';
 
             // Generate receipt buffer
             const generator = new ReceiptGenerator({
               paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
               storeName: 'The Small',
-              currency: '€'
+              currency: currency as string,
+              language: language,
+              greekRenderMode: greekRenderMode
             });
 
             const receiptBuffer = generator.generateReceipt(receiptData);
@@ -545,13 +715,30 @@ export function registerOrderCrudHandlers(): void {
             acc[sc.id] = sc.name || sc.name_en || sc.name_el || 'Item';
             return acc;
           }, {});
+
+          // Cache fetched subcategories for future offline use
+          const dbManager = serviceRegistry.dbManager;
+          if (dbManager?.bulkCacheSubcategories) {
+            try {
+              const subcategoriesToCache = subcategories.map((sc: any) => ({
+                id: sc.id,
+                name: sc.name || '',
+                name_en: sc.name_en,
+                name_el: sc.name_el
+              }));
+              dbManager.bulkCacheSubcategories(subcategoriesToCache);
+              console.log(`[order:fetch-items-from-supabase] Cached ${subcategoriesToCache.length} subcategories`);
+            } catch (cacheError) {
+              console.warn('[order:fetch-items-from-supabase] Failed to cache subcategories:', cacheError);
+            }
+          }
         }
       }
 
       // Helper function to extract name from customizations
       const extractNameFromCustomizations = (customizations: any): string | null => {
         if (!customizations || typeof customizations !== 'object') return null;
-        
+
         // Try to find ingredient name in customizations
         for (const key of Object.keys(customizations)) {
           const cust = customizations[key];
@@ -569,13 +756,13 @@ export function registerOrderCrudHandlers(): void {
       const transformedItems = items.map((item: any, index: number) => {
         // Try multiple sources for the item name
         let itemName: string = menuItemNames[item.menu_item_id] || '';
-        
+
         if (!itemName) {
           // Try to extract from customizations
           const custName = extractNameFromCustomizations(item.customizations);
           if (custName) itemName = custName;
         }
-        
+
         if (!itemName) {
           // Generate a generic name with price info
           const price = parseFloat(item.unit_price) || 0;
@@ -658,7 +845,7 @@ export function registerOrderCrudHandlers(): void {
         'Get order by ID',
       );
       console.log('[order:update-items] getOrderById result:', existingOrder ? `found (id=${existingOrder.id})` : 'not found');
-      
+
       // If not found by local ID, try by supabase_id
       if (!existingOrder) {
         console.log('[order:update-items] Order not found by local ID, trying supabase_id:', orderId);

@@ -272,7 +272,21 @@ export function OrderApprovalPanel({
     
     console.log('[OrderApprovalPanel] Normalizing items:', items.length);
     
-    return items.map((item: any) => {
+    // Deduplicate items by id to prevent showing duplicates
+    const seenIds = new Set<string>();
+    const uniqueItems = items.filter((item: any) => {
+      const itemId = item.id || item.menu_item_id || `${item.name}-${item.quantity}-${item.price}`;
+      if (seenIds.has(itemId)) {
+        console.log('[OrderApprovalPanel] Filtering duplicate item:', itemId);
+        return false;
+      }
+      seenIds.add(itemId);
+      return true;
+    });
+    
+    console.log('[OrderApprovalPanel] Unique items after dedup:', uniqueItems.length);
+    
+    return uniqueItems.map((item: any) => {
       // Extract customizations/ingredients - handle both array and object formats
       // Requirements: 2.2 - Display customizations as sub-items with prices
       let customizationsList: { name: string; price: number }[] = [];
@@ -512,13 +526,13 @@ export function OrderApprovalPanel({
                 <span className={`${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                   {t('orderApprovalPanel.orderType') || 'Type'}
                 </span>
-                <p className="font-semibold capitalize">{orderType || 'N/A'}</p>
+                <p className="font-semibold capitalize">{t(`orders.type.${orderType}`) || orderType || 'N/A'}</p>
               </div>
               <div>
                 <span className={`${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
                   {t('orderApprovalPanel.status') || 'Status'}
                 </span>
-                <p className="font-semibold capitalize">{order.status || 'pending'}</p>
+                <p className="font-semibold capitalize">{t(`orders.status.${order.status}`) || order.status || 'pending'}</p>
               </div>
             </div>
             {orderType === 'delivery' && deliveryAddress && (

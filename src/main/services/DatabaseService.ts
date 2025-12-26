@@ -177,6 +177,8 @@ export class DatabaseService {
       const hasRoutingPath = columns.some((col: any) => col.name === 'routing_path');
       const hasSourceTerminalId = columns.some((col: any) => col.name === 'source_terminal_id');
       const hasForwardedAt = columns.some((col: any) => col.name === 'forwarded_at');
+      const hasDeliveryNotes = columns.some((col: any) => col.name === 'delivery_notes');
+      const hasNameOnRinger = columns.some((col: any) => col.name === 'name_on_ringer');
 
       if (!hasRoutingPath) {
         console.log('Adding routing_path column to orders table...');
@@ -190,9 +192,74 @@ export class DatabaseService {
         console.log('Adding forwarded_at column to orders table...');
         this.db.exec(`ALTER TABLE orders ADD COLUMN forwarded_at TEXT`);
       }
+      if (!hasDeliveryNotes) {
+        console.log('Adding delivery_notes column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN delivery_notes TEXT`);
+      }
+      if (!hasNameOnRinger) {
+        console.log('Adding name_on_ringer column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN name_on_ringer TEXT`);
+      }
 
-      console.log('✅ Orders table migrations complete');
+      const hasDeliveryFloor = columns.some((col: any) => col.name === 'delivery_floor');
+      const hasDeliveryCity = columns.some((col: any) => col.name === 'delivery_city');
+      const hasDeliveryPostalCode = columns.some((col: any) => col.name === 'delivery_postal_code');
+
+      if (!hasDeliveryFloor) {
+        console.log('Adding delivery_floor column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN delivery_floor TEXT`);
+      }
+      if (!hasDeliveryCity) {
+        console.log('Adding delivery_city column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN delivery_city TEXT`);
+      }
+      if (!hasDeliveryPostalCode) {
+        console.log('Adding delivery_postal_code column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN delivery_postal_code TEXT`);
+      }
+
+      // Add driver and staff related columns
+      const hasDriverId = columns.some((col: any) => col.name === 'driver_id');
+      const hasStaffShiftId = columns.some((col: any) => col.name === 'staff_shift_id');
+      const hasStaffId = columns.some((col: any) => col.name === 'staff_id');
+      const hasDiscountPercentage = columns.some((col: any) => col.name === 'discount_percentage');
+      const hasDiscountAmount = columns.some((col: any) => col.name === 'discount_amount');
+      const hasTipAmount = columns.some((col: any) => col.name === 'tip_amount');
+
+      if (!hasDriverId) {
+        console.log('Adding driver_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN driver_id TEXT`);
+      }
+
+      // Add driver_name for display without joins
+      const hasDriverName = columns.some((col: any) => col.name === 'driver_name');
+      if (!hasDriverName) {
+        console.log('Adding driver_name column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN driver_name TEXT`);
+      }
+      if (!hasStaffShiftId) {
+        console.log('Adding staff_shift_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN staff_shift_id TEXT`);
+      }
+      if (!hasStaffId) {
+        console.log('Adding staff_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN staff_id TEXT`);
+      }
+      if (!hasDiscountPercentage) {
+        console.log('Adding discount_percentage column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN discount_percentage REAL`);
+      }
+      if (!hasDiscountAmount) {
+        console.log('Adding discount_amount column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN discount_amount REAL`);
+      }
+      if (!hasTipAmount) {
+        console.log('Adding tip_amount column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN tip_amount REAL`);
+      }
     }
+
+    console.log('✅ Orders table migrations complete');
 
     // Check if sync_queue table exists and add new columns
     const syncQueueExists = this.db.prepare(`
@@ -307,6 +374,11 @@ export class DatabaseService {
         order_type TEXT NOT NULL,
         table_number TEXT,
         delivery_address TEXT,
+        delivery_city TEXT,
+        delivery_postal_code TEXT,
+        delivery_floor TEXT,
+        delivery_notes TEXT,
+        name_on_ringer TEXT,
         special_instructions TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -319,7 +391,14 @@ export class DatabaseService {
         version INTEGER DEFAULT 1 NOT NULL,
         updated_by TEXT,
         last_synced_at TEXT,
-        remote_version INTEGER
+        remote_version INTEGER,
+        driver_id TEXT,
+        driver_name TEXT,
+        staff_shift_id TEXT,
+        staff_id TEXT,
+        discount_percentage REAL,
+        discount_amount REAL,
+        tip_amount REAL
       )
     `);
 
@@ -859,6 +938,24 @@ export class DatabaseService {
       )
     `);
 
+    // Subcategories cache table for offline item name resolution
+    createTableSafe('subcategories_cache', `
+      CREATE TABLE IF NOT EXISTS subcategories_cache (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        name_en TEXT,
+        name_el TEXT,
+        category_id TEXT,
+        updated_at TEXT NOT NULL
+      )
+    `);
+
+    // Add indexes for subcategories_cache
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_subcategories_cache_updated ON subcategories_cache(updated_at);
+      CREATE INDEX IF NOT EXISTS idx_subcategories_cache_category ON subcategories_cache(category_id);
+    `);
+
     // Alter orders table to add shift-related columns
     try {
       this.db!.exec('ALTER TABLE orders ADD COLUMN staff_shift_id TEXT');
@@ -1109,6 +1206,81 @@ export class DatabaseService {
     };
   }
 
+  // ============================================================================
+  // SUBCATEGORIES CACHE METHODS (for offline item name resolution)
+  // ============================================================================
+
+  /**
+   * Cache a single subcategory (menu item) for offline name resolution
+   */
+  cacheSubcategory(id: string, name: string, name_en?: string, name_el?: string, category_id?: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO subcategories_cache (id, name, name_en, name_el, category_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(id, name, name_en || null, name_el || null, category_id || null, new Date().toISOString());
+  }
+
+  /**
+   * Get a subcategory from the local cache by ID
+   */
+  getSubcategoryFromCache(id: string): { id: string; name: string; name_en?: string; name_el?: string; category_id?: string } | null {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare('SELECT * FROM subcategories_cache WHERE id = ?');
+    const row = stmt.get(id) as any;
+    return row || null;
+  }
+
+  /**
+   * Bulk cache subcategories for efficient syncing
+   */
+  bulkCacheSubcategories(subcategories: Array<{ id: string; name: string; name_en?: string; name_el?: string; category_id?: string }>): void {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO subcategories_cache (id, name, name_en, name_el, category_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const now = new Date().toISOString();
+    const insertMany = this.db.transaction((items: typeof subcategories) => {
+      for (const item of items) {
+        stmt.run(item.id, item.name, item.name_en || null, item.name_el || null, item.category_id || null, now);
+      }
+    });
+
+    insertMany(subcategories);
+    console.log(`[DatabaseService] Cached ${subcategories.length} subcategories`);
+  }
+
+  /**
+   * Clear old subcategories cache entries (older than specified days)
+   */
+  clearOldSubcategoriesCache(olderThanDays: number = 30): number {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+
+    const stmt = this.db.prepare('DELETE FROM subcategories_cache WHERE updated_at < ?');
+    const result = stmt.run(cutoffDate.toISOString());
+    console.log(`[DatabaseService] Cleared ${result.changes} old subcategories cache entries`);
+    return result.changes;
+  }
+
+  /**
+   * Get all cached subcategories (for debugging/diagnostics)
+   */
+  getAllCachedSubcategories(): Array<{ id: string; name: string; name_en?: string; name_el?: string; category_id?: string; updated_at: string }> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const stmt = this.db.prepare('SELECT * FROM subcategories_cache ORDER BY updated_at DESC');
+    return stmt.all() as any[];
+  }
+
   /**
    * Factory reset - clears all local cached data when switching to a different terminal/branch
    * Keeps only terminal settings and sync history
@@ -1153,6 +1325,7 @@ export class DatabaseService {
       safeClearTable('menu_items');
       safeClearTable('menu_categories');
       safeClearTable('ingredients');
+      safeClearTable('subcategories_cache');
 
       // Clear sync queue
       safeClearTable('sync_queue');

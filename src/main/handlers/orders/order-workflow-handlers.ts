@@ -9,6 +9,8 @@ import { ipcMain } from 'electron';
 import { serviceRegistry } from '../../service-registry';
 import { ErrorHandler, withTimeout } from '../../../shared/utils/error-handler';
 import { TIMING } from '../../../shared/constants';
+import { getPrintServiceInstance } from '../print/print-handlers';
+import { AssignOrderData } from '../../templates/assign-order-template';
 
 const errorHandler = ErrorHandler.getInstance();
 
@@ -93,9 +95,10 @@ export function registerOrderWorkflowHandlers(): void {
       const driverRow = driverRows[0] || {};
       const driverName = (driverRow as any).staff_name || `Driver ${String(driverId).slice(-6)}`;
 
-      // Update order with driver_id
+      // Update order with driver_id and driver_name
       const updated = await dbManager.updateOrder(order.id, {
         driver_id: driverId,
+        driver_name: driverName,
         updated_at: new Date().toISOString(),
       });
 
@@ -156,6 +159,91 @@ export function registerOrderWorkflowHandlers(): void {
         } catch (e) {
           console.warn('[order:assign-driver] Fast sync failed:', e);
         }
+      }
+
+      // Add driver_id and driver_name to sync queue for Supabase update
+      try {
+        const dbSvc = dbManager.getDatabaseService();
+        dbSvc.sync.addToSyncQueue('orders', order.id, 'update', {
+          driver_id: driverId,
+          driver_name: driverName,
+          status: 'completed',
+          updated_at: new Date().toISOString()
+        });
+        console.log('[order:assign-driver] Added driver_id to sync queue for order:', order.id);
+      } catch (e) {
+        console.warn('[order:assign-driver] Failed to queue driver_id sync:', e);
+      }
+
+      // Print driver assignment receipt
+      try {
+        console.log('[order:assign-driver] 🖨️ Attempting to print driver assignment receipt...');
+        const printService = getPrintServiceInstance();
+        console.log('[order:assign-driver] PrintService instance:', printService ? 'Available' : 'NOT AVAILABLE');
+
+        if (printService) {
+          // Get order items from the order object (items are embedded in local orders)
+          const orderItems = Array.isArray((order as any).items) ? (order as any).items : [];
+          console.log('[order:assign-driver] Order items count:', orderItems.length);
+
+          // Normalize payment method to expected type
+          const normalizePaymentMethod = (pm: string | null | undefined): 'cash' | 'card' | 'mixed' | 'online' => {
+            const pmLower = (pm || 'cash').toLowerCase();
+            if (pmLower.includes('card')) return 'card';
+            if (pmLower.includes('mix')) return 'mixed';
+            if (pmLower.includes('online')) return 'online';
+            return 'cash';
+          };
+
+          // Build receipt data
+          // Debugging receipt data to ensure fields are present
+          console.log('[order:assign-driver] 🔍 Extracting Address Information:');
+          const rawCity = (order as any).delivery_city;
+          const rawPostal = (order as any).delivery_postal_code;
+          const rawFloor = (order as any).delivery_floor;
+          const rawBell = (order as any).delivery_bell || (order as any).bell_name || (order as any).name_on_ringer;
+          const rawDeliveryNotes = (order as any).delivery_notes || '';
+
+          console.log(`[order:assign-driver] Raw DB fields -> city: "${rawCity}", postal: "${rawPostal}", floor: "${rawFloor}", bell: "${rawBell}", deliveryNotes: "${rawDeliveryNotes}"`);
+
+          const assignOrderData: AssignOrderData = {
+            orderId: order.id,
+            orderNumber: order.order_number || `#${order.id.slice(-6)}`,
+            driverId,
+            driverName,
+            customerName: order.customer_name || '',
+            customerPhone: order.customer_phone || '',
+            deliveryAddress: order.delivery_address || '',
+            deliveryCity: rawCity || (order as any).city || '',
+            deliveryPostalCode: rawPostal || (order as any).postal_code || '',
+            deliveryFloor: rawFloor || (order as any).floor_number || '',
+            deliveryBell: rawBell || '',
+            deliveryNotes: rawDeliveryNotes,
+            orderTotal: Number(order.total_amount || 0),
+            paymentMethod: normalizePaymentMethod(order.payment_method),
+            items: orderItems.map((item: any) => ({
+              name: item.name || item.menu_item_name || 'Item',
+              quantity: item.quantity || 1,
+              price: item.unit_price || item.price || 0,
+              customizations: item.customizations
+            })),
+            notes: notes || order.special_instructions || '',
+            assignedAt: new Date()
+          };
+
+          console.log('[order:assign-driver] 🖨️ Calling printDriverAssignmentReceipt...');
+          const terminalName = (settingsService?.getSetting?.('terminal', 'terminal_name', '') as string) || '';
+          const printResult = await printService.printDriverAssignmentReceipt(assignOrderData, terminalName);
+          if (printResult.success) {
+            console.log('[order:assign-driver] ✅ Driver assignment receipt printed');
+          } else {
+            console.warn('[order:assign-driver] Failed to print driver receipt:', printResult.error);
+          }
+        } else {
+          console.log('[order:assign-driver] PrintService not available, skipping receipt print');
+        }
+      } catch (e) {
+        console.warn('[order:assign-driver] Error printing driver receipt (ignored):', e);
       }
 
       // Emit event

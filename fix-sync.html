@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Force Sync Orders - Fix Z-Report</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      padding: 40px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: rgba(0,0,0,0.3);
+      padding: 30px;
+      border-radius: 20px;
+      backdrop-filter: blur(10px);
+    }
+    h1 { margin-top: 0; text-align: center; }
+    button {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: 2px solid rgba(255,255,255,0.3);
+      color: white;
+      padding: 15px 30px;
+      font-size: 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      margin: 10px 5px;
+      transition: all 0.3s;
+    }
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      background: rgba(0,0,0,0.2);
+      padding: 20px;
+      border-radius: 10px;
+      margin: 20px 0;
+      min-height: 200px;
+      font-family: 'Courier New', monospace;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .success { color: #4ade80; }
+    .error { color: #f87171; }
+    .warning { color: #fbbf24; }
+    .info { color: #60a5fa; }
+    .buttons { text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔄 Force Sync - Fix Z-Report</h1>
+    <p style="text-align: center; opacity: 0.8;">
+      This tool will force sync all pending orders and driver earnings so you can submit the Z-Report.
+    </p>
+
+    <div class="buttons">
+      <button onclick="checkStatus()">1️⃣ Check Status</button>
+      <button onclick="forceSync()">2️⃣ Force Sync All</button>
+      <button onclick="requeueOrphaned()">3️⃣ Requeue Orphaned</button>
+      <button onclick="checkAgain()">4️⃣ Verify Fixed</button>
+    </div>
+
+    <div class="status" id="output">
+Click "Check Status" to see what needs syncing...
+    </div>
+  </div>
+
+  <script>
+    const output = document.getElementById('output');
+
+    function log(message, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString();
+      const className = type;
+      output.innerHTML += `<span class="${className}">[${timestamp}] ${message}</span>\n`;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function clear() {
+      output.innerHTML = '';
+    }
+
+    async function checkStatus() {
+      clear();
+      log('📊 Checking sync status...', 'info');
+
+      try {
+        const summary = await window.electronAPI.invoke('sync:get-unsynced-financial-summary');
+
+        log('', 'info');
+        log('════════════════════════════════════════════════════', 'info');
+        log(`Unsynced Driver Earnings: ${summary.driverEarnings}`, summary.driverEarnings > 0 ? 'warning' : 'success');
+        log(`Unsynced Staff Payments: ${summary.staffPayments}`, summary.staffPayments > 0 ? 'warning' : 'success');
+        log(`Unsynced Expenses: ${summary.shiftExpenses}`, summary.shiftExpenses > 0 ? 'warning' : 'success');
+        log(`TOTAL UNSYNCED: ${summary.total}`, summary.total > 0 ? 'error' : 'success');
+        log('════════════════════════════════════════════════════', 'info');
+        log('', 'info');
+
+        if (summary.total === 0) {
+          log('✅ Everything is synced! You can submit Z-Report now.', 'success');
+        } else {
+          log('⚠️  Click "Force Sync All" to sync everything', 'warning');
+        }
+
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    async function forceSync() {
+      clear();
+      log('🔄 Starting force sync...', 'info');
+      log('This may take 30-60 seconds...', 'warning');
+
+      try {
+        // First, requeue any orphaned records
+        log('', 'info');
+        log('Step 1: Requeuing orphaned financial records...', 'info');
+        const requeueResult = await window.electronAPI.invoke('sync:requeue-orphaned-financial');
+        if (requeueResult.success) {
+          log(`✅ Requeued ${requeueResult.requeued} orphaned records`, 'success');
+        }
+
+        // Force sync
+        log('', 'info');
+        log('Step 2: Forcing sync of all pending records...', 'info');
+        const syncResult = await window.electronAPI.invoke('sync:force-sync');
+        if (syncResult.success) {
+          log('✅ Sync triggered successfully', 'success');
+        }
+
+        // Wait a bit for sync to process
+        log('', 'info');
+        log('⏳ Waiting for sync to complete (30 seconds)...', 'warning');
+        await new Promise(resolve => setTimeout(resolve, 30000));
+
+        // Check status again
+        log('', 'info');
+        log('Step 3: Checking final status...', 'info');
+        const summary = await window.electronAPI.invoke('sync:get-unsynced-financial-summary');
+
+        log('', 'info');
+        log('════════════════════════════════════════════════════', 'info');
+        log(`Remaining Driver Earnings: ${summary.driverEarnings}`, summary.driverEarnings > 0 ? 'warning' : 'success');
+        log(`Remaining Staff Payments: ${summary.staffPayments}`, summary.staffPayments > 0 ? 'warning' : 'success');
+        log(`Remaining Expenses: ${summary.shiftExpenses}`, summary.shiftExpenses > 0 ? 'warning' : 'success');
+        log(`TOTAL REMAINING: ${summary.total}`, summary.total > 0 ? 'error' : 'success');
+        log('════════════════════════════════════════════════════', 'info');
+        log('', 'info');
+
+        if (summary.total === 0) {
+          log('', 'info');
+          log('🎉 SUCCESS! All records synced!', 'success');
+          log('✅ You can now submit the Z-Report', 'success');
+        } else {
+          log('', 'info');
+          log('⚠️  Some records still pending...', 'warning');
+          log('💡 Click "Force Sync All" again, or wait 1 minute and try again', 'warning');
+        }
+
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    async function requeueOrphaned() {
+      clear();
+      log('🔄 Requeuing orphaned financial records...', 'info');
+
+      try {
+        const result = await window.electronAPI.invoke('sync:requeue-orphaned-financial');
+        if (result.success) {
+          log(`✅ Successfully requeued ${result.requeued} orphaned records`, 'success');
+          log('', 'info');
+          log('💡 Now click "Force Sync All" to sync them', 'info');
+        } else {
+          log(`❌ Error: ${result.error}`, 'error');
+        }
+      } catch (err) {
+        log(`❌ Error: ${err.message}`, 'error');
+      }
+    }
+
+    async function checkAgain() {
+      await checkStatus();
+    }
+
+    // Auto-check on load
+    window.addEventListener('load', () => {
+      setTimeout(checkStatus, 500);
+    });
+  </script>
+</body>
+</html>

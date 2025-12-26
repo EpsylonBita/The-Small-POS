@@ -331,8 +331,40 @@ export class RealtimeOrderHandler {
       orderId: order?.id,
       branchId: this.branchId,
       terminalId: this.terminalId,
-      originTerminalId: payload?.new?.origin_terminal_id
+      originTerminalId: payload?.new?.origin_terminal_id,
+      hasNew: !!payload.new,
+      hasOld: !!payload.old,
+      oldId: payload.old?.id
     })
+
+    // For DELETE events, we need the old record's ID
+    if (eventType === 'DELETE') {
+      const deleteOrderId = payload.old?.id
+      if (deleteOrderId) {
+        console.log(`📡 [RealtimeOrderHandler] Processing DELETE for order ${deleteOrderId}`)
+        try {
+          const orderService = this.dbManager.getDatabaseService().orders
+          const deleted = orderService.deleteOrder(deleteOrderId)
+          console.log(`📡 [RealtimeOrderHandler] Order ${deleteOrderId} deleted from local DB: ${deleted}`)
+        } catch (error) {
+          console.error(`[RealtimeOrderHandler] Failed to delete order ${deleteOrderId}:`, error)
+        }
+        
+        // Emit delete event to renderer
+        this.emitToRenderer('order-deleted', {
+          eventType: 'DELETE',
+          table: 'orders',
+          branchId: this.branchId,
+          terminalId: this.terminalId,
+          new: null,
+          old: payload.old,
+        })
+        return
+      } else {
+        console.warn('[RealtimeOrderHandler] DELETE event received but no order ID in payload.old')
+        return
+      }
+    }
 
     // Ignore events originated by this terminal if present
     if (payload?.new?.origin_terminal_id && payload.new.origin_terminal_id === this.terminalId) {

@@ -32,7 +32,7 @@ export interface OrderItem {
 
 export interface ReceiptData {
   orderNumber: string;
-  orderType: 'dine-in' | 'takeout' | 'delivery';
+  orderType: 'dine-in' | 'pickup' | 'delivery';
   timestamp: Date;
   items: OrderItem[];
   subtotal: number;
@@ -44,12 +44,14 @@ export interface ReceiptData {
   customerName?: string;
   customerPhone?: string;
   deliveryAddress?: string;
+  deliveryNotes?: string;
+  ringerName?: string;
   tableName?: string;
 }
 
 export interface KitchenTicketData {
   orderNumber: string;
-  orderType: 'dine-in' | 'takeout' | 'delivery';
+  orderType: 'dine-in' | 'pickup' | 'delivery';
   timestamp: Date;
   items: OrderItem[];
   customerName?: string;

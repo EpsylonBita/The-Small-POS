@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.37] - 2025-12-25
+
+### Added
+- Driver assignment receipt printing when orders are assigned to drivers
+- Driver ID is now synced to Supabase when orders are assigned to drivers
+- Driver name badge displayed on completed/delivered order cards in the delivered tab
+
+### Fixed
+- Fixed `login_time` column error in order-status-handlers.ts (should be `check_in_time`)
+- Fixed `driver_id` not displaying in OrderCard by adding missing `driver_id` column migration to orders table
+
+### Changed
+- Enhanced `order:assign-driver` handler to print driver receipt with Greek/English i18n support
+- Updated `OrderSyncService` to include `driver_id` in backfill and insert payloads
+- Updated `OrderCard` component to show driver assignment badge for delivery orders
+
+## [1.1.36] - 2025-12-25
+
+### Fixed
+- Fixed ingredient selections being reset during order creation when the 15-second background refresh runs
+- Added ref tracking in `MenuItemModal` to only initialize once per menu item, preventing re-initialization on parent re-renders
+- Skip `silentRefresh` when menu modals are open as additional safeguard
+
+
 ## [1.1.35] - 2025-12-23
 
 ### Fixed

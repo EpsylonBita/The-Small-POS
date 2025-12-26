@@ -3,6 +3,7 @@
 export interface StaffShift {
   id: string;
   staff_id: string;
+  staff_name?: string; // Staff name from joined query
   branch_id: string;
   terminal_id: string;
   role_type: 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';

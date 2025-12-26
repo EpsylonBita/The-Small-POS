@@ -8,6 +8,7 @@ import { registerOrderCrudHandlers } from './order-crud-handlers';
 import { registerOrderStatusHandlers } from './order-status-handlers';
 import { registerOrderWorkflowHandlers } from './order-workflow-handlers';
 import { registerOrderRetryHandlers, clearRetryQueue, getRetryQueueLength } from './order-retry-handlers';
+import { registerDiagnosticHandlers } from '../diagnostic-handlers';
 
 export {
   registerOrderCrudHandlers,
@@ -29,6 +30,7 @@ export function registerOrderHandlers(): void {
   registerOrderStatusHandlers();
   registerOrderWorkflowHandlers();
   registerOrderRetryHandlers();
+  registerDiagnosticHandlers();
 
   console.log('[OrderHandlers] ✅ All order handlers registered');
 }

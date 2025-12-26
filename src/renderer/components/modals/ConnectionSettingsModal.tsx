@@ -555,6 +555,64 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               </button>
             </div>
 
+            {/* Clear Old Orders - Medium destructive */}
+            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <Database className="w-5 h-5 flex-shrink-0 text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.6)]" />
+                <div className="text-left min-w-0">
+                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
+                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-old-orders')
+                    if (result?.success) {
+                      toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
+                    } else {
+                      toast.error(result?.error || t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+                    }
+                  } catch (e) {
+                    console.error('Failed to clear old orders:', e)
+                    toast.error(t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+                  }
+                }}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-yellow-600/30 border-2 border-yellow-500 hover:bg-yellow-600/50 text-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.5)]`}
+              >
+                {t('settings.database.clearOldOrdersButton', 'Clear')}
+              </button>
+            </div>
+
+            {/* Sync Deleted Orders - Cleanup orphaned orders */}
+            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <Database className="w-5 h-5 flex-shrink-0 text-blue-400 drop-shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
+                <div className="text-left min-w-0">
+                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
+                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from admin dashboard')}</span>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    const result = await (window as any)?.electronAPI?.invoke?.('sync:cleanup-deleted-orders')
+                    if (result?.success) {
+                      toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
+                    } else {
+                      toast.error(result?.error || t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                    }
+                  } catch (e) {
+                    console.error('Failed to sync deleted orders:', e)
+                    toast.error(t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                  }
+                }}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-blue-600/30 border-2 border-blue-500 hover:bg-blue-600/50 text-blue-300 shadow-[0_0_12px_rgba(96,165,250,0.5)]`}
+              >
+                {t('settings.database.syncButton', 'Sync')}
+              </button>
+            </div>
+
             {/* Factory Reset - Destructive */}
             <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
               <div className="flex items-center gap-3 flex-1 min-w-0">

@@ -198,9 +198,11 @@ export class OrderService {
         if (api?.invoke) {
           try {
             const result = await api.invoke('order:get-all');
-            if (Array.isArray(result)) {
+            // Handle IPC response format: { success: true, data: [...] } or direct array
+            const orders = result?.data ?? result;
+            if (Array.isArray(orders)) {
               // Normalize statuses for POS UI (map server 'completed' -> POS 'delivered')
-              const normalized = (result as any[]).map((o) => ({
+              const normalized = (orders as any[]).map((o) => ({
                 ...o,
                 status: o?.status ? mapStatusForPOS(o.status as any) : o?.status
               }));
@@ -388,6 +390,8 @@ export class OrderService {
         orderType: (orderData.orderType ?? orderData.order_type) as any,
         tableNumber: orderData.tableNumber ?? orderData.table_number,
         deliveryAddress: (orderData as any).address ?? orderData.delivery_address,
+        delivery_notes: orderData.delivery_notes ?? (orderData as any).deliveryNotes ?? null,
+        name_on_ringer: orderData.name_on_ringer ?? (orderData as any).nameOnRinger ?? null,
         notes: orderData.notes ?? orderData.special_instructions,
         estimatedTime: orderData.estimatedTime ?? orderData.estimated_time,
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
@@ -397,6 +401,8 @@ export class OrderService {
 
       console.log('[OrderService.createOrder] Normalized data:', {
         deliveryAddress: normalized.deliveryAddress,
+        delivery_notes: normalized.delivery_notes,
+        name_on_ringer: normalized.name_on_ringer,
         orderType: normalized.orderType,
         itemsCount: normalized.items?.length,
         firstItemCustomizations: normalized.items?.[0]?.customizations,

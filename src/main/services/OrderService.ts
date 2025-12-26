@@ -14,6 +14,8 @@ interface OrderRow {
   order_type?: 'dine-in' | 'takeaway' | 'delivery';
   table_number?: string;
   delivery_address?: string;
+  delivery_notes?: string;
+  name_on_ringer?: string;
   special_instructions?: string;
   created_at: string;
   updated_at: string;
@@ -26,6 +28,7 @@ interface OrderRow {
   staff_shift_id?: string;
   staff_id?: string;
   driver_id?: string;
+  driver_name?: string;
   discount_percentage?: number;
   discount_amount?: number;
   tip_amount?: number;
@@ -34,6 +37,9 @@ interface OrderRow {
   updated_by?: string;
   last_synced_at?: string;
   remote_version?: number;
+  delivery_floor?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
 }
 
 interface OrderFilters {
@@ -60,6 +66,11 @@ export interface Order {
   order_type?: 'dine-in' | 'takeaway' | 'delivery';
   table_number?: string;
   delivery_address?: string;
+  delivery_notes?: string;
+  delivery_floor?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  name_on_ringer?: string;
   special_instructions?: string;
   created_at: string;
   updated_at: string;
@@ -72,6 +83,7 @@ export interface Order {
   staff_shift_id?: string;
   staff_id?: string;
   driver_id?: string;
+  driver_name?: string;
   discount_percentage?: number;
   discount_amount?: number;
   tip_amount?: number;
@@ -199,15 +211,8 @@ export class OrderService extends BaseService {
 
   createOrder(orderData: Partial<Order>): Order {
     return this.executeTransaction(() => {
+      // Validate required fields
       this.validateRequired(orderData, ['items', 'total_amount', 'status']);
-
-      // Debug: log incoming items with customizations
-      console.log('[OrderService.createOrder] Incoming items:', JSON.stringify(orderData.items, null, 2));
-      if (orderData.items) {
-        orderData.items.forEach((item: any, idx: number) => {
-          console.log(`[OrderService.createOrder] Item ${idx} (${item.name}): customizations count =`, item.customizations?.length || 0);
-        });
-      }
 
       // Get terminal ID from environment or generate one
       const terminalId = process.env.TERMINAL_ID || 'terminal-' + this.generateId().substring(0, 8);
@@ -224,6 +229,11 @@ export class OrderService extends BaseService {
         order_type: orderData.order_type || 'takeaway',
         table_number: orderData.table_number,
         delivery_address: orderData.delivery_address,
+        delivery_notes: orderData.delivery_notes,
+        delivery_floor: orderData.delivery_floor,
+        delivery_city: orderData.delivery_city,
+        delivery_postal_code: orderData.delivery_postal_code,
+        name_on_ringer: orderData.name_on_ringer,
         special_instructions: orderData.special_instructions,
         created_at: this.getCurrentTimestamp(),
         updated_at: this.getCurrentTimestamp(),
@@ -248,25 +258,27 @@ export class OrderService extends BaseService {
         INSERT INTO orders (
           id, order_number, customer_name, customer_phone, customer_email,
           items, total_amount, status, order_type, table_number,
-          delivery_address, special_instructions, created_at, updated_at,
+          delivery_address, delivery_notes, delivery_floor, delivery_city, delivery_postal_code, name_on_ringer, special_instructions, created_at, updated_at,
           estimated_time, supabase_id, sync_status, payment_status,
           payment_method, payment_transaction_id, staff_shift_id, staff_id,
-          driver_id, discount_percentage, discount_amount, tip_amount,
+          driver_id, driver_name, discount_percentage, discount_amount, tip_amount,
           version, updated_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
-      // Debug: log the items being stored
-      console.log('[OrderService.createOrder] Storing items as JSON:', JSON.stringify(order.items, null, 2));
+
 
       stmt.run(
         order.id, order.order_number, order.customer_name, order.customer_phone,
         order.customer_email, JSON.stringify(order.items), order.total_amount,
         order.status, order.order_type, order.table_number, order.delivery_address,
+        order.delivery_notes || null, order.delivery_floor || null, order.delivery_city || null,
+        order.delivery_postal_code || null, order.name_on_ringer || null,
         order.special_instructions, order.created_at, order.updated_at,
         order.estimated_time, order.supabase_id, order.sync_status,
         order.payment_status, order.payment_method, order.payment_transaction_id,
         order.staff_shift_id || null, order.staff_id || null, order.driver_id || null,
+        order.driver_name || null,
         order.discount_percentage || null, order.discount_amount || null, order.tip_amount || null,
         order.version, order.updated_by
       );
@@ -314,6 +326,11 @@ export class OrderService extends BaseService {
         payment_status: order.payment_status ?? 'pending',
         payment_method: order.payment_method ?? null,
         notes: order.special_instructions ?? null,
+        delivery_notes: order.delivery_notes ?? null,
+        delivery_floor: order.delivery_floor ?? null,
+        delivery_city: order.delivery_city ?? null,
+        delivery_postal_code: order.delivery_postal_code ?? null,
+        name_on_ringer: order.name_on_ringer ?? null,
         table_number: order.table_number ?? null,
         estimated_ready_time: order.estimated_time ?? null,
         terminal_id: __tid,
@@ -432,10 +449,11 @@ export class OrderService extends BaseService {
           customer_name = ?, customer_phone = ?, customer_email = ?,
           items = ?, total_amount = ?, status = ?, order_type = ?,
           table_number = ?, delivery_address = ?, special_instructions = ?,
+          delivery_floor = ?, delivery_city = ?, delivery_postal_code = ?,
           updated_at = ?, estimated_time = ?, supabase_id = ?,
           sync_status = ?, payment_status = ?, payment_method = ?,
           payment_transaction_id = ?, staff_shift_id = ?, staff_id = ?,
-          driver_id = ?, discount_percentage = ?, discount_amount = ?, tip_amount = ?,
+          driver_id = ?, driver_name = ?, discount_percentage = ?, discount_amount = ?, tip_amount = ?,
           version = ?, updated_by = ?
         WHERE id = ?
       `);
@@ -444,11 +462,14 @@ export class OrderService extends BaseService {
         updatedOrder.customer_name, updatedOrder.customer_phone, updatedOrder.customer_email,
         JSON.stringify(updatedOrder.items), updatedOrder.total_amount, updatedOrder.status,
         updatedOrder.order_type, updatedOrder.table_number, updatedOrder.delivery_address,
-        updatedOrder.special_instructions, updatedOrder.updated_at, updatedOrder.estimated_time,
+        updatedOrder.special_instructions, updatedOrder.delivery_floor || null,
+        updatedOrder.delivery_city || null, updatedOrder.delivery_postal_code || null,
+        updatedOrder.updated_at, updatedOrder.estimated_time,
         updatedOrder.supabase_id, updatedOrder.sync_status, updatedOrder.payment_status,
         updatedOrder.payment_method, updatedOrder.payment_transaction_id,
         updatedOrder.staff_shift_id || null, updatedOrder.staff_id || null,
-        updatedOrder.driver_id || null, updatedOrder.discount_percentage || null,
+        updatedOrder.driver_id || null, updatedOrder.driver_name || null,
+        updatedOrder.discount_percentage || null,
         updatedOrder.discount_amount || null, updatedOrder.tip_amount || null,
         updatedOrder.version, updatedOrder.updated_by, id
       );
@@ -524,10 +545,8 @@ export class OrderService extends BaseService {
       // Try to find by supabase_id
       const orderBySupabaseId = this.getOrderBySupabaseId(id);
       if (orderBySupabaseId) {
-        console.log('[MAIN OrderService] 🔄 Found order by supabase_id, using local ID', { supabaseId: id, localId: orderBySupabaseId.id });
         return this.updateOrderStatus(orderBySupabaseId.id, status); // Recursive call with local ID
       }
-      console.error('[MAIN OrderService] ❌ Order not found in local DB', { id });
       return false;
     }
 
@@ -670,13 +689,7 @@ export class OrderService extends BaseService {
   }
 
   private mapRowToOrder(row: OrderRow): Order {
-    // Debug: log the items being retrieved
     const parsedItems = JSON.parse(row.items);
-    if (parsedItems && parsedItems.length > 0) {
-      parsedItems.forEach((item: any, idx: number) => {
-        console.log(`[OrderService.mapRowToOrder] Order ${row.id}, Item ${idx} (${item.name}): customizations count =`, item.customizations?.length || (item.customizations ? Object.keys(item.customizations).length : 0));
-      });
-    }
 
     return {
       id: row.id,
@@ -690,6 +703,11 @@ export class OrderService extends BaseService {
       order_type: row.order_type,
       table_number: row.table_number,
       delivery_address: row.delivery_address,
+      delivery_notes: row.delivery_notes,
+      delivery_floor: row.delivery_floor,
+      delivery_city: row.delivery_city,
+      delivery_postal_code: row.delivery_postal_code,
+      name_on_ringer: row.name_on_ringer,
       special_instructions: row.special_instructions,
       created_at: row.created_at,
       updated_at: row.updated_at,
@@ -702,6 +720,7 @@ export class OrderService extends BaseService {
       staff_shift_id: row.staff_shift_id,
       staff_id: row.staff_id,
       driver_id: row.driver_id,
+      driver_name: row.driver_name,
       discount_percentage: row.discount_percentage,
       discount_amount: row.discount_amount,
       tip_amount: row.tip_amount,
@@ -740,11 +759,11 @@ export class OrderService extends BaseService {
    */
   private mapStatusForSupabase(status: Order['status']): string {
     const SUPABASE_ALLOWED_STATUSES = ['pending', 'confirmed', 'preparing', 'ready', 'completed', 'cancelled'];
-    
+
     if (status === 'out_for_delivery') return 'ready';
     if (status === 'delivered') return 'completed';
     if (SUPABASE_ALLOWED_STATUSES.includes(status)) return status;
-    
+
     // Fallback for any unknown status
     return 'ready';
   }

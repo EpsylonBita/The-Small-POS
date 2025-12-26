@@ -312,7 +312,16 @@ export function registerReportHandlers() {
             if (termTypeNow !== 'mobile_waiter') {
                 try {
                     const terminalName = await db.settings.getSetting<string>('terminal', 'name', '');
+                    // Get PrinterManager from printer-manager-handlers module for proper printer routing
+                    const { getPrinterManagerInstance } = require('../printer-manager-handlers');
                     const printer = new PrintService(db.settings);
+                    const printerManager = getPrinterManagerInstance();
+                    if (printerManager) {
+                        printer.setPrinterManager(printerManager);
+                        console.log('[Z-Report] PrinterManager attached to PrintService');
+                    } else {
+                        console.log('[Z-Report] No PrinterManager available, using direct printing');
+                    }
                     await printer.printZReport(snapshot, terminalName || undefined);
                 } catch (printErr) {
                     console.warn('Z report printing failed (fallback to console log only):', printErr);

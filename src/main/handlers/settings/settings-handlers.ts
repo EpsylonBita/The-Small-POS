@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { serviceRegistry } from '../../service-registry';
 import { getSupabaseClient } from '../../../shared/supabase-config';
+import { initializeMainLanguageFromSettings } from '../../lib/main-i18n';
 
 /**
  * Registers settings-related IPC handlers (general settings, terminal config,
@@ -16,6 +17,9 @@ export function registerSettingsHandlers(): void {
     console.error('[SettingsHandlers] Required services (settingsService, dbManager) not initialized');
     return;
   }
+
+  // Initialize main process i18n with saved language from settings
+  initializeMainLanguageFromSettings(settingsService);
 
   const terminalConfigService = serviceRegistry.terminalConfigService;
   const adminDashboardSyncService = serviceRegistry.adminDashboardSyncService;
@@ -401,6 +405,36 @@ export function registerSettingsHandlers(): void {
       return { success: true, message: `Setting ${category}.${key} saved successfully` };
     } catch (error) {
       console.error('Set setting error:', error);
+      return { success: false, error: (error as Error).message };
+    }
+  });
+
+  // Language settings handlers
+  ipcMain.removeHandler('settings:get-language');
+  ipcMain.handle('settings:get-language', async () => {
+    try {
+      const language = settingsService.getLanguage();
+      return language;
+    } catch (error) {
+      console.error('Get language error:', error);
+      return 'en';
+    }
+  });
+
+  ipcMain.removeHandler('settings:set-language');
+  ipcMain.handle('settings:set-language', async (_event, language: 'en' | 'el') => {
+    try {
+      console.log(`[settings:set-language] Setting language to: ${language}`);
+      settingsService.setLanguage(language);
+      // Update main process i18n instance
+      const { updateMainLanguage } = require('../../lib/main-i18n');
+      if (updateMainLanguage) {
+        updateMainLanguage(language);
+        console.log(`[settings:set-language] Main process i18n updated to: ${language}`);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Set language error:', error);
       return { success: false, error: (error as Error).message };
     }
   });

@@ -24,7 +24,7 @@ import {
   serializePrinterConfig,
   deserializePrinterConfig,
 } from '../types/serialization';
-import { initializePrinterTables, checkPrinterTablesExist, migratePrintersTableForSystemType } from './PrinterDatabaseSchema';
+import { initializePrinterTables, checkPrinterTablesExist, migratePrintersTableForSystemType, migratePrintersTableForGreekRenderMode, migratePrintersTableForReceiptTemplate } from './PrinterDatabaseSchema';
 
 /**
  * Database row type for printers table
@@ -36,6 +36,8 @@ interface PrinterRow {
   connection_details: string;
   paper_size: string;
   character_set: string;
+  greek_render_mode: string | null;
+  receipt_template: string | null;
   role: string;
   is_default: number;
   fallback_printer_id: string | null;
@@ -55,6 +57,8 @@ function rowToSerialized(row: PrinterRow): SerializedPrinterConfig {
     connectionDetails: row.connection_details,
     paperSize: row.paper_size,
     characterSet: row.character_set,
+    greekRenderMode: row.greek_render_mode,
+    receiptTemplate: row.receipt_template,
     role: row.role,
     isDefault: row.is_default,
     fallbackPrinterId: row.fallback_printer_id,
@@ -87,6 +91,10 @@ export class PrinterConfigStore {
     } else {
       // Run migration to add 'system' type support if needed
       migratePrintersTableForSystemType(this.db);
+      // Run migration to add 'greek_render_mode' column if needed
+      migratePrintersTableForGreekRenderMode(this.db);
+      // Run migration to add 'receipt_template' column if needed
+      migratePrintersTableForReceiptTemplate(this.db);
     }
 
     this.initialized = true;
@@ -114,9 +122,9 @@ export class PrinterConfigStore {
 
     const stmt = this.db.prepare(`
       INSERT INTO printers (
-        id, name, type, connection_details, paper_size, character_set,
+        id, name, type, connection_details, paper_size, character_set, greek_render_mode, receipt_template,
         role, is_default, fallback_printer_id, enabled, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -126,6 +134,8 @@ export class PrinterConfigStore {
       serialized.connectionDetails,
       serialized.paperSize,
       serialized.characterSet,
+      serialized.greekRenderMode,
+      serialized.receiptTemplate,
       serialized.role,
       serialized.isDefault,
       serialized.fallbackPrinterId,
@@ -193,6 +203,8 @@ export class PrinterConfigStore {
         connection_details = ?,
         paper_size = ?,
         character_set = ?,
+        greek_render_mode = ?,
+        receipt_template = ?,
         role = ?,
         is_default = ?,
         fallback_printer_id = ?,
@@ -207,6 +219,8 @@ export class PrinterConfigStore {
       serialized.connectionDetails,
       serialized.paperSize,
       serialized.characterSet,
+      serialized.greekRenderMode,
+      serialized.receiptTemplate,
       serialized.role,
       serialized.isDefault,
       serialized.fallbackPrinterId,

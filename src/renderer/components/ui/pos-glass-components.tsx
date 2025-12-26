@@ -298,11 +298,11 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
   if (!isOpen) return null
 
   const sizeClasses = {
-    sm: 'max-w-md',
-    md: 'max-w-lg',
-    lg: 'max-w-2xl',
-    xl: 'max-w-4xl',
-    full: 'max-w-[95vw] max-h-[95vh]'
+    sm: 'max-w-lg', // Increased from md
+    md: 'max-w-2xl', // Increased from lg
+    lg: 'max-w-4xl', // Increased from 2xl
+    xl: 'max-w-6xl', // Increased from 4xl
+    full: 'max-w-[96vw] max-h-[92vh]' // Slightly larger
   }
 
   return (
@@ -667,13 +667,13 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // Early return if not mounted
   if (!mounted) return null
 
-  // Size classes mapping
+  // Size classes mapping - Larger modals for better UX
   const sizeClasses = {
-    sm: 'max-w-md',
-    md: 'max-w-lg',
-    lg: 'max-w-2xl',
-    xl: 'max-w-4xl',
-    full: 'max-w-[95vw] max-h-[95vh]'
+    sm: 'max-w-lg', // Increased from md
+    md: 'max-w-2xl', // Increased from lg
+    lg: 'max-w-4xl', // Increased from 2xl
+    xl: 'max-w-6xl', // Increased from 4xl
+    full: 'max-w-[96vw] max-h-[92vh]' // Slightly larger
   }
 
   return (

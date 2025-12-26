@@ -21,6 +21,8 @@ interface CustomerData {
   notes?: string;
   name_on_ringer?: string;
   addresses?: any[];
+  version?: number;
+  editAddressId?: string; // ID of address to edit (for editAddress mode)
 }
 
 interface AddCustomerModalProps {
@@ -34,8 +36,9 @@ interface AddCustomerModalProps {
    * - 'new': Creating a new customer (default)
    * - 'edit': Full edit of existing customer (all fields editable)
    * - 'addAddress': Adding a new address to existing customer (only address fields editable)
+   * - 'editAddress': Editing an existing address (only address fields editable)
    */
-  mode?: 'new' | 'edit' | 'addAddress';
+  mode?: 'new' | 'edit' | 'addAddress' | 'editAddress';
 }
 
 interface AddressAutocompleteProps {
@@ -379,8 +382,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   // Track if we're editing an existing customer
   const isEditing = !!initialCustomer?.id;
 
-  // In addAddress mode, customer info fields are read-only
+  // In addAddress or editAddress mode, customer info fields are read-only
   const isAddAddressMode = mode === 'addAddress';
+  const isEditAddressMode = mode === 'editAddress';
+  const isAddressOnlyMode = isAddAddressMode || isEditAddressMode;
 
   useEffect(() => {
     const electron = (window as any).electronAPI
@@ -428,7 +433,38 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       setErrors({});
 
       if (initialCustomer) {
-        if (isAddAddressMode) {
+        if (isEditAddressMode && initialCustomer.editAddressId) {
+          // Edit Address mode - find the address to edit and prefill its data
+          const addressToEdit = initialCustomer.addresses?.find(
+            (addr: any) => addr.id === initialCustomer.editAddressId
+          );
+          if (addressToEdit) {
+            setFormData({
+              phone: initialCustomer.phone || '',
+              name: initialCustomer.name || '',
+              email: initialCustomer.email || '',
+              nameOnRinger: addressToEdit.name_on_ringer || '',
+              address: addressToEdit.street_address || addressToEdit.street || '',
+              city: addressToEdit.city || '',
+              postalCode: addressToEdit.postal_code || '',
+              floorNumber: addressToEdit.floor_number || '',
+              notes: addressToEdit.notes || '',
+            });
+          } else {
+            // Address not found, fall back to empty address fields
+            setFormData({
+              phone: initialCustomer.phone || '',
+              name: initialCustomer.name || '',
+              email: initialCustomer.email || '',
+              nameOnRinger: '',
+              address: '',
+              city: '',
+              postalCode: '',
+              floorNumber: '',
+              notes: '',
+            });
+          }
+        } else if (isAddAddressMode) {
           // Add Address mode - only prefill customer info, leave address fields EMPTY for new address
           setFormData({
             phone: initialCustomer.phone || '',
@@ -483,7 +519,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         });
       }
     }
-  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode]);
+  }, [isOpen, initialPhone, initialCustomer, isAddAddressMode, isEditAddressMode]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -878,9 +914,62 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         return;
       }
 
+      // Handle EDIT ADDRESS mode - update existing address in customer_addresses table
+      if (mode === 'editAddress' && initialCustomer?.id && initialCustomer?.editAddressId) {
+        console.log('[AddCustomerModal] Updating address:', initialCustomer.editAddressId, 'for customer:', initialCustomer.id);
+
+        try {
+          const addressData = {
+            street_address: formData.address.trim(),
+            city: formData.city ? formData.city.trim() : null,
+            postal_code: formData.postalCode ? formData.postalCode.trim() : null,
+            floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
+            notes: formData.notes ? formData.notes.trim() : null,
+            coordinates: addressCoordinates,
+          };
+
+          // Find the address to get its current version
+          const addressToEdit = initialCustomer.addresses?.find(
+            (addr: any) => addr.id === initialCustomer.editAddressId
+          );
+          const currentVersion = addressToEdit?.version || 1;
+
+          // Use customerService to update the address
+          const result = await customerService.updateCustomerAddress(
+            initialCustomer.editAddressId,
+            addressData,
+            currentVersion
+          ) as any;
+
+          if (result && result.success) {
+            const updatedAddress = result.data;
+            // Update the addresses array with the edited address
+            const updatedAddresses = initialCustomer.addresses?.map((addr: any) =>
+              addr.id === initialCustomer.editAddressId ? { ...addr, ...updatedAddress } : addr
+            ) || [];
+
+            // Return the customer with updated addresses
+            const updatedCustomer = {
+              ...initialCustomer,
+              addresses: updatedAddresses,
+              // Keep editAddressId so OrderFlow knows which address was edited
+              editAddressId: initialCustomer.editAddressId,
+            };
+
+            onCustomerAdded(updatedCustomer);
+          } else {
+            throw new Error(result?.error || 'Failed to update address');
+          }
+        } catch (err: any) {
+          throw new Error(err.message || 'Failed to update address');
+        }
+        return;
+      }
+
       // Handle EDIT mode - update existing customer via IPC
       if (mode === 'edit' && initialCustomer?.id) {
         console.log('[AddCustomerModal] Updating existing customer via IPC:', initialCustomer.id);
+        console.log('[AddCustomerModal] initialCustomer.version:', (initialCustomer as any).version);
 
         try {
           const updates = {
@@ -897,15 +986,59 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             coordinates: addressCoordinates
           };
 
-          // Use optimisitic versioning if available, otherwise 0
-          const currentVersion = (initialCustomer as any).version || 0;
+          // Use optimistic versioning if available, otherwise fetch fresh version
+          let currentVersion = initialCustomer.version;
+          
+          // If no version, fetch fresh customer data to get current version
+          if (currentVersion === undefined || currentVersion === null) {
+            console.log('[AddCustomerModal] No version found, fetching fresh customer data...');
+            try {
+              // First invalidate cache to ensure we get fresh data
+              await window.electronAPI?.customerInvalidateCache?.(initialCustomer.phone);
+              
+              const freshCustomer = await window.electronAPI?.customerLookupByPhone?.(initialCustomer.phone);
+              console.log('[AddCustomerModal] Fresh customer data:', JSON.stringify(freshCustomer, null, 2));
+              if (freshCustomer?.version !== undefined && freshCustomer?.version !== null) {
+                currentVersion = freshCustomer.version;
+                console.log('[AddCustomerModal] Got fresh version:', currentVersion);
+              } else if (freshCustomer?.id) {
+                // Customer exists but has no version - this is a legacy customer
+                // We need to fetch the actual version from the database or use force update
+                console.log('[AddCustomerModal] Customer exists but no version in response, using force update (-1)');
+                currentVersion = -1; // Signal to skip version check for legacy customers
+              }
+            } catch (e) {
+              console.warn('[AddCustomerModal] Failed to fetch fresh version:', e);
+            }
+          }
+          
+          // If still no version after fetching, throw error - version is required for updates
+          if (currentVersion === undefined || currentVersion === null) {
+            console.error('[AddCustomerModal] Cannot update customer without version');
+            throw new Error(t('modals.addCustomer.versionRequired', 'Unable to update customer - please refresh and try again'));
+          }
+
+          console.log('[AddCustomerModal] Using version for update:', currentVersion);
 
           // Result is { success, data, conflict, error }
           const result = await customerService.updateCustomer(initialCustomer.id, updates, currentVersion) as any;
 
           if (result && result.success) {
-            // Success
-            onCustomerAdded(result.data);
+            // Success - merge the updated customer with address data from form
+            // The API returns customer without addresses, so we need to include them
+            const updatedCustomer = {
+              ...result.data,
+              // Include address data from form for immediate use
+              address: formData.address.trim(),
+              city: formData.city ? formData.city.trim() : undefined,
+              postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
+              floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
+              notes: formData.notes ? formData.notes.trim() : undefined,
+              name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
+              // Preserve existing addresses from initialCustomer if available
+              addresses: initialCustomer.addresses || [],
+            };
+            onCustomerAdded(updatedCustomer);
             setFormData({
               phone: '',
               name: '',
@@ -1000,6 +1133,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     if (isAddAddressMode) {
       return t('modals.addCustomer.addAddressTitle', 'Add New Address');
     }
+    if (isEditAddressMode) {
+      return t('modals.addCustomer.editAddressTitle', 'Edit Address');
+    }
     if (isEditing) {
       return t('modals.addCustomer.editTitle');
     }
@@ -1029,9 +1165,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.phone}
               onChange={(e) => handleInputChange('phone', e.target.value)}
               placeholder={t('modals.addCustomer.phonePlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddAddressMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-              disabled={isAddAddressMode}
-              readOnly={isAddAddressMode}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              disabled={isAddressOnlyMode}
+              readOnly={isAddressOnlyMode}
             />
           </div>
           {errors.phone && (
@@ -1171,9 +1307,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.name}
               onChange={(e) => handleInputChange('name', e.target.value)}
               placeholder={t('modals.addCustomer.namePlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddAddressMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-              disabled={isAddAddressMode}
-              readOnly={isAddAddressMode}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              disabled={isAddressOnlyMode}
+              readOnly={isAddressOnlyMode}
             />
           </div>
           {errors.name && (
@@ -1181,7 +1317,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           )}
         </div>
 
-        {/* Email - disabled in addAddress mode */}
+        {/* Email - disabled in addAddress/editAddress mode */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
             {t('modals.addCustomer.emailLabel')}
@@ -1193,9 +1329,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               value={formData.email}
               onChange={(e) => handleInputChange('email', e.target.value)}
               placeholder={t('modals.addCustomer.emailPlaceholder')}
-              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddAddressMode ? 'opacity-60 cursor-not-allowed' : ''}`}
-              disabled={isAddAddressMode}
-              readOnly={isAddAddressMode}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4 ${isAddressOnlyMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+              disabled={isAddressOnlyMode}
+              readOnly={isAddressOnlyMode}
             />
           </div>
           {errors.email && (

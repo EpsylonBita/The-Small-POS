@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS orders (
   order_type TEXT NOT NULL,
   table_number TEXT,
   delivery_address TEXT,
+  delivery_city TEXT,
+  delivery_postal_code TEXT,
+  delivery_floor TEXT,
+  delivery_notes TEXT,
+  name_on_ringer TEXT,
   special_instructions TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -34,7 +39,16 @@ CREATE TABLE IF NOT EXISTS orders (
   -- Hybrid Sync Routing Metadata
   routing_path TEXT, -- 'main', 'via_parent', 'direct_cloud'
   source_terminal_id TEXT, -- Original terminal ID if forwarded
-  forwarded_at TEXT -- Timestamp when forwarded
+  forwarded_at TEXT, -- Timestamp when forwarded
+  -- Driver assignment
+  driver_id TEXT,
+  driver_name TEXT,
+  staff_shift_id TEXT,
+  staff_id TEXT,
+  -- Discounts and tips
+  discount_percentage REAL,
+  discount_amount REAL,
+  tip_amount REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_sync_status ON orders(sync_status);
@@ -139,4 +153,26 @@ CREATE INDEX IF NOT EXISTS idx_terminal_settings_organization ON terminal_settin
 -- This ensures terminals receive a reasonable module set for new installs.
 -- Administrators should configure the correct business_type via the admin dashboard.
 -- The POS will emit a 'terminal-config-warning' IPC event when this fallback is used.
+
+-- ============================================================================
+-- SUBCATEGORIES CACHE TABLE (for offline item name resolution)
+-- ============================================================================
+-- Caches menu item names from Supabase subcategories table for offline printing
+-- and item name resolution when orders lack embedded names.
+CREATE TABLE IF NOT EXISTS subcategories_cache (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_en TEXT,
+  name_el TEXT,
+  category_id TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_subcategories_cache_updated ON subcategories_cache(updated_at);
+CREATE INDEX IF NOT EXISTS idx_subcategories_cache_category ON subcategories_cache(category_id);
+
+-- Version 4.0 (2025-12-23 - Item Name Resolution)
+-- - Added subcategories_cache table for offline item name resolution
+-- - Used by print handlers to resolve item names when orders lack embedded names
+-- - Synced from Supabase subcategories table during admin dashboard sync
 

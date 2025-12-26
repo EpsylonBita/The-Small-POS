@@ -1025,14 +1025,23 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
 
       // Calculate cash to return using the specified formula:
-      // cashToReturn = totalCashCollected - openingCash - totalExpenses - driverPayment
+      // cashToReturn = openingCash + totalCashCollected - totalExpenses - driverPayment
+      // Filter out canceled orders before calculating
       const openingCash = effectiveShift.opening_cash_amount || 0;
-      const totalCashCollected = freshSummary?.driverDeliveries?.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0) || 0;
+      const deliveries = freshSummary?.driverDeliveries || [];
+      const completedDeliveries = deliveries.filter((d: any) => {
+        const status = (d.status || d.order_status || '').toLowerCase();
+        return status !== 'cancelled' && status !== 'canceled';
+      });
+      const totalCashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
-      closingAmount = totalCashCollected - openingCash - totalExpenses - driverPayment;
-      console.log('Driver closingAmount (formula: totalCashCollected - openingCash - totalExpenses - driverPayment):', {
-        totalCashCollected,
+      closingAmount = openingCash + totalCashCollected - totalExpenses - driverPayment;
+      console.log('Driver closingAmount (formula: openingCash + totalCashCollected - totalExpenses - driverPayment):', {
+        totalDeliveries: deliveries.length,
+        completedDeliveries: completedDeliveries.length,
+        canceledDeliveries: deliveries.length - completedDeliveries.length,
         openingCash,
+        totalCashCollected,
         totalExpenses,
         driverPayment,
         closingAmount
@@ -1233,14 +1242,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
         // Print staff check-out receipt (role-specific)
         try {
+          console.log('[StaffShiftModal] Printing checkout for shift:', effectiveShift.id, 'role:', effectiveShift.role_type);
           const terminalName = await (window as any).electronAPI.getTerminalSetting('terminal', 'name');
-          await (window as any).electronAPI.printCheckout(
+          const printResult = await (window as any).electronAPI.printCheckout(
             effectiveShift.id,
             effectiveShift.role_type,
             terminalName || undefined
           );
+          console.log('[StaffShiftModal] Print checkout result:', printResult);
+          if (!printResult?.success) {
+            console.warn('[StaffShiftModal] Checkout print failed:', printResult?.error);
+          }
         } catch (printErr) {
-          console.warn('Staff checkout print failed:', printErr);
+          console.error('[StaffShiftModal] Staff checkout print error:', printErr);
         }
 
         await refreshActiveShift();
@@ -1692,18 +1706,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <Euro className="w-8 h-8 text-green-400" />
                       </div>
                       <input
-                        type="number"
-                        step="0.01"
+                        type="text"
+                        inputMode="decimal"
                         value={roleType === 'driver'
                           ? (!activeCashierExists ? '0' : driverStartingAmount)
                           : openingCash}
                         onChange={(e) => {
+                          const val = e.target.value.replace(/[^0-9.]/g, '');
                           if (roleType === 'driver') {
-                            setDriverStartingAmount(e.target.value);
+                            setDriverStartingAmount(val);
                           } else {
-                            setOpeningCash(e.target.value);
+                            setOpeningCash(val);
                           }
                         }}
+                        onFocus={(e) => e.target.select()}
                         placeholder={roleType === 'driver' ? '0.00 (optional)' : t('forms.placeholders.amount')}
                         className="liquid-glass-modal-input flex-1 text-3xl font-bold text-center"
                         readOnly={roleType === 'driver' && !activeCashierExists}
@@ -1832,8 +1848,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 rounded-xl p-4 border border-blue-500/20">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h3 className="font-bold liquid-glass-modal-text text-lg capitalize">{effectiveShift.role_type}</h3>
-                      <p className="text-xs text-gray-400 mt-1">Total Sales: <span className="text-green-400 font-semibold">${(effectiveShift.total_sales_amount || 0).toFixed(2)}</span></p>
+                      <h3 className="font-bold liquid-glass-modal-text text-lg">
+                        {effectiveShift.staff_name || <span className="capitalize">{effectiveShift.role_type}</span>}
+                      </h3>
+                      <p className="text-xs text-gray-400 mt-1">
+                        <span className="capitalize">{effectiveShift.role_type}</span> · Total Sales: <span className="text-green-400 font-semibold">${(effectiveShift.total_sales_amount || 0).toFixed(2)}</span>
+                      </p>
                     </div>
                     <div className="text-right">
                       <div className="text-2xl font-bold text-blue-300">{effectiveShift.total_orders_count || 0}</div>
@@ -1942,10 +1962,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </select>
 
                       <input
-                        type="number"
-                        step="0.01"
+                        type="text"
+                        inputMode="decimal"
                         value={expenseAmount}
-                        onChange={(e) => setExpenseAmount(e.target.value)}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/[^0-9.]/g, '');
+                          setExpenseAmount(val);
+                        }}
+                        onFocus={(e) => e.target.select()}
                         placeholder={t('modals.expense.amountPlaceholder')}
                         className="liquid-glass-modal-input text-sm"
                       />
@@ -2715,11 +2739,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <div className="relative">
                           <Euro className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                           <input
-                            type="number"
-                            step="0.01"
-                            min="0"
+                            type="text"
+                            inputMode="decimal"
                             value={paymentAmount}
-                            onChange={(e) => setPaymentAmount(e.target.value)}
+                            onChange={(e) => {
+                              const val = e.target.value.replace(/[^0-9.]/g, '');
+                              setPaymentAmount(val);
+                            }}
+                            onFocus={(e) => e.target.select()}
                             placeholder={expectedPayment ? `€${expectedPayment.toFixed(2)}` : "0.00"}
                             className="liquid-glass-modal-input w-full pl-9"
                           />
@@ -2838,11 +2865,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     </label>
                     <div className="flex items-center gap-3">
                       <input
-                        type="number"
-                        step="0.01"
-                        min="0"
+                        type="text"
+                        inputMode="decimal"
                         value={staffPayment}
-                        onChange={(e) => setStaffPayment(e.target.value)}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/[^0-9.]/g, '');
+                          setStaffPayment(val);
+                        }}
+                        onFocus={(e) => e.target.select()}
                         placeholder={t('forms.placeholders.amount')}
                         className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                       />
@@ -2857,11 +2887,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     </label>
                     <div className="flex items-center gap-3">
                       <input
-                        type="number"
-                        step="0.01"
-                        min="0"
+                        type="text"
+                        inputMode="decimal"
                         value={closingCash}
-                        onChange={(e) => setClosingCash(e.target.value)}
+                        onChange={(e) => {
+                          // Only allow numbers and decimal point
+                          const val = e.target.value.replace(/[^0-9.]/g, '');
+                          setClosingCash(val);
+                        }}
+                        onFocus={(e) => e.target.select()}
                         placeholder={t('forms.placeholders.amount')}
                         className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                         autoFocus
@@ -2929,11 +2963,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <Euro className="w-8 h-8 text-green-400" />
                     </div>
                     <input
-                      type="number"
-                      step="0.01"
-                      min="0"
+                      type="text"
+                      inputMode="decimal"
                       value={staffPayment}
-                      onChange={(e) => setStaffPayment(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value.replace(/[^0-9.]/g, '');
+                        setStaffPayment(val);
+                      }}
+                      onFocus={(e) => e.target.select()}
                       placeholder={t('forms.placeholders.amount')}
                       className="liquid-glass-modal-input flex-1 text-3xl font-bold text-center"
                       autoFocus
@@ -2945,9 +2982,27 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               {/* DRIVER CHECKOUT - Earnings Calculation */}
               {effectiveShift?.role_type === 'driver' && shiftSummary && (() => {
                 const startingAmount = effectiveShift.opening_cash_amount || 0;
-                const cashEarned = shiftSummary.breakdown?.overall?.cashTotal || 0;
-                const driverPaymentOwed = parseFloat(staffPayment || '0');
-                const amountToTake = cashEarned - driverPaymentOwed;
+
+                // Filter out canceled orders and get actual cash collected from deliveries
+                const deliveries = shiftSummary?.driverDeliveries || [];
+                const completedDeliveries = deliveries.filter((d: any) => {
+                  const status = (d.status || d.order_status || '').toLowerCase();
+                  return status !== 'cancelled' && status !== 'canceled';
+                });
+
+                // Calculate cash collected from completed deliveries only
+                const cashCollected = completedDeliveries.reduce((sum: number, d: any) =>
+                  sum + (d.cash_collected || 0), 0);
+
+                // Get total expenses
+                const totalExpenses = shiftSummary?.totalExpenses || 0;
+
+                // Get driver payment amount
+                const driverPayment = parseFloat(staffPayment || '0');
+
+                // Calculate amount to return to cashier
+                // Formula: Starting Amount + Cash Collected - Expenses - Driver Payment
+                const amountToReturn = startingAmount + cashCollected - totalExpenses - driverPayment;
 
                 return (
                   <div className="space-y-3">
@@ -2959,34 +3014,49 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                     {/* Earnings Summary */}
                     <div className="space-y-2">
-                      {/* Starting Amount */}
+                      {/* Starting Amount (cash taken from cashier) */}
                       <div className="flex justify-between items-center p-3 bg-blue-900/30 rounded-lg border border-blue-600/40">
                         <span className="text-sm text-blue-200">{t('modals.staffShift.startingAmount')}</span>
-                        <span className="font-bold text-blue-300">${startingAmount.toFixed(2)}</span>
+                        <span className="font-bold text-blue-300">+${startingAmount.toFixed(2)}</span>
                       </div>
 
-                      {/* Cash Earned */}
+                      {/* Cash Collected (from deliveries) */}
                       <div className="flex justify-between items-center p-3 bg-green-900/30 rounded-lg border border-green-600/40">
-                        <span className="text-sm text-green-200">{t('modals.staffShift.cashEarned')}</span>
-                        <span className="font-bold text-green-300">${cashEarned.toFixed(2)}</span>
+                        <span className="text-sm text-green-200">
+                          {t('modals.staffShift.cashCollected')} ({completedDeliveries.length} {t('modals.staffShift.completedOrdersLabel')})
+                        </span>
+                        <span className="font-bold text-green-300">+${cashCollected.toFixed(2)}</span>
                       </div>
 
-                      {/* Driver Payment Owed */}
-                      <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
-                        <span className="text-sm text-red-200">{t('modals.staffShift.driverPaymentOwed')}</span>
-                        <span className="font-bold text-red-300">-${driverPaymentOwed.toFixed(2)}</span>
-                      </div>
+                      {/* Expenses (if any) */}
+                      {totalExpenses > 0 && (
+                        <div className="flex justify-between items-center p-3 bg-orange-900/30 rounded-lg border border-orange-600/40">
+                          <span className="text-sm text-orange-200">{t('modals.staffShift.totalExpenses')}</span>
+                          <span className="font-bold text-orange-300">-${totalExpenses.toFixed(2)}</span>
+                        </div>
+                      )}
 
-                      {/* Amount to Take from Drawer */}
-                      <div className={`flex justify-between items-center p-3 rounded-lg border-2 font-semibold ${amountToTake >= 0
+                      {/* Driver Payment (if entered) */}
+                      {driverPayment > 0 && (
+                        <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
+                          <span className="text-sm text-red-200">{t('modals.staffShift.driverPayment')}</span>
+                          <span className="font-bold text-red-300">-${driverPayment.toFixed(2)}</span>
+                        </div>
+                      )}
+
+                      {/* Separator */}
+                      <div className="border-t border-white/20 my-2"></div>
+
+                      {/* Amount to Return to Cashier */}
+                      <div className={`flex justify-between items-center p-4 rounded-lg border-2 font-semibold ${amountToReturn >= 0
                         ? 'bg-yellow-900/30 border-yellow-500/50'
                         : 'bg-red-900/30 border-red-500/50'
                         }`}>
-                        <span className={`text-sm ${amountToTake >= 0 ? 'text-yellow-200' : 'text-red-200'}`}>
-                          {t('modals.staffShift.amountToTakeFromDrawer')}
+                        <span className={`text-base ${amountToReturn >= 0 ? 'text-yellow-200' : 'text-red-200'}`}>
+                          {t('modals.staffShift.amountToReturn', 'Ποσό που Θα Ληφθεί από Ταμείο')}
                         </span>
-                        <span className={amountToTake >= 0 ? 'text-lg text-yellow-300' : 'text-lg text-red-300'}>
-                          ${Math.abs(amountToTake).toFixed(2)}
+                        <span className={amountToReturn >= 0 ? 'text-xl text-yellow-300' : 'text-xl text-red-300'}>
+                          ${amountToReturn.toFixed(2)}
                         </span>
                       </div>
                     </div>
@@ -2994,21 +3064,26 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Driver Payment Input */}
                     <div className="bg-white/5 rounded-lg p-4 border border-white/10">
                       <label className="block text-xs font-semibold text-gray-300 mb-2 uppercase tracking-wide">
-                        {t('modals.staffShift.driverPayment')}
+                        {t('modals.staffShift.driverPaymentInput', 'ΠΛΗΡΩΜΗ ΟΔΗΓΟΥ (Enter your payment amount)')}
                       </label>
                       <div className="flex items-center gap-3">
                         <input
-                          type="number"
-                          step="0.01"
-                          min="0"
+                          type="text"
+                          inputMode="decimal"
                           value={staffPayment}
-                          onChange={(e) => setStaffPayment(e.target.value)}
-                          placeholder={t('forms.placeholders.amount')}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/[^0-9.]/g, '');
+                            setStaffPayment(val);
+                          }}
+                          onFocus={(e) => e.target.select()}
+                          placeholder="0.00"
                           className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                           autoFocus
                         />
                       </div>
-                      <p className="text-xs text-gray-400 mt-2">Enter your payment amount</p>
+                      <p className="text-xs text-gray-400 mt-2">
+                        {t('modals.staffShift.driverPaymentHelp', 'Enter the amount you received from the cashier as payment')}
+                      </p>
                     </div>
                   </div>
                 );

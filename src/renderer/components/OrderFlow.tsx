@@ -4,7 +4,6 @@ import { MenuModal } from './modals/MenuModal';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
-import { AddressSelectionModal } from './modals/AddressSelectionModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
@@ -41,6 +40,8 @@ interface Customer {
   floor_number?: string;
   notes?: string;
   name_on_ringer?: string;
+  version?: number;
+  editAddressId?: string; // ID of address being edited
   addresses?: Array<{
     id: string;
     street_address: string;
@@ -48,9 +49,12 @@ interface Customer {
     postal_code?: string;
     floor_number?: string;
     notes?: string;
+    delivery_notes?: string;
+    name_on_ringer?: string;
     address_type: string;
     is_default: boolean;
     created_at: string;
+    version?: number;
   }>;
 }
 
@@ -67,11 +71,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [isOrderTypeModalOpen, setIsOrderTypeModalOpen] = useState(false);
   const [isCustomerSearchModalOpen, setIsCustomerSearchModalOpen] = useState(false);
   const [isAddCustomerModalOpen, setIsAddCustomerModalOpen] = useState(false);
-  const [isAddressSelectionModalOpen, setIsAddressSelectionModalOpen] = useState(false);
   const [isMenuModalOpen, setIsMenuModalOpen] = useState(false);
 
-  // Customer modal mode: 'new' | 'edit' | 'addAddress'
-  const [customerModalMode, setCustomerModalMode] = useState<'new' | 'edit' | 'addAddress'>('new');
+  // Customer modal mode: 'new' | 'edit' | 'addAddress' | 'editAddress'
+  const [customerModalMode, setCustomerModalMode] = useState<'new' | 'edit' | 'addAddress' | 'editAddress'>('new');
   // Customer for editing or adding address in AddCustomerModal
   const [customerToEdit, setCustomerToEdit] = useState<Customer | null>(null);
 
@@ -150,7 +153,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsOrderTypeModalOpen(false);
     setIsCustomerSearchModalOpen(false);
     setIsAddCustomerModalOpen(false);
-    setIsAddressSelectionModalOpen(false);
     setIsMenuModalOpen(false);
     setSelectedOrderType(null);
     setSelectedCustomer(null);
@@ -181,7 +183,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       // For pickup orders, create a default customer and go directly to menu
       const pickupCustomer: Customer = {
         id: 'pickup-customer',
-        name: t('orderFlow.walkInCustomer'),
+        name: '',
         phone: '',
         email: '',
         addresses: []
@@ -200,6 +202,20 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [t]);
 
   const handleCustomerSelected = useCallback((customer: Customer) => {
+    console.log('[OrderFlow] handleCustomerSelected received:', {
+      id: customer.id,
+      name: customer.name,
+      name_on_ringer: customer.name_on_ringer,
+      notes: customer.notes,
+      selected_address_id: (customer as any).selected_address_id,
+      addressCount: customer.addresses?.length,
+      addresses: customer.addresses?.map((a: any) => ({
+        id: a.id,
+        street: a.street_address,
+        notes: a.notes
+      }))
+    });
+
     setSelectedCustomer(customer);
     setIsCustomerSearchModalOpen(false);
 
@@ -208,25 +224,55 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     if (selectedAddressId && customer.addresses) {
       const selectedAddr = customer.addresses.find((a: any) => a.id === selectedAddressId);
       if (selectedAddr) {
-        // Address already selected, skip address selection modal
-        setSelectedAddress(selectedAddr);
+        // Address already selected from CustomerSearchModal
+        // Use the notes from the customer object (which was set by CustomerSearchModal) if address notes is missing
+        const addressWithNotes = {
+          ...selectedAddr,
+          notes: selectedAddr.notes || customer.notes
+        };
+        console.log('[OrderFlow] Using selected address:', {
+          id: addressWithNotes.id,
+          street: addressWithNotes.street_address,
+          notes: addressWithNotes.notes
+        });
+        setSelectedAddress(addressWithNotes);
         setIsMenuModalOpen(true);
         return;
       }
     }
 
-    // If customer has multiple addresses and none pre-selected, show address selection modal
-    if (customer.addresses && customer.addresses.length > 1) {
-      setIsAddressSelectionModalOpen(true);
-    } else if (customer.addresses && customer.addresses.length === 1) {
-      // Single address, use it directly
-      setSelectedAddress(customer.addresses[0]);
+    // Use first/default address if available
+    if (customer.addresses && customer.addresses.length > 0) {
+      const defaultAddr = customer.addresses.find((a: any) => a.is_default) || customer.addresses[0];
+      console.log('[OrderFlow] Using default address:', {
+        id: defaultAddr.id,
+        street: defaultAddr.street_address,
+        notes: defaultAddr.notes
+      });
+      setSelectedAddress(defaultAddr);
+      setIsMenuModalOpen(true);
+    } else if (customer.address) {
+      // Fallback to legacy address field
+      const legacyAddress = {
+        street_address: customer.address,
+        city: (customer as any).city || '',
+        postal_code: customer.postal_code,
+        floor_number: customer.floor_number,
+        notes: customer.notes,
+      };
+      console.log('[OrderFlow] Using legacy address:', legacyAddress);
+      setSelectedAddress(legacyAddress);
       setIsMenuModalOpen(true);
     } else {
-      // No addresses, proceed to menu (will need to add address later)
-      setIsMenuModalOpen(true);
+      // No addresses - for delivery orders, go back to search
+      if (selectedOrderType === 'delivery') {
+        toast.error(t('orderFlow.noAddressForDelivery'));
+        setIsCustomerSearchModalOpen(true);
+      } else {
+        setIsMenuModalOpen(true);
+      }
     }
-  }, []);
+  }, [selectedOrderType, t]);
 
   const [newCustomerInitialPhone, setNewCustomerInitialPhone] = useState<string>('');
 
@@ -242,7 +288,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setSelectedCustomer(customer);
     setSelectedAddress(address);
     setDeliveryZoneInfo(validationResult || null);
-    setIsAddressSelectionModalOpen(false);
 
     // Check if we can proceed directly to menu
     if (validationResult?.uiState?.canProceed) {
@@ -272,7 +317,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setCustomerToEdit(customer);
     setCustomerModalMode('addAddress');
     setIsCustomerSearchModalOpen(false);
-    setIsAddressSelectionModalOpen(false);
     setIsAddCustomerModalOpen(true);
   }, []);
 
@@ -293,27 +337,47 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [t]);
 
   const handleEditCustomer = useCallback((customer: Customer) => {
-    // For editing, we reuse the AddCustomerModal with the customer's data pre-filled
-    setCustomerToEdit(customer);
-    setCustomerModalMode('edit');
+    // Check if we're editing a specific address (editAddressId is set by CustomerSearchModal)
+    if (customer.editAddressId) {
+      // Edit address mode
+      setCustomerToEdit(customer);
+      setCustomerModalMode('editAddress');
+    } else {
+      // Edit customer mode
+      setCustomerToEdit(customer);
+      setCustomerModalMode('edit');
+    }
     setIsCustomerSearchModalOpen(false);
     setIsAddCustomerModalOpen(true);
   }, []);
 
   const handleCustomerAdded = useCallback((newCustomer: Customer) => {
     const wasEditing = !!customerToEdit;
+    const wasEditingAddress = customerModalMode === 'editAddress';
+    const wasAddingAddress = customerModalMode === 'addAddress';
+    
     setSelectedCustomer(newCustomer);
     setIsAddCustomerModalOpen(false);
     setCustomerToEdit(null); // Clear edit state
+    setCustomerModalMode('new'); // Reset mode
 
-    // If new customer has addresses, use the first one
-    if (newCustomer.addresses && newCustomer.addresses.length > 0) {
-      setSelectedAddress(newCustomer.addresses[0]);
+    if (wasEditingAddress || wasAddingAddress) {
+      // After editing/adding an address, go back to customer search to show the same customer's addresses
+      toast.success(wasEditingAddress ? t('orderFlow.addressUpdated', 'Address updated') : t('orderFlow.addressAdded'));
+      setIsCustomerSearchModalOpen(true);
+    } else if (wasEditing) {
+      // After editing customer info, go back to customer search for address selection
+      toast.success(t('orderFlow.customerUpdated'));
+      setIsCustomerSearchModalOpen(true);
+    } else {
+      // New customer - proceed to menu
+      if (newCustomer.addresses && newCustomer.addresses.length > 0) {
+        setSelectedAddress(newCustomer.addresses[0]);
+      }
+      setIsMenuModalOpen(true);
+      toast.success(t('orderFlow.customerAdded'));
     }
-
-    setIsMenuModalOpen(true);
-    toast.success(wasEditing ? t('orderFlow.customerUpdated') : t('orderFlow.customerAdded'));
-  }, [t, customerToEdit]);
+  }, [t, customerToEdit, customerModalMode]);
 
   const handleMenuModalClose = useCallback(() => {
     resetFlow();
@@ -331,15 +395,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setShowZoneAlert(false);
     setDeliveryZoneInfo(null);
     setSelectedAddress(null);
-    // If customer has multiple addresses, show selection modal
-    if (selectedCustomer?.addresses && selectedCustomer.addresses.length > 1) {
-      setIsAddressSelectionModalOpen(true);
-    } else {
-      // Otherwise, go back to customer search to select different customer
-      setSelectedCustomer(null);
-      setIsCustomerSearchModalOpen(true);
-    }
-  }, [selectedCustomer]);
+    // Go back to customer search for address selection
+    setIsCustomerSearchModalOpen(true);
+  }, []);
 
   const handleSwitchToPickup = useCallback(() => {
     setShowZoneAlert(false);
@@ -350,7 +408,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     // Create pickup customer and proceed to menu
     const pickupCustomer: Customer = {
       id: 'pickup-customer',
-      name: t('orderFlow.walkInCustomer'),
+      name: '',
       phone: '',
       email: '',
       addresses: []
@@ -485,6 +543,17 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       }
 
       // Create order object matching the API expected format and shared types
+      console.log('[OrderFlow] ========== ORDER CREATION DEBUG ==========');
+      console.log('[OrderFlow] selectedAddress:', JSON.stringify(selectedAddress, null, 2));
+      console.log('[OrderFlow] selectedCustomer:', JSON.stringify({
+        id: selectedCustomer?.id,
+        name: selectedCustomer?.name,
+        name_on_ringer: selectedCustomer?.name_on_ringer,
+        ringer_name: (selectedCustomer as any)?.ringer_name
+      }, null, 2));
+      console.log('[OrderFlow] delivery_notes will be:', selectedAddress?.notes);
+      console.log('[OrderFlow] name_on_ringer will be:', selectedCustomer?.name_on_ringer);
+      
       const orderToCreate = {
         // API required fields
         customer_id: selectedCustomer?.id !== 'pickup-customer' ? selectedCustomer?.id : null,
@@ -508,6 +577,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         status: 'pending' as const,
         payment_method: orderData.paymentData?.method || null,
         delivery_address: deliveryAddress,
+        delivery_city: selectedAddress?.city || null,
+        delivery_postal_code: selectedAddress?.postal_code || null,
+        delivery_floor: selectedAddress?.floor_number || null,
+        delivery_notes: selectedAddress?.notes || selectedAddress?.delivery_notes || null,
+        name_on_ringer: selectedCustomer?.name_on_ringer || selectedAddress?.name_on_ringer || null,
         notes: orderData.notes || null,
 
         // Driver assignment for delivery orders
@@ -525,7 +599,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         // Additional fields for local storage compatibility
         orderNumber: `ORD-${Date.now().toString().slice(-6)}`,
-        customerName: selectedCustomer?.name || t('orderFlow.walkInCustomer'),
+        customerName: selectedCustomer?.name || '',
         customerPhone: selectedCustomer?.phone || '',
         orderType: selectedOrderType as 'pickup' | 'delivery',
         paymentStatus: (orderData.paymentData ? 'completed' : 'pending') as 'pending' | 'completed' | 'processing' | 'failed' | 'refunded',
@@ -540,6 +614,13 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       };
 
       // Create order using the store method (handles both local storage and Supabase sync)
+
+      // Debug: Log the final order data before creation
+      console.log('[OrderFlow] ========== FINAL ORDER DATA ==========');
+      console.log('[OrderFlow] orderToCreate.delivery_notes:', orderToCreate.delivery_notes);
+      console.log('[OrderFlow] orderToCreate.name_on_ringer:', orderToCreate.name_on_ringer);
+      console.log('[OrderFlow] selectedAddress:', selectedAddress);
+      console.log('[OrderFlow] selectedCustomer.name_on_ringer:', selectedCustomer?.name_on_ringer);
 
       // Ensure a cashier shift is active before allowing order creation
       try {
@@ -737,6 +818,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         onAddNewCustomer={handleAddNewCustomer}
         onAddNewAddress={handleAddNewAddress}
         onEditCustomer={handleEditCustomer}
+        initialCustomer={selectedCustomer}
       />
 
       {/* Add Customer Modal - also used for editing and adding new addresses */}
@@ -753,17 +835,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         mode={customerModalMode}
       />
 
-      {/* Address Selection Modal */}
-      {selectedCustomer && isAddressSelectionModalOpen && (
-        <AddressSelectionModal
-          isOpen={isAddressSelectionModalOpen}
-          onClose={() => setIsAddressSelectionModalOpen(false)}
-          customer={selectedCustomer}
-          orderType={selectedOrderType || 'delivery'}
-          onAddressSelected={handleAddressSelected}
-          onAddNewAddress={handleAddNewAddress}
-        />
-      )}
+
 
       {/* Zone Validation Alert - Displayed when delivery zone validation requires attention */}
       {showZoneAlert && deliveryZoneInfo && selectedAddress && (

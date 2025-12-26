@@ -213,9 +213,9 @@ export class CustomerSyncService {
         customerData.organization_id = this.organizationId
       }
 
-      // Map full_name from either full_name or name input
+      // Map name field (DB column is 'name', not 'full_name')
       if ((data as any).full_name || (data as any).name) {
-        customerData.full_name = (data as any).full_name || (data as any).name
+        customerData.name = (data as any).name || (data as any).full_name
       }
       if ((data as any).email !== undefined) {
         customerData.email = (data as any).email
@@ -259,8 +259,9 @@ export class CustomerSyncService {
       if ((updates as any).phone !== undefined) {
         updateData.phone = updates.phone ? this.normalizePhone(updates.phone) : null
       }
+      // Map name field (DB column is 'name', not 'full_name')
       if ((updates as any).full_name || (updates as any).name) {
-        updateData.full_name = (updates as any).full_name || (updates as any).name
+        updateData.name = (updates as any).name || (updates as any).full_name
       }
       if ((updates as any).email !== undefined) {
         updateData.email = (updates as any).email
@@ -268,6 +269,20 @@ export class CustomerSyncService {
       if ((updates as any).loyalty_points !== undefined) {
         updateData.loyalty_points = (updates as any).loyalty_points
       }
+      // Valid customer table fields only (address-related fields are in customer_addresses table)
+      if ((updates as any).address !== undefined) {
+        updateData.address = (updates as any).address
+      }
+      if ((updates as any).postal_code !== undefined) {
+        updateData.postal_code = (updates as any).postal_code
+      }
+      if ((updates as any).notes !== undefined) {
+        updateData.notes = (updates as any).notes
+      }
+      if ((updates as any).ringer_name !== undefined) {
+        updateData.ringer_name = (updates as any).ringer_name
+      }
+      // Note: city, floor_number, coordinates belong to customer_addresses table, not customers
 
       // Remove undefined values
       Object.keys(updateData).forEach(key => {
@@ -276,15 +291,36 @@ export class CustomerSyncService {
         }
       })
 
-      // Increment version for optimistic locking
-      updateData.version = currentVersion + 1
+      // Skip version check if currentVersion is -1 (legacy customer without version)
+      const skipVersionCheck = currentVersion === -1
 
-      // Attempt update with version check
-      const { data: updated, error } = await this.supabase
-        .from('customers')
-        .update(updateData)
-        .eq('id', customerId)
-        .eq('version', currentVersion)
+      // For version check, we need to handle NULL versions in the database
+      // If version is 1 (default), also try matching NULL for legacy customers
+      let query;
+      if (skipVersionCheck) {
+        // Force update without version check
+        query = this.supabase
+          .from('customers')
+          .update(updateData)
+          .eq('id', customerId)
+      } else if (currentVersion === 1) {
+        // Version 1 might mean the DB has NULL or 1, try both
+        query = this.supabase
+          .from('customers')
+          .update({ ...updateData, version: 2 })
+          .eq('id', customerId)
+          .or(`version.eq.1,version.is.null`)
+      } else {
+        // Normal version check
+        query = this.supabase
+          .from('customers')
+          .update({ ...updateData, version: currentVersion + 1 })
+          .eq('id', customerId)
+          .eq('version', currentVersion)
+      }
+
+      // Attempt update
+      const { data: updated, error } = await query
         .select()
         .single()
 
@@ -367,11 +403,11 @@ export class CustomerSyncService {
       if ((address as any).floor_number !== undefined) addressData.floor_number = (address as any).floor_number
       if ((address as any).address_type !== undefined) addressData.address_type = (address as any).address_type
       if ((address as any).is_default !== undefined) addressData.is_default = (address as any).is_default
-      // Support both 'delivery_notes' (canonical) and 'notes' (alias) field names
-      if ((address as any).delivery_notes !== undefined || (address as any).notes !== undefined) {
-        addressData.delivery_notes = (address as any).delivery_notes !== undefined 
-          ? (address as any).delivery_notes 
-          : (address as any).notes
+      // Notes field - DB column is 'notes' (not 'delivery_notes')
+      if ((address as any).notes !== undefined || (address as any).delivery_notes !== undefined) {
+        addressData.notes = (address as any).notes !== undefined 
+          ? (address as any).notes 
+          : (address as any).delivery_notes
       }
 
       const { data: created, error } = await this.supabase
@@ -412,11 +448,11 @@ export class CustomerSyncService {
       if ((updates as any).floor_number !== undefined) updateData.floor_number = (updates as any).floor_number
       if ((updates as any).address_type !== undefined) updateData.address_type = (updates as any).address_type
       if ((updates as any).is_default !== undefined) updateData.is_default = (updates as any).is_default
-      // Support both 'delivery_notes' (canonical) and 'notes' (alias) field names
-      if ((updates as any).delivery_notes !== undefined || (updates as any).notes !== undefined) {
-        updateData.delivery_notes = (updates as any).delivery_notes !== undefined 
-          ? (updates as any).delivery_notes 
-          : (updates as any).notes
+      // Notes field - DB column is 'notes' (not 'delivery_notes')
+      if ((updates as any).notes !== undefined || (updates as any).delivery_notes !== undefined) {
+        updateData.notes = (updates as any).notes !== undefined 
+          ? (updates as any).notes 
+          : (updates as any).delivery_notes
       }
 
       // Remove undefined values
@@ -554,6 +590,13 @@ export class CustomerSyncService {
         resolved: false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
+      }
+
+      // Add organization_id (required field)
+      if (this.organizationId) {
+        conflictData.organization_id = this.organizationId
+      } else if (remoteData?.organization_id) {
+        conflictData.organization_id = remoteData.organization_id
       }
 
       const { data: conflict, error } = await this.supabase

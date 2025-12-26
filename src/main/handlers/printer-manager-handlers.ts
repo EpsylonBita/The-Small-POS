@@ -287,8 +287,14 @@ export function registerPrinterManagerHandlers(db?: Database.Database): void {
       updates: Partial<Omit<PrinterConfig, 'id' | 'createdAt'>>
     ) => {
       try {
+        console.log('[printer:update] Updating printer:', printerId);
+        console.log('[printer:update] Updates received:', JSON.stringify(updates, null, 2));
+        console.log('[printer:update] receiptTemplate in updates:', updates.receiptTemplate);
+        
         const manager = getPrinterManager();
         const updatedConfig = await manager.updatePrinter(printerId, updates);
+        
+        console.log('[printer:update] Updated config receiptTemplate:', updatedConfig.receiptTemplate);
         return { success: true, printer: updatedConfig };
       } catch (error) {
         console.error('[printer:update] Error:', error);

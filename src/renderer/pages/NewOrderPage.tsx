@@ -22,6 +22,7 @@ interface Customer {
   name: string;
   phone?: string;
   email?: string;
+  version?: number;
 }
 
 interface NewOrderPageProps {
@@ -628,6 +629,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
             floor_number: (existingCustomer as any).floor_number,
             notes: (existingCustomer as any).notes,
             name_on_ringer: (existingCustomer as any).name_on_ringer,
+            version: existingCustomer.version,
           } : undefined}
         />
       )}

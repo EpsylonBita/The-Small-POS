@@ -16,6 +16,7 @@ const resources = {
 };
 
 // Get language from localStorage or default to 'en'
+// Note: For main process, this will be updated via IPC when SettingsService is available
 const getInitialLanguage = (): string => {
   try {
     if (typeof localStorage !== 'undefined') {
@@ -25,7 +26,8 @@ const getInitialLanguage = (): string => {
       }
     }
   } catch (e) {
-    console.warn('Failed to read language from localStorage:', e);
+    // Main process doesn't have localStorage - default to 'en'
+    // Language will be updated via updateLanguageFromDatabase() after SettingsService init
   }
   return 'en';
 };
@@ -47,6 +49,22 @@ if (!i18n.isInitialized) {
       debug: false,
       initImmediate: false,
     });
+}
+
+/**
+ * Update i18n language from database
+ * Called after SettingsService is initialized in main process
+ */
+export function updateLanguageFromDatabase(settingsService: any): void {
+  try {
+    const language = settingsService.getLanguage();
+    if (language && ['en', 'el'].includes(language)) {
+      i18n.changeLanguage(language);
+      console.log(`[i18n] Language updated from database: ${language}`);
+    }
+  } catch (e) {
+    console.warn('[i18n] Failed to update language from database:', e);
+  }
 }
 
 export default i18n;

@@ -152,17 +152,31 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
 
+  // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
+  const isMenuModalOpenRef = React.useRef(false);
+  useEffect(() => {
+    isMenuModalOpenRef.current = showMenuModal || showEditMenuModal;
+  }, [showMenuModal, showEditMenuModal]);
+
   // Silent refresh of orders grid every 15 seconds
   // Uses silentRefresh which doesn't trigger loading states or flash the UI
-  // Modals remain open and unaffected during refresh
   // Note: Interval increased to prevent 429 rate limiting from admin API
+  // IMPORTANT: We skip refresh when menu modals are open to prevent ingredient
+  // selection state from being reset due to parent re-renders
   const { isShiftActive } = useShift();
   useEffect(() => {
     // Do not refresh while shift is inactive
     if (!isShiftActive) return;
 
     const intervalId = setInterval(() => {
-      // Silent refresh - no loading state, no flash, no modal closing
+      // Skip refresh if menu modals are open to prevent ingredient selection reset
+      // When orders state updates, it causes re-renders that propagate to MenuItemModal
+      // where the selectedIngredients useEffect gets triggered and resets the selection
+      // Using ref to avoid recreating interval when modal state changes
+      if (isMenuModalOpenRef.current) {
+        return;
+      }
+      // Silent refresh - no loading state, no flash
       silentRefresh();
     }, 15000); // 15 seconds to avoid rate limiting
 
@@ -372,7 +386,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       setOrderType('pickup');
       // For pickup orders, go directly to menu with basic customer info
       setCustomerInfo({
-        name: t('orderFlow.walkInCustomer'),
+        name: '',
         phone: '',
         email: '',
         address: {
@@ -919,7 +933,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         toast.success(t('orderDashboard.orderCreated'));
         // Refresh orders to get the new order
         await silentRefresh();
-        
+
         // Auto-print receipt/ticket for new orders
         if (result.orderId) {
           console.log('[OrderDashboard] Starting auto-print for order:', result.orderId);
@@ -1163,7 +1177,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   const handleEditOrder = () => {
     setShowEditOptionsModal(false);
-    
+
     // Get the order being edited to determine its type
     if (pendingEditOrders.length > 0) {
       const orderToEdit = orders.find(order => order.id === pendingEditOrders[0]);
@@ -1173,19 +1187,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         setCurrentEditOrderId(orderToEdit.id);
         setCurrentEditSupabaseId(orderToEdit.supabase_id || (orderToEdit as any).supabaseId);
         setCurrentEditOrderNumber(orderToEdit.order_number || orderToEdit.orderNumber);
-        
+
         console.log('[OrderDashboard] handleEditOrder - orderId:', orderToEdit.id, 'supabaseId:', orderToEdit.supabase_id, 'orderNumber:', orderToEdit.order_number || orderToEdit.orderNumber);
-        
+
         // Determine order type - handle both camelCase and snake_case
         const orderTypeValue = (orderToEdit.orderType || (orderToEdit as any).order_type || 'pickup') as string;
         // Map dine-in to pickup for menu display purposes
         const menuOrderType = (orderTypeValue === 'dine-in' || orderTypeValue === 'dine_in')
-          ? 'pickup' 
+          ? 'pickup'
           : (orderTypeValue === 'delivery' ? 'delivery' : 'pickup');
         setEditingOrderType(menuOrderType);
       }
     }
-    
+
     // Open the menu-based edit modal instead of the simple edit modal
     setShowEditMenuModal(true);
   };
@@ -1234,7 +1248,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           items,
           orderNotes
         });
-        
+
         if (!result?.success) {
           throw new Error(result?.error || 'Failed to update order items');
         }
@@ -1275,7 +1289,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         items: orderData.items,
         orderNotes: orderData.notes
       });
-      
+
       if (!result?.success) {
         throw new Error(result?.error || 'Failed to update order items');
       }

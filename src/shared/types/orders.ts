@@ -84,6 +84,8 @@ export interface Order {
   table_number?: string | null; // Allow null for compatibility
   tableNumber?: string; // For backward compatibility
   delivery_address?: string | null; // Allow null for compatibility
+  delivery_notes?: string | null; // Notes for delivery address
+  name_on_ringer?: string | null; // Name on the ringer/doorbell
   address?: string; // For backward compatibility
   special_instructions?: string;
   notes?: string; // For backward compatibility

@@ -3,12 +3,15 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
+import { discoverBluetoothPrinters, getBluetoothStatus } from '../../utils/web-bluetooth-printer-discovery'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
 type PrinterRole = 'receipt' | 'kitchen' | 'bar' | 'label'
 type PrinterState = 'online' | 'offline' | 'error' | 'busy'
 type PaperSize = '58mm' | '80mm' | '112mm'
+type GreekRenderMode = 'text' | 'bitmap'
+type ReceiptTemplate = 'classic' | 'modern'
 
 interface ConnectionDetails {
   type: string
@@ -31,6 +34,8 @@ interface PrinterConfig {
   connectionDetails: ConnectionDetails
   paperSize: PaperSize
   characterSet: string
+  greekRenderMode?: GreekRenderMode
+  receiptTemplate?: ReceiptTemplate
   role: PrinterRole
   isDefault: boolean
   fallbackPrinterId?: string
@@ -122,6 +127,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     systemPrinterName: '',
     paperSize: '80mm' as PaperSize,
     characterSet: 'PC437_USA',
+    greekRenderMode: 'text' as GreekRenderMode,
+    receiptTemplate: 'classic' as ReceiptTemplate,
     role: 'receipt' as PrinterRole,
     isDefault: false,
     fallbackPrinterId: '',
@@ -169,7 +176,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     return () => unsubscribe?.()
   }, [isOpen, api])
 
-  // Discover printers
+  // Discover printers (network, USB, system)
   const handleDiscover = async (types?: PrinterType[]) => {
     setScanning(true)
     try {
@@ -183,6 +190,38 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     } catch (e) {
       console.error('Discovery failed:', e)
       toast.error(t('settings.printer.discoveryFailed'))
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  // Discover Bluetooth printers - uses native Windows Bluetooth detection
+  const handleDiscoverBluetooth = async () => {
+    setScanning(true)
+    try {
+      console.log('[PrinterSettings] Scanning for Bluetooth devices...')
+
+      // Call the updated handler that scans Windows paired devices
+      const result = await api?.printerDiscover?.(['bluetooth'])
+
+      if (result?.success) {
+        const btDevices = result.printers || []
+        console.log('[PrinterSettings] Found Bluetooth devices:', btDevices)
+
+        if (btDevices.length > 0) {
+          // Replace discovered printers with Bluetooth results
+          setDiscoveredPrinters(btDevices)
+          setViewMode('discover')
+          toast.success(t('settings.printer.bluetoothDeviceFound', { count: btDevices.length }))
+        } else {
+          toast(t('settings.printer.noBluetoothDevicesFound'), { icon: 'ℹ️' })
+        }
+      } else {
+        toast.error(result?.error || t('settings.printer.bluetoothDiscoveryFailed'))
+      }
+    } catch (e: any) {
+      console.error('Bluetooth discovery failed:', e)
+      toast.error(e.message || t('settings.printer.bluetoothDiscoveryFailed'))
     } finally {
       setScanning(false)
     }
@@ -224,6 +263,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       systemPrinterName: '',
       paperSize: '80mm',
       characterSet: 'PC437_USA',
+      greekRenderMode: 'text',
+      receiptTemplate: 'classic',
       role: 'receipt',
       isDefault: printers.length === 0,
       fallbackPrinterId: '',
@@ -276,6 +317,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         connectionDetails: buildConnectionDetails(),
         paperSize: formData.paperSize,
         characterSet: formData.characterSet,
+        greekRenderMode: formData.greekRenderMode,
+        receiptTemplate: formData.receiptTemplate,
         role: formData.role,
         isDefault: formData.isDefault,
         fallbackPrinterId: formData.fallbackPrinterId || undefined,
@@ -398,6 +441,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       systemPrinterName: printer.type === 'system' ? (conn.systemName || '') : '',
       paperSize: printer.paperSize,
       characterSet: printer.characterSet,
+      greekRenderMode: printer.greekRenderMode || 'text',
+      receiptTemplate: printer.receiptTemplate || 'classic',
       role: printer.role,
       isDefault: printer.isDefault,
       fallbackPrinterId: printer.fallbackPrinterId || '',
@@ -422,6 +467,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       systemPrinterName: '',
       paperSize: '80mm',
       characterSet: 'PC437_USA',
+      greekRenderMode: 'text',
+      receiptTemplate: 'classic',
       role: 'receipt',
       isDefault: false,
       fallbackPrinterId: '',
@@ -516,6 +563,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           className={liquidGlassModalButton('secondary', 'sm')}
         >
           {scanning ? t('settings.printer.scanning') : t('settings.printer.discoverPrinters')}
+        </button>
+        <button
+          onClick={handleDiscoverBluetooth}
+          disabled={scanning}
+          className={liquidGlassModalButton('secondary', 'sm')}
+          title={t('settings.printer.discoverBluetoothTooltip')}
+        >
+          {t('settings.printer.discoverBluetooth')}
         </button>
       </div>
 
@@ -787,6 +842,72 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           <option value="112mm">112mm</option>
         </select>
       </div>
+
+      {/* Character Set / Code Page */}
+      <div>
+        <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+          {t('settings.printer.characterSet', 'Character Set')}
+        </label>
+        <select
+          value={formData.characterSet}
+          onChange={e => setFormData(prev => ({ ...prev, characterSet: e.target.value }))}
+          className="liquid-glass-modal-input"
+        >
+          <option value="PC437_USA">PC437 (USA/Standard)</option>
+          <option value="CP66_GREEK">CP66 (Chinese/Netum Greek)</option>
+          <option value="PC737_GREEK">PC737 (Greek)</option>
+          <option value="PC851_GREEK">PC851 (Greek)</option>
+          <option value="PC869_GREEK">PC869 (Greek)</option>
+          <option value="PC850_MULTILINGUAL">PC850 (Multilingual)</option>
+          <option value="PC852_LATIN2">PC852 (Latin 2)</option>
+          <option value="PC866_CYRILLIC">PC866 (Cyrillic)</option>
+          <option value="PC1252_LATIN1">PC1252 (Latin 1)</option>
+          <option value="PC1253_GREEK">PC1253 (Windows Greek)</option>
+        </select>
+        <p className="text-xs text-gray-400 mt-1">
+          {t('settings.printer.characterSetHint', 'Select the character set that matches your printer\'s default code page. For Greek, try PC737 or PC1253.')}
+        </p>
+      </div>
+
+      {/* Greek Render Mode - only show when Greek character set is selected */}
+      {(formData.characterSet.includes('GREEK') || formData.characterSet === 'CP66_GREEK') && (
+        <div>
+          <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+            {t('settings.printer.greekRenderMode', 'Greek Rendering Mode')}
+          </label>
+          <select
+            value={formData.greekRenderMode}
+            onChange={e => setFormData(prev => ({ ...prev, greekRenderMode: e.target.value as GreekRenderMode }))}
+            className="liquid-glass-modal-input"
+          >
+            <option value="text">{t('settings.printer.greekRenderModeText', 'Text (use printer fonts)')}</option>
+            <option value="bitmap">{t('settings.printer.greekRenderModeBitmap', 'Bitmap (render as image)')}</option>
+          </select>
+          <p className="text-xs text-gray-400 mt-1">
+            {t('settings.printer.greekRenderModeHint', 'Use "Text" if your printer has Greek fonts. Use "Bitmap" if Greek characters print as gibberish or squares.')}
+          </p>
+        </div>
+      )}
+
+      {/* Receipt Template - only show for receipt printers */}
+      {formData.role === 'receipt' && (
+        <div>
+          <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+            {t('settings.printer.receiptTemplate', 'Receipt Template')}
+          </label>
+          <select
+            value={formData.receiptTemplate}
+            onChange={e => setFormData(prev => ({ ...prev, receiptTemplate: e.target.value as ReceiptTemplate }))}
+            className="liquid-glass-modal-input"
+          >
+            <option value="classic">{t('settings.printer.receiptTemplateClassic', 'Classic (simple text layout)')}</option>
+            <option value="modern">{t('settings.printer.receiptTemplateModern', 'Modern (styled with headers)')}</option>
+          </select>
+          <p className="text-xs text-gray-400 mt-1">
+            {t('settings.printer.receiptTemplateHint', 'Classic: simple text-based layout. Modern: styled layout with pillow-shaped section headers.')}
+          </p>
+        </div>
+      )}
 
       {/* Role */}
       <div>

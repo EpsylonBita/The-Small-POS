@@ -63,11 +63,23 @@ function serializeQueuedJob(job: QueuedJob): SerializedQueuedJob {
  * Deserialize a database row to QueuedJob
  */
 function deserializeQueuedJob(row: PrintQueueRow): QueuedJob {
+  let data = JSON.parse(row.job_data) as PrintJobData;
+  
+  // Restore Buffer objects that were serialized as {type: "Buffer", data: [...]}
+  if (data && typeof data === 'object' && 'buffer' in data) {
+    const rawData = data as { buffer: any; type?: string };
+    if (rawData.buffer && typeof rawData.buffer === 'object' && rawData.buffer.type === 'Buffer' && Array.isArray(rawData.buffer.data)) {
+      // Restore the Buffer from the serialized format
+      rawData.buffer = Buffer.from(rawData.buffer.data);
+      data = rawData as PrintJobData;
+    }
+  }
+  
   return {
     id: row.id,
     printerId: row.printer_id,
     type: row.job_type as PrintJobType,
-    data: JSON.parse(row.job_data) as PrintJobData,
+    data,
     priority: row.priority,
     status: row.status as QueuedJobStatus,
     retryCount: row.retry_count,

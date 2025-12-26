@@ -90,6 +90,39 @@ export enum PaperSize {
   MM_112 = '112mm',
 }
 
+/**
+ * Greek text rendering mode for printers
+ * - 'text': Use printer's built-in Greek fonts (faster, requires printer support)
+ * - 'bitmap': Render Greek as images (slower, works on all printers)
+ */
+export type GreekRenderMode = 'text' | 'bitmap';
+
+/**
+ * Receipt template style
+ * - 'classic': Simple text-based layout (left image)
+ * - 'modern': Styled layout with pillow-shaped headers (right image)
+ */
+export type ReceiptTemplate = 'classic' | 'modern';
+
+// ============================================================================
+// Receipt Template Configuration
+// ============================================================================
+
+/**
+ * Configuration for receipt templates
+ * Used by all checkout and report templates for consistent formatting
+ */
+export interface ReceiptTemplateConfig {
+  paperSize: PaperSize;
+  language: 'en' | 'el';
+  currency: string;
+  terminalName?: string;
+  storeName?: string;
+  storeAddress?: string;
+  storePhone?: string;
+  receiptTemplate?: ReceiptTemplate;
+}
+
 // ============================================================================
 // Connection Details Types
 // ============================================================================
@@ -156,7 +189,9 @@ export interface PrinterConfig {
   type: PrinterType;
   connectionDetails: ConnectionDetails;
   paperSize: PaperSize;
-  characterSet: string; // 'PC437_USA', 'GBK', etc.
+  characterSet: string; // 'PC437_USA', 'CP66_GREEK', etc.
+  greekRenderMode?: GreekRenderMode; // 'text' or 'bitmap' for Greek printing
+  receiptTemplate?: ReceiptTemplate; // 'classic' or 'modern' receipt style
   role: PrinterRole;
   isDefault: boolean;
   fallbackPrinterId?: string;
@@ -193,7 +228,7 @@ export interface PrintOrderItem {
  */
 export interface ReceiptData {
   orderNumber: string;
-  orderType: 'dine-in' | 'takeout' | 'delivery';
+  orderType: 'dine-in' | 'pickup' | 'delivery';
   timestamp: Date;
   items: PrintOrderItem[];
   subtotal: number;
@@ -205,6 +240,8 @@ export interface ReceiptData {
   customerName?: string;
   customerPhone?: string;
   deliveryAddress?: string;
+  deliveryNotes?: string;
+  ringerName?: string;
   tableName?: string;
 }
 
@@ -213,7 +250,7 @@ export interface ReceiptData {
  */
 export interface KitchenTicketData {
   orderNumber: string;
-  orderType: 'dine-in' | 'takeout' | 'delivery';
+  orderType: 'dine-in' | 'pickup' | 'delivery';
   timestamp: Date;
   items: PrintOrderItem[];
   customerName?: string;
@@ -380,6 +417,8 @@ export interface SerializedPrinterConfig {
   connectionDetails: string; // JSON string
   paperSize: string;
   characterSet: string;
+  greekRenderMode: string | null; // 'text' or 'bitmap'
+  receiptTemplate: string | null; // 'classic' or 'modern'
   role: string;
   isDefault: number; // SQLite boolean
   fallbackPrinterId: string | null;

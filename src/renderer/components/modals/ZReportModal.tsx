@@ -632,7 +632,24 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
           {t('modals.zReport.exportOrdersCSV')}
         </button>
         <button
-          onClick={() => window.print()}
+          onClick={async () => {
+            if (!zReport) return;
+            try {
+              const terminalName = await (window as any).electronAPI?.getTerminalSetting?.('terminal', 'name');
+              const result = await (window as any).electronAPI?.printZReport?.(zReport, terminalName || undefined);
+              if (result?.success) {
+                console.log('[ZReportModal] Z-Report printed successfully');
+              } else {
+                console.error('[ZReportModal] Z-Report print failed:', result?.error);
+                // Fallback to browser print if thermal print fails
+                window.print();
+              }
+            } catch (err) {
+              console.error('[ZReportModal] Z-Report print error:', err);
+              // Fallback to browser print
+              window.print();
+            }
+          }}
           className={liquidGlassModalButton('primary', 'sm') + ' text-sm'}
         >
           {t('modals.zReport.print')}
@@ -647,9 +664,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                 const res = await (window as any)?.electronAPI?.submitZReport?.({ branchId, date: selectedDate });
                 if (res?.success) {
                   setSubmitResult(t('modals.zReport.submitSuccess'));
+
+                  // Close the modal immediately
+                  onClose();
+
+                  // Clear all data and logout
                   try { await (window as any).electronAPI?.ipcRenderer?.invoke('auth:logout'); } catch { }
-                  try { localStorage.removeItem('pos-user'); } catch { }
-                  try { clearShift(); localStorage.removeItem('activeShift'); } catch { }
+                  try { localStorage.clear(); } catch { }
+                  try { clearShift(); } catch { }
+
+                  // Reload after a short delay to show success message
                   setTimeout(() => { window.location.reload(); }, 600);
                 } else {
                   setSubmitResult(t('modals.zReport.submitFailed', { error: res?.error || t('modals.zReport.unknownError') }));

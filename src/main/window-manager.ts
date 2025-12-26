@@ -204,7 +204,8 @@ export class WindowManager {
                         'geolocation',          // address autocomplete
                         'media',                // getUserMedia (camera/mic/screen w/ desktop constraint)
                         'display-capture',      // getDisplayMedia screen sharing
-                        'videoCapture'          // older aliases on some Chromium builds
+                        'videoCapture',         // older aliases on some Chromium builds
+                        'bluetooth'             // Web Bluetooth API for printer discovery
                     ]);
                     if (allowed.has(permission)) {
                         console.log(`✅ Permission granted: ${permission}`);
@@ -216,9 +217,40 @@ export class WindowManager {
             }
             if (ses && typeof ses.setPermissionCheckHandler === 'function') {
                 ses.setPermissionCheckHandler((_wc, permission, _details) => {
-                    return ['geolocation', 'media', 'display-capture', 'videoCapture'].includes(permission);
+                    return ['geolocation', 'media', 'display-capture', 'videoCapture', 'bluetooth'].includes(permission);
                 });
             }
+
+            // Handle Web Bluetooth device selection
+            // This must be attached to webContents, not session
+            this.mainWindow.webContents.on('select-bluetooth-device', (event: any, deviceList: any[], callback: (deviceId: string) => void) => {
+                event.preventDefault();
+                console.log('[Bluetooth] Device selection requested, found', deviceList.length, 'devices');
+
+                // Filter for devices that look like printers
+                const printerDevices = deviceList.filter((device: any) => {
+                    const name = device.deviceName || '';
+                    const patterns = [
+                        /printer/i, /thermal/i, /receipt/i, /pos/i,
+                        /epson/i, /star/i, /bixolon/i, /citizen/i,
+                        /zebra/i, /brother/i, /tsp/i, /tm-/i, /srp-/i, /ct-/i
+                    ];
+                    return patterns.some(pattern => pattern.test(name));
+                });
+
+                if (printerDevices.length > 0) {
+                    console.log('[Bluetooth] Found printer devices:', printerDevices.map((d: any) => d.deviceName));
+                    // Select the first printer device found
+                    callback(printerDevices[0].deviceId);
+                } else if (deviceList.length > 0) {
+                    console.log('[Bluetooth] No printer-like devices found, selecting first device');
+                    // If no printer-like devices, select the first one
+                    callback(deviceList[0].deviceId);
+                } else {
+                    console.log('[Bluetooth] No devices found');
+                    callback('');
+                }
+            });
             // Handle getDisplayMedia screen picking in Electron
             try {
                 const sesAny: any = ses as any;

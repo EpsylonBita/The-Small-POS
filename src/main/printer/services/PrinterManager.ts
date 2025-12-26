@@ -887,7 +887,68 @@ export class PrinterManager
    * Generate print data from job
    */
   private generatePrintData(job: QueuedJob, printer: PrinterConfig): Buffer {
-    this.receiptGenerator.setConfig({ paperSize: printer.paperSize });
+    // Get language and currency from local_settings
+    let language: 'en' | 'el' = 'en';
+    let currency = '€';
+    
+    try {
+      // Language is stored in 'terminal' category
+      const langRow = this.db.prepare(
+        `SELECT setting_value FROM local_settings WHERE setting_category = 'terminal' AND setting_key = 'language'`
+      ).get() as { setting_value: string } | undefined;
+      if (langRow?.setting_value) {
+        try {
+          const parsed = JSON.parse(langRow.setting_value);
+          if (parsed === 'el' || parsed === 'en') {
+            language = parsed;
+          }
+        } catch {
+          // Value might not be JSON encoded
+          if (langRow.setting_value === 'el' || langRow.setting_value === 'en') {
+            language = langRow.setting_value as 'en' | 'el';
+          }
+        }
+      }
+      
+      // Currency might be in 'restaurant' or 'general' category
+      const currRow = this.db.prepare(
+        `SELECT setting_value FROM local_settings WHERE setting_category = 'restaurant' AND setting_key = 'currency'`
+      ).get() as { setting_value: string } | undefined;
+      if (currRow?.setting_value) {
+        try {
+          currency = JSON.parse(currRow.setting_value) || '€';
+        } catch {
+          currency = currRow.setting_value || '€';
+        }
+      }
+    } catch (e) {
+      console.warn('[PrinterManager] Could not read language/currency settings:', e);
+    }
+
+    console.log('[PrinterManager] generatePrintData - language:', language, 'currency:', currency);
+
+    // Get the printer's character set configuration
+    // Default to PC737_GREEK for Greek language if not specified
+    let characterSet = printer.characterSet || 'PC437_USA';
+    if (language === 'el' && characterSet === 'PC437_USA') {
+      // Auto-select Greek character set if language is Greek but no Greek charset configured
+      characterSet = 'PC737_GREEK';
+    }
+    
+    // Get Greek render mode from printer config
+    const greekRenderMode = printer.greekRenderMode || 'text';
+    
+    console.log('[PrinterManager] generatePrintData - characterSet:', characterSet, 'greekRenderMode:', greekRenderMode);
+    console.log('[PrinterManager] generatePrintData - receiptTemplate:', printer.receiptTemplate || 'classic');
+
+    this.receiptGenerator.setConfig({ 
+      paperSize: printer.paperSize,
+      language: language,
+      currency: currency,
+      characterSet: characterSet as any,
+      greekRenderMode: greekRenderMode,
+      receiptTemplate: printer.receiptTemplate || 'classic'
+    });
 
     switch (job.type) {
       case PrintJobType.RECEIPT:

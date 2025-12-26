@@ -380,6 +380,15 @@ export class SyncService {
   }
 
   private async syncStaffShift(operation: string, recordId: string, data: any): Promise<void> {
+    // Validate UUIDs - skip invalid ones (e.g., "no-pin-user")
+    const isValidUUID = (val: any) => typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+    
+    if (!isValidUUID(data.staff_id)) {
+      console.warn(`[SyncService] Skipping staff shift sync - invalid staff_id: ${data.staff_id}`);
+      // Return without error - the caller will mark it as synced
+      return;
+    }
+
     if (operation === 'insert') {
       // Extract shift_date from check_in_time (YYYY-MM-DD format)
       const shiftDate = data.check_in_time ? data.check_in_time.split('T')[0] : new Date().toISOString().split('T')[0];
@@ -509,14 +518,48 @@ export class SyncService {
 
   private async syncDriverEarning(operation: string, recordId: string, data: any): Promise<void> {
     if (operation === 'insert' || operation === 'update') {
+      // Validate UUIDs
+      const isValidUUID = (val: any) => typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
+      let orderId = isValidUUID(data.order_id) ? data.order_id : null;
+      let staffShiftId = isValidUUID(data.staff_shift_id) ? data.staff_shift_id : null;
+
+      // Verify order exists in Supabase (skip sync if not found - order must sync first)
+      if (orderId) {
+        const { data: existingOrder } = await this.supabase
+          .from('orders')
+          .select('id')
+          .eq('id', orderId)
+          .maybeSingle();
+        if (!existingOrder) {
+          console.warn(`[SyncService] Order ${orderId} not found in Supabase yet, will retry driver_earning ${data.id} later`);
+          throw new Error(`Order ${orderId} not synced yet - will retry driver earning later`);
+        }
+      } else {
+        throw new Error('Driver earning missing order_id - cannot sync without order reference');
+      }
+
+      // Verify shift exists in Supabase
+      if (staffShiftId) {
+        const { data: existingShift } = await this.supabase
+          .from('staff_shifts')
+          .select('id')
+          .eq('id', staffShiftId)
+          .maybeSingle();
+        if (!existingShift) {
+          console.warn(`[SyncService] Shift ${staffShiftId} not found in Supabase, setting staff_shift_id to NULL for driver_earning ${data.id}`);
+          staffShiftId = null;
+        }
+      }
+
       // Upsert to handle idempotency
       const { error } = await this.supabase
         .from('driver_earnings')
         .upsert({
           id: data.id,
           driver_id: data.driver_id,
-          staff_shift_id: data.staff_shift_id,
-          order_id: data.order_id,
+          staff_shift_id: staffShiftId,
+          order_id: orderId,
           branch_id: data.branch_id,
           delivery_fee: data.delivery_fee,
           tip_amount: data.tip_amount,

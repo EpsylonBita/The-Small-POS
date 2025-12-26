@@ -14,6 +14,8 @@ import {
   PrinterType,
   PrinterRole,
   PaperSize,
+  GreekRenderMode,
+  ReceiptTemplate,
 } from './index';
 
 /**
@@ -29,6 +31,8 @@ export function serializePrinterConfig(
     connectionDetails: JSON.stringify(config.connectionDetails),
     paperSize: config.paperSize,
     characterSet: config.characterSet,
+    greekRenderMode: config.greekRenderMode ?? null,
+    receiptTemplate: config.receiptTemplate ?? null,
     role: config.role,
     isDefault: config.isDefault ? 1 : 0,
     fallbackPrinterId: config.fallbackPrinterId ?? null,
@@ -51,6 +55,8 @@ export function deserializePrinterConfig(
     connectionDetails: JSON.parse(serialized.connectionDetails) as ConnectionDetails,
     paperSize: serialized.paperSize as PaperSize,
     characterSet: serialized.characterSet,
+    greekRenderMode: (serialized.greekRenderMode as GreekRenderMode) ?? undefined,
+    receiptTemplate: (serialized.receiptTemplate as ReceiptTemplate) ?? undefined,
     role: serialized.role as PrinterRole,
     isDefault: serialized.isDefault === 1,
     fallbackPrinterId: serialized.fallbackPrinterId ?? undefined,

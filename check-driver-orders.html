@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Check Driver Orders</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+    .order { margin: 10px 0; padding: 10px; border: 1px solid #333; }
+    .good { color: #00ff00; }
+    .bad { color: #ff0000; }
+    .warn { color: #ffaa00; }
+    button { margin: 10px 0; padding: 10px 20px; background: #333; color: #00ff00; border: 1px solid #00ff00; cursor: pointer; }
+    button:hover { background: #444; }
+  </style>
+</head>
+<body>
+  <h1>Driver Orders Diagnostic</h1>
+  <button onclick="checkOrders()">Check Orders</button>
+  <button onclick="checkDriverShifts()">Check Driver Shifts</button>
+  <button onclick="checkDriverEarnings()">Check Driver Earnings</button>
+  <div id="output"></div>
+
+  <script>
+    async function checkOrders() {
+      const output = document.getElementById('output');
+      output.innerHTML = '<h2>Checking Orders...</h2>';
+
+      try {
+        const result = await window.electronAPI.executeQuery(
+          `SELECT id, order_number, status, order_type, driver_id, staff_shift_id, created_at
+           FROM orders
+           WHERE LOWER(COALESCE(order_type, '')) = 'delivery'
+           ORDER BY created_at DESC
+           LIMIT 20`
+        );
+
+        if (result.success && result.data) {
+          let html = `<h2>Found ${result.data.length} delivery orders:</h2>`;
+          result.data.forEach((order, idx) => {
+            const hasDriver = !!order.driver_id;
+            const isCompleted = ['delivered', 'completed'].some(s => order.status?.toLowerCase() === s);
+            const willShow = hasDriver && isCompleted;
+
+            html += `<div class="order">
+              <strong>#${idx + 1}: ${order.order_number}</strong><br>
+              Status: <span class="${isCompleted ? 'good' : 'warn'}">${order.status || 'N/A'}</span><br>
+              Driver ID: <span class="${hasDriver ? 'good' : 'bad'}">${order.driver_id || 'NOT SET'}</span><br>
+              Staff Shift ID: ${order.staff_shift_id || 'NOT SET'}<br>
+              Created: ${new Date(order.created_at).toLocaleString()}<br>
+              <strong class="${willShow ? 'good' : 'bad'}">
+                Will appear in driver checkout? ${willShow ? 'YES ✓' : 'NO ✗'}
+              </strong>
+            </div>`;
+          });
+          output.innerHTML = html;
+        } else {
+          output.innerHTML = `<div class="bad">Error: ${result.error || 'Unknown error'}</div>`;
+        }
+      } catch (err) {
+        output.innerHTML = `<div class="bad">Error: ${err.message}</div>`;
+      }
+    }
+
+    async function checkDriverShifts() {
+      const output = document.getElementById('output');
+      output.innerHTML = '<h2>Checking Driver Shifts...</h2>';
+
+      try {
+        const result = await window.electronAPI.executeQuery(
+          `SELECT id, staff_id, role_type, status, check_in_time, check_out_time
+           FROM staff_shifts
+           WHERE role_type = 'driver'
+           ORDER BY check_in_time DESC
+           LIMIT 10`
+        );
+
+        if (result.success && result.data) {
+          let html = `<h2>Found ${result.data.length} driver shifts:</h2>`;
+          result.data.forEach((shift, idx) => {
+            const isActive = shift.status === 'active';
+            html += `<div class="order">
+              <strong>#${idx + 1}: ${shift.id.substring(0, 8)}...</strong><br>
+              Staff ID: ${shift.staff_id}<br>
+              Status: <span class="${isActive ? 'good' : 'warn'}">${shift.status}</span><br>
+              Check In: ${new Date(shift.check_in_time).toLocaleString()}<br>
+              Check Out: ${shift.check_out_time ? new Date(shift.check_out_time).toLocaleString() : 'Still active'}
+            </div>`;
+          });
+          output.innerHTML = html;
+        } else {
+          output.innerHTML = `<div class="bad">Error: ${result.error || 'Unknown error'}</div>`;
+        }
+      } catch (err) {
+        output.innerHTML = `<div class="bad">Error: ${err.message}</div>`;
+      }
+    }
+
+    async function checkDriverEarnings() {
+      const output = document.getElementById('output');
+      output.innerHTML = '<h2>Checking Driver Earnings...</h2>';
+
+      try {
+        const result = await window.electronAPI.executeQuery(
+          `SELECT de.id, de.driver_id, de.staff_shift_id, de.order_id,
+                  o.order_number, o.status as order_status, de.delivery_fee, de.cash_collected
+           FROM driver_earnings de
+           LEFT JOIN orders o ON de.order_id = o.id
+           ORDER BY de.created_at DESC
+           LIMIT 15`
+        );
+
+        if (result.success && result.data) {
+          let html = `<h2>Found ${result.data.length} driver earnings:</h2>`;
+          result.data.forEach((earning, idx) => {
+            html += `<div class="order">
+              <strong>#${idx + 1}: ${earning.id.substring(0, 8)}...</strong><br>
+              Order: #${earning.order_number || 'N/A'} (${earning.order_status || 'N/A'})<br>
+              Driver ID: ${earning.driver_id}<br>
+              Shift ID: ${earning.staff_shift_id}<br>
+              Delivery Fee: €${earning.delivery_fee}<br>
+              Cash Collected: €${earning.cash_collected}
+            </div>`;
+          });
+          output.innerHTML = html;
+        } else {
+          output.innerHTML = `<div class="bad">Error: ${result.error || 'Unknown error'}</div>`;
+        }
+      } catch (err) {
+        output.innerHTML = `<div class="bad">Error: ${err.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>

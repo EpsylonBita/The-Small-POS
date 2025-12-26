@@ -178,6 +178,26 @@ export const OrderCard = memo<OrderCardProps>(({
   const orderPlatform = order.platform || order.order_platform || '';
   const isExternal = isExternalPlatform(orderPlatform);
 
+  // Normalize driver info for display
+  const driverIdNormalized = order.driver_id || order.driverId || (order as any).driver_id || '';
+  const driverNameNormalized = order.driverName || (order as any).driver_name || '';
+  const orderStatusNormalized = (order.status || '').toLowerCase();
+  const isDeliveredOrCompleted = orderStatusNormalized === 'completed' || orderStatusNormalized === 'delivered';
+
+  // Debug: log driver info when order is delivered/completed
+  if (orderTypeNormalized === 'delivery' && isDeliveredOrCompleted) {
+    console.log('[OrderCard] Driver info for order:', {
+      orderId: order.id,
+      orderStatus: order.status,
+      driver_id: order.driver_id,
+      driverId: order.driverId,
+      driverName: order.driverName,
+      isDeliveredOrCompleted,
+      driverIdNormalized,
+      driverNameNormalized
+    });
+  }
+
   const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow;
 
   // Fallback: resolve address via customer lookup when missing
@@ -285,12 +305,30 @@ export const OrderCard = memo<OrderCardProps>(({
                     {customerNameNormalized}{customerNameNormalized && customerPhoneNormalized && ' • '}{customerPhoneNormalized}
                   </div>
                 )}
+                {/* Driver badge for completed/delivered orders */}
+                {isDeliveredOrCompleted && driverIdNormalized && (
+                  <div className="flex items-center gap-1 mt-1">
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${resolvedTheme === 'light'
+                      ? 'bg-green-100 text-green-700 border border-green-200'
+                      : 'bg-green-900/30 text-green-400 border border-green-700/40'
+                      }`}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
+                        <path d="M15 18H9" />
+                        <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14" />
+                        <circle cx="17" cy="18" r="2" />
+                        <circle cx="7" cy="18" r="2" />
+                      </svg>
+                      {driverNameNormalized || (driverIdNormalized ? `Driver ${String(driverIdNormalized).slice(-6)}` : t('orderCard.driverAssigned', 'Driver Assigned'))}
+                    </span>
+                  </div>
+                )}
               </>
             ) : (
               <>
-                {/* For non-delivery orders: Show customer name prominently */}
+                {/* For non-delivery orders: Show customer name or order type */}
                 <div className={`text-sm sm:text-base font-bold truncate ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                  {customerNameNormalized || t('orderCard.customer') || 'Customer'}
+                  {customerNameNormalized || t(`orders.type.${orderTypeNormalized}`) || orderTypeNormalized || t('orderCard.customer') || 'Customer'}
                 </div>
                 {/* Show phone number */}
                 {customerPhoneNormalized && (

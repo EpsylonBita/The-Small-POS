@@ -105,6 +105,10 @@ export function registerOrderHandlers({
         externalPlatformOrderId: order.external_platform_order_id,
         platformCommissionPct: order.platform_commission_pct,
         netEarnings: order.net_earnings,
+        // Driver assignment fields
+        driver_id: order.driver_id,
+        driverId: order.driver_id,
+        driverName: order.driver_name,
       }));
       return transformedOrders;
     } catch (error) {
@@ -168,6 +172,10 @@ export function registerOrderHandlers({
         externalPlatformOrderId: order.external_platform_order_id,
         platformCommissionPct: order.platform_commission_pct,
         netEarnings: order.net_earnings,
+        // Driver assignment fields
+        driver_id: order.driver_id,
+        driverId: order.driver_id,
+        driverName: (order as any).driver_name,
       };
       return transformedOrder;
     } catch (error) {
@@ -435,6 +443,10 @@ export function registerOrderHandlers({
             externalPlatformOrderId: fresh.external_platform_order_id,
             platformCommissionPct: fresh.platform_commission_pct,
             netEarnings: fresh.net_earnings,
+            // Driver assignment fields
+            driver_id: fresh.driver_id,
+            driverId: fresh.driver_id,
+            driverName: (fresh as any).driver_name,
           };
           mainWindow.webContents.send('order-realtime-update', payload);
         }
@@ -549,6 +561,10 @@ export function registerOrderHandlers({
           externalPlatformOrderId: createdOrder.external_platform_order_id,
           platformCommissionPct: createdOrder.platform_commission_pct,
           netEarnings: createdOrder.net_earnings,
+          // Driver assignment fields
+          driver_id: createdOrder.driver_id,
+          driverId: createdOrder.driver_id,
+          driverName: (createdOrder as any).driver_name,
         };
 
         mainWindow.webContents.send('order-created', createdOrderData);

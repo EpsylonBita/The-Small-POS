@@ -302,6 +302,27 @@ export class DatabaseManager {
     }
   }
 
+  // Subcategories cache methods for offline item name resolution
+  cacheSubcategory(id: string, name: string, name_en?: string, name_el?: string, category_id?: string): void {
+    return this.databaseService.cacheSubcategory(id, name, name_en, name_el, category_id);
+  }
+
+  getSubcategoryFromCache(id: string): { id: string; name: string; name_en?: string; name_el?: string; category_id?: string } | null {
+    return this.databaseService.getSubcategoryFromCache(id);
+  }
+
+  bulkCacheSubcategories(subcategories: Array<{ id: string; name: string; name_en?: string; name_el?: string; category_id?: string }>): void {
+    return this.databaseService.bulkCacheSubcategories(subcategories);
+  }
+
+  clearOldSubcategoriesCache(olderThanDays: number = 30): number {
+    return this.databaseService.clearOldSubcategoriesCache(olderThanDays);
+  }
+
+  getAllCachedSubcategories(): Array<{ id: string; name: string; name_en?: string; name_el?: string; category_id?: string; updated_at: string }> {
+    return this.databaseService.getAllCachedSubcategories();
+  }
+
   // Order retry methods for error handling
   async saveOrderForRetry(orderData: any) {
     try {

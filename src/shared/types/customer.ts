@@ -13,6 +13,7 @@ export interface CustomerAddress {
   id: string;
   customer_id?: string;
   street: string; // Maps to street_address in Supabase
+  street_address?: string; // Supabase field name
   city: string;
   postal_code: string;
   country?: string;
@@ -20,6 +21,7 @@ export interface CustomerAddress {
   address_type?: 'delivery' | 'home' | 'work' | 'other';
   is_default: boolean;
   delivery_notes?: string;
+  notes?: string; // Alias for delivery_notes (Supabase field name)
   created_at?: string;
   updated_at?: string;
   // Sync metadata
@@ -55,6 +57,9 @@ export interface Customer {
   total_orders?: number; // Computed field
   last_order_date?: string; // Computed field
   is_banned?: boolean; // Ban status
+  // Ringer name - name displayed on doorbell for delivery
+  name_on_ringer?: string;
+  ringer_name?: string; // Alias for name_on_ringer (Supabase field name)
   // Sync metadata
   version?: number;
   updated_by?: string;

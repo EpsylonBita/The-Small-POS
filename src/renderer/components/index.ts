@@ -59,7 +59,6 @@ export {
 
 // New modular menu components
 export { MenuModal } from './modals/MenuModal';
-export { AddressSelectionModal } from './modals/AddressSelectionModal';
 export { MenuCategoryTabs } from './menu/MenuCategoryTabs';
 export { MenuItemGrid } from './menu/MenuItemGrid';
 export { MenuItemCard } from './menu/MenuItemCard';

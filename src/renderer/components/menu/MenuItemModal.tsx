@@ -44,13 +44,27 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   const [quantity, setQuantity] = useState(1);
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
-  const [ingredientsByColor, setIngredientsByColor] = useState<{[color: string]: Ingredient[]}>({});
+  const [ingredientsByColor, setIngredientsByColor] = useState<{ [color: string]: Ingredient[] }>({});
   const [activeFlavorType, setActiveFlavorType] = useState<'all' | 'savory' | 'sweet'>('all');
   const [isLittleMode, setIsLittleMode] = useState(false);
   const [isWithoutMode, setIsWithoutMode] = useState(false); // New: "without" mode for removing ingredients
 
+  // Track which menuItem we've initialized for to prevent re-initialization on parent re-renders
+  const initializedForMenuItemRef = React.useRef<string | null>(null);
+
   useEffect(() => {
     if (isOpen && menuItem) {
+      // Only initialize if this is a NEW menuItem (different from what we've already initialized)
+      // This prevents resetting selectedIngredients when parent re-renders due to silentRefresh
+      const menuItemId = menuItem.id;
+      if (initializedForMenuItemRef.current === menuItemId) {
+        // Already initialized for this menuItem, skip re-initialization
+        return;
+      }
+
+      // Mark this menuItem as initialized
+      initializedForMenuItemRef.current = menuItemId;
+
       // In edit mode, use initial values; otherwise reset
       if (isEditMode && initialCustomizations.length > 0) {
         setSelectedIngredients(initialCustomizations);
@@ -65,14 +79,17 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       setIsLittleMode(false);
       setIsWithoutMode(false);
       loadAvailableIngredients();
+    } else if (!isOpen) {
+      // Reset the ref when modal closes so next open will initialize fresh
+      initializedForMenuItemRef.current = null;
     }
   }, [isOpen, menuItem, isEditMode, initialCustomizations, initialQuantity, initialNotes]);
 
 
-	  // Guard: don't render if closed or no item provided
-	  if (!isOpen || !menuItem) {
-	    return null;
-	  }
+  // Guard: don't render if closed or no item provided
+  if (!isOpen || !menuItem) {
+    return null;
+  }
 
   const loadAvailableIngredients = async () => {
     if (!menuItem) return;
@@ -91,7 +108,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         }
         acc[color].push(ingredient);
         return acc;
-      }, {} as {[key: string]: Ingredient[]});
+      }, {} as { [key: string]: Ingredient[] });
 
       setIngredientsByColor(byColor);
 
@@ -151,9 +168,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
       setSelectedIngredients(prev => [
         ...prev,
-        { 
-          ingredient, 
-          quantity: 1, 
+        {
+          ingredient,
+          quantity: 1,
           isLittle: isLittleMode,
           isWithout: isWithoutMode // Mark as "without" if in without mode
         }
@@ -237,7 +254,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       }
       acc[color].push(ingredient);
       return acc;
-    }, {} as {[key: string]: Ingredient[]});
+    }, {} as { [key: string]: Ingredient[] });
   }, [filteredIngredients]);
 
   return (
@@ -291,7 +308,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h3 className="text-lg font-semibold liquid-glass-modal-text">
-                  {menuItem.is_customizable 
+                  {menuItem.is_customizable
                     ? t('menu.itemModal.customizeTitle', { item: menuItem.name })
                     : t('menu.itemModal.extrasTitle') || 'Extras & Modifications'}
                 </h3>
@@ -317,15 +334,13 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       setIsWithoutMode(!isWithoutMode);
                       if (!isWithoutMode) setIsLittleMode(false); // Turn off little mode when enabling without
                     }}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      isWithoutMode ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600'
-                    }`}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isWithoutMode ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600'
+                      }`}
                     title={t('menu.itemModal.withoutHint') || 'Mark ingredients to remove (no price change)'}
                   >
                     <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        isWithoutMode ? 'translate-x-6' : 'translate-x-1'
-                      }`}
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isWithoutMode ? 'translate-x-6' : 'translate-x-1'
+                        }`}
                     />
                   </button>
                 </label>
@@ -338,72 +353,67 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       setIsLittleMode(!isLittleMode);
                       if (!isLittleMode) setIsWithoutMode(false); // Turn off without mode when enabling little
                     }}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                      isLittleMode ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'
-                    }`}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isLittleMode ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'
+                      }`}
                     title={t('menu.itemModal.littleHint')}
                   >
                     <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        isLittleMode ? 'translate-x-6' : 'translate-x-1'
-                      }`}
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isLittleMode ? 'translate-x-6' : 'translate-x-1'
+                        }`}
                     />
                   </button>
                 </label>
               </div>
             </div>
 
-              {loading ? (
-                <div className="space-y-3">
-                  {[1, 2, 3].map(i => (
-                    <div key={i} className="h-20 rounded-xl animate-pulse liquid-glass-modal-card" />
-                  ))}
+            {loading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map(i => (
+                  <div key={i} className="h-20 rounded-xl animate-pulse liquid-glass-modal-card" />
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Flavor Type Tabs */}
+                <div className="flex gap-2 pb-3 border-b liquid-glass-modal-border">
+                  <button
+                    onClick={() => setActiveFlavorType('all')}
+                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'all'
+                        ? 'bg-blue-500 text-white shadow-lg'
+                        : 'liquid-glass-modal-button'
+                      }`}
+                  >
+                    {t('menu.itemModal.all')}
+                  </button>
+                  <button
+                    onClick={() => setActiveFlavorType('savory')}
+                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'savory'
+                        ? 'bg-orange-500 text-white shadow-lg'
+                        : 'liquid-glass-modal-button'
+                      }`}
+                  >
+                    {t('menu.itemModal.savory')}
+                  </button>
+                  <button
+                    onClick={() => setActiveFlavorType('sweet')}
+                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'sweet'
+                        ? 'bg-pink-500 text-white shadow-lg'
+                        : 'liquid-glass-modal-button'
+                      }`}
+                  >
+                    {t('menu.itemModal.sweet')}
+                  </button>
                 </div>
-              ) : (
-                <div className="space-y-4">
-                  {/* Flavor Type Tabs */}
-                  <div className="flex gap-2 pb-3 border-b liquid-glass-modal-border">
-                    <button
-                      onClick={() => setActiveFlavorType('all')}
-                      className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${
-                        activeFlavorType === 'all'
-                          ? 'bg-blue-500 text-white shadow-lg'
-                          : 'liquid-glass-modal-button'
-                      }`}
-                    >
-                      {t('menu.itemModal.all')}
-                    </button>
-                    <button
-                      onClick={() => setActiveFlavorType('savory')}
-                      className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${
-                        activeFlavorType === 'savory'
-                          ? 'bg-orange-500 text-white shadow-lg'
-                          : 'liquid-glass-modal-button'
-                      }`}
-                    >
-                      {t('menu.itemModal.savory')}
-                    </button>
-                    <button
-                      onClick={() => setActiveFlavorType('sweet')}
-                      className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${
-                        activeFlavorType === 'sweet'
-                          ? 'bg-pink-500 text-white shadow-lg'
-                          : 'liquid-glass-modal-button'
-                      }`}
-                    >
-                      {t('menu.itemModal.sweet')}
-                    </button>
-                  </div>
 
-                  {/* Ingredients Grouped by Color */}
-                  <div className="space-y-6">
-                    {Object.keys(filteredByColor).length === 0 ? (
-                      <div className="text-center py-8 liquid-glass-modal-text-muted">
-                        <p>No ingredients available for this filter.</p>
-                        <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
-                      </div>
-                    ) : (
-                      Object.entries(filteredByColor).map(([color, ingredients]) => (
+                {/* Ingredients Grouped by Color */}
+                <div className="space-y-6">
+                  {Object.keys(filteredByColor).length === 0 ? (
+                    <div className="text-center py-8 liquid-glass-modal-text-muted">
+                      <p>No ingredients available for this filter.</p>
+                      <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
+                    </div>
+                  ) : (
+                    Object.entries(filteredByColor).map(([color, ingredients]) => (
                       <div key={color}>
                         {/* Color Header */}
                         <div className="flex items-center gap-2 mb-3">
@@ -436,13 +446,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             return (
                               <div
                                 key={ingredient.id}
-                                className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left backdrop-blur-sm ${
-                                  isSelected
-                                    ? isWithout 
+                                className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left backdrop-blur-sm ${isSelected
+                                    ? isWithout
                                       ? 'border-red-400/60 shadow-lg scale-[1.02]'
                                       : 'border-white/40 shadow-lg scale-[1.02]'
                                     : 'border-white/10 hover:border-white/30'
-                                }`}
+                                  }`}
                                 style={{
                                   backgroundColor: isSelected
                                     ? isWithout
@@ -458,9 +467,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                   className="w-full text-left"
                                 >
                                   <div className="flex flex-col gap-1 pr-8">
-                                    <span className={`font-medium text-sm line-clamp-2 ${
-                                      isWithout ? 'line-through text-red-400' : 'liquid-glass-modal-text'
-                                    }`}>
+                                    <span className={`font-medium text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : 'liquid-glass-modal-text'
+                                      }`}>
                                       {isWithout && <span className="no-underline mr-1">🚫</span>}
                                       {getIngredientName(ingredient)}
                                       {isLittle && isSelected && !isWithout && (
@@ -494,12 +502,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                     >
                                       <span className="text-white font-bold text-sm">−</span>
                                     </button>
-                                    
+
                                     {/* Quantity display */}
                                     <span className="min-w-[24px] text-center text-sm font-bold text-white">
                                       {currentQuantity}
                                     </span>
-                                    
+
                                     {/* Increase button */}
                                     <button
                                       onClick={(e) => {
@@ -543,11 +551,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                         </div>
                       </div>
                     ))
-                    )}
-                  </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+          </div>
 
           {/* Special Instructions */}
           <div className="mb-6">
@@ -606,7 +614,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 const extras = selectedIngredients.filter(si => !si.isWithout);
                 const withoutItems = selectedIngredients.filter(si => si.isWithout);
                 const totalExtrasCount = extras.reduce((sum, si) => sum + si.quantity, 0);
-                
+
                 return (
                   <div className="space-y-1">
                     {totalExtrasCount > 0 && (
@@ -634,13 +642,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
           <button
             onClick={handleAddToCart}
-            className={`liquid-glass-modal-button w-full py-4 rounded-xl font-bold text-lg text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${
-              isEditMode 
+            className={`liquid-glass-modal-button w-full py-4 rounded-xl font-bold text-lg text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
                 ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700'
                 : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
-            }`}
+              }`}
           >
-            {isEditMode 
+            {isEditMode
               ? `✓ ${t('menu.itemModal.updateItem') || 'Update Item'}`
               : `🛒 ${t('menu.itemModal.addToCart')}`
             }

@@ -694,6 +694,28 @@ export class SettingsService extends BaseService {
     this.setSetting('terminal', 'inter_terminal_secret', secret);
   }
 
+  // Language Settings Helper Methods
+  getLanguage(): 'en' | 'el' {
+    const value = this.getSetting<'en' | 'el'>('terminal', 'language', 'en');
+    console.log(`[SettingsService] getLanguage() - raw value: "${value}", returning: "${value !== null ? value : 'en'}"`);
+    return value !== null ? value : 'en';
+  }
+
+  setLanguage(language: 'en' | 'el'): void {
+    console.log(`[SettingsService] setLanguage() called with: "${language}"`);
+    // Validate language
+    if (language !== 'en' && language !== 'el') {
+      console.error(`[SettingsService] Invalid language: "${language}"`);
+      throw new Error('Language must be either "en" or "el"');
+    }
+    this.setSetting('terminal', 'language', language);
+    console.log(`[SettingsService] Language saved to database: "${language}"`);
+    
+    // Verify it was saved
+    const savedValue = this.getSetting<'en' | 'el'>('terminal', 'language', 'en');
+    console.log(`[SettingsService] Verification - saved value: "${savedValue}"`);
+  }
+
   compareSettings(
     category: SettingCategory,
     remoteSettings: Record<string, any>

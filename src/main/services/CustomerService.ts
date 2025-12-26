@@ -174,6 +174,16 @@ export class CustomerService {
       }
 
       const result = await response.json();
+      
+      // Debug: Log the raw API response
+      console.log('[CustomerService] Raw API response:', JSON.stringify({
+        success: result?.success,
+        hasCustomer: !!result?.customer,
+        customerRingerName: result?.customer?.ringer_name,
+        customerNameOnRinger: result?.customer?.name_on_ringer,
+        addressCount: result?.customer?.addresses?.length,
+        firstAddressNotes: result?.customer?.addresses?.[0]?.notes
+      }));
 
       // Support both shapes:
       // A) { success, data: { customer, hasConflict } }
@@ -250,6 +260,7 @@ export class CustomerService {
    * - customer_addresses → addresses mapping
    * - street_address → street mapping
    * - notes → delivery_notes mapping
+   * - ringer_name → name_on_ringer mapping
    * - Merges addresses from both data.customer_addresses and data.addresses
    * - Adding computed fields (total_orders, last_order_date)
    */
@@ -261,12 +272,14 @@ export class CustomerService {
       id: addr.id,
       customer_id: addr.customer_id,
       street: addr.street_address || addr.street, // Handle both field names
+      street_address: addr.street_address || addr.street, // Also include street_address for compatibility
       city: addr.city,
       postal_code: addr.postal_code,
       floor_number: addr.floor_number,
       address_type: addr.address_type,
       is_default: Boolean(addr.is_default), // Ensure boolean
       delivery_notes: addr.delivery_notes || addr.notes, // Map notes → delivery_notes
+      notes: addr.notes || addr.delivery_notes, // Also include notes for frontend compatibility
       created_at: addr.created_at,
       updated_at: addr.updated_at,
       version: addr.version,
@@ -285,8 +298,11 @@ export class CustomerService {
       total_orders: data.total_orders || 0,
       last_order_date: data.last_order_date,
       is_banned: Boolean(data.is_banned),
-      // Sync metadata
-      version: data.version,
+      // Ringer name - map from ringer_name or name_on_ringer
+      name_on_ringer: data.ringer_name || data.name_on_ringer,
+      ringer_name: data.ringer_name || data.name_on_ringer,
+      // Sync metadata - default version to 1 for legacy customers without version
+      version: data.version ?? 1,
       updated_by: data.updated_by,
       last_synced_at: data.last_synced_at,
     };

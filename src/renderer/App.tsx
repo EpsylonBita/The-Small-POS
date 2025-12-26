@@ -469,7 +469,7 @@ function AppContent() {
   return (
     <ErrorBoundary>
       <ThemeProvider>
-        <HashRouter>
+        <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <div className="min-h-screen">
             {/* Shutdown/Restart Overlay */}
             {isShuttingDown && (

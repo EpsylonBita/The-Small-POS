@@ -267,6 +267,9 @@ const electronAPI = {
         'sync:get-inter-terminal-status',
         'sync:clear-all',
         'sync:clear-failed',
+        'sync:clear-old-orders',
+        'sync:clear-all-orders',
+        'sync:cleanup-deleted-orders',
         'sync:get-financial-stats',
         'sync:get-failed-financial-items',
         'sync:retry-financial-item',
@@ -299,6 +302,8 @@ const electronAPI = {
         'settings:set-discount-max',
         'settings:get-tax-rate',
         'settings:set-tax-rate',
+        'settings:get-language',
+        'settings:set-language',
         'settings:update-terminal-credentials',
         'settings:is-configured',
         'settings:factory-reset',
@@ -324,6 +329,8 @@ const electronAPI = {
         'shift:get-active-by-terminal',
         'shift:get-active-by-terminal-loose',
         'shift:get-active-cashier-by-terminal',
+        'shift:list-staff-for-checkin',
+        'shift:get-staff-roles',
 
         'shift:get-summary',
         'shift:record-expense',
@@ -414,6 +421,7 @@ const electronAPI = {
         'printer:cancel-job',
         'printer:retry-job',
         'printer:test',
+        'printer:test-greek-direct',
         'printer:diagnostics',
         'printer:bluetooth-status',
 
@@ -658,6 +666,10 @@ const electronAPI = {
     return ipcRenderer.invoke('shift:print-checkout', { shiftId, roleType, terminalName });
   },
 
+  printZReport: (snapshot: any, terminalName?: string) => {
+    return ipcRenderer.invoke('report:print-z-report', { snapshot, terminalName });
+  },
+
   // Driver management methods
   getActiveDrivers: (branchId: string) => {
     return ipcRenderer.invoke('driver:get-active', branchId);
@@ -741,6 +753,27 @@ const electronAPI = {
 
   updateOrderType: (orderId: string, orderType: string) => {
     return ipcRenderer.invoke('order:update-type', orderId, orderType);
+  },
+
+  // Diagnostic tools
+  checkDeliveredOrders: () => {
+    return ipcRenderer.invoke('diagnostic:check-delivered-orders');
+  },
+
+  fixMissingDriverIds: (driverId: string) => {
+    return ipcRenderer.invoke('diagnostic:fix-missing-driver-ids', driverId);
+  },
+
+  forceSyncOrders: (orderIds: string[]) => {
+    return ipcRenderer.invoke('diagnostic:force-sync-orders', orderIds);
+  },
+
+  markEarningsSynced: (earningIds: string[]) => {
+    return ipcRenderer.invoke('diagnostic:mark-earnings-synced', earningIds);
+  },
+
+  markAllUnsyncedEarnings: () => {
+    return ipcRenderer.invoke('diagnostic:mark-all-unsynced-earnings');
   },
 
   // Printing
@@ -1002,6 +1035,22 @@ const electronAPI = {
    */
   printerTest: (printerId: string) => {
     return ipcRenderer.invoke('printer:test', printerId);
+  },
+
+  /**
+   * Test Greek printing with different encoding modes
+   * @param mode - Encoding mode: 'ascii', 'cp737', 'cp1253', or 'utf8'
+   * @param printerName - Windows printer name (default: 'POS-80')
+   * 
+   * Usage from DevTools console:
+   *   window.electronAPI.printerTestGreekDirect('ascii')           // ASCII only test
+   *   window.electronAPI.printerTestGreekDirect('cp737')           // CP737 Greek encoding
+   *   window.electronAPI.printerTestGreekDirect('cp1253')          // Windows-1253 Greek
+   *   window.electronAPI.printerTestGreekDirect('utf8')            // UTF-8
+   *   window.electronAPI.printerTestGreekDirect('ascii', 'POS-80 RAW') // Specify printer
+   */
+  printerTestGreekDirect: (mode: string = 'ascii', printerName: string = 'POS-80') => {
+    return ipcRenderer.invoke('printer:test-greek-direct', mode, printerName);
   },
 
   /**

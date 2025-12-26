@@ -485,6 +485,9 @@ export class AdminDashboardSyncService {
       // Sync menu data
       await this.syncMenuData();
 
+      // Sync subcategories to local cache for offline item name resolution
+      await this.syncSubcategoriesToCache();
+
       // Sync settings
       await this.syncSettings();
 
@@ -596,6 +599,98 @@ export class AdminDashboardSyncService {
     } catch (error) {
       console.error('❌ Menu sync failed:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Sync subcategories (menu items) to local cache for offline item name resolution
+   * This ensures item names are available for printing even when offline
+   * Scoped to current organization to prevent cross-tenant data leakage
+   */
+  private async syncSubcategoriesToCache(): Promise<void> {
+    try {
+      const dbSvc = this.dbManager?.getDatabaseService?.();
+      if (!dbSvc) {
+        console.warn('[Subcategories Sync] DatabaseService not available, skipping');
+        return;
+      }
+
+      // Get Supabase config
+      const { getSupabaseConfig } = await import('../shared/supabase-config.js');
+      const { createClient } = await import('@supabase/supabase-js');
+      
+      const config = getSupabaseConfig('server');
+      const supabase = createClient(config.url, config.serviceRoleKey || config.anonKey, {
+        auth: { autoRefreshToken: false, persistSession: false }
+      });
+
+      // Get organization_id for filtering - required for tenant isolation
+      const organizationId = (await (dbSvc?.settings?.getSetting?.('terminal', 'organization_id', null))) as string | null;
+      
+      if (!organizationId) {
+        console.warn('[Subcategories Sync] No organization_id configured, skipping to prevent cross-tenant data');
+        return;
+      }
+
+      console.log(`[Subcategories Sync] Fetching subcategories for organization ${organizationId}...`);
+
+      // First, get all category IDs for this organization
+      const { data: categories, error: categoriesError } = await supabase
+        .from('categories')
+        .select('id')
+        .eq('organization_id', organizationId)
+        .eq('is_active', true);
+
+      if (categoriesError) {
+        console.error('[Subcategories Sync] Failed to fetch categories:', categoriesError);
+        return;
+      }
+
+      if (!categories || categories.length === 0) {
+        console.log('[Subcategories Sync] No categories found for organization');
+        return;
+      }
+
+      const categoryIds = categories.map((c: any) => c.id);
+
+      // Fetch active subcategories scoped to organization's categories
+      const { data: subcategories, error } = await supabase
+        .from('subcategories')
+        .select('id, name, name_en, name_el, category_id')
+        .eq('is_active', true)
+        .in('category_id', categoryIds);
+
+      if (error) {
+        console.error('[Subcategories Sync] Failed to fetch subcategories:', error);
+        return;
+      }
+
+      if (!subcategories || subcategories.length === 0) {
+        console.log('[Subcategories Sync] No subcategories found for organization');
+        return;
+      }
+
+      // Bulk cache the subcategories
+      const subcategoriesToCache = subcategories.map((sc: any) => ({
+        id: sc.id,
+        name: sc.name || '',
+        name_en: sc.name_en,
+        name_el: sc.name_el,
+        category_id: sc.category_id
+      }));
+
+      dbSvc.bulkCacheSubcategories(subcategoriesToCache);
+      console.log(`✅ [Subcategories Sync] Cached ${subcategoriesToCache.length} subcategories for offline use`);
+
+      // Clean up old cache entries (older than 30 days)
+      const cleared = dbSvc.clearOldSubcategoriesCache(30);
+      if (cleared > 0) {
+        console.log(`[Subcategories Sync] Cleared ${cleared} old cache entries`);
+      }
+
+    } catch (error) {
+      console.error('❌ [Subcategories Sync] Failed:', error);
+      // Don't throw - this is a non-critical sync operation
     }
   }
 

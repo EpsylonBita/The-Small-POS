@@ -1,5 +1,6 @@
 import React, { useMemo, useCallback } from "react";
 import { useTheme } from '../contexts/theme-context';
+import { useI18n } from '../contexts/i18n-context';
 
 interface BulkActionsBarProps {
   selectedCount: number;
@@ -26,6 +27,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
   onClearSelection
 }) => {
   const { resolvedTheme } = useTheme();
+  const { t } = useI18n();
 
   // Define actions based on active tab
   const getActionsForTab = useCallback((): ActionConfig[] => {
@@ -140,25 +142,25 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
           {/* Conditional actions by selectionType */}
           {selectionType === 'delivery' && (
             <>
-              <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}>Driver</button>
-              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('pickup'); }}>Pickup</button>
-              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>Edit</button>
-              <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>Cancel</button>
-              <button className={`${getButtonStyles('secondary')} ${resolvedTheme === 'light' ? 'bg-black/80 hover:bg-black/90 text-white' : 'bg-white/80 hover:bg-white/90 text-black'}`} onClick={(e) => { e.preventDefault(); onBulkAction('map'); }}>Map</button>
+              <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}>{t('bulkActions.driver')}</button>
+              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('pickup'); }}>{t('bulkActions.pickup')}</button>
+              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>{t('bulkActions.edit')}</button>
+              <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>{t('bulkActions.cancel')}</button>
+              <button className={`${getButtonStyles('secondary')} ${resolvedTheme === 'light' ? 'bg-black/80 hover:bg-black/90 text-white' : 'bg-white/80 hover:bg-white/90 text-black'}`} onClick={(e) => { e.preventDefault(); onBulkAction('map'); }}>{t('bulkActions.map')}</button>
             </>
           )}
 
           {selectionType === 'pickup' && (
             <>
-              <button className={`${getButtonStyles('warning')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}>Delivered</button>
-              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>Edit</button>
-              <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>Cancel</button>
+              <button className={`${getButtonStyles('warning')}`} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}>{t('bulkActions.delivered')}</button>
+              <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>{t('bulkActions.edit')}</button>
+              <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>{t('bulkActions.cancel')}</button>
             </>
           )}
 
           {/* View shows only when single selection */}
           {selectedCount === 1 && (
-            <button className={getButtonStyles('secondary', true)} onClick={(e) => { e.preventDefault(); onBulkAction('view'); }}>View</button>
+            <button className={getButtonStyles('secondary', true)} onClick={(e) => { e.preventDefault(); onBulkAction('view'); }}>{t('bulkActions.view')}</button>
           )}
 
           {/* Divider */}
@@ -185,7 +187,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
-            <span>Clear</span>
+            <span>{t('bulkActions.clear')}</span>
           </button>
         </div>
       </div>

@@ -43,6 +43,7 @@ export interface StaffInfo {
 export interface StaffShift {
   id: string;
   staff_id: string;
+  staff_name?: string; // Staff name from joined query
   branch_id?: string;
   terminal_id?: string;
   role_type: 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
@@ -761,9 +762,9 @@ export class StaffService extends BaseService {
         `);
         const driverExpenses = (driverExpensesStmt.get(params.shiftId) as any)?.total || 0;
 
-        // Driver formula: expected return = cashCollected - startingAmount - expenses - wage
-        // This is the amount the driver should return to the cashier's drawer
-        const expectedDriverReturn = cashCollected - openingAmount - driverExpenses - paymentAmount;
+        // Driver formula: expected return = startingAmount + cashCollected - expenses - wage
+        // The driver returns the starting cash PLUS collected cash MINUS expenses and wage
+        const expectedDriverReturn = openingAmount + cashCollected - driverExpenses - paymentAmount;
         expected = expectedDriverReturn;
         variance = params.closingCash - expectedDriverReturn;
       } else {
@@ -832,7 +833,7 @@ export class StaffService extends BaseService {
         const cashierDrawer = activeCashierDrawerStmt.get(shift.branch_id, shift.terminal_id) as any;
 
         if (cashierDrawer) {
-          // Use expectedReturn (derived from formula: cashCollected - startingAmount - expenses - paymentAmount)
+          // Use expectedReturn (derived from formula: startingAmount + cashCollected - expenses - paymentAmount)
           // for updating the cashier drawer's driver_cash_returned field.
           // This value may be negative if driver owes money (shortage).
           // closingCash is kept for the driver shift's own variance calculation but decoupled from cashier drawer.
@@ -842,17 +843,24 @@ export class StaffService extends BaseService {
           // This prevents double-counting when later phases introduce dedicated staff_payments handling
           const newTotalStaffPayments = (cashierDrawer.total_staff_payments || 0) + paymentAmount;
 
+          // When driver returns cash, reduce driver_cash_given by their starting amount
+          // because that money has been returned (it's included in expectedReturn)
+          // This prevents double-counting in the cashier's expected calculation
+          const currentDriverCashGiven = (cashierDrawer as any).driver_cash_given || 0;
+          const newDriverCashGiven = currentDriverCashGiven - openingAmount;
+
           const updateCashierDrawerStmt = this.db.prepare(`
             UPDATE cash_drawer_sessions
-            SET driver_cash_returned = ?, total_staff_payments = ?, updated_at = ?
+            SET driver_cash_returned = ?, total_staff_payments = ?, driver_cash_given = ?, updated_at = ?
             WHERE id = ?
           `);
-          updateCashierDrawerStmt.run(newDriverCashReturned, newTotalStaffPayments, now, cashierDrawer.id);
+          updateCashierDrawerStmt.run(newDriverCashReturned, newTotalStaffPayments, newDriverCashGiven, now, cashierDrawer.id);
 
           // Add drawer update to sync queue
           this.addToSyncQueue('cash_drawer_sessions', cashierDrawer.id, 'update', {
             driver_cash_returned: newDriverCashReturned,
             total_staff_payments: newTotalStaffPayments,
+            driver_cash_given: newDriverCashGiven,
             updated_at: now
           });
         }
@@ -1453,7 +1461,12 @@ export class StaffService extends BaseService {
    * @param options.skipBackfill If true, skips driver earnings backfill (faster for non-checkout reads)
    */
   getShiftSummary(shiftId: string, options?: { skipBackfill?: boolean }): any {
-    const shift = this.db.prepare('SELECT * FROM staff_shifts WHERE id = ?').get(shiftId) as any;
+    const shift = this.db.prepare(`
+      SELECT ss.*, (s.first_name || ' ' || s.last_name) as staff_name
+      FROM staff_shifts ss
+      LEFT JOIN staff s ON ss.staff_id = s.id
+      WHERE ss.id = ?
+    `).get(shiftId) as any;
     if (!shift) return null;
 
     const cashDrawer = this.db.prepare('SELECT * FROM cash_drawer_sessions WHERE staff_shift_id = ?').get(shiftId) as any;
@@ -1681,10 +1694,10 @@ export class StaffService extends BaseService {
           ss.payment_amount as driver_payment
         FROM orders o
         LEFT JOIN driver_earnings de ON de.order_id = o.id AND de.staff_shift_id = ?
-        JOIN staff_shifts ss ON o.staff_shift_id = ss.id
+        LEFT JOIN staff_shifts ss ON ss.id = ?
         LEFT JOIN staff s ON ss.staff_id = s.id
         WHERE o.driver_id = (SELECT staff_id FROM staff_shifts WHERE id = ?)
-          AND o.staff_shift_id = ?
+          AND LOWER(COALESCE(o.order_type, '')) = 'delivery'
         ORDER BY o.created_at DESC
       `);
       driverSummaries = driverDeliveriesStmt.all(shiftId, shiftId, shiftId) as any[];
@@ -1738,6 +1751,7 @@ export class StaffService extends BaseService {
     return {
       id: row.id,
       staff_id: row.staff_id,
+      staff_name: row.staff_name || '', // Include staff name from joined query
       branch_id: row.branch_id,
       terminal_id: row.terminal_id,
       role_type: row.role_type,

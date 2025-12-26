@@ -24,6 +24,8 @@ export const CREATE_PRINTERS_TABLE = `
     connection_details TEXT NOT NULL,
     paper_size TEXT NOT NULL CHECK (paper_size IN ('58mm', '80mm', '112mm')),
     character_set TEXT NOT NULL DEFAULT 'PC437_USA',
+    greek_render_mode TEXT DEFAULT 'text' CHECK (greek_render_mode IN ('text', 'bitmap')),
+    receipt_template TEXT DEFAULT 'classic' CHECK (receipt_template IN ('classic', 'modern')),
     role TEXT NOT NULL CHECK (role IN ('receipt', 'kitchen', 'bar', 'label')),
     is_default INTEGER NOT NULL DEFAULT 0,
     fallback_printer_id TEXT,
@@ -238,5 +240,71 @@ export function migratePrintersTableForSystemType(db: import('better-sqlite3').D
   } catch (error) {
     console.error('[PrinterDatabaseSchema] Migration failed:', error);
     throw error;
+  }
+}
+
+/**
+ * Migrate the printers table to add 'greek_render_mode' column
+ * This column stores the rendering mode for Greek text ('text' or 'bitmap')
+ * 
+ * @param db - better-sqlite3 Database instance
+ */
+export function migratePrintersTableForGreekRenderMode(db: import('better-sqlite3').Database): void {
+  try {
+    // Check if the column already exists
+    const tableInfo = db.prepare('PRAGMA table_info(printers)').all() as Array<{ name: string }>;
+    const hasColumn = tableInfo.some(col => col.name === 'greek_render_mode');
+    
+    if (hasColumn) {
+      console.log('[PrinterDatabaseSchema] greek_render_mode column already exists');
+      return;
+    }
+    
+    console.log('[PrinterDatabaseSchema] Adding greek_render_mode column to printers table...');
+    
+    // SQLite supports adding columns with ALTER TABLE
+    db.exec(`
+      ALTER TABLE printers 
+      ADD COLUMN greek_render_mode TEXT DEFAULT 'text' 
+      CHECK (greek_render_mode IN ('text', 'bitmap'))
+    `);
+    
+    console.log('[PrinterDatabaseSchema] ✅ greek_render_mode column added successfully');
+  } catch (error) {
+    console.error('[PrinterDatabaseSchema] Failed to add greek_render_mode column:', error);
+    // Don't throw - this is a non-critical migration
+  }
+}
+
+/**
+ * Migrate the printers table to add 'receipt_template' column
+ * This column stores the receipt template style ('classic' or 'modern')
+ * 
+ * @param db - better-sqlite3 Database instance
+ */
+export function migratePrintersTableForReceiptTemplate(db: import('better-sqlite3').Database): void {
+  try {
+    // Check if the column already exists
+    const tableInfo = db.prepare('PRAGMA table_info(printers)').all() as Array<{ name: string }>;
+    const hasColumn = tableInfo.some(col => col.name === 'receipt_template');
+    
+    if (hasColumn) {
+      console.log('[PrinterDatabaseSchema] receipt_template column already exists');
+      return;
+    }
+    
+    console.log('[PrinterDatabaseSchema] Adding receipt_template column to printers table...');
+    
+    // SQLite supports adding columns with ALTER TABLE
+    // Note: SQLite doesn't support CHECK constraints in ALTER TABLE, so we add without constraint
+    db.exec(`
+      ALTER TABLE printers 
+      ADD COLUMN receipt_template TEXT DEFAULT 'classic'
+    `);
+    
+    console.log('[PrinterDatabaseSchema] ✅ receipt_template column added successfully');
+  } catch (error) {
+    console.error('[PrinterDatabaseSchema] Failed to add receipt_template column:', error);
+    // Don't throw - this is a non-critical migration
   }
 }

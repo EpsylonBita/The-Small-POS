@@ -28,6 +28,7 @@ interface Customer {
   floor_number?: string;
   notes?: string;
   name_on_ringer?: string;
+  version?: number;
   addresses?: CustomerAddress[];
 }
 
@@ -38,6 +39,8 @@ interface CustomerSearchModalProps {
   onAddNewCustomer: (phone: string) => void;
   onAddNewAddress?: (customer: Customer) => void;
   onEditCustomer?: (customer: Customer) => void;
+  /** Pre-selected customer to show directly (e.g., after editing an address) */
+  initialCustomer?: Customer | null;
 }
 
 export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
@@ -47,6 +50,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   onAddNewCustomer,
   onAddNewAddress,
   onEditCustomer,
+  initialCustomer,
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -58,6 +62,16 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+
+  // Set customer from initialCustomer prop when modal opens
+  useEffect(() => {
+    if (isOpen && initialCustomer) {
+      setCustomer(initialCustomer);
+      setSearchQuery(initialCustomer.phone || '');
+      setCustomers([]);
+      setError(null);
+    }
+  }, [isOpen, initialCustomer]);
 
   // Auto-select default or first address when customer is found
   useEffect(() => {
@@ -179,6 +193,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           floor_number: c.floor_number,
           notes: c.notes,
           name_on_ringer: c.name_on_ringer,
+          version: c.version,
           addresses: c.addresses,
         }));
         setError(null);
@@ -196,6 +211,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           floor_number: result.customer.floor_number,
           notes: result.customer.notes,
           name_on_ringer: result.customer.name_on_ringer,
+          version: result.customer.version,
           addresses: result.customer.addresses,
         };
 
@@ -248,6 +264,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   const handleSelectCustomer = () => {
     if (customer) {
+      // Debug: Log customer data before selection
+      console.log('[CustomerSearch] handleSelectCustomer - customer:', {
+        id: customer.id,
+        name: customer.name,
+        name_on_ringer: customer.name_on_ringer,
+        addressCount: customer.addresses?.length,
+        addresses: customer.addresses?.map(a => ({
+          id: a.id,
+          street: a.street_address,
+          notes: a.notes
+        }))
+      });
+
       // Determine which address to use - either the explicitly selected one, or default/first
       let addressToUse = selectedAddressId;
       
@@ -261,6 +290,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       if (addressToUse && customer.addresses) {
         const selectedAddr = customer.addresses.find(a => a.id === addressToUse);
         if (selectedAddr) {
+          console.log('[CustomerSearch] Selected address:', {
+            id: selectedAddr.id,
+            street: selectedAddr.street_address,
+            notes: selectedAddr.notes,
+            rawAddress: selectedAddr
+          });
           const customerWithSelectedAddress = {
             ...customer,
             address: selectedAddr.street_address,
@@ -270,6 +305,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             notes: selectedAddr.notes || customer.notes,
             selected_address_id: selectedAddr.id
           };
+          console.log('[CustomerSearch] Passing to OrderFlow:', {
+            name_on_ringer: customerWithSelectedAddress.name_on_ringer,
+            notes: customerWithSelectedAddress.notes
+          });
           onCustomerSelected(customerWithSelectedAddress);
           return;
         }
@@ -379,10 +418,91 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     }
   }, [isOpen]);
 
-  // Helper to select a customer from the list
-  const handleSelectFromList = (selectedCustomer: Customer) => {
-    setCustomer(selectedCustomer);
-    setCustomers([]);
+  // Helper to select a customer from the list - fetch fresh data with addresses
+  const handleSelectFromList = async (selectedCustomer: Customer) => {
+    setIsSearching(true);
+    try {
+      // Fetch fresh customer data with addresses using the customer's phone
+      const ls = typeof window !== 'undefined' ? window.localStorage : null;
+      const electron = typeof window !== 'undefined' ? window.electron : undefined;
+
+      let posKey = '';
+      let termId = '';
+
+      // Get credentials
+      try {
+        if (electron?.ipcRenderer) {
+          const [mainTerminalId, mainApiKey] = await Promise.all([
+            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
+            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
+          ]);
+          termId = (mainTerminalId || '').toString().trim();
+          posKey = (mainApiKey || '').toString().trim();
+        }
+      } catch (e) {
+        console.warn('[CustomerSearch] Failed to get credentials:', e);
+      }
+
+      if (!posKey) {
+        posKey = (ls?.getItem('pos_api_key') || '').trim() ||
+          (environment.POS_API_KEY || '').trim() ||
+          (environment.POS_API_SHARED_KEY || '').trim();
+      }
+      if (!termId) {
+        termId = (ls?.getItem('terminal_id') || '').trim();
+      }
+
+      // Fetch by exact phone to get full customer data with addresses
+      const endpoint = getApiUrl(`pos/customers?phone=${encodeURIComponent(selectedCustomer.phone)}`);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (posKey) headers['x-pos-api-key'] = String(posKey);
+      if (termId) headers['x-terminal-id'] = String(termId);
+
+      const response = await fetch(endpoint, { method: 'GET', headers, credentials: 'omit' });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.customer) {
+          console.log('[CustomerSearch] Full customer data received:', {
+            id: result.customer.id,
+            name: result.customer.name,
+            name_on_ringer: result.customer.name_on_ringer,
+            addressCount: result.customer.addresses?.length,
+            addresses: result.customer.addresses?.map((a: any) => ({
+              id: a.id,
+              street: a.street_address,
+              notes: a.notes
+            }))
+          });
+          const customerObj = {
+            id: result.customer.id,
+            phone: result.customer.phone,
+            name: result.customer.name,
+            email: result.customer.email,
+            address: result.customer.address,
+            postal_code: result.customer.postal_code,
+            floor_number: result.customer.floor_number,
+            notes: result.customer.notes,
+            name_on_ringer: result.customer.name_on_ringer,
+            version: result.customer.version,
+            addresses: result.customer.addresses,
+          };
+          setCustomer(customerObj);
+          setCustomers([]);
+          return;
+        }
+      }
+      // Fallback to using the selected customer from list if fetch fails
+      setCustomer(selectedCustomer);
+      setCustomers([]);
+    } catch (err) {
+      console.error('Error fetching customer details:', err);
+      // Fallback to using the selected customer from list
+      setCustomer(selectedCustomer);
+      setCustomers([]);
+    } finally {
+      setIsSearching(false);
+    }
   };
 
   return (
