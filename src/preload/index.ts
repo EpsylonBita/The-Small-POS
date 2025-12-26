@@ -355,6 +355,7 @@ const electronAPI = {
         'database:health-check',
         'database:get-stats',
         'database:reset',
+        'database:clear-operational-data',
 
         // Terminal config
         'terminal-config:get-settings',

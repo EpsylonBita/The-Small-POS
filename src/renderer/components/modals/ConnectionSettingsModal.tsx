@@ -613,6 +613,41 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               </button>
             </div>
 
+            {/* Clear All Operational Data - Clears orders, shifts, drawers but keeps settings */}
+            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+              <div className="flex items-center gap-3 flex-1 min-w-0">
+                <Database className="w-5 h-5 flex-shrink-0 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+                <div className="text-left min-w-0">
+                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
+                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  const confirmed = confirm(t('settings.database.confirmClearOperational', '⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?'))
+                  if (!confirmed) return
+
+                  try {
+                    toast.loading(t('settings.database.clearingOperational', 'Clearing operational data...'))
+                    const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
+                    toast.dismiss()
+                    if (result?.success) {
+                      toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
+                    } else {
+                      toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+                    }
+                  } catch (e) {
+                    console.error('Failed to clear operational data:', e)
+                    toast.dismiss()
+                    toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+                  }
+                }}
+                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-amber-600/30 border-2 border-amber-500 hover:bg-amber-600/50 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.5)]`}
+              >
+                {t('settings.database.clearOperationalButton', 'Clear')}
+              </button>
+            </div>
+
             {/* Factory Reset - Destructive */}
             <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
               <div className="flex items-center gap-3 flex-1 min-w-0">

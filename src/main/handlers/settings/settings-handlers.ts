@@ -529,6 +529,26 @@ export function registerSettingsHandlers(): void {
     }
   });
 
+  // Clear operational data handler - clears orders, shifts, drawers, etc. but keeps settings
+  ipcMain.removeHandler('database:clear-operational-data');
+  ipcMain.handle('database:clear-operational-data', async () => {
+    try {
+      const databaseService = dbManager.getDatabaseService();
+      if (!databaseService) {
+        return { success: false, error: 'Database service not initialized' };
+      }
+      
+      console.log('[database:clear-operational-data] Starting operational data clear...');
+      await databaseService.clearOperationalData();
+      console.log('[database:clear-operational-data] Operational data clear completed');
+      
+      return { success: true };
+    } catch (error) {
+      console.error('[database:clear-operational-data] Operational data clear failed:', error);
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
   // Update terminal credentials and trigger sync
   ipcMain.removeHandler('settings:update-terminal-credentials');
   ipcMain.handle(

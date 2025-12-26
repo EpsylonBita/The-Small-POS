@@ -1282,6 +1282,71 @@ export class DatabaseService {
   }
 
   /**
+   * Clear operational data - clears orders, shifts, drawers, expenses, payments, driver_earnings
+   * Keeps connection settings, menu data, and customer data intact
+   * Use this when you need to clear stuck operational data without losing configuration
+   */
+  async clearOperationalData(): Promise<void> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    try {
+      console.log('[DatabaseService] Starting operational data clear...');
+
+      // Helper function to safely delete from table
+      const safeClearTable = (tableName: string) => {
+        try {
+          this.db?.prepare(`DELETE FROM ${tableName}`).run();
+          console.log(`[DatabaseService] Cleared table: ${tableName}`);
+        } catch (e) {
+          console.warn(`[DatabaseService] Could not clear table ${tableName} (might not exist):`, (e as Error).message);
+        }
+      };
+
+      // Clear all orders and related data
+      safeClearTable('orders');
+      safeClearTable('order_items');
+      safeClearTable('order_status_history');
+      safeClearTable('order_retry_queue');
+      safeClearTable('order_sync_conflicts');
+
+      // Clear all staff shifts and related data
+      safeClearTable('staff_shifts');
+      safeClearTable('staff_activity_log');
+      safeClearTable('staff_sessions');
+      safeClearTable('shift_expenses');
+      safeClearTable('driver_earnings');
+      safeClearTable('staff_payments');
+
+      // Clear cash drawer sessions
+      safeClearTable('cash_drawer_sessions');
+
+      // Clear payments
+      safeClearTable('payments');
+      safeClearTable('payment_transactions');
+      safeClearTable('payment_receipts');
+      safeClearTable('payment_refunds');
+
+      // Clear sync queue (operational items only)
+      safeClearTable('sync_queue');
+
+      // Vacuum database to reclaim space
+      try {
+        this.db.prepare('VACUUM').run();
+        console.log('[DatabaseService] Database vacuumed successfully');
+      } catch (e) {
+        console.warn('[DatabaseService] Could not vacuum database:', (e as Error).message);
+      }
+
+      console.log('[DatabaseService] Operational data clear completed successfully');
+    } catch (error) {
+      console.error('[DatabaseService] Operational data clear failed:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Factory reset - clears all local cached data when switching to a different terminal/branch
    * Keeps only terminal settings and sync history
    */

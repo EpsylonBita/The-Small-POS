@@ -1390,7 +1390,14 @@
       "confirmFactoryReset": "⚠️ FINAL CONFIRMATION ⚠️\n\nThis is your last chance to cancel.\n\nAll data will be permanently deleted and the app will restart.\n\nClick OK to proceed with factory reset.",
       "cleared": "Successfully cleared {{count}} orders from local database",
       "resetSuccess": "Factory reset complete. App will restart...",
-      "clearFailed": "Failed to perform factory reset"
+      "clearFailed": "Failed to perform factory reset",
+      "clearOperationalLabel": "Clear All Operational Data",
+      "clearOperationalHelp": "Clears orders, shifts, drawers, payments. Keeps settings.",
+      "clearOperationalButton": "Clear",
+      "confirmClearOperational": "⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?",
+      "clearingOperational": "Clearing operational data...",
+      "operationalCleared": "All operational data cleared successfully",
+      "operationalClearFailed": "Failed to clear operational data"
     },
     "actions": {
       "back": "← Back"
