@@ -266,7 +266,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[95vh] z-[1100] flex flex-col">
+      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[95vh] z-[1101] flex flex-col">
         {/* Header */}
         <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
           <div className="flex justify-between items-start gap-4">
@@ -301,7 +301,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 relative z-0">
           {/* Ingredients Section - Show for ALL items (customizable or not) */}
           <div className="mb-6">
             {/* Header with Little and Without Switches */}
@@ -556,23 +556,33 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               </div>
             )}
           </div>
+        </div>
 
+        {/* Footer - Fixed */}
+        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-6 py-4 space-y-4 bg-black/40 backdrop-blur-sm relative z-10">
           {/* Special Instructions */}
-          <div className="mb-6">
-            <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
+          <div>
+            <label htmlFor="special-instructions-textarea" className="block text-sm font-medium mb-2 liquid-glass-modal-text">
               {t('menu.itemModal.specialInstructions')}
             </label>
             <textarea
+              id="special-instructions-textarea"
+              name="specialInstructions"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              className="w-full p-3 rounded-xl liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-blue-500 transition-all resize-none text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
-              rows={3}
+              onClick={(e) => e.stopPropagation()}
+              onFocus={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              onKeyUp={(e) => e.stopPropagation()}
+              onKeyPress={(e) => e.stopPropagation()}
+              className="w-full p-3 rounded-xl liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-blue-500 transition-all resize-none text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted pointer-events-auto cursor-text"
+              rows={2}
               placeholder={t('menu.itemModal.specialInstructionsPlaceholder')}
             />
           </div>
 
           {/* Quantity */}
-          <div className="mb-0">
+          <div>
             <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
               {t('menu.itemModal.quantity')}
             </label>
@@ -594,10 +604,6 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               </button>
             </div>
           </div>
-        </div>
-
-        {/* Footer - Fixed */}
-        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-6 py-4">
           <div className="flex justify-between items-center mb-4">
             <span className="text-lg font-semibold liquid-glass-modal-text">
               {t('menu.itemModal.total')}:

@@ -29,6 +29,7 @@ interface MenuModalProps {
     paymentData?: any;
     discountPercentage?: number;
     discountAmount?: number;
+    deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   }) => void;
   // Edit mode props
   editMode?: boolean;
@@ -125,7 +126,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Reset cart when modal closes to ensure clean state for next open
       setCartItems([]);
     }
-  }, [isOpen]);
+  }, [isOpen, cartItems.length]);
 
   // Transform customizations from Supabase format to MenuCart format
   const transformCustomizations = (customizations: any): any[] => {
@@ -176,24 +177,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Initialize cart items when in edit mode
   useEffect(() => {
-    // Skip if not open or already loaded for this order
+    // Skip if not open
     if (!isOpen) return;
+
+    // Skip if already loaded for this exact order
     if (editMode && hasLoadedItemsRef.current && lastEditOrderIdRef.current === editOrderId) {
       console.log('[MenuModal] Skipping load - already loaded for order:', editOrderId);
       return;
     }
-    
+
     const loadItems = async () => {
-      console.log('[MenuModal] loadItems called - editMode:', editMode, 'editOrderId:', editOrderId, 'editSupabaseId:', editSupabaseId, 'initialCartItems:', initialCartItems?.length);
-      
       if (editMode) {
-        // Mark as loaded to prevent re-running
+        // Mark as loaded IMMEDIATELY to prevent race conditions where this effect runs multiple times
+        // before the async operations complete
         hasLoadedItemsRef.current = true;
         lastEditOrderIdRef.current = editOrderId;
-        
+
+        // IMPORTANT: Clear cart items first to prevent duplicates when switching between orders
+        // This handles the case where the modal is already open and we're loading a different order
+        setCartItems([]);
+
         // If we have initialCartItems, use them
         if (initialCartItems && initialCartItems.length > 0) {
-          console.log('[MenuModal] Using initialCartItems:', initialCartItems.length);
           const transformedItems = initialCartItems.map((item, index) => ({
             id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
             menuItemId: item.menu_item_id || item.menuItemId || item.id,
@@ -206,21 +211,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             basePrice: item.unit_price || item.price || 0,
             unitPrice: item.unit_price || item.price || 0,
           }));
-          console.log('[MenuModal] Transformed items:', transformedItems);
           setCartItems(transformedItems);
-        } 
+        }
         // Otherwise fetch from backend if we have an orderId
         else if (editOrderId) {
-          console.log('[MenuModal] Fetching items from backend for order:', editOrderId, 'supabaseId:', editSupabaseId);
           setIsLoadingItems(true);
           try {
             const fetchedItems = await fetchOrderItems(editOrderId, editSupabaseId);
-            console.log('[MenuModal] Fetched items:', fetchedItems?.length, fetchedItems);
             if (fetchedItems.length > 0) {
               const transformedItems = fetchedItems.map((item, index) => {
-                console.log('[MenuModal] Item customizations raw:', item.customizations);
                 const transformedCustomizations = transformCustomizations(item.customizations);
-                console.log('[MenuModal] Item customizations transformed:', transformedCustomizations);
                 return {
                   id: `edit-${item.id || index}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                   menuItemId: item.menu_item_id || item.menuItemId || item.id,
@@ -234,10 +234,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   unitPrice: item.unit_price || item.price || 0,
                 };
               });
-              console.log('[MenuModal] Setting cart items:', transformedItems);
               setCartItems(transformedItems);
-            } else {
-              console.log('[MenuModal] No items fetched from backend');
             }
           } catch (error) {
             console.error('[MenuModal] Error loading items:', error);
@@ -324,6 +321,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   }, [isOpen]);
 
   const handleAddToCart = (item: any, quantity: number, customizations: any[], notes: string) => {
+    // Debug: Log notes parameter
+    console.log('[MenuModal.handleAddToCart] notes parameter:', notes, 'type:', typeof notes);
+    
     // Ensure item has required properties
     // Use order-type-specific price: delivery_price for delivery, pickup_price for pickup
     const basePrice = orderType === 'pickup'
@@ -450,6 +450,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const discountAmount = subtotal * (discountPercentage / 100);
     const totalAfterDiscount = subtotal - discountAmount;
 
+    // Debug: Log cart items with notes before passing to onOrderComplete
+    console.log('[MenuModal.handlePaymentComplete] cartItems with notes:', cartItems.map(item => ({
+      name: item.name,
+      notes: item.notes,
+      hasNotes: !!item.notes
+    })));
+
     // Log address state for debugging
     console.log('[MenuModal.handlePaymentComplete] selectedAddress:', selectedAddress);
     console.log('[MenuModal.handlePaymentComplete] orderType:', orderType);
@@ -473,7 +480,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           notes: '', // Could be enhanced to collect order notes
           paymentData,
           discountPercentage,
-          discountAmount
+          discountAmount,
+          deliveryZoneInfo // Pass delivery zone info to OrderDashboard for correct fee calculation
         });
       }
 

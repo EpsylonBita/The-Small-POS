@@ -62,6 +62,13 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
       // Don't handle if loading
       if (loading) return
 
+      // Don't intercept if user is typing in an input/textarea field
+      const target = e.target as HTMLElement
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+        console.log('Ignoring keydown - user is typing in', target.tagName)
+        return
+      }
+
       // Prevent default for all keys we handle
       if (e.key >= '0' && e.key <= '9') {
         console.log('Number key pressed:', e.key)

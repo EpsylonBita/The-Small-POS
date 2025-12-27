@@ -323,6 +323,14 @@ export function registerPrintHandlers() {
       // Debug: Log the full item structure to see what fields are available
       if (order.items && order.items.length > 0) {
         console.log(`[payment:print-receipt] First item structure:`, JSON.stringify(order.items[0], null, 2));
+        // Debug: Log notes field specifically for all items
+        order.items.forEach((item: any, idx: number) => {
+          console.log(`[payment:print-receipt] Item ${idx} notes:`, {
+            notes: item.notes,
+            special_instructions: item.special_instructions,
+            hasNotes: !!(item.notes || item.special_instructions)
+          });
+        });
       }
 
       // Create Supabase client for name resolution fallback
@@ -373,6 +381,14 @@ export function registerPrintHandlers() {
           specialInstructions: item.notes || item.special_instructions || undefined
         };
       }));
+
+      // Debug: Log printItems to verify specialInstructions are set
+      console.log(`[payment:print-receipt] PrintItems created:`, printItems.map((pi, idx) => ({
+        idx,
+        name: pi.name,
+        specialInstructions: pi.specialInstructions,
+        hasSpecialInstructions: !!pi.specialInstructions
+      })));
 
       // Map order type to receipt format
       let orderType: 'dine-in' | 'pickup' | 'delivery' = 'pickup';
@@ -844,6 +860,13 @@ Write-Output $hexOutput
 
         let bitmapHex: string;
         try {
+          // SECURITY: Validate that the script path is within the expected temp directory
+          const normalizedPath = path.normalize(psFile2);
+          const normalizedTempDir = path.normalize(tempDir);
+          if (!normalizedPath.startsWith(normalizedTempDir)) {
+            throw new Error('Invalid script path - path traversal detected');
+          }
+
           bitmapHex = execSync(`powershell -ExecutionPolicy Bypass -File "${psFile2}"`, {
             encoding: 'utf8',
             timeout: 30000,

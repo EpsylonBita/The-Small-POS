@@ -332,7 +332,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
       {/* Suggestions Dropdown */}
       {showSuggestions && (suggestions.length > 0 || isLoading) && (
-        <div className="absolute left-0 right-0 top-full z-[9999] mt-1 bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl border liquid-glass-modal-border rounded-xl shadow-2xl max-h-60 overflow-y-auto">
+        <div className="absolute left-0 right-0 top-full z-[9999] mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto">
           {isLoading && (
             <div className="p-3 text-center text-gray-500 dark:text-gray-400">
               {t('modals.addCustomer.searchingAddresses')}
@@ -344,7 +344,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
               type="button"
               key={suggestion.place_id || index}
               onClick={() => handleSuggestionClick(suggestion)}
-              className="w-full text-left p-3 hover:bg-blue-500/10 dark:hover:bg-blue-400/10 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
+              className="w-full text-left p-3 hover:bg-white/10 dark:hover:bg-white/5 transition-colors border-b border-gray-200/20 dark:border-gray-600/20 last:border-b-0"
             >
               <div className="flex items-start gap-2">
                 <MapPin className="w-4 h-4 text-blue-500 dark:text-blue-400 mt-1 flex-shrink-0" />
@@ -988,14 +988,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
           // Use optimistic versioning if available, otherwise fetch fresh version
           let currentVersion = initialCustomer.version;
-          
+
           // If no version, fetch fresh customer data to get current version
           if (currentVersion === undefined || currentVersion === null) {
             console.log('[AddCustomerModal] No version found, fetching fresh customer data...');
             try {
               // First invalidate cache to ensure we get fresh data
               await window.electronAPI?.customerInvalidateCache?.(initialCustomer.phone);
-              
+
               const freshCustomer = await window.electronAPI?.customerLookupByPhone?.(initialCustomer.phone);
               console.log('[AddCustomerModal] Fresh customer data:', JSON.stringify(freshCustomer, null, 2));
               if (freshCustomer?.version !== undefined && freshCustomer?.version !== null) {
@@ -1011,7 +1011,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               console.warn('[AddCustomerModal] Failed to fetch fresh version:', e);
             }
           }
-          
+
           // If still no version after fetching, throw error - version is required for updates
           if (currentVersion === undefined || currentVersion === null) {
             console.error('[AddCustomerModal] Cannot update customer without version');
@@ -1195,7 +1195,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         {/* Delivery Validation */}
         {showDeliveryValidation && (
-          <div className="bg-gray-50/50 dark:bg-gray-800/50 rounded-xl p-4 border liquid-glass-modal-border">
+          <div className="liquid-glass-modal-card">
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
                 <MapPin className="w-4 h-4" />
@@ -1237,7 +1237,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
               {/* Validation Details */}
               {deliveryValidationResult && deliveryValidationResult.zone && (
-                <div className="bg-white dark:bg-gray-700 rounded-lg p-3 space-y-2">
+                <div className="bg-black/20 rounded-lg p-3 space-y-2 border border-white/5">
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.zone')}:</span>
@@ -1402,14 +1402,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 px-4 py-3 bg-gray-500/10 hover:bg-gray-500/20 liquid-glass-modal-text font-medium rounded-xl border border-gray-500/30 transition-all"
+            className="liquid-glass-modal-button flex-1 text-gray-300 bg-white/5 border-white/10 hover:border-white/20"
           >
             {t('modals.addCustomer.cancel')}
           </button>
           <button
             type="submit"
             disabled={isSubmitting}
-            className="flex-1 px-4 py-3 bg-blue-500/20 hover:bg-blue-500/30 disabled:bg-gray-500/10 disabled:cursor-not-allowed text-blue-600 dark:text-blue-400 disabled:text-gray-500 font-medium rounded-xl border border-blue-500/30 disabled:border-gray-500/20 transition-all"
+            className="liquid-glass-modal-button flex-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)] disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting
               ? t('modals.addCustomer.saving')

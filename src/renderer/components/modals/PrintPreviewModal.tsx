@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import DOMPurify from 'dompurify';
 import { Printer, ZoomIn, ZoomOut, Download, X } from 'lucide-react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import { useTranslation } from 'react-i18next';
@@ -87,7 +88,12 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                     >
                         {previewHtml ? (
                             <div
-                                dangerouslySetInnerHTML={{ __html: previewHtml }}
+                                dangerouslySetInnerHTML={{
+                                    __html: DOMPurify.sanitize(previewHtml, {
+                                        ALLOWED_TAGS: ['div', 'span', 'p', 'br', 'strong', 'em', 'b', 'i', 'table', 'tr', 'td', 'th', 'hr'],
+                                        ALLOWED_ATTR: ['class', 'style']
+                                    })
+                                }}
                                 className="receipt-preview-content font-mono text-[10px] leading-tight"
                             />
                         ) : (

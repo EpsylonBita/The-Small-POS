@@ -21,15 +21,15 @@ interface POSGlassCardProps extends React.HTMLAttributes<HTMLDivElement> {
 }
 
 export const POSGlassCard = React.forwardRef<HTMLDivElement, POSGlassCardProps>(
-  ({ 
-    children, 
-    variant = 'primary', 
+  ({
+    children,
+    variant = 'primary',
     size = 'default',
-    className = '', 
-    onClick, 
+    className = '',
+    onClick,
     isSelected = false,
     isLoading = false,
-    ...props 
+    ...props
   }, ref) => {
     const baseClasses = 'liquid-glass-modal-card'
     const variantClass = `liquid-glass-modal-${variant}`
@@ -43,8 +43,8 @@ export const POSGlassCard = React.forwardRef<HTMLDivElement, POSGlassCardProps>(
     }
 
     const combinedClasses = cn(
-      baseClasses, 
-      variantClass, 
+      baseClasses,
+      variantClass,
       interactiveClass,
       selectedClass,
       loadingClass,
@@ -62,11 +62,11 @@ export const POSGlassCard = React.forwardRef<HTMLDivElement, POSGlassCardProps>(
         onKeyDown={
           onClick
             ? e => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  onClick(e as unknown as React.MouseEvent<HTMLDivElement>)
-                }
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onClick(e as unknown as React.MouseEvent<HTMLDivElement>)
               }
+            }
             : undefined
         }
         {...props}
@@ -120,8 +120,8 @@ export const POSGlassButton = React.forwardRef<HTMLButtonElement, POSGlassButton
     const widthClass = fullWidth ? 'w-full' : ''
 
     const combinedClasses = cn(
-      sizeClasses[size], 
-      variantClass, 
+      sizeClasses[size],
+      variantClass,
       widthClass,
       className
     )
@@ -169,15 +169,15 @@ export const POSGlassInput = React.forwardRef<HTMLInputElement, POSGlassInputPro
               {icon}
             </div>
           )}
-          <input 
-            ref={ref} 
-                       className={cn(
-               'liquid-glass-modal-input', 
-               icon ? 'pl-10' : undefined,
-               error ? 'border-red-500 focus:border-red-500' : undefined,
-               className
-             )} 
-            {...props} 
+          <input
+            ref={ref}
+            className={cn(
+              'liquid-glass-modal-input',
+              icon ? 'pl-10' : undefined,
+              error ? 'border-red-500 focus:border-red-500' : undefined,
+              className
+            )}
+            {...props}
           />
         </div>
         {error && (
@@ -210,13 +210,13 @@ export const POSGlassPINInput: React.FC<POSGlassPINInputProps> = ({
 
   const handleChange = (index: number, inputValue: string) => {
     if (inputValue.length > 1) return
-    
+
     const newValue = value.split('')
     newValue[index] = inputValue
-    
+
     const finalValue = newValue.join('').slice(0, length)
     onChange(finalValue)
-    
+
     // Move to next input
     if (inputValue && index < length - 1) {
       inputRefs.current[index + 1]?.focus()
@@ -307,20 +307,20 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
 
   return (
     <>
-      <div 
-        className="liquid-glass-modal-backdrop" 
-        onClick={closeOnBackdrop ? onClose : undefined} 
-        aria-hidden="true" 
+      <div
+        className="liquid-glass-modal-backdrop"
+        onClick={closeOnBackdrop ? onClose : undefined}
+        aria-hidden="true"
       />
 
       <div
-        className={cn('liquid-glass-modal-shell', sizeClasses[size], className)}
+        className={cn('liquid-glass-modal-shell p-6', sizeClasses[size], className)}
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? 'modal-title' : undefined}
       >
         {title && (
-          <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center justify-between mb-4">
             <h2 id="modal-title" className="text-2xl font-bold pos-glass-text-primary">
               {title}
             </h2>
@@ -424,7 +424,7 @@ interface LiquidGlassModalProps {
    * @required
    */
   isOpen: boolean;
-  
+
   /**
    * Callback function called when the modal should close
    * Triggered by:
@@ -434,7 +434,7 @@ interface LiquidGlassModalProps {
    * @required
    */
   onClose: () => void;
-  
+
   /**
    * Modal title displayed in the header
    * When provided, automatically renders a header with title and close button
@@ -442,13 +442,13 @@ interface LiquidGlassModalProps {
    * @optional
    */
   title?: string;
-  
+
   /**
    * Modal content
    * @required
    */
   children: React.ReactNode;
-  
+
   /**
    * Additional CSS classes applied to the modal shell
    * Useful for custom sizing, positioning, or styling
@@ -456,7 +456,7 @@ interface LiquidGlassModalProps {
    * @example className="max-h-[90vh] overflow-y-auto"
    */
   className?: string;
-  
+
   /**
    * Modal size variant
    * - 'sm': max-w-md (small forms, confirmations)
@@ -468,7 +468,7 @@ interface LiquidGlassModalProps {
    * @default 'md'
    */
   size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
-  
+
   /**
    * Whether clicking the backdrop (outside the modal) closes the modal
    * Set to false for critical flows (payments, data entry) to prevent accidental closes
@@ -476,7 +476,7 @@ interface LiquidGlassModalProps {
    * @default true
    */
   closeOnBackdrop?: boolean;
-  
+
   /**
    * Whether pressing the Escape key closes the modal
    * Set to false during processing states to prevent interruption
@@ -698,20 +698,21 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         onAnimationEnd={handleAnimationEnd}
       >
         {/* Title section - fixed at top */}
+        {/* Title section - fixed at top */}
         {title && (
-          <div className="flex items-center justify-between mb-6 flex-shrink-0">
+          <div className="liquid-glass-modal-header">
             <h2
               id="liquid-glass-modal-title"
-              className="text-2xl font-bold pos-glass-text-primary"
+              className="liquid-glass-modal-title"
             >
               {title}
             </h2>
             <button
               onClick={handleClose}
-              className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+              className="liquid-glass-modal-close"
               aria-label={t('common.actions.close')}
             >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
@@ -719,7 +720,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         )}
 
         {/* Content wrapper with scroll - prevent horizontal overflow from button hover effects */}
-        <div className="overflow-y-auto overflow-x-hidden flex-1 min-h-0 scrollbar-hide">
+        <div className={cn("liquid-glass-modal-content scrollbar-hide overflow-x-hidden", !title && "pt-8")}>
           {/* Children content */}
           {children}
         </div>
@@ -904,17 +905,17 @@ interface POSGlassNumberInputProps extends Omit<React.InputHTMLAttributes<HTMLIn
 }
 
 export const POSGlassNumberInput = React.forwardRef<HTMLInputElement, POSGlassNumberInputProps>(
-  ({ 
-    label, 
-    onIncrement, 
-    onDecrement, 
-    min = 0, 
-    max, 
-    step = 1, 
+  ({
+    label,
+    onIncrement,
+    onDecrement,
+    min = 0,
+    max,
+    step = 1,
     className = '',
     value,
     onChange,
-    ...props 
+    ...props
   }, ref) => {
     const numValue = typeof value === 'string' ? parseInt(value) || 0 : (value as number) || 0
 

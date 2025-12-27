@@ -351,13 +351,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       // Use IPC to fetch staff from main process (where Supabase config is available)
       let staffList: StaffMember[] = [];
-      
+
       // Try the new IPC handler first
       if ((window as any).electronAPI?.invoke) {
         try {
           console.log('[loadStaff] Trying IPC handler shift:list-staff-for-checkin...');
           const result = await (window as any).electronAPI.invoke('shift:list-staff-for-checkin', branchId);
-          
+
           // Handle IPC response format
           const data = result?.data || result;
           if (Array.isArray(data)) {
@@ -383,7 +383,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           console.log('[loadStaff] Loading roles via IPC for', staffIds.length, 'staff members');
           const rolesResult = await (window as any).electronAPI?.invoke?.('shift:get-staff-roles', staffIds);
           const rolesByStaff = rolesResult?.data || rolesResult || {};
-          
+
           // Assign roles to staff members
           staffList.forEach(staff => {
             const staffRoles = rolesByStaff[staff.id] || [];
@@ -1381,7 +1381,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         isOpen={isOpen}
         onClose={onClose}
         title={mode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}
-        size="lg"
+        size="md"
         closeOnBackdrop={false}
         closeOnEscape={true}
       >
@@ -1476,7 +1476,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <p className="liquid-glass-modal-text-muted">{t('modals.staffShift.noStaffAvailable')}</p>
                     </div>
                   ) : (
-                    <div className="grid gap-3 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
+                    <div className="grid gap-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar p-1">
                       {[...availableStaff]
                         .sort((a, b) => {
                           const aActive = staffActiveShifts.has(a.id);
@@ -1491,45 +1491,66 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <button
                               key={staffMember.id}
                               onClick={() => handleStaffSelect(staffMember)}
-                              className="bg-white/10 dark:bg-gray-800/20 border liquid-glass-modal-border rounded-xl p-4 hover:bg-white/20 dark:hover:bg-gray-800/30 transition-all duration-300 text-left group shadow-[0_2px_8px_0_rgba(59,130,246,0.2)]"
+                              className="group relative w-full overflow-hidden rounded-2xl border-2 text-left transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] shadow-lg hover:shadow-2xl bg-white/5 border-white/10 hover:border-white/20 hover:bg-white/10 p-5"
                             >
-                              <div className="flex items-center gap-4">
-                                <div className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-300 ${isActive
-                                  ? 'bg-green-500/20 shadow-[0_4px_12px_0_rgba(34,197,94,0.4)] group-hover:shadow-[0_6px_16px_0_rgba(34,197,94,0.6)]'
-                                  : 'bg-white/10 dark:bg-gray-800/20 shadow-[0_4px_12px_0_rgba(59,130,246,0.3)] group-hover:shadow-[0_6px_16px_0_rgba(59,130,246,0.5)]'
+                              <div className="relative flex items-center gap-4">
+                                {/* Avatar */}
+                                <div className={`flex h-20 w-20 shrink-0 items-center justify-center rounded-xl transition-all duration-300 ${isActive
+                                  ? 'bg-gradient-to-br from-green-500/30 to-emerald-500/20 ring-2 ring-green-400/50 shadow-[0_0_20px_rgba(34,197,94,0.3)]'
+                                  : 'bg-gradient-to-br from-gray-600/30 to-gray-700/20 ring-2 ring-white/10 group-hover:ring-white/30'
                                   }`}>
-                                  <User className={`w-6 h-6 ${isActive ? 'text-green-400' : 'text-blue-400'}`} />
+                                  <User className={`h-10 w-10 transition-all duration-300 ${isActive ? 'text-green-300' : 'text-gray-400 group-hover:text-white group-hover:scale-110'}`} strokeWidth={1.5} />
                                 </div>
-                                <div className="flex-1">
-                                  <div className="font-semibold liquid-glass-modal-text flex items-center gap-2 mb-1">
-                                    {staffMember.name}
+
+                                {/* Info */}
+                                <div className="flex flex-1 flex-col justify-center min-w-0">
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <span className="truncate text-xl font-bold liquid-glass-modal-text transition-colors group-hover:text-white">
+                                      {staffMember.name}
+                                    </span>
                                     {isActive && (
-                                      <span className="text-xs px-2 py-0.5 rounded-full bg-green-900/50 text-green-300 border border-green-700/50">{t('shift.labels.active')}</span>
+                                      <span className="inline-flex items-center rounded-full bg-green-500/20 px-3 py-1 text-xs font-bold text-green-400 ring-2 ring-green-400/40 shadow-[0_0_15px_rgba(34,197,94,0.3)] animate-pulse">
+                                        {t('shift.labels.active')}
+                                      </span>
                                     )}
                                   </div>
-                                  {/* Display all roles as badges */}
-                                  <div className="flex flex-wrap gap-1.5">
+
+                                  {/* Role Badges */}
+                                  <div className="flex flex-wrap gap-2">
                                     {staffMember.roles && staffMember.roles.length > 0 ? (
                                       staffMember.roles
-                                        .sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0)) // Primary first
-                                        .map((role, idx) => (
-                                          <span
-                                            key={idx}
-                                            className={`text-xs px-2 py-0.5 rounded-full border-2 flex items-center gap-1 font-medium ${role.is_primary
-                                              ? 'border-orange-400 text-orange-400 bg-orange-400/10'
-                                              : 'border-white/60 text-white/90 bg-white/5'
-                                              }`}
-                                          >
-                                            {role.is_primary && (
-                                              <span className="text-orange-400">★</span>
-                                            )}
-                                            {role.role_display_name}
-                                          </span>
-                                        ))
+                                        .sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0))
+                                        .map((role, idx) => {
+                                          const isCashier = role.role_name === 'cashier';
+                                          const isDriver = role.role_name === 'driver';
+                                          const isKitchen = role.role_name === 'kitchen';
+
+                                          let badgeStyle = "bg-gray-600/20 text-gray-300 border-gray-500/30";
+                                          if (isCashier || role.is_primary) badgeStyle = "bg-orange-500/20 text-orange-300 border-orange-400/40";
+                                          else if (isDriver) badgeStyle = "bg-blue-500/20 text-blue-300 border-blue-400/40";
+                                          else if (isKitchen) badgeStyle = "bg-red-500/20 text-red-300 border-red-400/40";
+
+                                          return (
+                                            <span
+                                              key={idx}
+                                              className={`inline-flex items-center gap-1.5 rounded-full border-2 px-3 py-1 text-xs font-bold backdrop-blur-sm transition-all ${badgeStyle}`}
+                                            >
+                                              {(role.is_primary || isCashier) && (
+                                                <span className="text-orange-400">★</span>
+                                              )}
+                                              {role.role_display_name}
+                                            </span>
+                                          );
+                                        })
                                     ) : (
-                                      <span className="liquid-glass-modal-text-muted text-sm">{staffMember.role_display_name}</span>
+                                      <span className="text-sm text-gray-500">{staffMember.role_display_name}</span>
                                     )}
                                   </div>
+                                </div>
+
+                                {/* Chevron */}
+                                <div className="text-gray-400 transition-all duration-300 group-hover:translate-x-2 group-hover:text-white group-hover:scale-125">
+                                  <ChevronRight className="h-7 w-7" strokeWidth={2} />
                                 </div>
                               </div>
                             </button>
@@ -1542,70 +1563,111 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
               {/* Step 2: Enter PIN */}
               {checkInStep === 'enter-pin' && selectedStaff && (
-                <div className="space-y-6">
-                  <button
-                    onClick={() => setCheckInStep('select-staff')}
-                    className="px-4 py-2 bg-white/10 dark:bg-gray-800/20 rounded-lg shadow-[0_2px_8px_0_rgba(59,130,246,0.2)] hover:shadow-[0_4px_12px_0_rgba(59,130,246,0.35)] text-sm flex items-center gap-2 hover:gap-3 transition-all duration-300 liquid-glass-modal-text"
-                  >
-                    <ChevronRight className="w-4 h-4 rotate-180" />
-                    {t('common.actions.back')}
-                  </button>
-
-
-                  {/* Staff Info Card */}
-                  <div className={liquidGlassModalCard()}>
-                    <div className="w-20 h-20 rounded-full bg-white/10 dark:bg-gray-800/20 shadow-[0_8px_20px_0_rgba(59,130,246,0.4)] flex items-center justify-center mx-auto mb-4 ring-4 ring-blue-500/20">
-                      <User className="w-10 h-10 text-blue-400" />
-                    </div>
-                    <h3 className="text-xl font-bold liquid-glass-modal-text">{selectedStaff.name}</h3>
-                    <p className="liquid-glass-modal-text-muted text-sm mt-1 mb-6">{selectedStaff.role_display_name}</p>
+                <div className="space-y-8 px-4">
+                  {/* Back Button - Aligned to start, subtle */}
+                  <div className="flex justify-start">
+                    <button
+                      onClick={() => setCheckInStep('select-staff')}
+                      className="group flex items-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-sm font-medium text-gray-300 transition-all hover:bg-white/10 hover:text-white"
+                    >
+                      <ChevronRight className="h-4 w-4 rotate-180 transition-transform group-hover:-translate-x-1" />
+                      {t('common.actions.back')}
+                    </button>
                   </div>
 
-                  {/* PIN Input */}
-                  <div className="space-y-3" onClick={() => pinInputRef.current?.focus()}>
-                    <label className="block text-sm font-medium liquid-glass-modal-text text-center">
+                  {/* Staff Info Card - Centered & Premium */}
+                  <div className="flex flex-col items-center justify-center space-y-4 rounded-3xl bg-white/5 p-8 text-center shadow-2xl backdrop-blur-xl border border-white/10">
+                    <div className="relative">
+                      <div className="flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-br from-blue-500/20 to-cyan-500/20 shadow-[0_0_30px_rgba(59,130,246,0.2)] ring-1 ring-white/20 backdrop-blur-md">
+                        <User className="h-10 w-10 text-blue-400" />
+                      </div>
+                      {/* Active Status Dot */}
+                      <div className="absolute bottom-1 right-1 h-5 w-5 rounded-full bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)] ring-4 ring-[#2a2d3e]"></div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <h3 className="text-2xl font-bold text-white tracking-tight">{selectedStaff.name}</h3>
+                      <p className="text-base font-medium text-blue-300/80">{selectedStaff.role_display_name}</p>
+                    </div>
+                  </div>
+
+                  {/* PIN Input Section - Modern & Clean */}
+                  <div className="mx-auto w-full max-w-md space-y-4">
+                    <label className="block text-center text-sm font-semibold uppercase tracking-wider text-gray-400">
                       {t('modals.staffShift.enterPIN')}
                     </label>
-                    <input
-                      ref={pinInputRef}
-                      type="password"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      maxLength={4}
-                      value={enteredPin}
-                      onChange={(e) => setEnteredPin(e.target.value.replace(/\D/g, ''))}
-                      onKeyDown={(e) => e.key === 'Enter' && enteredPin.length === 4 && handlePinSubmit()}
-                      placeholder={t('forms.placeholders.pinDots')}
-                      className="liquid-glass-modal-input text-center text-3xl tracking-[1em] font-bold cursor-text"
-                      autoFocus
-                      autoComplete="off"
-                    />
+
+                    <div
+                      className="relative overflow-hidden rounded-xl bg-white/5 p-1 ring-1 ring-white/10 transition-all focus-within:bg-white/10 focus-within:ring-2 focus-within:ring-blue-500/50"
+                      onClick={() => pinInputRef.current?.focus()}
+                    >
+                      <input
+                        ref={pinInputRef}
+                        type="password"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        maxLength={4}
+                        value={enteredPin}
+                        onChange={(e) => setEnteredPin(e.target.value.replace(/\D/g, ''))}
+                        onKeyDown={(e) => e.key === 'Enter' && enteredPin.length === 4 && handlePinSubmit()}
+                        placeholder=""
+                        className="w-full bg-transparent py-4 text-center text-4xl font-bold tracking-[1em] text-white placeholder-gray-600 outline-none"
+                        autoFocus
+                        autoComplete="off"
+                        style={{ textIndent: '1em' }} // Center visual adjustment for tracking
+                      />
+
+                      {/* Custom Placeholder Dots (Only if empty) */}
+                      {enteredPin.length === 0 && (
+                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-4 opacity-30">
+                          <div className="h-3 w-3 rounded-full bg-white"></div>
+                          <div className="h-3 w-3 rounded-full bg-white"></div>
+                          <div className="h-3 w-3 rounded-full bg-white"></div>
+                          <div className="h-3 w-3 rounded-full bg-white"></div>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
+                  {/* Action Button */}
                   <button
                     onClick={handlePinSubmit}
                     disabled={enteredPin.length !== 4}
-                    className="w-full px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-[0_4px_16px_0_rgba(59,130,246,0.5)] hover:shadow-[0_6px_20px_0_rgba(59,130,246,0.6)] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-300"
+                    className="w-full rounded-xl bg-blue-600 py-4 text-lg font-bold text-white shadow-lg shadow-blue-500/30 transition-all hover:bg-blue-500 hover:shadow-blue-500/40 hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none active:scale-[0.98]"
                   >
-                    {t('modals.staffShift.continue')}
+                    {loading ? (
+                      <div className="flex items-center justify-center gap-2">
+                        <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"></div>
+                        <span>Authenticating...</span>
+                      </div>
+                    ) : (
+                      t('modals.staffShift.continue')
+                    )}
                   </button>
                 </div>
               )}
 
               {/* Step 3: Select Role */}
+              {/* Step 3: Select Role */}
               {checkInStep === 'select-role' && selectedStaff && (
-                <div className="space-y-6">
-                  <button
-                    onClick={() => setCheckInStep('enter-pin')}
-                    className="px-4 py-2 bg-white/10 dark:bg-gray-800/20 rounded-lg shadow-[0_2px_8px_0_rgba(59,130,246,0.2)] hover:shadow-[0_4px_12px_0_rgba(59,130,246,0.35)] text-sm flex items-center gap-2 hover:gap-3 transition-all duration-300 liquid-glass-modal-text"
-                  >
-                    <ChevronRight className="w-4 h-4 rotate-180" />
-                    {t('modals.staffShift.back')}
-                  </button>
+                <div className="space-y-8 px-4">
+                  {/* Back Button - Aligned to start, subtle */}
+                  <div className="flex justify-start">
+                    <button
+                      onClick={() => setCheckInStep('enter-pin')}
+                      className="group flex items-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-sm font-medium text-gray-300 transition-all hover:bg-white/10 hover:text-white"
+                    >
+                      <ChevronRight className="h-4 w-4 rotate-180 transition-transform group-hover:-translate-x-1" />
+                      {t('common.actions.back')}
+                    </button>
+                  </div>
 
-                  <h3 className="text-xl font-bold liquid-glass-modal-text">{t('modals.staffShift.selectRoleForShift')}</h3>
+                  {/* Header Title */}
+                  <h3 className="text-xl font-bold text-slate-800 dark:text-white/90">
+                    {t('modals.staffShift.selectRoleForShift')}
+                  </h3>
 
-                  <div className="grid gap-3">
+                  <div className="grid gap-4">
                     {/* Show all staff member's assigned roles */}
                     {selectedStaff.roles && selectedStaff.roles.length > 0 ? (
                       selectedStaff.roles
@@ -1614,33 +1676,40 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           <button
                             key={idx}
                             onClick={() => handleRoleSelect(role.role_name as any)}
-                            className={`bg-white/10 dark:bg-gray-800/20 rounded-xl flex items-center justify-between p-5 hover:bg-white/20 dark:hover:bg-gray-800/30 hover:shadow-[0_8px_24px_0_rgba(59,130,246,0.5)] transition-all duration-300 group shadow-[0_4px_16px_0_rgba(59,130,246,0.35)] ${role.is_primary ? 'border-2 border-blue-500' : 'border border-white/10 dark:border-gray-700/50'
+                            className={`group relative w-full overflow-hidden rounded-2xl border p-4 text-left shadow-lg transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] ${role.is_primary
+                              ? 'border-blue-500/30 bg-gradient-to-r from-blue-600/20 to-slate-600/20 shadow-blue-500/5'
+                              : 'border-white/10 bg-white/5 hover:bg-white/10'
                               }`}
                           >
-                            <div className="text-left flex items-center gap-4">
+                            <div className="flex items-center gap-5">
+                              {/* Icon Container */}
                               <div
-                                className="w-12 h-12 rounded-xl shadow-[0_4px_12px_0_rgba(59,130,246,0.4)] flex items-center justify-center"
-                                style={{
-                                  backgroundColor: `${role.role_color}20`,
-                                  borderColor: `${role.role_color}40`,
-                                  border: `1px solid`
-                                }}
+                                className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border backdrop-blur-sm transition-transform duration-300 group-hover:scale-105 ${role.is_primary
+                                  ? 'border-blue-400/30 bg-white/10 shadow-inner'
+                                  : 'border-white/10 bg-white/5'
+                                  }`}
                               >
-                                <User className="w-6 h-6" style={{ color: role.role_color }} />
+                                <User className={`h-8 w-8 ${role.is_primary ? 'text-blue-200' : 'text-cyan-400'}`} />
                               </div>
-                              <div>
-                                <div className="font-bold liquid-glass-modal-text capitalize text-lg flex items-center gap-2">
-                                  {role.role_display_name}
+
+                              {/* Content */}
+                              <div className="flex flex-1 flex-col justify-center">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-lg font-bold text-white">
+                                    {role.role_display_name}
+                                  </span>
                                   {role.is_primary && (
-                                    <span className="text-yellow-400 text-sm">★</span>
+                                    <span className="text-orange-400 shadow-orange-500/20 drop-shadow-sm">★</span>
                                   )}
                                 </div>
-                                <div className="liquid-glass-modal-text-muted text-sm">
+                                <span className={`text-sm ${role.is_primary ? 'text-blue-200/60' : 'text-gray-400'}`}>
                                   {role.is_primary ? t('modals.staffShift.primaryRole') : t('modals.staffShift.secondaryRole')}
-                                </div>
+                                </span>
                               </div>
+
+                              {/* Chevron */}
+                              <ChevronRight className={`h-6 w-6 transition-transform duration-300 group-hover:translate-x-1 ${role.is_primary ? 'text-blue-300/50' : 'text-cyan-500/50'}`} />
                             </div>
-                            <ChevronRight className="w-6 h-6 group-hover:translate-x-1 transition-transform duration-300" style={{ color: role.role_color }} />
                           </button>
 
                         ))
@@ -1648,18 +1717,27 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       // Fallback to single role if roles array is empty
                       <button
                         onClick={() => handleRoleSelect(selectedStaff.role_name as any)}
-                        className="bg-white/10 dark:bg-gray-800/20 border-2 border-blue-500 rounded-xl flex items-center justify-between p-5 hover:bg-white/20 dark:hover:bg-gray-800/30 hover:shadow-[0_8px_24px_0_rgba(59,130,246,0.5)] transition-all duration-300 group shadow-[0_4px_16px_0_rgba(59,130,246,0.35)]"
+                        className="group relative w-full overflow-hidden rounded-2xl border border-blue-500/30 bg-gradient-to-r from-blue-600/20 to-slate-600/20 p-4 text-left shadow-lg shadow-blue-500/5 transition-all duration-300 hover:scale-[1.01] active:scale-[0.99]"
                       >
-                        <div className="text-left flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-xl bg-white/10 dark:bg-gray-800/20 shadow-[0_4px_12px_0_rgba(59,130,246,0.4)] flex items-center justify-center">
-                            <User className="w-6 h-6 text-blue-400" />
+                        <div className="flex items-center gap-5">
+                          {/* Icon Container */}
+                          <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border border-blue-400/30 bg-white/10 shadow-inner backdrop-blur-sm transition-transform duration-300 group-hover:scale-105">
+                            <User className="h-8 w-8 text-blue-200" />
                           </div>
-                          <div>
-                            <div className="font-bold liquid-glass-modal-text capitalize text-lg">{selectedStaff.role_display_name}</div>
-                            <div className="liquid-glass-modal-text-muted text-sm">{t('modals.staffShift.yourAssignedRole')}</div>
+
+                          {/* Content */}
+                          <div className="flex flex-1 flex-col justify-center">
+                            <span className="text-lg font-bold text-white">
+                              {selectedStaff.role_display_name}
+                            </span>
+                            <span className="text-sm text-blue-200/60">
+                              {t('modals.staffShift.yourAssignedRole')}
+                            </span>
                           </div>
+
+                          {/* Chevron */}
+                          <ChevronRight className="h-6 w-6 text-blue-300/50 transition-transform duration-300 group-hover:translate-x-1" />
                         </div>
-                        <ChevronRight className="w-6 h-6 text-blue-400 group-hover:translate-x-1 transition-transform duration-300" />
                       </button>
                     )}
                   </div>

@@ -27,6 +27,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [editingPin, setEditingPin] = useState(false)
   const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
 
 
 
@@ -231,7 +232,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       }
       const res = await fetch(getApiUrl('/pos/orders?limit=1'), { method: 'GET', headers })
       let body: any = null
-      try { body = await res.json() } catch {}
+      try { body = await res.json() } catch { }
       if (res.ok) {
         toast.success(t('modals.connectionSettings.connected'))
       } else {
@@ -297,11 +298,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
-      <div className="p-6 space-y-4">
+      <div className="space-y-4">
         {/* Connection Settings */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 hover:bg-white/15 dark:hover:bg-gray-800/30 transition-all ${
-          showConnectionSettings ? 'bg-white/15 dark:bg-gray-800/30' : ''
-        }`}>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
+          }`}>
           <button
             onClick={() => setShowConnectionSettings(!showConnectionSettings)}
             className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
@@ -369,9 +369,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         {/* PIN Settings */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 hover:bg-white/15 dark:hover:bg-gray-800/30 transition-all ${
-          showPinSettings ? 'bg-white/15 dark:bg-gray-800/30' : ''
-        }`}>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPinSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
+          }`}>
           <button
             onClick={() => setShowPinSettings(!showPinSettings)}
             className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
@@ -439,7 +438,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         {/* Theme Switcher */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 px-4 py-3 transition-all`}>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Palette className="w-5 h-5 text-pink-400 drop-shadow-[0_0_8px_rgba(244,114,182,0.6)]" />
@@ -448,33 +447,30 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => handleSaveTheme('light')}
-                className={`p-2 rounded-lg transition-all ${
-                  theme === 'light'
-                    ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
-                    : 'bg-white/10 border border-gray-600 hover:bg-white/20'
-                }`}
+                className={`p-2 rounded-lg transition-all ${theme === 'light'
+                  ? 'bg-yellow-500/30 border-2 border-yellow-400 shadow-[0_0_12px_rgba(250,204,21,0.5)]'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                  }`}
                 title={t('modals.connectionSettings.light')}
               >
                 <Sun className={`w-5 h-5 ${theme === 'light' ? 'text-yellow-300' : 'text-gray-400'}`} />
               </button>
               <button
                 onClick={() => handleSaveTheme('dark')}
-                className={`p-2 rounded-lg transition-all ${
-                  theme === 'dark'
-                    ? 'bg-indigo-500/30 border-2 border-indigo-400 shadow-[0_0_12px_rgba(129,140,248,0.5)]'
-                    : 'bg-white/10 border border-gray-600 hover:bg-white/20'
-                }`}
+                className={`p-2 rounded-lg transition-all ${theme === 'dark'
+                  ? 'bg-indigo-500/30 border-2 border-indigo-400 shadow-[0_0_12px_rgba(129,140,248,0.5)]'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                  }`}
                 title={t('modals.connectionSettings.dark')}
               >
                 <Moon className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-300' : 'text-gray-400'}`} />
               </button>
               <button
                 onClick={() => handleSaveTheme('auto')}
-                className={`p-2 rounded-lg transition-all ${
-                  theme === 'auto'
-                    ? 'bg-cyan-500/30 border-2 border-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
-                    : 'bg-white/10 border border-gray-600 hover:bg-white/20'
-                }`}
+                className={`p-2 rounded-lg transition-all ${theme === 'auto'
+                  ? 'bg-cyan-500/30 border-2 border-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.5)]'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20'
+                  }`}
                 title={t('modals.connectionSettings.system')}
               >
                 <Monitor className={`w-5 h-5 ${theme === 'auto' ? 'text-cyan-300' : 'text-gray-400'}`} />
@@ -484,7 +480,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         {/* Language Switcher */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 px-4 py-3 transition-all`}>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Globe className="w-5 h-5 text-blue-400 drop-shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
@@ -496,11 +492,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   setLanguage('en')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${
-                  currentLanguage === 'en'
-                    ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                    : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
-                }`}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'en'
+                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                  }`}
                 title={t('settings.display.langEnglish')}
               >
                 EN
@@ -510,11 +505,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   setLanguage('el')
                   toast.success(t('modals.connectionSettings.languageSaved'))
                 }}
-                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${
-                  currentLanguage === 'el'
-                    ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
-                    : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
-                }`}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'el'
+                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                  }`}
                 title={t('settings.display.langGreek')}
               >
                 ΕΛ
@@ -524,151 +518,163 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
 
         {/* Database Management */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 px-4 py-3 transition-all`}>
-          <div className="flex flex-col gap-3">
-            {/* Clear Sync Queue - Less destructive */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Database className="w-5 h-5 flex-shrink-0 text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.6)]" />
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showDatabaseSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+          <button
+            onClick={() => setShowDatabaseSettings(!showDatabaseSettings)}
+            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
+          >
+            <div className="flex items-center gap-3">
+              <Database className="w-5 h-5 text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.6)]" />
+              <div className="text-left">
+                <span className="font-medium block">{t('settings.database.management', 'Database Management')}</span>
+              </div>
+            </div>
+            <ChevronDown className={`w-5 h-5 transition-transform ${showDatabaseSettings ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showDatabaseSettings && (
+            <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border pt-4`}>
+              <div className="flex flex-col gap-3">
+                {/* Clear Sync Queue - Less destructive */}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearSyncQueueLabel', 'Clear Sync Queue')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearSyncQueueHelp', 'Clears stuck sync items without deleting data')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all')
+                        if (result?.success) {
+                          toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
+                        } else {
+                          toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
+                        }
+                      } catch (e) {
+                        console.error('Failed to clear sync queue:', e)
+                        toast.error(t('settings.database.syncQueueClearFailed'))
+                      }
+                    }}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
+                  >
+                    {t('settings.database.clearSyncButton')}
+                  </button>
+                </div>
+
+                {/* Clear Old Orders - Medium destructive */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-old-orders')
+                        if (result?.success) {
+                          toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
+                        } else {
+                          toast.error(result?.error || t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+                        }
+                      } catch (e) {
+                        console.error('Failed to clear old orders:', e)
+                        toast.error(t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
+                      }
+                    }}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-yellow-600/30 border-2 border-yellow-500 hover:bg-yellow-600/50 text-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.5)]`}
+                  >
+                    {t('settings.database.clearOldOrdersButton', 'Clear')}
+                  </button>
+                </div>
+
+                {/* Sync Deleted Orders - Cleanup orphaned orders */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from admin dashboard')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const result = await (window as any)?.electronAPI?.invoke?.('sync:cleanup-deleted-orders')
+                        if (result?.success) {
+                          toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
+                        } else {
+                          toast.error(result?.error || t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                        }
+                      } catch (e) {
+                        console.error('Failed to sync deleted orders:', e)
+                        toast.error(t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
+                      }
+                    }}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-blue-600/30 border-2 border-blue-500 hover:bg-blue-600/50 text-blue-300 shadow-[0_0_12px_rgba(96,165,250,0.5)]`}
+                  >
+                    {t('settings.database.syncButton', 'Sync')}
+                  </button>
+                </div>
+
+                {/* Clear All Operational Data - Clears orders, shifts, drawers but keeps settings */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      const confirmed = confirm(t('settings.database.confirmClearOperational', '⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?'))
+                      if (!confirmed) return
+
+                      try {
+                        toast.loading(t('settings.database.clearingOperational', 'Clearing operational data...'))
+                        const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
+                        toast.dismiss()
+                        if (result?.success) {
+                          toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
+                        } else {
+                          toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+                        }
+                      } catch (e) {
+                        console.error('Failed to clear operational data:', e)
+                        toast.dismiss()
+                        toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+                      }
+                    }}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-amber-600/30 border-2 border-amber-500 hover:bg-amber-600/50 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.5)]`}
+                  >
+                    {t('settings.database.clearOperationalButton', 'Clear')}
+                  </button>
+                </div>
+
+                {/* Factory Reset - Destructive */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.label')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.helpText')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleClearDatabase}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-red-600/30 border-2 border-red-500 hover:bg-red-600/50 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.5)]`}
+                  >
+                    {t('settings.database.clearButton')}
+                  </button>
                 </div>
               </div>
-              <button
-                onClick={async () => {
-                  try {
-                    const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all')
-                    if (result?.success) {
-                      toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
-                    } else {
-                      toast.error(result?.error || t('settings.database.syncQueueClearFailed'))
-                    }
-                  } catch (e) {
-                    console.error('Failed to clear sync queue:', e)
-                    toast.error(t('settings.database.syncQueueClearFailed'))
-                  }
-                }}
-                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
-              >
-                {t('settings.database.clearSyncButton')}
-              </button>
             </div>
-
-            {/* Clear Old Orders - Medium destructive */}
-            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Database className="w-5 h-5 flex-shrink-0 text-yellow-400 drop-shadow-[0_0_8px_rgba(250,204,21,0.6)]" />
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOldOrdersLabel', 'Clear Old Orders')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOldOrdersHelp', 'Removes orphaned orders from previous days')}</span>
-                </div>
-              </div>
-              <button
-                onClick={async () => {
-                  try {
-                    const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-old-orders')
-                    if (result?.success) {
-                      toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
-                    } else {
-                      toast.error(result?.error || t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
-                    }
-                  } catch (e) {
-                    console.error('Failed to clear old orders:', e)
-                    toast.error(t('settings.database.oldOrdersClearFailed', 'Failed to clear old orders'))
-                  }
-                }}
-                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-yellow-600/30 border-2 border-yellow-500 hover:bg-yellow-600/50 text-yellow-300 shadow-[0_0_12px_rgba(250,204,21,0.5)]`}
-              >
-                {t('settings.database.clearOldOrdersButton', 'Clear')}
-              </button>
-            </div>
-
-            {/* Sync Deleted Orders - Cleanup orphaned orders */}
-            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Database className="w-5 h-5 flex-shrink-0 text-blue-400 drop-shadow-[0_0_8px_rgba(96,165,250,0.6)]" />
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.syncDeletedOrdersLabel', 'Sync Deleted Orders')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.syncDeletedOrdersHelp', 'Removes orders deleted from admin dashboard')}</span>
-                </div>
-              </div>
-              <button
-                onClick={async () => {
-                  try {
-                    const result = await (window as any)?.electronAPI?.invoke?.('sync:cleanup-deleted-orders')
-                    if (result?.success) {
-                      toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
-                    } else {
-                      toast.error(result?.error || t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
-                    }
-                  } catch (e) {
-                    console.error('Failed to sync deleted orders:', e)
-                    toast.error(t('settings.database.syncDeletedOrdersFailed', 'Failed to sync deleted orders'))
-                  }
-                }}
-                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-blue-600/30 border-2 border-blue-500 hover:bg-blue-600/50 text-blue-300 shadow-[0_0_12px_rgba(96,165,250,0.5)]`}
-              >
-                {t('settings.database.syncButton', 'Sync')}
-              </button>
-            </div>
-
-            {/* Clear All Operational Data - Clears orders, shifts, drawers but keeps settings */}
-            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Database className="w-5 h-5 flex-shrink-0 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearOperationalLabel', 'Clear All Operational Data')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearOperationalHelp', 'Clears orders, shifts, drawers, payments. Keeps settings.')}</span>
-                </div>
-              </div>
-              <button
-                onClick={async () => {
-                  const confirmed = confirm(t('settings.database.confirmClearOperational', '⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?'))
-                  if (!confirmed) return
-
-                  try {
-                    toast.loading(t('settings.database.clearingOperational', 'Clearing operational data...'))
-                    const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
-                    toast.dismiss()
-                    if (result?.success) {
-                      toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
-                    } else {
-                      toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-                    }
-                  } catch (e) {
-                    console.error('Failed to clear operational data:', e)
-                    toast.dismiss()
-                    toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-                  }
-                }}
-                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-amber-600/30 border-2 border-amber-500 hover:bg-amber-600/50 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.5)]`}
-              >
-                {t('settings.database.clearOperationalButton', 'Clear')}
-              </button>
-            </div>
-
-            {/* Factory Reset - Destructive */}
-            <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
-              <div className="flex items-center gap-3 flex-1 min-w-0">
-                <Database className="w-5 h-5 flex-shrink-0 text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.6)]" />
-                <div className="text-left min-w-0">
-                  <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.label')}</span>
-                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.helpText')}</span>
-                </div>
-              </div>
-              <button
-                onClick={handleClearDatabase}
-                className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-red-600/30 border-2 border-red-500 hover:bg-red-600/50 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.5)]`}
-              >
-                {t('settings.database.clearButton')}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Printer Settings trigger */}
-        <div className={`rounded-xl backdrop-blur-md border liquid-glass-modal-border bg-white/10 dark:bg-gray-800/20 px-4 py-3 transition-all`}>
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Printer className="w-5 h-5 text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.6)]" />

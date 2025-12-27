@@ -71,7 +71,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   const { resolvedTheme } = useTheme();
   const { isShiftActive } = useShift();
   const { navigationModules, isLoading } = useModules();
-  
+
   // State for upgrade modal
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [selectedLockedModule, setSelectedLockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
@@ -83,13 +83,13 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       setShowUpgradeModal(true);
       return;
     }
-    
+
     // For unlocked modules, enforce shift requirement
     if (!isShiftActive) {
       onStartShift && onStartShift();
       return;
     }
-    
+
     onViewChange(id);
   };
 
@@ -221,7 +221,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     if (moduleColorMap[moduleId]) {
       return moduleColorMap[moduleId];
     }
-    
+
     // Fallback based on category
     if (category === 'core') return 'blue';
     if (category === 'vertical') return 'orange';
@@ -268,7 +268,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
     <div className="fixed left-0 top-1/2 transform -translate-y-1/2 z-50 transition-all duration-300 max-h-[90vh]">
       {/* Theme-aware Sidebar */}
       <div className={`${resolvedTheme === 'dark'
-        ? 'bg-gray-900/95 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(59,130,246,0.4)] border-r border-gray-700/50'
+        ? 'bg-black backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(59,130,246,0.4)] border-r border-blue-500/20'
         : 'bg-white/90 backdrop-blur-xl rounded-r-3xl p-4 shadow-[0_8px_32px_0_rgba(59,130,246,0.15)] border-r border-gray-200'} max-h-[85vh] overflow-y-auto overflow-x-hidden touch-pan-y scrollbar-hide`}
         style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', WebkitOverflowScrolling: 'touch' }}>
         <nav className="flex flex-col space-y-4">
@@ -279,7 +279,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           <button
             onClick={onStartShift}
             data-testid="check-in-btn"
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${resolvedTheme==='dark' ? 'text-white hover:text-blue-300' : 'text-black hover:text-blue-600'}`}
+            className={`w-12 h-12 flex items-center justify-center transition-colors ${resolvedTheme === 'dark' ? 'text-white hover:text-blue-300' : 'text-black hover:text-blue-600'}`}
             title={t('navigation.checkIn')}
           >
             <Clock className="w-5 h-5" strokeWidth={2} />
@@ -307,16 +307,16 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                 const isActive = currentView === module.id;
                 const color = getModuleColor(module.id, module.category || 'other');
                 const isComingSoon = isModuleComingSoon(module.id);
-                
+
                 // Different titles for locked, coming soon, or unlocked modules
                 let title: string;
                 if (isComingSoon) {
-                  title = t('modules.comingSoon', { 
+                  title = t('modules.comingSoon', {
                     module: t(`navigation.${module.id}`, { defaultValue: module.name }),
                     defaultValue: `${module.name} - Coming Soon`
                   });
                 } else if (isLocked && requiredPlan) {
-                  title = t('modules.lockedModule', { 
+                  title = t('modules.lockedModule', {
                     module: t(`navigation.${module.id}`, { defaultValue: module.name }),
                     plan: requiredPlan,
                     defaultValue: `${module.name} - Requires ${requiredPlan} plan`
@@ -339,13 +339,12 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
                     key={module.id}
                     onClick={handleClick}
                     disabled={isComingSoon}
-                    className={`relative w-12 h-12 flex items-center justify-center transition-colors ${
-                      isComingSoon
+                    className={`relative w-12 h-12 flex items-center justify-center transition-colors ${isComingSoon
                         ? `opacity-40 cursor-not-allowed ${resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-300'}`
-                        : isLocked 
+                        : isLocked
                           ? `opacity-60 ${resolvedTheme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`
                           : getNeonClass(color, isActive, resolvedTheme)
-                    }`}
+                      }`}
                     title={title}
                   >
                     {getModuleIcon(module.icon || 'Package')}
@@ -382,7 +381,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
             className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('green', false, resolvedTheme)}`}
             title={t('navigation.settings')}
           >
-            <Settings className={`w-5 h-5 ${resolvedTheme==='dark' ? 'text-white' : 'text-black'}`} />
+            <Settings className={`w-5 h-5 ${resolvedTheme === 'dark' ? 'text-white' : 'text-black'}`} />
           </button>
 
           {/* Divider */}
@@ -391,11 +390,11 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           {/* Logout Button */}
           <button
             onClick={onLogout}
-            className={`${resolvedTheme==='dark'
+            className={`${resolvedTheme === 'dark'
               ? 'w-12 h-12 rounded-lg flex items-center justify-center transition-all duration-300 transform hover:scale-110 active:scale-95 bg-gray-800/40 border border-gray-700/50 text-gray-500 hover:bg-red-900/40 hover:border-red-700/50 hover:text-red-400 shadow-[0_2px_8px_0_rgba(59,130,246,0.15)] hover:shadow-[0_4px_16px_0_rgba(239,68,68,0.4)]'
               : 'w-12 h-12 rounded-lg flex items-center justify-center transition-all duration-200 bg-transparent text-black/60 hover:text-red-500'}`}
             title={t('navigation.logout')}>
-            <LogOut className={`w-5 h-5 ${resolvedTheme==='dark' ? '' : 'text-black'}`} strokeWidth={2} />
+            <LogOut className={`w-5 h-5 ${resolvedTheme === 'dark' ? '' : 'text-black'}`} strokeWidth={2} />
           </button>
 
 
@@ -403,7 +402,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
         </nav>
       </div>
-      
+
       {/* Upgrade Prompt Modal */}
       <UpgradePromptModal
         isOpen={showUpgradeModal}

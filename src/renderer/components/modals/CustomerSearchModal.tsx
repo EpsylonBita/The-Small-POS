@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight } from 'lucide-react';
+import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getApiUrl, environment } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -279,13 +279,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       // Determine which address to use - either the explicitly selected one, or default/first
       let addressToUse = selectedAddressId;
-      
+
       // If no address explicitly selected but customer has addresses, use default or first
       if (!addressToUse && customer.addresses && customer.addresses.length > 0) {
         const defaultAddr = customer.addresses.find(a => a.is_default) || customer.addresses[0];
         addressToUse = defaultAddr.id;
       }
-      
+
       // Use the selected/default address if available
       if (addressToUse && customer.addresses) {
         const selectedAddr = customer.addresses.find(a => a.id === addressToUse);
@@ -520,7 +520,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           {t('modals.customerSearch.searchLabel', 'Phone Number or Name')}
         </label>
         <div className="relative">
-          <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 z-10 ${resolvedTheme === 'dark' ? 'text-white' : 'text-black'}`} />
           <input
             ref={searchInputRef}
             type="text"
@@ -558,11 +558,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           <p className="text-sm liquid-glass-modal-text-muted mb-2">
             {t('modals.customerSearch.multipleResults', { count: customers.length })}
           </p>
-          <div className="max-h-60 overflow-y-auto space-y-2">
+          <div className="max-h-60 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
             {customers.map((c) => (
               <div
                 key={c.id}
-                className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl cursor-pointer hover:bg-blue-500/20 transition-all"
+                className="liquid-glass-modal-card cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800/30 transition-all mb-3 relative group"
                 onClick={() => handleSelectFromList(c)}
               >
                 <div className="flex items-center gap-3">
@@ -578,9 +578,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         </div>
       )}
 
-      {/* Customer Found */}
       {customer && (
-        <div className="mb-4 p-4 bg-green-500/10 border border-green-500/20 rounded-xl">
+        <div className="mb-6 liquid-glass-modal-card">
           <div className="flex items-start gap-3">
             <User className="w-5 h-5 text-green-600 dark:text-green-400 mt-1" />
             <div className="flex-1">
@@ -593,94 +592,96 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               {customer.addresses && customer.addresses.length > 0 ? (
                 // Multiple addresses - show a card for EACH address
                 <div className="mt-2 space-y-2">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-blue-500/80 dark:text-blue-400/80 mb-1">
+                  <p
+                    className="text-xs font-semibold uppercase tracking-wider mb-1"
+                    style={{ color: resolvedTheme === 'dark' ? 'rgba(96, 165, 250, 0.8)' : '#2563eb' }}
+                  >
                     {t('modals.customerSearch.addresses', 'Addresses')}
                   </p>
                   {customer.addresses.map((addr) => {
                     const isSelected = selectedAddressId === addr.id;
                     return (
-                    <div
-                      key={addr.id}
-                      onClick={() => setSelectedAddressId(addr.id)}
-                      className={`p-2 rounded-lg cursor-pointer transition-all ${
-                        isSelected 
-                          ? 'bg-green-500/20 border-2 border-green-500/50' 
-                          : 'bg-blue-500/5 hover:bg-blue-500/15 border border-blue-500/10 hover:border-blue-500/30'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        {/* Checkmark or MapPin icon */}
-                        {isSelected ? (
-                          <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0 mt-0.5">
-                            <Check className="w-3 h-3 text-white" />
-                          </div>
-                        ) : (
-                          <MapPin className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
-                            {addr.street_address}
-                          </p>
-                          <p className="text-xs liquid-glass-modal-text-muted">
-                            {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
-                          </p>
-                          {addr.floor_number && (
-                            <p className="text-xs liquid-glass-modal-text-muted">
-                              {t('modals.customerSearch.floor')}: {addr.floor_number}
-                            </p>
+                      <div
+                        key={addr.id}
+                        onClick={() => setSelectedAddressId(addr.id)}
+                        className={`p-2 rounded-lg cursor-pointer transition-all ${isSelected
+                          ? 'bg-green-500/10 border-2 border-green-500/30 shadow-[0_0_15px_rgba(34,197,94,0.1)]'
+                          : 'bg-gray-50 dark:bg-white/5 hover:bg-gray-100 dark:hover:bg-white/10 border border-gray-200 dark:border-white/10 hover:border-gray-300 dark:hover:border-white/20'
+                          }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {/* Checkmark or MapPin icon */}
+                          {isSelected ? (
+                            <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0 mt-0.5">
+                              <Check className="w-3 h-3 text-white" />
+                            </div>
+                          ) : (
+                            <MapPin className="w-4 h-4 text-gray-500 dark:text-blue-500 mt-0.5 flex-shrink-0" />
                           )}
-                        </div>
-                        {/* Edit and Delete buttons */}
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (onEditCustomer) {
-                                onEditCustomer({ ...customer, editAddressId: addr.id } as any);
-                              }
-                            }}
-                            className="p-1.5 text-amber-500 hover:bg-amber-500/20 rounded-md transition-colors"
-                            title={t('common.edit', 'Edit')}
-                          >
-                            <Edit className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation();
-                              if (!window.confirm(t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?'))) return;
-                              try {
-                                const response = await fetch(getApiUrl(`customers/${customer.id}/addresses/${addr.id}`), {
-                                  method: 'DELETE',
-                                  headers: { 'Content-Type': 'application/json' },
-                                });
-                                const result = await response.json().catch(() => ({}));
-                                if (response.ok && result.success !== false) {
-                                  setCustomer(prev => prev ? {
-                                    ...prev,
-                                    addresses: prev.addresses?.filter(a => a.id !== addr.id)
-                                  } : null);
-                                  // If deleted address was selected, select another
-                                  if (isSelected) {
-                                    const remaining = customer.addresses?.filter(a => a.id !== addr.id);
-                                    setSelectedAddressId(remaining?.[0]?.id || null);
+                          <div className="flex-1 min-w-0">
+                            <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
+                              {addr.street_address}
+                            </p>
+                            <p className="text-xs liquid-glass-modal-text-muted">
+                              {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
+                            </p>
+                            {addr.floor_number && (
+                              <p className="text-xs liquid-glass-modal-text-muted">
+                                {t('modals.customerSearch.floor')}: {addr.floor_number}
+                              </p>
+                            )}
+                          </div>
+                          {/* Edit and Delete buttons */}
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (onEditCustomer) {
+                                  onEditCustomer({ ...customer, editAddressId: addr.id } as any);
+                                }
+                              }}
+                              className="p-1.5 text-amber-500 hover:bg-amber-500/20 rounded-md transition-colors"
+                              title={t('common.edit', 'Edit')}
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (!window.confirm(t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?'))) return;
+                                try {
+                                  const response = await fetch(getApiUrl(`customers/${customer.id}/addresses/${addr.id}`), {
+                                    method: 'DELETE',
+                                    headers: { 'Content-Type': 'application/json' },
+                                  });
+                                  const result = await response.json().catch(() => ({}));
+                                  if (response.ok && result.success !== false) {
+                                    setCustomer(prev => prev ? {
+                                      ...prev,
+                                      addresses: prev.addresses?.filter(a => a.id !== addr.id)
+                                    } : null);
+                                    // If deleted address was selected, select another
+                                    if (isSelected) {
+                                      const remaining = customer.addresses?.filter(a => a.id !== addr.id);
+                                      setSelectedAddressId(remaining?.[0]?.id || null);
+                                    }
+                                  } else {
+                                    alert(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
                                   }
-                                } else {
+                                } catch (err) {
+                                  console.error('Error deleting address:', err);
                                   alert(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
                                 }
-                              } catch (err) {
-                                console.error('Error deleting address:', err);
-                                alert(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
-                              }
-                            }}
-                            className="p-1.5 text-red-500 hover:bg-red-500/20 rounded-md transition-colors"
-                            title={t('common.delete', 'Delete')}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                              }}
+                              className="p-1.5 text-red-500 hover:bg-red-500/20 rounded-md transition-colors"
+                              title={t('common.delete', 'Delete')}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  );
+                    );
                   })}
                 </div>
               ) : (
@@ -715,30 +716,40 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               )}
             </div>
           </div>
-          
+
           {/* Continue Button - prominent, shows selected address */}
           <button
             onClick={handleSelectCustomer}
-            className="w-full mt-4 px-4 py-3 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-green-500/25"
+            style={{
+              backgroundColor: resolvedTheme === 'dark' ? 'rgba(22, 163, 74, 0.2)' : '#16a34a',
+              color: resolvedTheme === 'dark' ? 'rgb(74, 222, 128)' : '#ffffff',
+              borderColor: resolvedTheme === 'dark' ? 'rgba(34, 197, 94, 0.3)' : '#16a34a'
+            }}
+            className="w-full mt-4 py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border hover:bg-green-700 dark:hover:bg-green-600/30"
           >
             <span>
               {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
-                ? t('modals.customerSearch.continueWithAddress', 'Continue with {{address}}', { 
-                    address: customer.addresses.find(a => a.id === selectedAddressId)?.street_address 
-                  })
+                ? t('modals.customerSearch.continueWithAddress', 'Continue with {{address}}', {
+                  address: customer.addresses.find(a => a.id === selectedAddressId)?.street_address
+                })
                 : t('modals.customerSearch.continue', 'Continue')
               }
             </span>
             <ArrowRight className="w-5 h-5" />
           </button>
-          
+
           {/* Action Buttons - Add Address, Edit Customer, Delete */}
           <div className="flex gap-2 mt-3">
             {/* Add Address Button */}
             {onAddNewAddress && (
               <button
                 onClick={handleAddNewAddress}
-                className="flex-1 px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 font-medium rounded-lg border border-blue-500/30 transition-all flex items-center justify-center gap-1"
+                style={{
+                  backgroundColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.2)' : '#2563eb',
+                  color: resolvedTheme === 'dark' ? 'rgb(96, 165, 250)' : '#ffffff',
+                  borderColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.3)' : '#2563eb'
+                }}
+                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-blue-700 dark:hover:bg-blue-500/30 gap-1"
               >
                 <MapPin className="w-4 h-4" />
                 {t('modals.customerSearch.addNewAddress')}
@@ -748,7 +759,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {onEditCustomer && (
               <button
                 onClick={handleEditCustomer}
-                className="flex-1 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-600 dark:text-amber-400 font-medium rounded-lg border border-amber-500/30 transition-all flex items-center justify-center gap-1"
+                style={{
+                  backgroundColor: resolvedTheme === 'dark' ? 'rgba(245, 158, 11, 0.2)' : '#d97706',
+                  color: resolvedTheme === 'dark' ? 'rgb(251, 191, 36)' : '#ffffff',
+                  borderColor: resolvedTheme === 'dark' ? 'rgba(245, 158, 11, 0.3)' : '#d97706'
+                }}
+                className="flex-1 py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-amber-700 dark:hover:bg-amber-500/30 gap-1"
               >
                 <Edit className="w-4 h-4" />
                 {t('modals.customerSearch.editCustomer')}
@@ -757,7 +773,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {/* Delete Customer Button */}
             <button
               onClick={handleDeleteCustomer}
-              className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-600 dark:text-red-400 font-medium rounded-lg border border-red-500/30 transition-all flex items-center justify-center gap-1"
+              style={{
+                backgroundColor: resolvedTheme === 'dark' ? 'rgba(239, 68, 68, 0.2)' : '#dc2626',
+                color: resolvedTheme === 'dark' ? 'rgb(248, 113, 113)' : '#ffffff',
+                borderColor: resolvedTheme === 'dark' ? 'rgba(239, 68, 68, 0.3)' : '#dc2626'
+              }}
+              className="py-2 px-4 rounded-lg font-medium flex items-center justify-center transition-all duration-300 border hover:bg-red-700 dark:hover:bg-red-500/30 gap-1"
               title={t('modals.customerSearch.deleteCustomer')}
             >
               <Trash2 className="w-4 h-4" />
@@ -768,7 +789,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
       {/* Add New Customer Option - Show when customer not found OR when customer is found (for different person with same phone) */}
       {searchQuery.length >= 3 && !isSearching && (customer || error === t('modals.customerSearch.customerNotFound')) && (
-        <div className="p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+        <div className="p-4 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 rounded-xl">
           <p className="text-sm liquid-glass-modal-text-muted mb-3">
             {customer
               ? t('modals.customerSearch.differentPersonPrompt')
@@ -777,7 +798,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           </p>
           <button
             onClick={handleAddNewCustomer}
-            className="w-full px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 font-medium rounded-lg border border-blue-500/30 transition-all"
+            style={{
+              backgroundColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.2)' : '#2563eb',
+              color: resolvedTheme === 'dark' ? 'rgb(96, 165, 250)' : '#ffffff',
+              borderColor: resolvedTheme === 'dark' ? 'rgba(59, 130, 246, 0.3)' : '#2563eb'
+            }}
+            className="w-full py-3 px-6 rounded-xl font-medium flex items-center justify-center transition-all duration-300 border hover:bg-blue-700 dark:hover:bg-blue-500/30"
           >
             {t('modals.customerSearch.addNewCustomer')}
           </button>

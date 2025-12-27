@@ -84,7 +84,7 @@ const orderItemWithoutCategoryArb: fc.Arbitrary<PrintOrderItem> = fc.record({
  */
 const kitchenTicketDataArb: fc.Arbitrary<KitchenTicketData> = fc.record({
   orderNumber: fc.stringMatching(/^[A-Z0-9]{4,10}$/),
-  orderType: fc.constantFrom('dine-in' as const, 'takeout' as const, 'delivery' as const),
+  orderType: fc.constantFrom('dine-in' as const, 'pickup' as const, 'delivery' as const),
   timestamp: validDateArb,
   items: fc.array(orderItemWithCategoryArb, { minLength: 1, maxLength: 10 }),
   customerName: fc.option(fc.string({ minLength: 1, maxLength: 50 }), { nil: undefined }),
@@ -153,7 +153,7 @@ const multiCategoryOrderArb = (categories: string[]): fc.Arbitrary<PrintJob> => 
     type: fc.constant(PrintJobType.KITCHEN_TICKET),
     data: fc.record({
       orderNumber: fc.stringMatching(/^[A-Z0-9]{4,10}$/),
-      orderType: fc.constantFrom('dine-in' as const, 'takeout' as const, 'delivery' as const),
+      orderType: fc.constantFrom('dine-in' as const, 'pickup' as const, 'delivery' as const),
       timestamp: validDateArb,
       items: itemsArb,
       customerName: fc.option(fc.string({ minLength: 1, maxLength: 50 }), { nil: undefined }),

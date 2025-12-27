@@ -21,7 +21,6 @@ function getServiceRoleClient(): SupabaseClient | null {
                     persistSession: false,
                 },
             });
-            console.log('[OrderSyncService] Service role client initialized for order sync');
         } else {
             console.warn('[OrderSyncService] Service role key not available, order sync may fail RLS');
         }
@@ -54,7 +53,6 @@ export class OrderSyncService {
      */
     public setOrganizationId(orgId: string | null): void {
         this.organizationId = orgId;
-        console.log('[OrderSyncService] Organization ID set:', orgId);
     }
 
     /**
@@ -192,14 +190,11 @@ export class OrderSyncService {
         let routingError = null;
 
         if (this.featureService?.isMobileWaiter() && this.interTerminalService) {
-            console.log('[OrderSyncService] 📱 Mobile Waiter: Checking parent connection...');
             try {
                 if (await this.interTerminalService.isParentReachable()) {
-                    console.log('[OrderSyncService] 🔗 Parent reachable, forwarding order...');
                     const result = await this.interTerminalService.forwardOrderToParent(data);
 
                     if (result.success) {
-                        console.log('[OrderSyncService] ✅ Order successfully forwarded to parent');
                         routedViaParent = true;
 
                         // Update local order routing metadata (if columns exist)
@@ -226,7 +221,7 @@ export class OrderSyncService {
                         routingError = result.error;
                     }
                 } else {
-                    console.log('[OrderSyncService] 🔌 Parent unreachable, falling back to direct cloud sync');
+                    // Parent unreachable, falling back to direct cloud sync
                 }
             } catch (err) {
                 console.error('[OrderSyncService] Error during routing:', err);
@@ -283,7 +278,6 @@ export class OrderSyncService {
         }
 
         // Try SECURITY DEFINER RPC function first (bypasses RLS)
-        console.log('[OrderSyncService] 🚀 Attempting insert via pos_upsert_order RPC', { recordId, organizationId });
         const { data: rpcResult, error: rpcError } = await this.supabase.rpc('pos_upsert_order', {
             p_client_order_id: recordId,
             p_organization_id: organizationId,
@@ -306,13 +300,11 @@ export class OrderSyncService {
             p_estimated_ready_time: estimatedReadyTimeMinutes,
             p_branch_id: branchId,
             p_terminal_id: terminalId,
-            p_driver_name: data.driver_name || null,
             p_platform: 'pos'
         });
 
         if (!rpcError && rpcResult && rpcResult.length > 0) {
             const result = rpcResult[0];
-            console.log('[OrderSyncService] ✅ Order synced via RPC', { id: result.id, order_number: result.order_number, is_new: result.is_new });
             await this.dbManager.updateOrderSupabaseId(recordId, result.id);
             await this.ensureOrderItems(recordId, result.id);
             return;
@@ -322,10 +314,8 @@ export class OrderSyncService {
         if (rpcError) {
             const msg = String(rpcError?.message || '');
             // If function doesn't exist, fall back silently
-            if (/42883|function .* does not exist/i.test(msg)) {
-                console.log('[OrderSyncService] ℹ️ pos_upsert_order RPC not available, using direct table operations');
-            } else {
-                console.warn('[OrderSyncService] ⚠️ RPC failed, falling back to direct operations:', rpcError);
+            if (!/42883|function .* does not exist/i.test(msg)) {
+                console.warn('[OrderSyncService] RPC failed, falling back to direct operations:', rpcError);
             }
         }
 
@@ -400,17 +390,14 @@ export class OrderSyncService {
             if (insertResp.error) {
                 const msg2b = String(insertResp.error?.message || '');
                 if (/22P02|invalid input syntax for type integer/i.test(msg2b)) {
-                    console.log('[OrderSyncService] 🔄 Retrying with Integer/Type validation');
                     // Extract the bad value from error message
                     const m = msg2b.match(/invalid input syntax for type integer:\s*\"([^\"]+)\"/i);
                     if (m && m[1]) {
                         const bad = m[1];
-                        console.log('[OrderSyncService] 🗑️ Removing field causing integer type error:', bad);
                         Object.keys(payload).forEach((k) => {
                             const val = (payload as any)[k];
                             // Check for exact match or if the value contains the bad string (for potential partial matches)
                             if (val === bad || (typeof val === 'string' && val.includes(bad))) {
-                                console.log(`[OrderSyncService] Dropping column ${k} due to type mismatch`);
                                 delete (payload as any)[k];
                             }
                         });
@@ -485,7 +472,6 @@ export class OrderSyncService {
                             notes: it.notes || null,
                             customizations: Array.isArray(it.customizations)
                                 ? (() => {
-                                    console.log('[OrderSyncService] Converting customizations array to object, count:', it.customizations.length);
                                     const result = it.customizations.reduce((acc: any, c: any, idx: number) => {
                                         // Generate a unique key for each customization
                                         // Priority: customizationId > optionId > name > ingredient.id > ingredient.name > fallback
@@ -497,11 +483,9 @@ export class OrderSyncService {
                                         else if (c.ingredient?.id && typeof c.ingredient.id === 'string') key = c.ingredient.id;
                                         else if (c.ingredient?.name && typeof c.ingredient.name === 'string') key = c.ingredient.name;
 
-                                        console.log('[OrderSyncService] Customization', idx, 'key:', key, 'name:', c.name || c.ingredient?.name);
                                         acc[key] = c;
                                         return acc;
                                     }, {});
-                                    console.log('[OrderSyncService] Result object keys:', Object.keys(result));
                                     return result;
                                 })()
                                 : (it.customizations || null)
@@ -525,23 +509,12 @@ export class OrderSyncService {
     }
 
     private async handleUpdate(recordId: string, data: any): Promise<void> {
-        console.log('[OrderSyncService] 🔄 Processing UPDATE operation', { recordId, table: 'orders', dataKeys: Object.keys(data) });
-
         // Get the order from local database to get supabase_id and version
         const localOrder = await this.dbManager.getOrderById(recordId);
         if (!localOrder) {
-            console.error('[OrderSyncService] ❌ Cannot update: Order not found in local DB', { recordId });
+            console.error('[OrderSyncService] Cannot update: Order not found in local DB', { recordId });
             throw new Error('Cannot update: Order not found');
         }
-
-        console.log('[OrderSyncService] 📋 Local order retrieved', {
-            recordId,
-            supabase_id: localOrder.supabase_id,
-            order_number: localOrder.order_number,
-            current_status: localOrder.status,
-            version: localOrder.version,
-            remote_version: localOrder.remote_version
-        });
 
         // Fallback resolution: if supabase_id is missing (e.g., update queued before insert completes),
         // try to resolve the remote order by client_order_id (recordId) or order_number and cache it locally.
@@ -605,7 +578,6 @@ export class OrderSyncService {
         if ('status' in updatePayload && updatePayload.status) {
             const originalStatus = updatePayload.status;
             updatePayload.status = mapStatusForSupabase(updatePayload.status as any);
-            console.log('[OrderSyncService] 🔄 Status mapped for Supabase', { originalStatus, mappedStatus: updatePayload.status });
             // Attach branch/terminal identifiers if available to satisfy server-side guards
             try {
                 const dbSvc = this.dbManager.getDatabaseService();
@@ -622,7 +594,6 @@ export class OrderSyncService {
                 const rank: Record<string, number> = { pending: 0, confirmed: 1, preparing: 2, ready: 3, out_for_delivery: 4, delivered: 5, completed: 6, cancelled: 7 };
                 const localSupabase = mapStatusForSupabase(localOrder.status || '');
                 if (updatePayload.status && localSupabase && (rank[localSupabase] ?? -1) > (rank[updatePayload.status] ?? -1)) {
-                    console.log('[OrderSyncService] ⤴️ Overriding queued status with progressed local status', { queued: updatePayload.status, local: localSupabase });
                     updatePayload.status = localSupabase;
                 }
             } catch { }
@@ -664,13 +635,6 @@ export class OrderSyncService {
         } catch { }
 
 
-        console.log('[OrderSyncService] 📦 Built UPDATE payload', {
-            supabase_id: localOrder.supabase_id,
-            payload: updatePayload,
-            hasTrackedRemoteVersion,
-            remoteVersion
-        });
-
         // Try optimistic-locking update when remote supports version column
         const orderClient = this.getOrderClient();
         let versionSupported = true;
@@ -691,30 +655,21 @@ export class OrderSyncService {
                 .select()
                 .maybeSingle();
 
-        console.log('[OrderSyncService] 🚀 Sending UPDATE to Supabase', {
-            supabase_id: localOrder.supabase_id,
-            withOptimisticLock: hasTrackedRemoteVersion
-        });
-
         // First attempt: only use optimistic lock if remote version is known and version column seems supported
         let updateResp = hasTrackedRemoteVersion ? await tryUpdate(updatePayload) : await tryUpdateNoVersion(updatePayload);
 
         if (updateResp.error) {
             const msg = String(updateResp.error?.message || '');
-            console.log('[OrderSyncService] ⚠️ UPDATE failed, checking for retries', { errorMessage: msg });
             // If remote does not support version column, retry without optimistic lock
             if (/42703|column\s+\"?version\"?\s+does not exist/i.test(msg)) {
-                console.log('[OrderSyncService] 🔄 Retrying without version column');
                 versionSupported = false;
                 updateResp = await tryUpdateNoVersion(updatePayload);
             }
             if (/42703|column .* does not exist|unknown column/i.test(msg)) {
-                console.log('[OrderSyncService] 🔄 Retrying without branch_id/terminal_id');
                 delete updatePayload.branch_id;
                 delete updatePayload.terminal_id;
                 updateResp = versionSupported ? await tryUpdate(updatePayload) : await tryUpdateNoVersion(updatePayload);
             } else if (/22P02|invalid input syntax for type uuid/i.test(msg)) {
-                console.log('[OrderSyncService] 🔄 Retrying with UUID validation');
                 const isUuid = (v: any) => typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v);
                 if ('branch_id' in updatePayload && !isUuid(updatePayload.branch_id)) delete updatePayload.branch_id;
                 if ('terminal_id' in updatePayload && !isUuid(updatePayload.terminal_id)) delete updatePayload.terminal_id;
@@ -734,15 +689,12 @@ export class OrderSyncService {
                 updateResp = versionSupported ? await tryUpdate(updatePayload) : await tryUpdateNoVersion(updatePayload);
             } else if (/22P02|invalid input syntax for type integer/i.test(msg)) {
                 // Handle Integer/Timestamp mismatch for update
-                console.log('[OrderSyncService] 🔄 Retrying with Integer/Type validation (Update)');
                 const m = msg.match(/invalid input syntax for type integer:\s*\"([^\"]+)\"/i);
                 if (m && m[1]) {
                     const bad = m[1];
-                    console.log('[OrderSyncService] 🗑️ Removing field causing integer type error:', bad);
                     Object.keys(updatePayload).forEach((k) => {
                         const val = (updatePayload as any)[k];
                         if (val === bad || (typeof val === 'string' && val.includes(bad))) {
-                            console.log(`[OrderSyncService] Dropping column ${k} due to type mismatch`);
                             delete (updatePayload as any)[k];
                         }
                     });
@@ -834,7 +786,6 @@ export class OrderSyncService {
     }
 
     private async resolveSupabaseId(localOrder: any, recordId: string) {
-        console.log('[OrderSyncService] 🔍 supabase_id missing, attempting resolution', { recordId, order_number: localOrder.order_number });
         const orderClient = this.getOrderClient();
         try {
             let remoteMatch: any = null;
@@ -847,14 +798,11 @@ export class OrderSyncService {
                 .single();
             if (!tryClient.error && tryClient.data) {
                 remoteMatch = tryClient.data;
-                console.log('[OrderSyncService] ✅ Resolved by client_order_id', { remoteMatch });
             } else {
                 const msg = String(tryClient.error?.message || '');
                 // If the column doesn't exist on this environment, ignore error and try order_number
-                if (/42703|column .* does not exist|unknown column/i.test(msg)) {
-                    console.log('[OrderSyncService] ℹ️ client_order_id column not available, trying order_number');
-                } else if (tryClient.error) {
-                    console.log('[OrderSyncService] ⚠️ client_order_id lookup failed', { error: msg });
+                if (!/42703|column .* does not exist|unknown column/i.test(msg) && tryClient.error) {
+                    // client_order_id lookup failed for other reasons
                 }
             }
 
@@ -868,7 +816,6 @@ export class OrderSyncService {
                     .single();
                 if (!tryByNumber.error && tryByNumber.data) {
                     remoteMatch = tryByNumber.data;
-                    console.log('[OrderSyncService] ✅ Resolved by order_number', { remoteMatch });
                 }
             }
 
@@ -880,13 +827,12 @@ export class OrderSyncService {
                 if (typeof remoteMatch.version === 'number') {
                     try { this.dbManager.orders.updateSyncMetadata(localOrder.id, remoteMatch.version, new Date().toISOString()); } catch { }
                 }
-                console.log('[OrderSyncService] ✅ supabase_id resolved and cached', { recordId, supabase_id: remoteMatch.id });
             } else {
-                console.error('[OrderSyncService] ❌ Cannot resolve supabase_id', { recordId, order_number: localOrder.order_number });
+                console.error('[OrderSyncService] Cannot resolve supabase_id', { recordId, order_number: localOrder.order_number });
                 throw new Error('Cannot update: missing supabase_id and remote match not found');
             }
         } catch (e) {
-            console.error('[OrderSyncService] ❌ supabase_id resolution failed', { error: e });
+            console.error('[OrderSyncService] supabase_id resolution failed', { error: e });
             throw e;
         }
     }
@@ -951,7 +897,6 @@ export class OrderSyncService {
         // Create a conflict record in the local database
         // This is a simplified version, you might want to store more details
         const conflictId = crypto.randomUUID();
-        console.log('[OrderSyncService] ⚔️ Creating conflict', { conflictId, localId: localOrder.id, remoteId: remoteOrder.id });
 
         // In a real implementation, you would save this to a conflicts table
         // await this.dbManager.createConflict(...)
@@ -966,8 +911,6 @@ export class OrderSyncService {
      * Handle order forwarded from a child terminal
      */
     private async handleForwardedOrder(orderData: any, sourceTerminalId: string): Promise<void> {
-        console.log(`[OrderSyncService] 📨 Handling forwarded order from ${sourceTerminalId}`, { orderId: orderData.branch_id });
-
         try {
             // 1. Insert into local database
             const db = this.dbManager.db;
@@ -975,7 +918,6 @@ export class OrderSyncService {
             // Check if order already exists
             const existing = db.prepare('SELECT id FROM orders WHERE id = ?').get(orderData.id || orderData.client_order_id);
             if (existing) {
-                console.log('[OrderSyncService] Order already exists locally, skipping insert');
                 return;
             }
 
@@ -1010,7 +952,6 @@ export class OrderSyncService {
 
             try {
                 db.prepare(sql).run(...values);
-                console.log('[OrderSyncService] 📥 Forwarded order inserted locally');
             } catch (err: any) {
                 console.error('[OrderSyncService] Failed to insert forwarded order:', err);
                 if (err.message.includes('no such column')) {
@@ -1019,7 +960,6 @@ export class OrderSyncService {
                     const fallbackValues = fallbackKeys.map(k => row[k]);
                     const fallbackSql = `INSERT INTO orders (${fallbackKeys.join(',')}) VALUES (${fallbackPlaceholders})`;
                     db.prepare(fallbackSql).run(...fallbackValues);
-                    console.log('[OrderSyncService] 📥 Forwarded order inserted locally (fallback)');
                 } else {
                     throw err;
                 }
@@ -1053,8 +993,6 @@ export class OrderSyncService {
             // 3. Queue for cloud sync
             const syncSvc = this.dbManager.sync;
             syncSvc.addToSyncQueue('orders', row.id, 'insert', orderData);
-
-            console.log('[OrderSyncService] ☁️ Forwarded order queued for cloud sync');
 
         } catch (err) {
             console.error('[OrderSyncService] Error handling forwarded order:', err);

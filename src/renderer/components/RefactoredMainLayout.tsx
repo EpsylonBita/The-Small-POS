@@ -108,7 +108,7 @@ const ComingSoonView: React.FC<{ moduleName?: string }> = ({ moduleName = 'This 
       <div className="text-6xl mb-4">🚧</div>
       <h2 className="text-2xl font-bold mb-2">{t('common.comingSoon', { defaultValue: 'Coming Soon' })}</h2>
       <p className="text-gray-500 text-center max-w-md">
-        {t('common.featureNotReady', { 
+        {t('common.featureNotReady', {
           feature: moduleName,
           defaultValue: `${moduleName} is not yet available. This feature will be added in a future update.`
         })}
@@ -122,7 +122,7 @@ const ViewLoadingSpinner: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
-  
+
   return (
     <div className="flex flex-col items-center justify-center h-full p-8">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
@@ -165,7 +165,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   const { staff, isShiftActive } = useShift();
 
   const [showExpenses, setShowExpenses] = React.useState(false);
-  
+
   // Route guard state for upgrade modal
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
   const [blockedModule, setBlockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
@@ -175,7 +175,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   // Use useModuleAccess hook for checking current view access
   // This provides centralized access checking for the current view
   const currentViewAccess = useModuleAccess(currentView as any);
-  
+
   // Route guard useEffect: Redirect to dashboard if currentView is a locked module
   // This catches cases where currentView is set externally (persisted state, deep-links, programmatic changes)
   useEffect(() => {
@@ -198,7 +198,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   // Attempting to access shows upgrade prompt and redirects to dashboard
   const handleViewChange = (view: string) => {
     console.log('🔄 View change requested:', view);
-    
+
     // Check if the requested view is a locked module using centralized utility
     const access = getModuleAccessStatic(enabledModules, lockedModules, view);
     if (access.isLocked && access.requiredPlan) {
@@ -207,7 +207,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       setShowUpgradePrompt(true);
       return; // Don't change view
     }
-    
+
     setCurrentView(view);
     console.log('✅ View state updated to:', view);
   };
@@ -243,21 +243,21 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     customers: CustomersView, // alias for users/staff management
     branches: BranchesView,
     // settings is handled via modal, not a view
-    
+
     // Restaurant vertical (lazy-loaded)
     tables: TablesView,
     reservations: ReservationsView,
-    
+
     // Hotel vertical (lazy-loaded)
     rooms: RoomsView,
     housekeeping: HousekeepingView,
     guest_billing: GuestBillingView,
-    
+
     // Salon vertical (lazy-loaded)
     appointments: AppointmentsView,
     staff_schedule: StaffScheduleView,
     service_catalog: ServiceCatalogView,
-    
+
     // Fast-food vertical (lazy-loaded)
     drive_through: DriveThruView,
     quick_pos: QuickPOSView,
@@ -289,11 +289,11 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   // Route-level guard is handled by the useEffect above - no state updates here
   const renderCurrentView = () => {
     console.log('🎯 Rendering view for currentView:', currentView);
-    
+
     // Note: Route guard logic has been moved to useEffect to avoid state updates during render.
     // The useEffect observes currentView and currentViewAccess to handle locked module redirects.
     // This function now only handles view component selection and Suspense wrapping.
-    
+
     const ViewComponent = VIEW_COMPONENTS[currentView] || VIEW_COMPONENTS['dashboard'];
     return (
       <Suspense fallback={<ViewLoadingSpinner />}>
@@ -303,11 +303,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   };
 
   return (
-    <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${
-      resolvedTheme === 'light'
+    <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
         ? 'bg-gray-50'
-        : 'bg-gray-900'
-    } ${className}`}>
+        : 'bg-black'
+      } ${className}`}>
       {/* Navigation Sidebar */}
       <NavigationSidebar
         currentView={currentView}
@@ -321,22 +320,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           try {
             const electron = (window as any).electronAPI
             electron?.refreshTerminalSettings?.()
-          } catch {}
+          } catch { }
           setShowConnectionSettings(true)
         }}
       />
-
-      {/* Top-right Expenses Button */}
-      {isShiftActive && (
-        <button
-          onClick={() => setShowExpenses(true)}
-          className="fixed top-2 sm:top-4 right-2 sm:right-4 z-[60] px-3 sm:px-5 py-2 sm:py-2.5 rounded-xl bg-white text-green-600 font-semibold border border-green-600/30 shadow-[0_10px_28px_0_rgba(16,185,129,0.45)] hover:shadow-[0_14px_36px_0_rgba(16,185,129,0.65)] active:scale-95 transition-all duration-300 min-h-[44px] touch-feedback"
-          title={t('expense.buttonLabel')}
-        >
-          {t('expense.buttonLabel')}
-        </button>
-      )}
-
 
       {/* Main Content Area with Container */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
@@ -378,6 +365,17 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
         </ContentContainer>
       </div>
 
+      {/* Top-right Expenses Button */}
+      {isShiftActive && (
+        <button
+          onClick={() => setShowExpenses(true)}
+          className="fixed top-16 right-6 z-50 px-4 py-2.5 rounded-xl backdrop-blur-xl bg-white/10 border border-green-500/30 text-green-400 font-semibold shadow-[0_8px_32px_0_rgba(34,197,94,0.3)] hover:bg-white/20 hover:border-green-400/50 hover:shadow-[0_8px_32px_0_rgba(34,197,94,0.5)] hover:scale-105 active:scale-95 transition-all duration-300"
+          title={t('expense.buttonLabel')}
+        >
+          {t('expense.buttonLabel')}
+        </button>
+      )}
+
       {/* Expenses Modal */}
       <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
       {/* Z Report Modal */}
@@ -388,7 +386,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}
       <ShiftManager ref={shiftManagerRef} />
-      
+
       {/* Upgrade Prompt Modal - Route guard for locked modules */}
       <UpgradePromptModal
         isOpen={showUpgradePrompt}

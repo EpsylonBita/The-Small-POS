@@ -4,14 +4,16 @@
  * Migrated from auth-service.ts to services directory for consistent organization.
  */
 
-import * as crypto from 'crypto';
+import * as bcrypt from 'bcryptjs';
 import { DatabaseManager, StaffSession } from '../database';
 import { BrowserWindow } from 'electron';
 import { SettingsService } from './SettingsService';
 
-// Default admin credentials (should be changed in production)
-const DEFAULT_ADMIN_PIN = '1234';
-const DEFAULT_STAFF_PIN = '0000';
+// Security constants
+const BCRYPT_ROUNDS = 10;
+const MIN_PIN_LENGTH = 6;
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
 export interface AuthResult {
   success: boolean;
@@ -37,6 +39,9 @@ export class AuthService {
   private readonly SESSION_DURATION = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
   private readonly INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
   private lastActivity: number = Date.now();
+
+  // Rate limiting for brute-force protection
+  private loginAttempts: Map<string, { count: number; lockedUntil?: number }> = new Map();
 
   constructor(dbManager: DatabaseManager, settingsService: SettingsService) {
     this.dbManager = dbManager;
@@ -76,35 +81,88 @@ export class AuthService {
     return this.lastActivity;
   }
 
-  private hashPin(pin: string): string {
-    return crypto.createHash('sha256').update(pin).digest('hex');
+  private async hashPin(pin: string): Promise<string> {
+    return bcrypt.hash(pin, BCRYPT_ROUNDS);
+  }
+
+  private async verifyPin(pin: string, hashedPin: string): Promise<boolean> {
+    return bcrypt.compare(pin, hashedPin);
+  }
+
+  private checkRateLimit(key: string): { allowed: boolean; error?: string } {
+    const attempts = this.loginAttempts.get(key);
+    const now = Date.now();
+
+    if (attempts?.lockedUntil && attempts.lockedUntil > now) {
+      const remainingMinutes = Math.ceil((attempts.lockedUntil - now) / 60000);
+      return { allowed: false, error: `Account locked. Try again in ${remainingMinutes} minutes.` };
+    }
+
+    // Reset if lockout expired
+    if (attempts?.lockedUntil && attempts.lockedUntil <= now) {
+      this.loginAttempts.delete(key);
+    }
+
+    return { allowed: true };
+  }
+
+  private recordFailedAttempt(key: string): void {
+    const attempts = this.loginAttempts.get(key) || { count: 0 };
+    attempts.count++;
+
+    if (attempts.count >= MAX_LOGIN_ATTEMPTS) {
+      attempts.lockedUntil = Date.now() + LOCKOUT_DURATION_MS;
+      console.warn(`[AuthService] Account ${key} locked after ${MAX_LOGIN_ATTEMPTS} failed attempts`);
+    }
+
+    this.loginAttempts.set(key, attempts);
+  }
+
+  private clearFailedAttempts(key: string): void {
+    this.loginAttempts.delete(key);
   }
 
   async login(pin: string, staffId?: string): Promise<AuthResult> {
     console.log('[AuthService] ========== LOGIN START ==========');
     console.log('[AuthService] PIN received:', pin === '' ? '(empty string)' : `(${pin.length} chars)`);
     console.log('[AuthService] staffId received:', staffId || '(none)');
-    try {
-      // Get configured PIN from settings
-      const simplePin = this.settingsService.getSetting<string>('staff', 'simple_pin', '');
-      const noPinConfigured = !simplePin || simplePin === '';
 
-      console.log('[AuthService] simplePin from settings:', simplePin === '' ? '(empty)' : '(configured)');
+    const rateLimitKey = staffId || 'default';
+
+    // Check rate limiting
+    const rateCheck = this.checkRateLimit(rateLimitKey);
+    if (!rateCheck.allowed) {
+      console.log('[AuthService] Rate limited:', rateCheck.error);
+      return { success: false, error: rateCheck.error };
+    }
+
+    try {
+      // Get configured PINs from settings (hashed)
+      const adminPinHash = this.settingsService.getSetting<string>('staff', 'admin_pin_hash', '');
+      const staffPinHash = this.settingsService.getSetting<string>('staff', 'staff_pin_hash', '');
+      const noPinConfigured = !adminPinHash && !staffPinHash;
+
+      console.log('[AuthService] adminPinHash configured:', !!adminPinHash);
+      console.log('[AuthService] staffPinHash configured:', !!staffPinHash);
       console.log('[AuthService] noPinConfigured:', noPinConfigured);
 
-      // Allow empty PIN only if no PIN has been configured
-      if (pin === '' && noPinConfigured) {
-        // No PIN required - allow login without PIN
-        console.log('[AuthService] Empty PIN + no PIN configured -> allowing bypass');
-      } else if (pin !== '' && !/^\d{4,6}$/.test(pin)) {
-        // Validate PIN format (4-6 digits) for non-empty PINs
-        console.log('[AuthService] PIN format validation FAILED');
+      // If no PINs configured, require setup (no empty PIN bypass for security)
+      if (noPinConfigured) {
+        console.log('[AuthService] No PINs configured - setup required');
         return {
           success: false,
-          error: 'PIN must be 4-6 digits'
+          error: 'PIN setup required. Please configure admin and staff PINs in settings.'
         };
-      } else {
-        console.log('[AuthService] PIN format check passed (PIN is non-empty and valid format OR empty with PIN configured)');
+      }
+
+      // Validate PIN format (6+ digits required for security)
+      if (!pin || pin.length < MIN_PIN_LENGTH || !/^\d+$/.test(pin)) {
+        console.log('[AuthService] PIN format validation FAILED');
+        this.recordFailedAttempt(rateLimitKey);
+        return {
+          success: false,
+          error: `PIN must be at least ${MIN_PIN_LENGTH} digits`
+        };
       }
 
       // Check if there's already an active session
@@ -124,43 +182,35 @@ export class AuthService {
         }
       }
 
-      // Determine role and staff ID based on PIN
-      console.log('[AuthService] Determining role - PIN:', pin === '' ? '(empty)' : pin.length + ' chars', 'DEFAULT_ADMIN_PIN:', DEFAULT_ADMIN_PIN, 'DEFAULT_STAFF_PIN:', DEFAULT_STAFF_PIN);
+      // Determine role and staff ID based on PIN verification
+      console.log('[AuthService] Determining role by verifying PIN hash');
       let role: 'admin' | 'staff';
       let resolvedStaffId: string;
 
-      if (pin === DEFAULT_ADMIN_PIN) {
-        console.log('[AuthService] Matched DEFAULT_ADMIN_PIN -> admin role');
+      // Check admin PIN first
+      if (adminPinHash && await this.verifyPin(pin, adminPinHash)) {
+        console.log('[AuthService] Matched admin PIN -> admin role');
         role = 'admin';
         resolvedStaffId = staffId || 'admin';
-      } else if (pin === '' && noPinConfigured) {
-        // Empty PIN allowed when no PIN is configured - grant staff access
-        console.log('[AuthService] Empty PIN + noPinConfigured -> staff role (no-pin-user)');
-        role = 'staff';
-        resolvedStaffId = staffId || 'no-pin-user';
-      } else if (simplePin && pin === simplePin) {
-        // Match against configured simple PIN
-        console.log('[AuthService] Matched simplePin -> staff role');
-        role = 'staff';
-        resolvedStaffId = staffId || 'local-simple-pin';
-      } else if (pin === DEFAULT_STAFF_PIN && noPinConfigured) {
-        // Fallback to default staff PIN only if no simple PIN is set
-        console.log('[AuthService] Matched DEFAULT_STAFF_PIN + noPinConfigured -> staff role');
+        this.clearFailedAttempts(rateLimitKey);
+      } else if (staffPinHash && await this.verifyPin(pin, staffPinHash)) {
+        // Check staff PIN
+        console.log('[AuthService] Matched staff PIN -> staff role');
         role = 'staff';
         resolvedStaffId = staffId || 'staff';
+        this.clearFailedAttempts(rateLimitKey);
       } else {
-        // In a real implementation, you would check against a database of staff PINs
-        // For now, we'll reject unknown PINs
+        // No PIN match - record failed attempt
         console.log('[AuthService] No PIN match found - returning Invalid PIN error');
-        console.log('[AuthService] Debug: pin empty?', pin === '', 'noPinConfigured?', noPinConfigured, 'simplePin empty?', simplePin === '');
+        this.recordFailedAttempt(rateLimitKey);
         return {
           success: false,
           error: 'Invalid PIN'
         };
       }
 
-      // Hash the PIN for storage
-      const pinHash = this.hashPin(pin);
+      // Hash the PIN for session storage (already verified, so just use existing hash)
+      const pinHash = (role === 'admin' ? adminPinHash : staffPinHash)!;
       console.log('[AuthService] Creating session for staffId:', resolvedStaffId, 'role:', role);
 
       // Create new session
@@ -334,26 +384,71 @@ export class AuthService {
     }
   }
 
-  // Method to change PIN (admin only)
-  async changePin(currentPin: string, newPin: string, targetStaffId?: string): Promise<boolean> {
+  // Method to setup PINs (for initial configuration or admin reset)
+  async setupPin(role: 'admin' | 'staff', pin: string, currentAdminPin?: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const session = await this.getCurrentSession();
-
-      if (!session || session.role !== 'admin') {
-        return false;
+      // Validate PIN format
+      if (!pin || pin.length < MIN_PIN_LENGTH || !/^\d+$/.test(pin)) {
+        return { success: false, error: `PIN must be at least ${MIN_PIN_LENGTH} digits` };
       }
 
+      // Check if PINs already exist - require admin auth for changes
+      const adminPinHash = this.settingsService.getSetting<string>('staff', 'admin_pin_hash', '');
+      const staffPinHash = this.settingsService.getSetting<string>('staff', 'staff_pin_hash', '');
+
+      if (adminPinHash || staffPinHash) {
+        // PINs already configured - need admin verification
+        if (!currentAdminPin) {
+          return { success: false, error: 'Admin PIN required to change PINs' };
+        }
+        if (!adminPinHash || !await this.verifyPin(currentAdminPin, adminPinHash)) {
+          return { success: false, error: 'Invalid admin PIN' };
+        }
+      }
+
+      // Hash and store the new PIN
+      const hashedPin = await this.hashPin(pin);
+      const settingKey = role === 'admin' ? 'admin_pin_hash' : 'staff_pin_hash';
+      this.settingsService.setSetting('staff', settingKey, hashedPin);
+
+      console.log(`[AuthService] ${role} PIN configured successfully`);
+      return { success: true };
+    } catch (error) {
+      console.error('Error setting up PIN:', error);
+      return { success: false, error: 'Failed to setup PIN' };
+    }
+  }
+
+  // Method to change PIN (requires current PIN verification)
+  async changePin(role: 'admin' | 'staff', currentPin: string, newPin: string): Promise<{ success: boolean; error?: string }> {
+    try {
       // Validate new PIN format
-      if (!/^\d{4}$/.test(newPin)) {
-        return false;
+      if (!newPin || newPin.length < MIN_PIN_LENGTH || !/^\d+$/.test(newPin)) {
+        return { success: false, error: `PIN must be at least ${MIN_PIN_LENGTH} digits` };
       }
 
-      // In a real implementation, you would update the PIN in a staff database
-      // For now, we'll just return true
-      return true;
+      // Get current hash based on role
+      const settingKey = role === 'admin' ? 'admin_pin_hash' : 'staff_pin_hash';
+      const currentHash = this.settingsService.getSetting<string>('staff', settingKey, '');
+
+      if (!currentHash) {
+        return { success: false, error: `No ${role} PIN configured` };
+      }
+
+      // Verify current PIN
+      if (!await this.verifyPin(currentPin, currentHash)) {
+        return { success: false, error: 'Current PIN is incorrect' };
+      }
+
+      // Hash and store new PIN
+      const newHash = await this.hashPin(newPin);
+      this.settingsService.setSetting('staff', settingKey, newHash);
+
+      console.log(`[AuthService] ${role} PIN changed successfully`);
+      return { success: true };
     } catch (error) {
       console.error('Error changing PIN:', error);
-      return false;
+      return { success: false, error: 'Failed to change PIN' };
     }
   }
 

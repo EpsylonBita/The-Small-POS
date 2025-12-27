@@ -1,11 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
-import { X, DollarSign, AlertCircle } from 'lucide-react';
+import { X, FileText, Euro, Plus, Receipt } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense } from '../../types';
-
-import { LiquidGlassModal } from '../ui/pos-glass-components';
+import toast from 'react-hot-toast';
 
 interface ExpenseModalProps {
   isOpen: boolean;
@@ -18,22 +16,17 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
   // Expense state
   const [showExpenseForm, setShowExpenseForm] = useState(false);
-  const [expenseType, setExpenseType] = useState<'supplies' | 'maintenance' | 'petty_cash' | 'refund' | 'other'>('other');
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expenseDescription, setExpenseDescription] = useState('');
-  const [expenseReceipt, setExpenseReceipt] = useState('');
   const [expenses, setExpenses] = useState<ShiftExpense[]>([]);
 
   // UI state
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-
-
 
   useEffect(() => {
     if (isOpen) {
       loadExpenses();
+      setShowExpenseForm(false);
     }
   }, [isOpen]);
 
@@ -42,9 +35,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       // Load expenses from the active cashier's shift (not just any shift)
       const branchId = staff?.branchId || localStorage.getItem('branch_id') || '';
       const terminalId = (staff as any)?.terminalId || localStorage.getItem('terminal_id') || '';
-      
+
       let shiftIdToLoad: string | null = null;
-      
+
       // First try to get the active cashier shift
       if (branchId && terminalId) {
         const cashierShift = await (window as any).electronAPI.getActiveCashierByTerminal(branchId, terminalId);
@@ -52,17 +45,17 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           shiftIdToLoad = cashierShift.id;
         }
       }
-      
+
       // Fallback to current user's shift if they're a cashier
       if (!shiftIdToLoad && activeShift?.id && activeShift.role_type === 'cashier') {
         shiftIdToLoad = activeShift.id;
       }
-      
+
       // Final fallback to any active shift
       if (!shiftIdToLoad && activeShift?.id) {
         shiftIdToLoad = activeShift.id;
       }
-      
+
       if (!shiftIdToLoad) {
         setExpenses([]);
         return;
@@ -78,10 +71,6 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   };
 
   const handleRecordExpense = async () => {
-    // Expenses must be charged to the active CASHIER's drawer, not just any shift
-    setError('');
-    setSuccess('');
-
     let shiftIdToUse: string | null = null;
     let cashierShift: any = null;
 
@@ -89,7 +78,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       // First, try to get the active cashier shift for this terminal
       const branchId = staff?.branchId || localStorage.getItem('branch_id') || '';
       const terminalId = (staff as any)?.terminalId || localStorage.getItem('terminal_id') || '';
-      
+
       if (branchId && terminalId) {
         cashierShift = await (window as any).electronAPI.getActiveCashierByTerminal(branchId, terminalId);
         if (cashierShift?.id) {
@@ -122,22 +111,21 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       }
     } catch (err) {
       console.error('Error finding cashier shift for expense:', err);
-      // Continue; we'll present the noActiveShift error below if still missing
     }
 
     if (!shiftIdToUse || !staff) {
-      setError(t('modals.expense.noActiveShift'));
+      toast.error(t('modals.expense.noActiveShift') || 'Δεν υπάρχει ενεργή βάρδια');
       return;
     }
 
     const amount = parseFloat(expenseAmount);
     if (isNaN(amount) || amount <= 0) {
-      setError(t('modals.expense.invalidAmount'));
+      toast.error(t('modals.expense.invalidAmount') || 'Μη έγκυρο ποσό');
       return;
     }
 
     if (!expenseDescription.trim()) {
-      setError(t('modals.expense.descriptionRequired'));
+      toast.error(t('modals.expense.justificationRequired') || 'Η αιτιολογία είναι υποχρεωτική για την καταγραφή εξόδου');
       return;
     }
 
@@ -148,25 +136,23 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         shiftId: shiftIdToUse,
         staffId: staff.staffId,
         branchId: staff.branchId,
-        expenseType,
+        expenseType: 'other',
         amount,
         description: expenseDescription,
-        receiptNumber: expenseReceipt || undefined,
+        receiptNumber: undefined,
       });
 
       if (result.success) {
-        setSuccess(t('modals.expense.recordSuccess'));
+        toast.success(t('modals.expense.recordSuccess') || 'Το έξοδο καταγράφηκε επιτυχώς');
         setExpenseAmount('');
         setExpenseDescription('');
-        setExpenseReceipt('');
         setShowExpenseForm(false);
         await loadExpenses();
-        setTimeout(() => setSuccess(''), 2000);
       } else {
-        setError(result.error || t('modals.expense.recordFailed'));
+        toast.error(result.error || t('modals.expense.recordFailed') || 'Αποτυχία καταγραφής εξόδου');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('modals.expense.recordFailed'));
+      toast.error(err instanceof Error ? err.message : (t('modals.expense.recordFailed') || 'Αποτυχία καταγραφής εξόδου'));
     } finally {
       setLoading(false);
     }
@@ -174,98 +160,194 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
   const totalExpenses = Array.isArray(expenses) ? expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0) : 0;
 
-  return (
-    <LiquidGlassModal
-      isOpen={isOpen}
-      onClose={onClose}
-      title={t('modals.expense.title')}
-      size="lg"
-      closeOnBackdrop={true}
-      closeOnEscape={true}
-    >
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
-            <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-            <p className="liquid-glass-modal-text font-medium">{error}</p>
-          </div>
-        )}
-        {success && (
-          <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 animate-in fade-in slide-in-from-top-2 duration-300">
-            <p className="liquid-glass-modal-text font-medium">{success}</p>
-          </div>
-        )}
-        <div>
-          <div className="flex items-center mb-3">
-            <h3 className="font-semibold liquid-glass-modal-text">{t('modals.expense.expenses')}</h3>
-          </div>
-          {showExpenseForm && (
-            <div className="bg-gray-50/50 dark:bg-gray-800/60 border liquid-glass-modal-border rounded-xl p-4 space-y-3 mb-4">
-              <input
-                type="text"
-                value={expenseDescription}
-                onChange={(e) => setExpenseDescription(e.target.value)}
-                placeholder={t('modals.expense.descriptionPlaceholder')}
-                className="liquid-glass-modal-input"
-              />
-              <input
-                type="number"
-                step="0.01"
-                value={expenseAmount}
-                onChange={(e) => setExpenseAmount(e.target.value)}
-                placeholder={t('modals.expense.amountPlaceholder')}
-                className="liquid-glass-modal-input"
-              />
-              <button
-                onClick={handleRecordExpense}
-                disabled={loading}
-                className="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-all duration-200"
-              >
-                {t('modals.expense.recordButton')}
-              </button>
-            </div>
-          )}
-          {expenses.length > 0 ? (
-            <div className="space-y-2">
-              {expenses.map((expense) => (
-                <div key={expense.id} className="flex items-center justify-between p-3 bg-gray-50/30 dark:bg-gray-800/60 rounded-xl p-3 border liquid-glass-modal-border">
-                  <div className="flex-1">
-                    <div className="font-medium liquid-glass-modal-text">{expense.description}</div>
-                    <div className="liquid-glass-modal-text-muted capitalize text-xs">{expense.expense_type}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="font-semibold liquid-glass-modal-text">${expense.amount.toFixed(2)}</div>
-                    <div className={`text-xs ${
-                      expense.status === 'approved' ? 'text-green-400' :
-                      expense.status === 'rejected' ? 'text-red-400' :
-                      'text-yellow-400'
-                    }`}>
-                      {t('expense.status.' + expense.status)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              <div className="flex justify-between items-center pt-3 border-t liquid-glass-modal-border">
-                <span className="font-semibold liquid-glass-modal-text">{t('modals.expense.totalExpenses')}:</span>
-                <span className="font-bold text-red-400 text-lg">${totalExpenses.toFixed(2)}</span>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm liquid-glass-modal-text-muted text-center py-4">{t('modals.expense.noExpenses')}</p>
-          )}
-        </div>
+  if (!isOpen) return null;
 
-          {/* Bottom Center Add Expense Button */}
-          <div className="sticky bottom-4 inset-x-0 flex justify-center pt-2">
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        className="liquid-glass-modal-backdrop fixed inset-0 z-[1000]"
+        onClick={onClose}
+      />
+
+      {/* Modal Container */}
+      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] z-[1050] flex flex-col">
+
+        {/* Header */}
+        <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
+          <div className="flex justify-between items-start gap-4">
+            <div className="flex-1">
+              <h2 className="text-2xl font-bold liquid-glass-modal-text">
+                {t('modals.expense.title') || 'Καταγραφή Εξόδου'}
+              </h2>
+              <p className="text-sm liquid-glass-modal-text-muted mt-1">
+                {t('modals.expense.subtitle') || 'Καταγράψτε τα έξοδα της βάρδιας'}
+              </p>
+            </div>
             <button
-              onClick={() => setShowExpenseForm(!showExpenseForm)}
-              className="px-8 py-4 text-lg rounded-2xl bg-green-600 hover:bg-green-700 text-white font-semibold transition-all duration-200"
+              onClick={onClose}
+              className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+              aria-label={t('common.actions.close')}
             >
-              {t('modals.expense.addButton')}
+              <X className="w-6 h-6" />
             </button>
           </div>
+        </div>
+
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0">
+          <div className="space-y-6">
+
+            {/* Add Expense Form */}
+            {showExpenseForm && (
+              <div className="liquid-glass-modal-card space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
+                <h3 className="font-semibold liquid-glass-modal-text flex items-center gap-2">
+                  <Plus className="w-4 h-4" />
+                  {t('modals.expense.newExpense') || 'Νέο Έξοδο'}
+                </h3>
+
+                {/* Amount */}
+                <div>
+                  <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
+                    <Euro className="w-4 h-4 inline mr-1" />
+                    {t('modals.expense.amount') || 'Ποσό'} *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={expenseAmount}
+                      onChange={(e) => setExpenseAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-blue-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
+                    />
+                    <Euro className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 liquid-glass-modal-text-muted" />
+                  </div>
+                </div>
+
+                {/* Justification Notes */}
+                <div>
+                  <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
+                    <FileText className="w-4 h-4 inline mr-1" />
+                    {t('modals.expense.justification') || 'Αιτιολογία'} *
+                  </label>
+                  <textarea
+                    value={expenseDescription}
+                    onChange={(e) => setExpenseDescription(e.target.value)}
+                    placeholder={t('modals.expense.justificationPlaceholder') || 'Εισάγετε την αιτιολογία για αυτό το έξοδο...'}
+                    rows={3}
+                    required
+                    className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-blue-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
+                  />
+                  <p className="text-xs liquid-glass-modal-text-muted mt-1">
+                    {t('modals.expense.justificationRequired') || 'Η αιτιολογία είναι υποχρεωτική για την καταγραφή εξόδου'}
+                  </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={handleRecordExpense}
+                    disabled={loading || !expenseAmount || parseFloat(expenseAmount) <= 0 || !expenseDescription.trim()}
+                    className="flex-1 liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30 gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Plus className="w-4 h-4" />
+                    {loading ? (t('common.loading') || 'Φόρτωση...') : (t('modals.expense.recordButton') || 'Καταγραφή Εξόδου')}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowExpenseForm(false);
+                      setExpenseAmount('');
+                      setExpenseDescription('');
+                    }}
+                    className="liquid-glass-modal-button"
+                  >
+                    {t('common.actions.cancel') || 'Ακύρωση'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Expenses List */}
+            <div className="liquid-glass-modal-card">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold liquid-glass-modal-text flex items-center gap-2">
+                  <Receipt className="w-4 h-4" />
+                  {t('modals.expense.expenses') || 'Έξοδα'}
+                </h3>
+                {expenses.length > 0 && (
+                  <span className="text-xs liquid-glass-modal-badge">
+                    {expenses.length} {t('modals.expense.items') || 'στοιχεία'}
+                  </span>
+                )}
+              </div>
+
+              {expenses.length > 0 ? (
+                <div className="space-y-3">
+                  {expenses.map((expense) => (
+                    <div
+                      key={expense.id}
+                      className="flex items-start justify-between p-3 bg-white/5 dark:bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
+                    >
+                      <div className="flex-1">
+                        <div className="font-medium liquid-glass-modal-text">{expense.description}</div>
+                      </div>
+                      <div className="text-right ml-3">
+                        <div className="font-bold text-red-400 flex items-center gap-1">
+                          <Euro className="w-4 h-4" />
+                          {expense.amount.toFixed(2)}
+                        </div>
+                        {expense.status && (
+                          <div className={`text-xs mt-1 ${
+                            expense.status === 'approved' ? 'text-green-400' :
+                            expense.status === 'rejected' ? 'text-red-400' :
+                            'text-yellow-400'
+                          }`}>
+                            {t(`expense.status.${expense.status}`) || expense.status}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Total */}
+                  <div className="flex justify-between items-center pt-4 border-t border-gray-200/50 dark:border-gray-700/50">
+                    <span className="font-bold text-lg liquid-glass-modal-text">
+                      {t('modals.expense.totalExpenses') || 'Σύνολο Εξόδων'}:
+                    </span>
+                    <span className="font-bold text-2xl text-red-400 flex items-center gap-1">
+                      <Euro className="w-5 h-5" />
+                      {totalExpenses.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Receipt className="w-12 h-12 mx-auto mb-3 liquid-glass-modal-text-muted opacity-50" />
+                  <p className="text-sm liquid-glass-modal-text-muted">
+                    {t('modals.expense.noExpenses') || 'Δεν καταγράφηκαν έξοδα για αυτή τη βάρδια'}
+                  </p>
+                </div>
+              )}
+            </div>
+
+          </div>
+        </div>
+
+        {/* Footer with Add Button */}
+        {!showExpenseForm && (
+          <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
+            <button
+              onClick={() => setShowExpenseForm(true)}
+              className="w-full liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30 gap-2 py-3"
+            >
+              <Plus className="w-5 h-5" />
+              {t('modals.expense.addButton') || '+ Προσθήκη Εξόδου'}
+            </button>
+          </div>
+        )}
 
       </div>
-    </LiquidGlassModal>
+    </>
   );
 }

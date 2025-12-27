@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
 
@@ -17,13 +18,13 @@ import type { UpdateInfo, ProgressInfo } from 'electron-updater';
  * Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
  */
 
-export type UpdateStatus = 
+export type UpdateStatus =
   | 'idle'
-  | 'checking' 
-  | 'available' 
-  | 'not-available' 
-  | 'downloading' 
-  | 'downloaded' 
+  | 'checking'
+  | 'available'
+  | 'not-available'
+  | 'downloading'
+  | 'downloaded'
   | 'error';
 
 export interface UpdateDialogProps {
@@ -80,8 +81,8 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
         return <CheckingState />;
       case 'available':
         return (
-          <AvailableState 
-            updateInfo={updateInfo} 
+          <AvailableState
+            updateInfo={updateInfo}
             onDownload={onDownload}
             onClose={onClose}
             currentVersion={currentVersion}
@@ -89,14 +90,14 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
         );
       case 'downloading':
         return (
-          <DownloadingState 
-            progress={progress} 
+          <DownloadingState
+            progress={progress}
             onCancel={onCancel}
           />
         );
       case 'downloaded':
         return (
-          <DownloadedState 
+          <DownloadedState
             updateInfo={updateInfo}
             onInstall={onInstall}
             onClose={onClose}
@@ -104,8 +105,8 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
         );
       case 'error':
         return (
-          <ErrorState 
-            error={error} 
+          <ErrorState
+            error={error}
             onRetry={onRetry}
             onClose={onClose}
           />
@@ -113,7 +114,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
       case 'not-available':
       case 'idle':
       default:
-        return <UpToDateState onClose={onClose} currentVersion={currentVersion} />;
+        return <UpToDateState onClose={onClose} currentVersion={currentVersion} onRetry={onRetry} />;
     }
   };
 
@@ -123,7 +124,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
   return (
     <LiquidGlassModal
       isOpen={isOpen}
-      onClose={canClose ? onClose : () => {}}
+      onClose={canClose ? onClose : () => { }}
       title={getTitle()}
       size="md"
       closeOnBackdrop={canClose}
@@ -155,25 +156,25 @@ interface AvailableStateProps {
   currentVersion?: string;
 }
 
-const AvailableState: React.FC<AvailableStateProps> = ({ 
-  updateInfo, 
+const AvailableState: React.FC<AvailableStateProps> = ({
+  updateInfo,
   onDownload,
   onClose,
   currentVersion
 }) => {
   const { t } = useTranslation();
   const releaseNotes = getReleaseNotesHtml(updateInfo?.releaseNotes);
-  
+
   return (
     <div className="space-y-4">
       {/* Version info header */}
       <div className="flex items-center space-x-3 text-cyan-400">
         <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path 
-            strokeLinecap="round" 
-            strokeLinejoin="round" 
-            strokeWidth={2} 
-            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" 
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
           />
         </svg>
         <div>
@@ -232,9 +233,9 @@ interface DownloadingStateProps {
   onCancel: () => void;
 }
 
-const DownloadingState: React.FC<DownloadingStateProps> = ({ 
-  progress, 
-  onCancel 
+const DownloadingState: React.FC<DownloadingStateProps> = ({
+  progress,
+  onCancel
 }) => {
   const { t } = useTranslation();
   const percent = progress?.percent || 0;
@@ -295,10 +296,10 @@ interface DownloadedStateProps {
   onClose: () => void;
 }
 
-const DownloadedState: React.FC<DownloadedStateProps> = ({ 
+const DownloadedState: React.FC<DownloadedStateProps> = ({
   updateInfo,
   onInstall,
-  onClose 
+  onClose
 }) => {
   const { t } = useTranslation();
   const version = updateInfo?.version || 'New Version';
@@ -328,11 +329,11 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
       <div className="flex justify-center mb-4">
         <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center text-green-400">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path 
-              strokeLinecap="round" 
-              strokeLinejoin="round" 
-              strokeWidth={2} 
-              d="M5 13l4 4L19 7" 
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M5 13l4 4L19 7"
             />
           </svg>
         </div>
@@ -377,10 +378,10 @@ interface ErrorStateProps {
   onClose: () => void;
 }
 
-const ErrorState: React.FC<ErrorStateProps> = ({ 
-  error, 
+const ErrorState: React.FC<ErrorStateProps> = ({
+  error,
   onRetry,
-  onClose 
+  onClose
 }) => {
   const { t } = useTranslation();
   return (
@@ -389,11 +390,11 @@ const ErrorState: React.FC<ErrorStateProps> = ({
       <div className="flex justify-center mb-4">
         <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center text-red-400">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path 
-              strokeLinecap="round" 
-              strokeLinejoin="round" 
-              strokeWidth={2} 
-              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
             />
           </svg>
         </div>
@@ -434,9 +435,10 @@ const ErrorState: React.FC<ErrorStateProps> = ({
 interface UpToDateStateProps {
   onClose: () => void;
   currentVersion?: string;
+  onRetry: () => void;
 }
 
-const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion }) => {
+const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, onRetry }) => {
   const { t } = useTranslation();
   return (
     <div className="space-y-6 text-center">
@@ -444,11 +446,11 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion }
       <div className="flex justify-center mb-4">
         <div className="w-16 h-16 bg-cyan-500/20 rounded-full flex items-center justify-center text-cyan-400">
           <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path 
-              strokeLinecap="round" 
-              strokeLinejoin="round" 
-              strokeWidth={2} 
-              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" 
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
             />
           </svg>
         </div>
@@ -467,8 +469,20 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion }
         </div>
       )}
 
-      {/* Close button */}
-      <div className="pt-4">
+      {/* Action buttons */}
+      <div className="pt-4 space-y-3">
+        <POSGlassButton
+          variant="secondary"
+          onClick={onRetry}
+          fullWidth
+        >
+          <div className="flex items-center justify-center gap-2">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {t('updates.actions.recheck')}
+          </div>
+        </POSGlassButton>
         <POSGlassButton
           variant="primary"
           onClick={onClose}
@@ -481,26 +495,33 @@ const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion }
   );
 };
 
-// Helper function to extract release notes as HTML
+// Helper function to extract release notes as HTML with XSS sanitization
 function getReleaseNotesHtml(
   releaseNotes?: UpdateInfo['releaseNotes']
 ): string {
   if (!releaseNotes) {
     return '';
   }
-  
+
+  let html: string;
+
   if (typeof releaseNotes === 'string') {
-    return releaseNotes;
-  }
-  
-  // Array of release note objects (ReleaseNoteInfo[])
-  if (Array.isArray(releaseNotes)) {
-    return releaseNotes
+    html = releaseNotes;
+  } else if (Array.isArray(releaseNotes)) {
+    // Array of release note objects (ReleaseNoteInfo[])
+    html = releaseNotes
       .map(note => `<p><strong>${note.version}</strong>: ${note.note || ''}</p>`)
       .join('');
+  } else {
+    return '';
   }
-  
-  return '';
+
+  // Sanitize HTML to prevent XSS attacks
+  // Only allow safe formatting tags
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
+    ALLOWED_ATTR: []
+  });
 }
 
 export default UpdateDialog;

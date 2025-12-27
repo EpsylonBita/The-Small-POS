@@ -61,4 +61,95 @@ export function registerWindowHandlers(): void {
       return false;
     }
   });
+
+  // Get window state (maximized, fullscreen)
+  ipcMain.removeHandler('window-get-state');
+  ipcMain.handle('window-get-state', () => {
+    try {
+      const mainWindow = serviceRegistry.mainWindow;
+      if (!mainWindow) return { isMaximized: false, isFullScreen: false };
+      return {
+        isMaximized: mainWindow.isMaximized(),
+        isFullScreen: mainWindow.isFullScreen(),
+      };
+    } catch (e) {
+      return { isMaximized: false, isFullScreen: false };
+    }
+  });
+
+  // Reload window
+  ipcMain.removeHandler('window-reload');
+  ipcMain.handle('window-reload', () => {
+    try {
+      serviceRegistry.mainWindow?.reload();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+
+  // Force reload window
+  ipcMain.removeHandler('window-force-reload');
+  ipcMain.handle('window-force-reload', () => {
+    try {
+      serviceRegistry.mainWindow?.webContents.reloadIgnoringCache();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+
+  // Toggle DevTools
+  ipcMain.removeHandler('window-toggle-devtools');
+  ipcMain.handle('window-toggle-devtools', () => {
+    try {
+      const mainWindow = serviceRegistry.mainWindow;
+      if (!mainWindow) return false;
+      if (mainWindow.webContents.isDevToolsOpened()) {
+        mainWindow.webContents.closeDevTools();
+      } else {
+        mainWindow.webContents.openDevTools();
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+
+  // Zoom controls
+  ipcMain.removeHandler('window-zoom-in');
+  ipcMain.handle('window-zoom-in', () => {
+    try {
+      const mainWindow = serviceRegistry.mainWindow;
+      if (!mainWindow) return false;
+      const currentZoom = mainWindow.webContents.getZoomLevel();
+      mainWindow.webContents.setZoomLevel(currentZoom + 1);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+
+  ipcMain.removeHandler('window-zoom-out');
+  ipcMain.handle('window-zoom-out', () => {
+    try {
+      const mainWindow = serviceRegistry.mainWindow;
+      if (!mainWindow) return false;
+      const currentZoom = mainWindow.webContents.getZoomLevel();
+      mainWindow.webContents.setZoomLevel(currentZoom - 1);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
+
+  ipcMain.removeHandler('window-zoom-reset');
+  ipcMain.handle('window-zoom-reset', () => {
+    try {
+      serviceRegistry.mainWindow?.webContents.setZoomLevel(0);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  });
 }

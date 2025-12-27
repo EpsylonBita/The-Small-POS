@@ -388,6 +388,16 @@ export function registerOrderCrudHandlers(): void {
 
       // Debug: log the items with customizations
       console.log('[order:create] Items received:', JSON.stringify(orderData.items, null, 2));
+      // Debug: Log notes field specifically for each item
+      if (orderData.items && orderData.items.length > 0) {
+        orderData.items.forEach((item: any, idx: number) => {
+          console.log(`[order:create] Item ${idx} notes check:`, {
+            notes: item.notes,
+            special_instructions: item.special_instructions,
+            hasNotes: !!(item.notes || item.special_instructions)
+          });
+        });
+      }
       console.log('[order:create] Delivery data received:', {
         delivery_notes: orderData.delivery_notes,
         name_on_ringer: orderData.name_on_ringer,

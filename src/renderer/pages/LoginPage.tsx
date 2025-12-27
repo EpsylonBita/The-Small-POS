@@ -18,6 +18,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     const [organizationLogo, setOrganizationLogo] = useState<string | null>(null);
     const [organizationName, setOrganizationName] = useState<string | null>(null);
     const [logoError, setLogoError] = useState(false);
+    const [showPinSetup, setShowPinSetup] = useState(false);
+    const [newPin, setNewPin] = useState("");
+    const [confirmPin, setConfirmPin] = useState("");
+    const [setupError, setSetupError] = useState("");
 
     // Load organization branding on mount
     useEffect(() => {
@@ -59,13 +63,16 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             try {
                 console.log('[LoginPage] Checking if PIN is configured...');
                 const snapshot = await (window as any).electronAPI?.ipcRenderer?.invoke('settings:get-local');
+                // Check for hashed PINs (new secure format)
+                const adminPinHash = snapshot?.['staff.admin_pin_hash'] ?? snapshot?.staff?.admin_pin_hash;
+                const staffPinHash = snapshot?.['staff.staff_pin_hash'] ?? snapshot?.staff?.staff_pin_hash;
+                // Also check legacy simple_pin for backwards compatibility
                 const simplePin = snapshot?.['staff.simple_pin'] ?? snapshot?.staff?.simple_pin;
-                const noPinConfigured = !simplePin || simplePin === '' || simplePin === null;
-                console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured);
+                const noPinConfigured = (!adminPinHash && !staffPinHash) && (!simplePin || simplePin === '');
+                console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured, 'hasAdminHash:', !!adminPinHash, 'hasStaffHash:', !!staffPinHash);
                 setNoPinSet(noPinConfigured);
             } catch (err) {
                 console.error('[LoginPage] Failed to check PIN:', err);
-                // If we can't check, assume no PIN is set to allow login
                 setNoPinSet(true);
             }
         };
@@ -128,7 +135,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     // Add keyboard support
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (isLoading) return;
+            // Don't capture keyboard when PIN setup modal is open
+            if (isLoading || showPinSetup) return;
 
             // Number keys
             if (e.key >= '0' && e.key <= '9') {
@@ -154,7 +162,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
         document.addEventListener('keydown', handleKeyDown);
         return () => document.removeEventListener('keydown', handleKeyDown);
-    }, [pin, isLoading]);
+    }, [pin, isLoading, showPinSetup]);
 
     const numbers = [
         ['1', '2', '3'],
@@ -260,37 +268,112 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
                 {noPinSet && (
                     <button
-                        onClick={async () => {
-                            setIsLoading(true);
-                            setError("");
-                            try {
-                                console.log('[LoginPage] ========== ENTER WITHOUT PIN CLICKED ==========');
-                                console.log('[LoginPage] Calling onLogin with empty string...');
-                                const success = await onLogin(''); // Empty PIN when no PIN is set
-                                console.log('[LoginPage] onLogin returned:', success);
-                                if (!success) {
-                                    console.log('[LoginPage] Login without PIN failed - success was falsy');
-                                    setError(t('login.errors.loginFailed', 'Login failed. Please try again.'));
-                                } else {
-                                    console.log('[LoginPage] Login without PIN succeeded!');
-                                }
-                            } catch (err) {
-                                console.error('[LoginPage] Login without PIN threw error:', err);
-                                setError(t('login.errors.loginFailed', 'Login failed. Please try again.'));
-                            } finally {
-                                setIsLoading(false);
-                            }
-                        }}
+                        onClick={() => setShowPinSetup(true)}
                         disabled={isLoading}
                         className="w-full mt-2 sm:mt-3 bg-green-600/80 hover:bg-green-600 active:bg-green-700 disabled:bg-white/10 text-white px-4 sm:px-6 py-3 sm:py-4 rounded-xl border border-green-400/40 transition-all duration-300 disabled:cursor-not-allowed font-semibold text-base sm:text-lg touch-manipulation select-none"
                     >
-                        {isLoading ? t('login.loggingIn', 'Logging in...') : t('login.enterWithoutPin', 'Enter Without PIN')}
+                        {t('login.createPin', 'Create PIN')}
                     </button>
+                )}
+
+                {/* PIN Setup Modal */}
+                {showPinSetup && (
+                    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                        <div className="bg-gray-800/95 border border-white/20 rounded-2xl p-6 max-w-sm w-full">
+                            <h2 className="text-xl font-bold text-white mb-4 text-center">{t('login.setupPin', 'Setup PIN')}</h2>
+                            <p className="text-white/70 text-sm mb-4 text-center">{t('login.setupPinDesc', 'Create a 6-digit PIN for admin access')}</p>
+
+                            <div className="space-y-4">
+                                <div>
+                                    <label className="text-white/80 text-sm block mb-1">{t('login.newPin', 'New PIN (6+ digits)')}</label>
+                                    <input
+                                        type="password"
+                                        value={newPin}
+                                        onChange={(e) => setNewPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                        placeholder="●●●●●●"
+                                        className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white text-center text-xl tracking-widest"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-white/80 text-sm block mb-1">{t('login.confirmPin', 'Confirm PIN')}</label>
+                                    <input
+                                        type="password"
+                                        value={confirmPin}
+                                        onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                        placeholder="●●●●●●"
+                                        className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white text-center text-xl tracking-widest"
+                                    />
+                                </div>
+
+                                {setupError && (
+                                    <p className="text-red-400 text-sm text-center">{setupError}</p>
+                                )}
+
+                                <div className="flex gap-3 pt-2">
+                                    <button
+                                        onClick={() => {
+                                            setShowPinSetup(false);
+                                            setNewPin("");
+                                            setConfirmPin("");
+                                            setSetupError("");
+                                        }}
+                                        className="flex-1 bg-white/10 hover:bg-white/20 text-white py-3 rounded-lg font-semibold"
+                                    >
+                                        {t('common.cancel', 'Cancel')}
+                                    </button>
+                                    <button
+                                        onClick={async () => {
+                                            setSetupError("");
+
+                                            if (newPin.length < 6) {
+                                                setSetupError(t('login.pinTooShort', 'PIN must be at least 6 digits'));
+                                                return;
+                                            }
+                                            if (newPin !== confirmPin) {
+                                                setSetupError(t('login.pinMismatch', 'PINs do not match'));
+                                                return;
+                                            }
+
+                                            try {
+                                                setIsLoading(true);
+                                                // Call the auth service to setup PIN
+                                                const result = await (window as any).electronAPI?.ipcRenderer?.invoke('auth:setup-pin', {
+                                                    adminPin: newPin,
+                                                    staffPin: newPin // Use same PIN for both initially
+                                                });
+
+                                                if (result?.success) {
+                                                    console.log('[LoginPage] PIN setup successful');
+                                                    setShowPinSetup(false);
+                                                    setNewPin("");
+                                                    setConfirmPin("");
+                                                    setNoPinSet(false);
+                                                    // Auto-login with new PIN
+                                                    setPin(newPin);
+                                                } else {
+                                                    setSetupError(result?.error || t('login.setupFailed', 'Failed to setup PIN'));
+                                                }
+                                            } catch (err) {
+                                                console.error('[LoginPage] PIN setup error:', err);
+                                                setSetupError(t('login.setupFailed', 'Failed to setup PIN'));
+                                            } finally {
+                                                setIsLoading(false);
+                                            }
+                                        }}
+                                        disabled={isLoading || newPin.length < 6}
+                                        className="flex-1 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 text-white py-3 rounded-lg font-semibold"
+                                    >
+                                        {isLoading ? '...' : t('login.savePin', 'Save PIN')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 )}
 
                 <div className="mt-4 sm:mt-6 text-center relative z-10">
                     {noPinSet && (
-                        <p className="text-yellow-300 text-xs sm:text-sm mb-2">⚠️ {t('login.noPinWarning', 'No PIN set. You can set one in Settings after logging in.')}</p>
+                        <p className="text-yellow-300 text-xs sm:text-sm mb-2">⚠️ {t('login.noPinWarning', 'No PIN configured. Please create one to continue.')}</p>
                     )}
                     <p className="text-white/70 text-xs sm:text-sm">{t('login.footer')}</p>
                 </div>

@@ -31,9 +31,12 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     const loadItems = async () => {
         setLoading(true);
         try {
-            if ((window as any).electronAPI?.getFailedFinancialSyncItems) {
-                const failedItems = await (window as any).electronAPI.getFailedFinancialSyncItems(50);
-                setItems(failedItems);
+            if (window.electronAPI && typeof (window.electronAPI as any).getFailedFinancialSyncItems === 'function') {
+                const failedItems = await (window.electronAPI as any).getFailedFinancialSyncItems(50);
+                console.log('Loaded failed financial items:', failedItems);
+                setItems(Array.isArray(failedItems) ? failedItems : []);
+            } else {
+                console.warn('getFailedFinancialSyncItems is not available');
             }
         } catch (err) {
             console.error('Failed to load financial sync items', err);
@@ -51,10 +54,12 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     const handleRetryItem = async (id: string) => {
         setProcessing(id);
         try {
-            if ((window as any).electronAPI?.retryFinancialSyncItem) {
-                await (window as any).electronAPI.retryFinancialSyncItem(id);
+            if (window.electronAPI && typeof (window.electronAPI as any).retryFinancialSyncItem === 'function') {
+                await (window.electronAPI as any).retryFinancialSyncItem(id);
                 await loadItems();
                 onRefresh();
+            } else {
+                console.warn('retryFinancialSyncItem is not available');
             }
         } catch (err) {
             console.error('Failed to retry item', err);
@@ -66,10 +71,12 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     const handleRetryAll = async () => {
         setProcessing('all');
         try {
-            if ((window as any).electronAPI?.retryAllFailedFinancialSyncs) {
-                await (window as any).electronAPI.retryAllFailedFinancialSyncs();
+            if (window.electronAPI && typeof (window.electronAPI as any).retryAllFailedFinancialSyncs === 'function') {
+                await (window.electronAPI as any).retryAllFailedFinancialSyncs();
                 await loadItems();
                 onRefresh();
+            } else {
+                console.warn('retryAllFailedFinancialSyncs is not available');
             }
         } catch (err) {
             console.error('Failed to retry all', err);
@@ -81,13 +88,13 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
             <div className="bg-gray-900 border border-white/10 rounded-2xl shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col">
                 {/* Header */}
                 <div className="p-6 border-b border-white/10 flex justify-between items-center bg-gray-800/50 rounded-t-2xl">
                     <div>
-                        <h2 className="text-xl font-bold text-white">Financial Sync Management</h2>
-                        <p className="text-gray-400 text-sm mt-1">Resolve failed financial transactions syncs</p>
+                        <h2 className="text-xl font-bold text-white">{t('sync.financial.title')}</h2>
+                        <p className="text-gray-400 text-sm mt-1">{t('sync.financial.subtitle')}</p>
                     </div>
                     <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
                         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -107,19 +114,19 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                             <svg className="w-16 h-16 text-green-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                             </svg>
-                            <h3 className="text-lg font-medium text-white">All Clear</h3>
-                            <p className="text-gray-400">No failed financial sync transactions found.</p>
+                            <h3 className="text-lg font-medium text-white">{t('sync.financial.allClear')}</h3>
+                            <p className="text-gray-400">{t('sync.financial.noFailedItems')}</p>
                         </div>
                     ) : (
                         <div className="space-y-4">
                             <div className="flex justify-between items-center mb-4">
-                                <span className="text-red-400 font-medium">{items.length} Failed Items</span>
+                                <span className="text-red-400 font-medium">{items.length} {t('sync.financial.failedItems')}</span>
                                 <button
                                     onClick={handleRetryAll}
                                     disabled={!!processing}
                                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
                                 >
-                                    {processing === 'all' ? 'Retrying All...' : 'Retry All Failed'}
+                                    {processing === 'all' ? t('sync.financial.retryingAll') : t('sync.financial.retryAll')}
                                 </button>
                             </div>
 
@@ -137,7 +144,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                                     {item.error_message}
                                                 </div>
                                                 <details className="text-xs text-gray-500 cursor-pointer">
-                                                    <summary className="hover:text-gray-300 transition-colors">View Data Payload</summary>
+                                                    <summary className="hover:text-gray-300 transition-colors">{t('sync.financial.viewPayload')}</summary>
                                                     <pre className="mt-2 p-2 bg-black/30 rounded overflow-x-auto text-gray-400 font-mono text-[10px]">
                                                         {JSON.stringify(JSON.parse(item.data), null, 2)}
                                                     </pre>
@@ -146,14 +153,14 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
 
                                             <div className="flex flex-col items-end gap-2">
                                                 <span className="text-xs text-gray-500 bg-black/20 px-2 py-1 rounded">
-                                                    Attempts: <span className="text-white font-mono">{item.attempts}</span>
+                                                    {t('sync.financial.attempts')}: <span className="text-white font-mono">{item.attempts}</span>
                                                 </span>
                                                 <button
                                                     onClick={() => handleRetryItem(item.id)}
                                                     disabled={!!processing}
                                                     className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-white rounded-lg text-xs font-medium border border-white/10 transition-colors disabled:opacity-50"
                                                 >
-                                                    {processing === item.id ? '...' : 'Retry'}
+                                                    {processing === item.id ? '...' : t('sync.financial.retry')}
                                                 </button>
                                             </div>
                                         </div>

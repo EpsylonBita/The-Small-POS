@@ -268,11 +268,12 @@ export class ReportService {
     const orderAllCount = this.db.prepare(`SELECT COUNT(*) as cnt FROM orders WHERE date(created_at) = ?`).get(targetDate) as any;
     console.log('[generateZReport] All orders for date', targetDate, ':', orderAllCount?.cnt);
 
-    // Shifts overview
+    // Shifts overview - includes all role types (cashier, driver, kitchen)
     const shiftsTotal = (this.db.prepare(`SELECT COUNT(*) as c FROM staff_shifts WHERE date(check_in_time) = ?`).get(targetDate) as any)?.c || 0;
     console.log('[generateZReport] shiftsTotal for', targetDate, ':', shiftsTotal);
     const shiftsCashier = (this.db.prepare(`SELECT COUNT(*) as c FROM staff_shifts WHERE date(check_in_time) = ? AND role_type = 'cashier'`).get(targetDate) as any)?.c || 0;
     const shiftsDriver = (this.db.prepare(`SELECT COUNT(*) as c FROM staff_shifts WHERE date(check_in_time) = ? AND role_type = 'driver'`).get(targetDate) as any)?.c || 0;
+    const shiftsKitchen = (this.db.prepare(`SELECT COUNT(*) as c FROM staff_shifts WHERE date(check_in_time) = ? AND role_type = 'kitchen'`).get(targetDate) as any)?.c || 0;
 
     // Sales summary (orders)
     // Use status-based filtering instead of payment_status for consistency with checkout reports
@@ -380,8 +381,11 @@ export class ReportService {
 
     // Staff payments total from staff_payments table (NOT shift_expenses)
     // Query detailed staff payment analytics with check-in/out times
-    // Use sp.staff_shift_id as the proper FK to avoid mis-associating shifts
-    // when a staff member has multiple shifts on the same date
+    // IMPORTANT: Get role_type from the RECIPIENT's shift on the payment date, not the cashier's shift
+    // The sp.staff_shift_id is the cashier who made the payment, but we need the role of paid_to_staff_id
+    // Use a subquery to find the recipient's shift on the same date to get their role
+    // FIX: Use staff_name from staff_shifts (which is always populated) instead of joining with staff table
+    // (the staff table may not have all staff members synced locally)
     const staffPaymentsDetailed = this.db.prepare(
       `SELECT
          sp.id,
@@ -391,14 +395,38 @@ export class ReportService {
          sp.payment_type,
          sp.notes,
          sp.created_at,
-         COALESCE(s.first_name || ' ' || s.last_name, sp.paid_to_staff_id) as staff_name,
-         ss_paid.role_type,
-         ss_paid.check_in_time,
-         ss_paid.check_out_time,
-         ss_paid.status as shift_status
+         -- Get staff_name from recipient's shift (more reliable than staff table which may not be synced)
+         COALESCE(
+           (SELECT staff_name FROM staff_shifts 
+            WHERE staff_id = sp.paid_to_staff_id 
+            AND date(check_in_time) = date(sp.created_at) 
+            LIMIT 1),
+           s.first_name || ' ' || s.last_name,
+           sp.paid_to_staff_id
+         ) as staff_name,
+         -- Get role from the recipient's shift on the payment date, not the cashier's shift
+         COALESCE(
+           (SELECT role_type FROM staff_shifts 
+            WHERE staff_id = sp.paid_to_staff_id 
+            AND date(check_in_time) = date(sp.created_at) 
+            LIMIT 1),
+           'unknown'
+         ) as role_type,
+         -- Get check-in/out times from recipient's shift for display
+         (SELECT check_in_time FROM staff_shifts 
+          WHERE staff_id = sp.paid_to_staff_id 
+          AND date(check_in_time) = date(sp.created_at) 
+          LIMIT 1) as check_in_time,
+         (SELECT check_out_time FROM staff_shifts 
+          WHERE staff_id = sp.paid_to_staff_id 
+          AND date(check_in_time) = date(sp.created_at) 
+          LIMIT 1) as check_out_time,
+         (SELECT status FROM staff_shifts 
+          WHERE staff_id = sp.paid_to_staff_id 
+          AND date(check_in_time) = date(sp.created_at) 
+          LIMIT 1) as shift_status
        FROM staff_payments sp
        LEFT JOIN staff s ON sp.paid_to_staff_id = s.id
-       LEFT JOIN staff_shifts ss_paid ON ss_paid.id = sp.staff_shift_id
        WHERE date(sp.created_at) = ?
        ORDER BY sp.created_at ASC`
     ).all(targetDate) as any[];
@@ -454,6 +482,31 @@ export class ReportService {
        FROM cash_drawer_sessions WHERE date(opened_at) = ?`
     ).get(targetDate) as any;
 
+    // Driver cash breakdown - per-driver cash transactions with identity
+    // This provides detailed breakdown of cash collected and to return for each driver
+    const driverCashBreakdownRaw = this.db.prepare(
+      `SELECT 
+         de.staff_shift_id as driver_shift_id,
+         ss.staff_id as driver_id,
+         COALESCE(ss.staff_name, s.first_name || ' ' || s.last_name, ss.staff_id) as driver_name,
+         SUM(de.cash_collected) as cash_collected,
+         SUM(de.cash_to_return) as cash_to_return
+       FROM driver_earnings de
+       INNER JOIN staff_shifts ss ON ss.id = de.staff_shift_id
+       LEFT JOIN staff s ON ss.staff_id = s.id
+       WHERE date(de.created_at) = ?
+       GROUP BY de.staff_shift_id, ss.staff_id
+       ORDER BY driver_name ASC`
+    ).all(targetDate) as any[];
+
+    const driverCashBreakdown = driverCashBreakdownRaw.map(d => ({
+      driverId: d.driver_id || '',
+      driverName: d.driver_name || d.driver_id || 'Unknown Driver',
+      driverShiftId: d.driver_shift_id || '',
+      cashCollected: Number(d.cash_collected || 0),
+      cashToReturn: Number(d.cash_to_return || 0),
+    }));
+
     // Expenses - EXCLUDE staff_payment type to avoid double-counting with staffPaymentsTotal
     // The staff_payments table is the primary source for staff payments now
     const expensesTotalRow = this.db.prepare(
@@ -487,33 +540,72 @@ export class ReportService {
        WHERE date(de.created_at) = ?`
     ).get(targetDate) as any;
 
-    // Staff personal reports (per shift)
+    // Staff personal reports (per shift) - includes ALL role types (cashier, driver, kitchen)
+    // Sort by role_type first to group staff by role, then by check_in_time
     const staffShifts = this.db.prepare(
-      `SELECT * FROM staff_shifts WHERE date(check_in_time) = ? ORDER BY check_in_time ASC`
+      `SELECT * FROM staff_shifts WHERE date(check_in_time) = ? ORDER BY role_type ASC, check_in_time ASC`
     ).all(targetDate) as any[];
 
     const staffReports = staffShifts.map(s => {
-      // Use status-based filtering for order aggregation
-      const ordersAgg = this.db.prepare(
-        `SELECT COUNT(*) as cnt,
-                COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') THEN total_amount ELSE 0 END), 0) as total,
-                COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') AND payment_method='cash' THEN total_amount ELSE 0 END), 0) as cashTotal,
-                COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') AND payment_method='card' THEN total_amount ELSE 0 END), 0) as cardTotal
-         FROM orders WHERE staff_shift_id = ?`
-      ).get(s.id) as any;
+      const roleType = s.role_type;
+      
+      // FIX: Order attribution by role
+      // - Drivers get delivery orders from driver_earnings table
+      // - Cashiers get in-store orders they created (excluding deliveries assigned to drivers)
+      let ordersAgg: any;
+      let ordersDetail: any[];
+      
+      if (roleType === 'driver') {
+        // For drivers: Get orders from driver_earnings table
+        // These are delivery orders assigned to this driver
+        ordersAgg = this.db.prepare(
+          `SELECT COUNT(*) as cnt,
+                  COALESCE(SUM(CASE WHEN o.status IN ('delivered', 'completed') THEN o.total_amount ELSE 0 END), 0) as total,
+                  COALESCE(SUM(CASE WHEN o.status IN ('delivered', 'completed') AND o.payment_method='cash' THEN o.total_amount ELSE 0 END), 0) as cashTotal,
+                  COALESCE(SUM(CASE WHEN o.status IN ('delivered', 'completed') AND o.payment_method='card' THEN o.total_amount ELSE 0 END), 0) as cardTotal
+           FROM orders o
+           INNER JOIN driver_earnings de ON de.order_id = o.id
+           WHERE de.staff_shift_id = ?`
+        ).get(s.id) as any;
 
-      // FETCH INDIVIDUAL ORDERS for detailed breakdown
-      // Fetch details for filtering/display, including cancelled orders
-      // LIMIT 1001 to detect if we need to warn about truncation
-      const ordersDetail = this.db.prepare(
-        `SELECT id, order_number, order_type, table_number, delivery_address,
-                total_amount, payment_method, payment_status, status, created_at
-         FROM orders 
-         WHERE staff_shift_id = ? 
-           AND status IN ('completed', 'delivered', 'cancelled')
-         ORDER BY created_at ASC
-         LIMIT 1001`
-      ).all(s.id) as any[];
+        // FETCH INDIVIDUAL ORDERS for drivers from driver_earnings
+        ordersDetail = this.db.prepare(
+          `SELECT o.id, o.order_number, o.order_type, o.table_number, o.delivery_address,
+                  o.total_amount, o.payment_method, o.payment_status, o.status, o.created_at
+           FROM orders o
+           INNER JOIN driver_earnings de ON de.order_id = o.id
+           WHERE de.staff_shift_id = ?
+             AND o.status IN ('completed', 'delivered', 'cancelled')
+           ORDER BY o.created_at ASC
+           LIMIT 1001`
+        ).all(s.id) as any[];
+      } else {
+        // For cashiers (and kitchen staff): Get in-store orders they created
+        // Exclude delivery orders that have been assigned to drivers
+        ordersAgg = this.db.prepare(
+          `SELECT COUNT(*) as cnt,
+                  COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') THEN total_amount ELSE 0 END), 0) as total,
+                  COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') AND payment_method='cash' THEN total_amount ELSE 0 END), 0) as cashTotal,
+                  COALESCE(SUM(CASE WHEN status IN ('delivered', 'completed') AND payment_method='card' THEN total_amount ELSE 0 END), 0) as cardTotal
+           FROM orders 
+           WHERE staff_shift_id = ?
+             AND (order_type IN ('dine-in', 'takeaway', 'pickup') 
+                  OR NOT EXISTS (SELECT 1 FROM driver_earnings de WHERE de.order_id = orders.id))`
+        ).get(s.id) as any;
+
+        // FETCH INDIVIDUAL ORDERS for cashiers - exclude delivery orders assigned to drivers
+        ordersDetail = this.db.prepare(
+          `SELECT id, order_number, order_type, table_number, delivery_address,
+                  total_amount, payment_method, payment_status, status, created_at
+           FROM orders 
+           WHERE staff_shift_id = ? 
+             AND status IN ('completed', 'delivered', 'cancelled')
+             AND (order_type IN ('dine-in', 'takeaway', 'pickup') 
+                  OR NOT EXISTS (SELECT 1 FROM driver_earnings de WHERE de.order_id = orders.id))
+           ORDER BY created_at ASC
+           LIMIT 1001`
+        ).all(s.id) as any[];
+      }
 
       let mappedOrders = ordersDetail.map(o => ({
         id: o.id,
@@ -624,7 +716,7 @@ export class ReportService {
 
     return {
       date: targetDate,
-      shifts: { total: Number(shiftsTotal || 0), cashier: Number(shiftsCashier || 0), driver: Number(shiftsDriver || 0) },
+      shifts: { total: Number(shiftsTotal || 0), cashier: Number(shiftsCashier || 0), driver: Number(shiftsDriver || 0), kitchen: Number(shiftsKitchen || 0) },
       sales: {
         totalOrders: Number(orderSales?.totalOrders || 0),
         totalSales: Number(orderSales?.totalSales || 0),
@@ -649,6 +741,8 @@ export class ReportService {
         openingTotal: Number(drawerSums?.openingTotal || 0),
         driverCashGiven: Number(drawerSums?.driverCashGiven || 0),
         driverCashReturned: Number(drawerSums?.driverCashReturned || 0),
+        // Per-driver cash breakdown with driver identity
+        driverCashBreakdown,
       },
       expenses: {
         total: Number(expensesTotalRow?.total || 0),
@@ -739,6 +833,10 @@ export class ReportService {
       agg.cashDrawer.totalVariance = add(agg.cashDrawer.totalVariance, r?.cashDrawer?.totalVariance);
       agg.cashDrawer.totalCashDrops = add(agg.cashDrawer.totalCashDrops, r?.cashDrawer?.totalCashDrops);
       agg.cashDrawer.unreconciledCount = add(agg.cashDrawer.unreconciledCount, r?.cashDrawer?.unreconciledCount);
+      // Merge driverCashBreakdown arrays from all terminals
+      const mainBreakdown = Array.isArray(agg.cashDrawer.driverCashBreakdown) ? agg.cashDrawer.driverCashBreakdown : [];
+      const childBreakdown = Array.isArray(r?.cashDrawer?.driverCashBreakdown) ? r.cashDrawer.driverCashBreakdown : [];
+      agg.cashDrawer.driverCashBreakdown = [...mainBreakdown, ...childBreakdown];
     }
 
     // Expenses
@@ -836,8 +934,9 @@ export class ReportService {
          AND (is_transfer_pending = 1 OR transferred_to_cashier_shift_id IS NOT NULL)
          AND staff_id != 'local-simple-pin'`
     ).get() as any;
-    if (Number(transferredDrivers?.c || 0) > 0) {
-      return { ok: false, reason: 'There are transferred driver shifts that have not been checked out. Please ensure all drivers complete their shifts before running the Z report.' };
+    const transferredDriverCount = Number(transferredDrivers?.c || 0);
+    if (transferredDriverCount > 0) {
+      return { ok: false, reason: `${transferredDriverCount} transferred driver shift${transferredDriverCount > 1 ? 's' : ''} not checked out. Please ensure all drivers complete their shifts before running the Z report.` };
     }
 
     // SECOND: Check for any other active shifts (non-transferred), excluding local-only shifts
@@ -849,8 +948,9 @@ export class ReportService {
          AND is_transfer_pending = 0
          AND transferred_to_cashier_shift_id IS NULL`
     ).get() as any;
-    if (Number(activeShifts?.c || 0) > 0) {
-      return { ok: false, reason: 'There are active shifts. Please close all shifts (checkout) before running the Z report.' };
+    const activeShiftCount = Number(activeShifts?.c || 0);
+    if (activeShiftCount > 0) {
+      return { ok: false, reason: `${activeShiftCount} active shift${activeShiftCount > 1 ? 's' : ''} remaining. Please close all shifts (checkout) before running the Z report.` };
     }
 
     // THIRD: Check for unclosed cashier drawers
@@ -863,8 +963,9 @@ export class ReportService {
          AND ss.staff_id != 'local-simple-pin'
          AND cds.closed_at IS NULL`
     ).get(targetDate) as any;
-    if (Number(unclosedCashierDrawers?.c || 0) > 0) {
-      return { ok: false, reason: 'All cashier checkouts must be executed (cash drawers still open).' };
+    const unclosedDrawerCount = Number(unclosedCashierDrawers?.c || 0);
+    if (unclosedDrawerCount > 0) {
+      return { ok: false, reason: `${unclosedDrawerCount} cashier drawer${unclosedDrawerCount > 1 ? 's' : ''} still open. All cashier checkouts must be executed before running the Z report.` };
     }
 
     // FOURTH: Block Z report if any open orders exist for the day (non-final statuses)
@@ -873,8 +974,9 @@ export class ReportService {
        WHERE date(created_at) = ?
          AND status NOT IN ('delivered','completed','cancelled')`
     ).get(targetDate) as any;
-    if (Number(openOrders?.c || 0) > 0) {
-      return { ok: false, reason: 'There are open orders for the day. Please complete or cancel them before running the Z report.' };
+    const openOrderCount = Number(openOrders?.c || 0);
+    if (openOrderCount > 0) {
+      return { ok: false, reason: `${openOrderCount} open order${openOrderCount > 1 ? 's' : ''} for the day. Please complete or cancel them before running the Z report.` };
     }
 
     return { ok: true };

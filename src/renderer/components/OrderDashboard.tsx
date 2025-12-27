@@ -743,6 +743,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   const handleOrderComplete = async (orderData: any) => {
     try {
       console.log('[OrderDashboard.handleOrderComplete] orderData:', orderData);
+      console.log('[OrderDashboard.handleOrderComplete] orderData.items with notes:', orderData.items?.map((item: any) => ({
+        name: item.name,
+        notes: item.notes,
+        special_instructions: item.special_instructions
+      })));
       console.log('[OrderDashboard.handleOrderComplete] orderData.address:', orderData.address);
       console.log('[OrderDashboard.handleOrderComplete] existingCustomer:', existingCustomer);
       console.log('[OrderDashboard.handleOrderComplete] existingCustomer?.address:', (existingCustomer as any)?.address);
@@ -886,8 +891,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         return sum + ((item.price || 0) * (item.quantity || 1));
       }, 0) || orderData.total || 0;
       const discountAmount = orderData.discountAmount || 0;
-      // TODO: Delivery fee should come from settings, not hardcoded
-      const deliveryFee = selectedOrderType === 'delivery' ? 2.50 : 0;
+
+      // Get delivery fee from delivery zone info if available, otherwise use 0
+      let deliveryFee = 0;
+      if (selectedOrderType === 'delivery') {
+        if (orderData.deliveryZoneInfo?.zone?.deliveryFee !== undefined) {
+          deliveryFee = orderData.deliveryZoneInfo.zone.deliveryFee;
+        }
+      }
+
       const total = subtotal - discountAmount + deliveryFee;
 
       // Create order object

@@ -292,6 +292,43 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   <div className={(cashDrawer.unreconciledCount ?? 0) > 0 ? 'text-amber-300 font-semibold' : 'text-green-300 font-semibold'}>{cashDrawer.unreconciledCount ?? 0}</div>
                 </div>
               </div>
+
+              {/* Driver Cash Breakdown - Per-driver cash transactions */}
+              {Array.isArray((cashDrawer as any).driverCashBreakdown) && (cashDrawer as any).driverCashBreakdown.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-white/10">
+                  <h4 className="font-medium mb-3 text-orange-300 text-sm">{t('modals.zReport.driverCashBreakdown')}</h4>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs text-white">
+                      <thead className="text-left">
+                        <tr className="border-b liquid-glass-modal-border">
+                          <th className="py-2 pr-3 text-gray-300">{t('modals.zReport.driverName')}</th>
+                          <th className="py-2 pr-3 text-gray-300 text-right">{t('modals.zReport.cashCollected')}</th>
+                          <th className="py-2 pr-3 text-gray-300 text-right">{t('modals.zReport.cashToReturn')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(cashDrawer as any).driverCashBreakdown.map((driver: any, index: number) => (
+                          <tr key={driver.driverShiftId || index} className="border-b liquid-glass-modal-border">
+                            <td className="py-2 pr-3 text-indigo-300 font-medium">{driver.driverName || t('modals.zReport.unknownDriver')}</td>
+                            <td className="py-2 pr-3 text-emerald-300 text-right">${(driver.cashCollected ?? 0).toFixed(2)}</td>
+                            <td className="py-2 pr-3 text-orange-300 text-right">${(driver.cashToReturn ?? 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                        {/* Total row */}
+                        <tr className="border-t-2 border-white/20 font-semibold">
+                          <td className="py-2 pr-3 text-gray-200">{t('modals.zReport.total')}</td>
+                          <td className="py-2 pr-3 text-emerald-200 text-right">
+                            ${((cashDrawer as any).driverCashBreakdown.reduce((sum: number, d: any) => sum + Number(d.cashCollected || 0), 0)).toFixed(2)}
+                          </td>
+                          <td className="py-2 pr-3 text-orange-200 text-right">
+                            ${(cashDrawer.driverCashReturned ?? 0).toFixed(2)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* EXPENSES */}
@@ -661,8 +698,21 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               setSubmitResult(null);
               setSubmitting(true);
               try {
+                console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
                 const res = await (window as any)?.electronAPI?.submitZReport?.({ branchId, date: selectedDate });
-                if (res?.success) {
+                
+                // Check for IPC wrapper error (success === false)
+                if (res?.success === false) {
+                  // IPC returned an error - extract specific error message
+                  const errorMessage = res?.error || res?.message || t('modals.zReport.unknownError');
+                  console.error('[ZReportModal] IPC error response:', { error: errorMessage, fullResponse: res });
+                  setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
+                  return; // Don't proceed, button will be re-enabled in finally
+                }
+                
+                // Check for actual success response
+                if (res?.success || res?.id) {
+                  console.log('[ZReportModal] Z-Report submitted successfully:', { id: res?.id, cleanup: res?.cleanup });
                   setSubmitResult(t('modals.zReport.submitSuccess'));
 
                   // Close the modal immediately
@@ -676,11 +726,25 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   // Reload after a short delay to show success message
                   setTimeout(() => { window.location.reload(); }, 600);
                 } else {
-                  setSubmitResult(t('modals.zReport.submitFailed', { error: res?.error || t('modals.zReport.unknownError') }));
+                  // Unexpected response format - extract any available error info
+                  const errorMessage = res?.error || res?.message || t('modals.zReport.unknownError');
+                  console.error('[ZReportModal] Unexpected response format:', res);
+                  setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
                 }
               } catch (e: any) {
-                setSubmitResult(e?.message || t('modals.zReport.submissionFailed'));
+                // Log full error details for debugging (Requirements 3.4)
+                console.error('[ZReportModal] Submit error caught:', {
+                  message: e?.message,
+                  code: e?.code,
+                  name: e?.name,
+                  stack: e?.stack,
+                  fullError: e
+                });
+                // Display specific error message to user
+                const errorMessage = e?.message || e?.error || t('modals.zReport.submissionFailed');
+                setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
               } finally {
+                // Always reset button state (Requirements 5.2, 5.4)
                 setSubmitting(false);
               }
             }}

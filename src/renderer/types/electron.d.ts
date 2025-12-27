@@ -281,4 +281,4 @@ interface UpdateState {
   error?: string;
 }
 
-// Intentionally no export here so this file contributes to the global namespace
+// Intentionally no export here so this file contributes to the global namespace\r\nexport {};

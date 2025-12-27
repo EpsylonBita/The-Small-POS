@@ -59,9 +59,23 @@ export class AutoUpdaterService extends EventEmitter {
     // Enable differential updates for faster downloads
     autoUpdater.autoRunAppAfterInstall = true;
 
-    // Disable signature verification since we don't have a code signing certificate
-    // This is required for unsigned builds to update properly
-    (autoUpdater as any).verifyUpdateCodeSignature = () => Promise.resolve(null);
+    // SECURITY: Code signature verification
+    // electron-updater verifies SHA512 checksums from latest.yml by default.
+    // For unsigned builds, we rely on this checksum verification.
+    // To enable full code signing, set up a Windows code signing certificate
+    // and remove this override.
+    // TODO: Implement proper code signing for production releases
+    if (!process.env.CODE_SIGNING_ENABLED) {
+      this.logger.log('[AutoUpdater] Running in checksum-only verification mode (unsigned build)');
+      // electron-updater still verifies checksums even without code signing
+      // This override is only needed for certain edge cases
+      (autoUpdater as any).verifyUpdateCodeSignature = () => {
+        this.logger.log('[AutoUpdater] Code signature verification skipped - using checksum verification');
+        return Promise.resolve(null);
+      };
+    } else {
+      this.logger.log('[AutoUpdater] Code signing enabled - full verification active');
+    }
 
     // Event listeners
     autoUpdater.on('checking-for-update', () => {
@@ -87,11 +101,11 @@ export class AutoUpdaterService extends EventEmitter {
     autoUpdater.on('error', (err: Error) => {
       this.setState({ status: 'error', error: err.message });
       this.emitToRenderer('update-error', { message: err.message });
-      
+
       // Don't spam logs for common non-critical errors (404 = no releases yet, network issues)
-      const isNonCritical = err.message.includes('404') || 
-                           err.message.includes('net::') ||
-                           err.message.includes('ENOTFOUND');
+      const isNonCritical = err.message.includes('404') ||
+        err.message.includes('net::') ||
+        err.message.includes('ENOTFOUND');
       if (isNonCritical) {
         this.logger.log('[AutoUpdater] Update check failed (non-critical):', err.message);
       } else {
@@ -212,7 +226,7 @@ export class AutoUpdaterService extends EventEmitter {
    */
   public installUpdate(): void {
     this.logger.log(`[AutoUpdater] installUpdate called, current status: ${this.state.status}`);
-    
+
     if (this.state.status !== 'downloaded') {
       this.logger.error(`[AutoUpdater] Cannot install - status is ${this.state.status}, not 'downloaded'`);
       throw new Error(`Update not downloaded (status: ${this.state.status})`);

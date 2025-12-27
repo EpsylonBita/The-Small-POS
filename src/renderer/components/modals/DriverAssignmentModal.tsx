@@ -83,55 +83,55 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       size="md"
       closeOnBackdrop={false}
     >
-          <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-            {t('modals.driverAssignment.message', { count: orderCount })}
-          </p>
+      <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+        {t('modals.driverAssignment.message', { count: orderCount })}
+      </p>
 
-          {/* Loading State */}
-          {isLoading && (
-            <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-            </div>
-          )}
+      {/* Loading State */}
+      {isLoading && (
+        <div className="flex justify-center py-8">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+        </div>
+      )}
 
-          {/* Error State */}
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-6">
-              {error}
-            </div>
-          )}
+      {/* Error State */}
+      {error && (
+        <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-6">
+          {error}
+        </div>
+      )}
 
-          {/* Empty State */}
-          {!isLoading && drivers.length === 0 && !error && (
-            <div className="text-center py-8 liquid-glass-modal-text-muted">
-              {t('modals.driverAssignment.noDrivers')}
-            </div>
-          )}
+      {/* Empty State */}
+      {!isLoading && drivers.length === 0 && !error && (
+        <div className="text-center py-8 liquid-glass-modal-text-muted">
+          {t('modals.driverAssignment.noDrivers')}
+        </div>
+      )}
 
-          {/* Drivers List */}
-          {!isLoading && drivers.length > 0 && (
-            <div className="space-y-3 mb-6">
-              {drivers.map((driver) => {
-                const isDisabled = driver.status !== 'available' || (driver.current_orders || 0) >= 3;
-                return (
-                  <button
-                    key={driver.id}
-                    onClick={() => handleDriverSelect(driver)}
-                    disabled={isDisabled}
-                    className={`
-                      w-full border rounded-lg p-3 transition-all duration-200 text-left
+      {/* Drivers List */}
+      {!isLoading && drivers.length > 0 && (
+        <div className="space-y-3 mb-6">
+          {drivers.map((driver) => {
+            const isDisabled = driver.status !== 'available' || (driver.current_orders || 0) >= 3;
+            return (
+              <button
+                key={driver.id}
+                onClick={() => handleDriverSelect(driver)}
+                disabled={isDisabled}
+                className={`
+                      liquid-glass-modal-button w-full justify-start p-3 h-auto
                       ${!isDisabled
-                        ? 'border-blue-200/50 dark:border-blue-400/30 bg-blue-50/50 dark:bg-blue-500/10 hover:bg-blue-100/50 dark:hover:bg-blue-500/20'
-                        : 'border-gray-200/50 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 cursor-not-allowed'
-                      }
+                    ? ''
+                    : 'opacity-50 cursor-not-allowed'
+                  }
                     `}
-                  >
-                    <div className="font-medium liquid-glass-modal-text">{driver.name}</div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
+              >
+                <div className="font-medium liquid-glass-modal-text">{driver.name}</div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </LiquidGlassModal>
   );
 };

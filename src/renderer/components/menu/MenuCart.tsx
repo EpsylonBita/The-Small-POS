@@ -256,6 +256,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     </div>
                   </div>
                 )}
+                {/* Special Notes */}
+                {item.notes && item.notes.trim() && (
+                  <div className={`mt-2 pt-2 border-t ${
+                    resolvedTheme === 'dark' ? 'border-gray-700/50' : 'border-gray-200/50'
+                  }`}>
+                    <div className={`text-xs font-medium mb-1 ${
+                      resolvedTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
+                    }`}>
+                      📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
+                    </div>
+                    <p className={`text-xs italic ${
+                      resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
+                    }`}>
+                      {item.notes}
+                    </p>
+                  </div>
+                )}
               </div>
             ))}
           </div>

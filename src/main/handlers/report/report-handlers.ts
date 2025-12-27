@@ -116,6 +116,15 @@ export function registerReportHandlers() {
     // Submit Z report snapshot to Admin API and finalize end-of-day
     ipcMain.handle('report:submit-z-report', async (_e, { branchId, date }) => {
         return handleIPCError(async () => {
+            // Step-by-step logging helper with elapsed time tracking
+            const startTime = Date.now();
+            const logStep = (step: number, msg: string) => {
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                console.log(`[Z-Report Submit] Step ${step}: ${msg} (${elapsed}s elapsed)`);
+            };
+
+            logStep(1, 'Starting Z-Report submission');
+
             const dbManager = serviceRegistry.requireService('dbManager');
             const db = dbManager.getDatabaseService();
             const sync = serviceRegistry.syncService;
@@ -135,51 +144,73 @@ export function registerReportHandlers() {
                 throw new IPCError('Z-report execution is disabled for this terminal type. Only main POS terminals can execute Z-reports.', 'PERMISSION_DENIED');
             }
 
+            logStep(2, 'Checking preconditions (canExecuteZReport)');
             // Preconditions: all checkouts executed (no active shifts, cash drawers closed)
             const can = await db.reports.canExecuteZReport(reportDate);
             if (!can?.ok) {
                 throw new IPCError(can?.reason || 'All checkouts must be executed before running the Z report.', 'VALIDATION_ERROR');
             }
 
+            logStep(3, 'Checking network status');
             // Ensure online and drain sync queue
             if (sync && !sync.getNetworkStatus()) {
                 throw new IPCError('POS is offline. Connect to the internet and retry the Z report.', 'NETWORK_ERROR');
             }
 
+            logStep(4, 'Re-queuing orphaned financial records');
             // Re-queue any orphaned financial records before syncing
             try {
                 const dbService = dbManager.getDatabaseService();
                 const requeued = dbService.sync.requeueOrphanedFinancialRecords();
                 if (requeued > 0) {
-                    console.log(`[Z-Report] Re-queued ${requeued} orphaned financial records`);
+                    console.log(`[Z-Report Submit] Re-queued ${requeued} orphaned financial records`);
                 }
             } catch (e) {
-                console.warn('[Z-Report] Failed to requeue orphaned records:', e);
+                console.warn('[Z-Report Submit] Failed to requeue orphaned records:', e);
             }
 
+            logStep(5, 'Draining sync queue (may take up to 20 seconds)');
             try {
-                await sync?.forceSyncAndWaitForEmpty(20000);
+                await sync?.forceSyncAndWaitForEmptyWithLogging(20000, logStep);
             } catch (e: any) {
                 throw new IPCError(`Unable to flush pending sync before Z report: ${e?.message || String(e)}`, 'NETWORK_ERROR');
             }
 
+            logStep(6, 'Verifying all orders are synced');
             // Verify no finalized orders are left unsynced
             const unsynced = await db.reports.countUnsyncedFinalOrders(reportDate);
             if (unsynced > 0) {
-                throw new IPCError(`There are ${unsynced} finalized orders not yet synced. Please retry.`, ErrorCodes.CONFLICT);
+                throw new IPCError(
+                    `${unsynced} finalized order${unsynced > 1 ? 's' : ''} not yet synced to cloud. Please wait for sync to complete or check your internet connection.`,
+                    ErrorCodes.CONFLICT
+                );
             }
 
+            logStep(7, 'Verifying all financial transactions are synced');
             // Verify all financial transactions are synced
             const unsyncedFinancial = await db.reports.getUnsyncedFinancialSummary(reportDate);
             if (unsyncedFinancial.total > 0) {
+                // Build detailed breakdown message
+                const breakdown: string[] = [];
+                if (unsyncedFinancial.driverEarnings > 0) {
+                    breakdown.push(`${unsyncedFinancial.driverEarnings} driver earning${unsyncedFinancial.driverEarnings > 1 ? 's' : ''}`);
+                }
+                if (unsyncedFinancial.staffPayments > 0) {
+                    breakdown.push(`${unsyncedFinancial.staffPayments} staff payment${unsyncedFinancial.staffPayments > 1 ? 's' : ''}`);
+                }
+                if (unsyncedFinancial.shiftExpenses > 0) {
+                    breakdown.push(`${unsyncedFinancial.shiftExpenses} shift expense${unsyncedFinancial.shiftExpenses > 1 ? 's' : ''}`);
+                }
+                const breakdownStr = breakdown.join(', ');
                 throw new IPCError(
-                    `There are ${unsyncedFinancial.total} unsynced financial transactions. Driver earnings: ${unsyncedFinancial.driverEarnings}, Staff payments: ${unsyncedFinancial.staffPayments}, Expenses: ${unsyncedFinancial.shiftExpenses}. Please retry sync.`,
+                    `${unsyncedFinancial.total} unsynced financial transaction${unsyncedFinancial.total > 1 ? 's' : ''}: ${breakdownStr}. Please wait for sync to complete or check your internet connection.`,
                     ErrorCodes.CONFLICT
                 );
             }
 
             // Optional: Validate financial data integrity
             if (featureService && featureService.isFeatureEnabled('financialIntegrityCheck')) {
+                logStep(8, 'Validating financial data integrity');
                 const integrityCheck = await db.reports.validateFinancialDataIntegrity(reportDate);
                 if (!integrityCheck.valid) {
                     const discrepancyDetails = integrityCheck.discrepancies
@@ -192,6 +223,7 @@ export function registerReportHandlers() {
                 }
             }
 
+            logStep(9, 'Generating Z-Report snapshot');
             let snapshot = await db.reports.generateZReport(branchId, reportDate);
 
             // Get admin URL from terminal settings first, then environment
@@ -294,6 +326,7 @@ export function registerReportHandlers() {
                 is_aggregated: isAggregated
             });
 
+            logStep(10, `Submitting to Admin Dashboard (POST ${adminBase}/api/pos/z-report/submit)`);
             const res = await fetch(`${adminBase}/api/pos/z-report/submit`, {
                 method: 'POST',
                 headers,
@@ -304,9 +337,30 @@ export function registerReportHandlers() {
             if (!res.ok) {
                 let err: any = null;
                 try { err = await res.json(); } catch { }
+                console.log(`[Z-Report Submit] HTTP request failed: status=${res.status}`);
                 throw new IPCError(err?.error || `HTTP ${res.status}`, 'NETWORK_ERROR');
             }
+            console.log(`[Z-Report Submit] HTTP request successful: status=${res.status}`);
 
+            // Parse response body for later use
+            const json = await res.json().catch(() => ({}));
+
+            logStep(11, 'Storing Z-Report timestamp (immediately after successful HTTP response)');
+            // IMPORTANT: Store the Z-Report timestamp IMMEDIATELY after successful HTTP POST
+            // This MUST happen BEFORE finalizeEndOfDay to prevent race conditions
+            // where RealtimeOrderHandler might sync orders back while finalizeEndOfDay is deleting them
+            // Uses full ISO timestamp (not just date) because business days don't align with calendar days
+            // e.g., a store closing at 5am - orders from 00:00-05:00 belong to previous business day
+            const zReportTimestamp = new Date().toISOString();
+            try {
+                db.settings.setSetting('system', 'last_z_report_timestamp', zReportTimestamp);
+                db.settings.setSetting('system', 'last_z_report_date', reportDate); // Keep date for reference
+                console.log(`[Z-Report Submit] ✅ Stored Z-Report timestamp: ${zReportTimestamp} (date: ${reportDate})`);
+            } catch (e) {
+                console.warn('[Z-Report Submit] Failed to store Z-Report timestamp:', e);
+            }
+
+            logStep(12, 'Printing Z-Report receipt');
             // Print Z Report receipt for local record before cleanup
             // Skip printing for mobile_waiter as per requirement
             if (termTypeNow !== 'mobile_waiter') {
@@ -318,40 +372,39 @@ export function registerReportHandlers() {
                     const printerManager = getPrinterManagerInstance();
                     if (printerManager) {
                         printer.setPrinterManager(printerManager);
-                        console.log('[Z-Report] PrinterManager attached to PrintService');
+                        console.log('[Z-Report Submit] PrinterManager attached to PrintService');
                     } else {
-                        console.log('[Z-Report] No PrinterManager available, using direct printing');
+                        console.log('[Z-Report Submit] No PrinterManager available, using direct printing');
                     }
                     await printer.printZReport(snapshot, terminalName || undefined);
+                    console.log('[Z-Report Submit] Print completed successfully');
                 } catch (printErr) {
-                    console.warn('Z report printing failed (fallback to console log only):', printErr);
+                    console.warn('[Z-Report Submit] Printing failed (non-fatal):', printErr);
                 }
+            } else {
+                console.log('[Z-Report Submit] Skipping print for mobile_waiter terminal');
             }
 
             // Note: Cashiers must manually count and enter opening amounts each day - no automatic carry-forward from previous day's closing
 
-            const json = await res.json().catch(() => ({}));
-
-            // IMPORTANT: Store the Z-Report timestamp BEFORE finalizeEndOfDay
-            // This prevents race condition where RealtimeOrderHandler might sync orders back
-            // while finalizeEndOfDay is deleting them
-            // Uses full ISO timestamp (not just date) because business days don't align with calendar days
-            // e.g., a store closing at 5am - orders from 00:00-05:00 belong to previous business day
-            const zReportTimestamp = new Date().toISOString();
-            try {
-                db.settings.setSetting('system', 'last_z_report_timestamp', zReportTimestamp);
-                db.settings.setSetting('system', 'last_z_report_date', reportDate); // Keep date for reference
-                console.log(`✅ Stored Z-Report timestamp: ${zReportTimestamp} (date: ${reportDate})`);
-            } catch (e) {
-                console.warn('Failed to store Z-Report timestamp:', e);
-            }
-
+            logStep(13, 'Finalizing end-of-day (clearing orders, shifts, drawers)');
             // Finalize end-of-day: clear daily data and logout current user
             // Now that timestamp is set, RealtimeOrderHandler will reject any old orders
+            console.log(`[Z-Report Submit] 🔄 BEFORE finalizeEndOfDay - about to clear data for date: ${reportDate}`);
             const cleanup = await db.reports.finalizeEndOfDay(reportDate);
-            console.log(`✅ Z-Report finalized. Cleared: orders=${cleanup.orders ?? 0}, shifts=${cleanup.staff_shifts ?? 0}, drawers=${cleanup.cash_drawer_sessions ?? 0}`);
+            console.log(`[Z-Report Submit] ✅ AFTER finalizeEndOfDay - Cleanup result:`, {
+                orders: cleanup.orders ?? 0,
+                staff_shifts: cleanup.staff_shifts ?? 0,
+                cash_drawer_sessions: cleanup.cash_drawer_sessions ?? 0,
+                driver_earnings: cleanup.driver_earnings ?? 0,
+                shift_expenses: cleanup.shift_expenses ?? 0,
+                staff_payments: cleanup.staff_payments ?? 0,
+                payment_transactions: cleanup.payment_transactions ?? 0,
+                sync_queue: cleanup.sync_queue ?? 0
+            });
 
-            try { await auth?.logout(); } catch (e) { console.error('Logout after Z report failed', e); }
+            logStep(14, 'Logging out user and notifying UI');
+            try { await auth?.logout(); } catch (e) { console.error('[Z-Report Submit] Logout after Z report failed', e); }
             try {
                 if (mainWindow && !mainWindow.isDestroyed()) {
                     // Notify that orders were cleared so UI can refresh
@@ -361,6 +414,9 @@ export function registerReportHandlers() {
             } catch { }
 
             try { sync?.startAutoSync(); } catch { }
+
+            const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(`[Z-Report Submit] ✅ Complete! Total time: ${totalElapsed}s`);
 
             return { id: json?.id || null, cleanup };
         }, 'report:submit-z-report');

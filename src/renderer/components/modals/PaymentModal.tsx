@@ -24,7 +24,7 @@ interface PaymentModalProps {
   }) => void;
 }
 
-type ModalStep = 'minimum_warning' | 'payment_selection';
+type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
@@ -42,6 +42,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const canUseCard = isFeatureEnabled('cardPayments');
   const hasAnyPaymentMethod = canUseCash || canUseCard;
   const [isProcessingPayment, setIsProcessingPayment] = useState(isProcessing);
+  const [cashReceived, setCashReceived] = useState<string>('');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<'cash' | 'card' | null>(null);
 
   // Check if order is below minimum (only if a minimum is set)
   const isBelowMinimum = minimumOrderAmount > 0 && orderTotal < minimumOrderAmount;
@@ -53,13 +55,33 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   const originalTotal = orderTotal + discountAmount;
 
+  // Calculate change
+  const cashAmount = parseFloat(cashReceived) || 0;
+  const changeAmount = cashAmount - orderTotal;
+  const hasEnoughCash = cashAmount >= orderTotal;
+
   // Reset step when modal opens
   useEffect(() => {
     if (isOpen) {
       setCurrentStep(isBelowMinimum ? 'minimum_warning' : 'payment_selection');
       setIsProcessingPayment(isProcessing);
+      setCashReceived('');
+      setSelectedPaymentMethod(null);
     }
   }, [isOpen, isProcessing, isBelowMinimum]);
+
+  // Handle payment method selection
+  const handlePaymentMethodSelect = (method: 'cash' | 'card') => {
+    setSelectedPaymentMethod(method);
+
+    // For delivery orders or card payment, process immediately
+    if (orderType === 'delivery' || method === 'card') {
+      handleSimplePayment(method);
+    } else {
+      // For pickup/in-store with cash, show cash input
+      setCurrentStep('cash_input');
+    }
+  };
 
   // Simple payment handler - just method, no amount input needed
   const handleSimplePayment = async (method: 'cash' | 'card') => {
@@ -74,16 +96,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         method,
         amount: orderTotal,
         transactionId: txId,
-        // No driver selection - will be assigned later in orders grid for delivery
         driverId: undefined,
-        // No cash received/change calculation for simplified flow
-        cashReceived: method === 'cash' ? orderTotal : undefined,
-        change: method === 'cash' ? 0 : undefined
+        cashReceived: method === 'cash' ? (cashAmount || orderTotal) : undefined,
+        change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined
       });
 
       try {
         ActivityTracker.trackPaymentCompleted(orderTotal, method, txId, undefined);
-      } catch {}
+      } catch { }
 
       toast.success(t(`modals.payment.${method}Success`));
       onClose();
@@ -94,6 +114,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
+  // Handle cash payment completion
+  const handleCashPaymentComplete = () => {
+    if (!hasEnoughCash) {
+      toast.error(t('modals.payment.insufficientCash', 'Insufficient cash received'));
+      return;
+    }
+    handleSimplePayment('cash');
+  };
+
   const handleSkipMinimumWarning = () => {
     setCurrentStep('payment_selection');
   };
@@ -101,6 +130,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const resetModal = () => {
     setCurrentStep(isBelowMinimum ? 'minimum_warning' : 'payment_selection');
     setIsProcessingPayment(false);
+    setCashReceived('');
+    setSelectedPaymentMethod(null);
+  };
+
+  const handleBackToPaymentSelection = () => {
+    setCurrentStep('payment_selection');
+    setCashReceived('');
+    setSelectedPaymentMethod(null);
   };
 
   const handleClose = () => {
@@ -120,34 +157,34 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       closeOnEscape={!isProcessingPayment}
     >
       {/* Content */}
-      <div className="p-6">
+      <div>
         {/* Order Total with Discount Breakdown */}
-        <div className="text-center mb-6">
+        <div className="text-center mb-8">
           {discountAmount > 0 && (
-            <div className="mb-3 space-y-1">
+            <div className="mb-4 space-y-2 p-4 rounded-xl bg-white/5 border border-white/10">
               <div className="flex justify-between text-sm">
                 <span className="liquid-glass-modal-text-muted">
                   {t('modals.payment.originalTotal')}
                 </span>
-                <span className="liquid-glass-modal-text">
+                <span className="liquid-glass-modal-text font-medium">
                   €{originalTotal.toFixed(2)}
                 </span>
               </div>
               <div className="flex justify-between text-sm">
-                <span className="text-green-600 dark:text-green-400">
+                <span className="text-green-500 dark:text-green-400 font-medium">
                   {t('modals.payment.discount')}
                 </span>
-                <span className="text-green-600 dark:text-green-400">
+                <span className="text-green-500 dark:text-green-400 font-medium">
                   -€{discountAmount.toFixed(2)}
                 </span>
               </div>
-              <div className="border-t border-gray-200/20 pt-2"></div>
+              <div className="border-t border-white/10 pt-2 mt-2"></div>
             </div>
           )}
-          <p className="text-sm liquid-glass-modal-text-muted">
+          <p className="text-sm liquid-glass-modal-text-muted mb-2">
             {discountAmount > 0 ? t('modals.payment.finalAmount') : t('modals.payment.totalAmount')}
           </p>
-          <p className="text-3xl font-bold text-emerald-600 dark:text-emerald-400">
+          <p className="text-4xl font-bold text-emerald-500 dark:text-emerald-400 tracking-tight">
             €{orderTotal.toFixed(2)}
           </p>
         </div>
@@ -170,13 +207,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div className="flex gap-3">
               <button
                 onClick={handleClose}
-                className="flex-1 px-4 py-3 rounded-xl font-medium transition-all duration-200 bg-gray-500/20 hover:bg-gray-500/30 liquid-glass-modal-text"
+                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 hover:bg-gray-500/30 liquid-glass-modal-text"
               >
                 {t('modals.payment.cancel')}
               </button>
               <button
                 onClick={handleSkipMinimumWarning}
-                className="flex-1 px-4 py-3 rounded-xl font-medium transition-all duration-200 bg-orange-600 hover:bg-orange-700 text-white"
+                className="liquid-glass-modal-button flex-1 font-medium bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border-orange-500/30"
               >
                 {t('modals.payment.skip', 'Skip')}
               </button>
@@ -184,12 +221,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           </div>
         )}
 
-        {/* Step: Payment Selection - Simplified (Cash or Card buttons only) */}
         {currentStep === 'payment_selection' && (
-          <div className="space-y-4">
-            {/* No payment methods available message */}
-            {!hasAnyPaymentMethod && (
-              <div className="flex items-center gap-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30">
+          <div className="relative">
+            {!hasAnyPaymentMethod ? (
+              <div className="flex items-center gap-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 w-full">
                 <AlertTriangle className="w-6 h-6 text-amber-400 flex-shrink-0" />
                 <div>
                   <h3 className="font-semibold text-amber-400">
@@ -200,97 +235,71 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   </p>
                 </div>
               </div>
-            )}
+            ) : (
+              <div className="grid grid-cols-2 gap-6">
+                {/* Cash Option */}
+                <button
+                  onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
+                  disabled={!canUseCash || isProcessingPayment}
+                  className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                    ${!canUseCash || isProcessingPayment
+                      ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
+                      : 'border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20 active:scale-100'
+                    }`}
+                >
+                  <Banknote
+                    className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
+                      ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400 group-hover:text-green-300'}`}
+                    strokeWidth={1.5}
+                  />
 
-            {/* Cash Payment Option - Direct payment button */}
-            {canUseCash ? (
-              <button
-                onClick={() => handleSimplePayment('cash')}
-                disabled={isProcessingPayment}
-                className={`w-full p-4 rounded-xl border-2 transition-all duration-200 text-left group ${
-                  isProcessingPayment
-                    ? 'bg-gray-400/50 cursor-not-allowed opacity-60'
-                    : 'bg-gradient-to-r from-green-50 to-green-100 border-green-200 hover:border-green-400 hover:shadow-lg dark:from-green-900/30 dark:to-green-800/30 dark:border-green-400/30 dark:hover:border-green-400/60 dark:hover:shadow-green-400/20'
-                }`}
-              >
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl flex items-center justify-center bg-green-500 text-white dark:bg-green-600 dark:text-green-100">
-                    <Banknote className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text">
-                      {t('modals.payment.cashPayment')}
-                    </h3>
-                    <p className="text-sm liquid-glass-modal-text-muted">
-                      {t('modals.payment.payWithCash', 'Complete order with cash')}
-                    </p>
-                  </div>
-                </div>
-              </button>
-            ) : isMobileWaiter && (
-              <div className="w-full p-4 rounded-xl border-2 border-gray-400/30 bg-gray-500/10 opacity-60">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl flex items-center justify-center bg-gray-500 text-white">
-                    <Banknote className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text-muted">
-                      {t('modals.payment.cashPayment')}
-                    </h3>
-                    <p className="text-sm text-amber-400">
+                  <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
+                    ${!canUseCash || isProcessingPayment ? 'text-gray-400' : 'text-green-400 group-hover:text-green-300'}`}
+                  >
+                    {t('modals.payment.cashSimple', 'CASH')}
+                  </span>
+
+                  {isMobileWaiter && !canUseCash && (
+                    <p className="text-xs text-amber-400 mt-2 text-center">
                       {t('terminal.messages.cashDrawerMainOnly', 'Cash handled by Main POS')}
                     </p>
-                  </div>
-                </div>
-              </div>
-            )}
+                  )}
+                </button>
 
-            {/* Card Payment Option - Direct payment button */}
-            {canUseCard ? (
-              <button
-                onClick={() => handleSimplePayment('card')}
-                disabled={isProcessingPayment}
-                className={`w-full p-4 rounded-xl border-2 transition-all duration-200 text-left group ${
-                  isProcessingPayment
-                    ? 'bg-gray-400/50 cursor-not-allowed opacity-60'
-                    : 'bg-gradient-to-r from-blue-50 to-blue-100 border-blue-200 hover:border-blue-400 hover:shadow-lg dark:from-blue-900/30 dark:to-blue-800/30 dark:border-blue-400/30 dark:hover:border-blue-400/60 dark:hover:shadow-blue-400/20'
-                }`}
-              >
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl flex items-center justify-center bg-blue-500 text-white dark:bg-blue-600 dark:text-blue-100">
-                    <CreditCard className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text">
-                      {t('modals.payment.cardPayment')}
-                    </h3>
-                    <p className="text-sm liquid-glass-modal-text-muted">
-                      {t('modals.payment.payWithCard', 'Complete order with card')}
-                    </p>
-                  </div>
-                </div>
-              </button>
-            ) : (
-              <div className="w-full p-4 rounded-xl border-2 border-gray-400/30 bg-gray-500/10 opacity-60">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-xl flex items-center justify-center bg-gray-500 text-white">
-                    <CreditCard className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text-muted">
-                      {t('modals.payment.cardPayment')}
-                    </h3>
-                    <p className="text-sm text-amber-400">
+                {/* Card Option */}
+                <button
+                  onClick={() => canUseCard && handlePaymentMethodSelect('card')}
+                  disabled={!canUseCard || isProcessingPayment}
+                  className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                    ${!canUseCard || isProcessingPayment
+                      ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
+                      : 'border-blue-400/30 bg-gradient-to-br from-blue-500/10 to-blue-600/5 hover:from-blue-500/20 hover:to-blue-600/10 hover:border-blue-400/50 hover:scale-105 hover:shadow-xl hover:shadow-blue-500/20 active:scale-100'
+                    }`}
+                >
+                  <CreditCard
+                    className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
+                      ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-blue-400 group-hover:text-blue-300'}`}
+                    strokeWidth={1.5}
+                  />
+
+                  <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
+                    ${!canUseCard || isProcessingPayment ? 'text-gray-400' : 'text-blue-400 group-hover:text-blue-300'}`}
+                  >
+                    {t('modals.payment.cardSimple', 'CARD')}
+                  </span>
+
+                  {!canUseCard && (
+                    <p className="text-xs text-amber-400 mt-2 text-center">
                       {t('terminal.messages.featureDisabled', 'Feature disabled for this terminal')}
                     </p>
-                  </div>
-                </div>
+                  )}
+                </button>
               </div>
             )}
 
             {/* Processing indicator */}
             {isProcessingPayment && (
-              <div className="text-center py-2">
+              <div className="mt-4 text-center">
                 <p className="text-sm liquid-glass-modal-text-muted animate-pulse">
                   {t('modals.payment.processing')}
                 </p>
@@ -298,7 +307,88 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             )}
           </div>
         )}
+
+        {/* Step: Cash Input (only for pickup/in-store) */}
+        {currentStep === 'cash_input' && (
+          <div className="space-y-6">
+            <div className="text-center">
+              <p className="text-sm liquid-glass-modal-text-muted mb-2">
+                {t('modals.payment.enterCashReceived', 'Cash Received')}
+              </p>
+              <input
+                type="number"
+                inputMode="decimal"
+                value={cashReceived}
+                onChange={(e) => setCashReceived(e.target.value)}
+                placeholder="0.00"
+                autoFocus
+                className="w-full text-center text-3xl font-bold p-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-green-400/50 focus:outline-none liquid-glass-modal-text transition-colors"
+                step="0.01"
+                min="0"
+              />
+            </div>
+
+            {cashReceived && (
+              <div className={`p-4 rounded-xl border-2 transition-colors ${
+                hasEnoughCash
+                  ? 'bg-green-500/10 border-green-400/30'
+                  : 'bg-red-500/10 border-red-400/30'
+              }`}>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="liquid-glass-modal-text-muted">
+                    {t('modals.payment.totalAmount')}
+                  </span>
+                  <span className="font-bold liquid-glass-modal-text">
+                    €{orderTotal.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center mb-2">
+                  <span className="liquid-glass-modal-text-muted">
+                    {t('modals.payment.cashReceived', 'Cash Received')}
+                  </span>
+                  <span className="font-bold liquid-glass-modal-text">
+                    €{cashAmount.toFixed(2)}
+                  </span>
+                </div>
+                <div className="border-t border-white/10 pt-2 mt-2"></div>
+                <div className="flex justify-between items-center">
+                  <span className={`font-semibold ${
+                    hasEnoughCash ? 'text-green-400' : 'text-red-400'
+                  }`}>
+                    {t('modals.payment.change', 'Change')}
+                  </span>
+                  <span className={`text-2xl font-bold ${
+                    hasEnoughCash ? 'text-green-400' : 'text-red-400'
+                  }`}>
+                    {hasEnoughCash ? `€${changeAmount.toFixed(2)}` : t('modals.payment.insufficient', 'Insufficient')}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleBackToPaymentSelection}
+                disabled={isProcessingPayment}
+                className="liquid-glass-modal-button flex-1 font-medium bg-gray-500/20 hover:bg-gray-500/30 liquid-glass-modal-text"
+              >
+                {t('common.actions.back', 'Back')}
+              </button>
+              <button
+                onClick={handleCashPaymentComplete}
+                disabled={!hasEnoughCash || isProcessingPayment}
+                className={`liquid-glass-modal-button flex-1 font-medium ${
+                  hasEnoughCash && !isProcessingPayment
+                    ? 'bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30'
+                    : 'bg-gray-500/20 text-gray-400 cursor-not-allowed opacity-50'
+                }`}
+              >
+                {isProcessingPayment ? t('modals.payment.processing') : t('modals.payment.completeCash', 'Complete')}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
-    </LiquidGlassModal>
+    </LiquidGlassModal >
   );
 };

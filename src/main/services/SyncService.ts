@@ -521,23 +521,54 @@ export class SyncService {
       // Validate UUIDs
       const isValidUUID = (val: any) => typeof val === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
 
-      let orderId = isValidUUID(data.order_id) ? data.order_id : null;
+      const localOrderId = isValidUUID(data.order_id) ? data.order_id : null;
       let staffShiftId = isValidUUID(data.staff_shift_id) ? data.staff_shift_id : null;
 
-      // Verify order exists in Supabase (skip sync if not found - order must sync first)
-      if (orderId) {
-        const { data: existingOrder } = await this.supabase
-          .from('orders')
-          .select('id')
-          .eq('id', orderId)
-          .maybeSingle();
-        if (!existingOrder) {
-          console.warn(`[SyncService] Order ${orderId} not found in Supabase yet, will retry driver_earning ${data.id} later`);
-          throw new Error(`Order ${orderId} not synced yet - will retry driver earning later`);
+      // Resolve the Supabase order ID from the local order ID
+      // The local order ID is stored in Supabase's client_order_id column
+      let supabaseOrderId: string | null = null;
+
+      if (localOrderId) {
+        // First, try to get the supabase_id from local database (faster)
+        try {
+          const localOrder = await this.dbManager.getOrderById(localOrderId);
+          if (localOrder?.supabase_id) {
+            supabaseOrderId = localOrder.supabase_id;
+          }
+        } catch (e) {
+          console.warn(`[SyncService] Could not get local order ${localOrderId}:`, e);
+        }
+
+        // If not found locally, look up in Supabase by client_order_id
+        if (!supabaseOrderId) {
+          const { data: existingOrder } = await this.supabase
+            .from('orders')
+            .select('id')
+            .eq('client_order_id', localOrderId)
+            .maybeSingle();
+          
+          if (existingOrder) {
+            supabaseOrderId = existingOrder.id;
+            // Update local order with supabase_id for future lookups
+            try {
+              await this.dbManager.updateOrderSupabaseId(localOrderId, existingOrder.id);
+            } catch (e) {
+              console.warn(`[SyncService] Could not update local order supabase_id:`, e);
+            }
+          }
+        }
+
+        // If still not found, the order hasn't synced yet
+        if (!supabaseOrderId) {
+          console.warn(`[SyncService] Order ${localOrderId} not found in Supabase yet (checked by client_order_id), will retry driver_earning ${data.id} later`);
+          throw new Error(`Order ${localOrderId} not synced yet - will retry driver earning later`);
         }
       } else {
         throw new Error('Driver earning missing order_id - cannot sync without order reference');
       }
+
+      // Use the resolved Supabase order ID
+      const orderId = supabaseOrderId;
 
       // Verify shift exists in Supabase
       if (staffShiftId) {
@@ -796,6 +827,59 @@ export class SyncService {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     throw new Error('Sync queue not empty after timeout');
+  }
+
+  /**
+   * Enhanced version of forceSyncAndWaitForEmpty with progress logging.
+   * Logs queue status every 2 seconds and includes detailed error info on timeout.
+   * 
+   * @param timeoutMs - Maximum time to wait for queue to empty
+   * @param logStep - Optional logging function for step-by-step progress
+   * @returns Promise that resolves when queue is empty or rejects on timeout
+   */
+  public async forceSyncAndWaitForEmptyWithLogging(
+    timeoutMs: number,
+    logStep?: (step: number, msg: string) => void
+  ): Promise<void> {
+    const startTime = Date.now();
+    const LOG_INTERVAL = 2000; // Log every 2 seconds
+    let lastLogTime = 0;
+
+    await this.startSync();
+
+    // Poll until queue is empty or timeout
+    while (Date.now() - startTime < timeoutMs) {
+      const queue = await this.dbManager.getSyncQueue();
+
+      // Log progress every 2 seconds
+      const now = Date.now();
+      if (now - lastLogTime >= LOG_INTERVAL) {
+        if (queue.length > 0) {
+          const tables = [...new Set(queue.map((q: SyncQueue) => q.table_name))].join(', ');
+          const elapsed = ((now - startTime) / 1000).toFixed(1);
+          const message = `Sync queue: ${queue.length} items remaining (tables: ${tables}) [${elapsed}s elapsed]`;
+          console.log(`[Z-Report Submit] ${message}`);
+          if (logStep) {
+            logStep(5, message);
+          }
+        }
+        lastLogTime = now;
+      }
+
+      if (queue.length === 0) {
+        console.log('[Z-Report Submit] Sync queue empty');
+        return;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // Timeout - get final queue state for detailed error message
+    const finalQueue = await this.dbManager.getSyncQueue();
+    const tables = [...new Set(finalQueue.map((q: SyncQueue) => q.table_name))].join(', ');
+    const errorMessage = `Sync queue not empty after ${timeoutMs / 1000}s timeout. ${finalQueue.length} items remaining (tables: ${tables})`;
+    console.error(`[Z-Report Submit] ${errorMessage}`);
+    throw new Error(errorMessage);
   }
 
   public getNetworkStatus(): boolean {

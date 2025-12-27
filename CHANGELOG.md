@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.38] - 2025-12-27
+
+### Added
+- Custom title bar with native Windows controls (minimize, maximize, close)
+- Menu bar with File, Edit, View, Window, and Help menus
+- Update notification badge in Help menu when updates are available
+- Driver cash breakdown section in Z-Report showing per-driver cash tracking
+- Special notes field in cart for order items
+- Comprehensive i18n translations for update dialogs and driver cash breakdown
+- Property-based tests for Z-Report driver cash tracking, staff payments, and order attribution
+
+### Changed
+- Enhanced Z-Report modal with detailed driver cash breakdown display
+- Improved Update Dialog with better status messages and localization
+- Refactored glassmorphism CSS with enhanced visual effects
+- Updated SyncStatusIndicator with improved UI and state management
+- Enhanced OrderDetailsModal with better layout and functionality
+- Improved PaymentModal with refined payment flow
+- Updated StaffShiftModal with enhanced shift management features
+- Modernized ConnectionSettingsModal and CustomerSearchModal UI
+- Enhanced OrderApprovalPanel with better order management
+
+### Fixed
+- Fixed window state management for fullscreen mode detection
+- Improved window handlers for zoom, reload, and fullscreen operations
+- Enhanced auth service with better session management
+- Fixed sync service reliability for order synchronization
+- Improved ReportService with accurate driver cash calculations
+
 ## [1.1.37] - 2025-12-25
 
 ### Added

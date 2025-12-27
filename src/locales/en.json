@@ -437,6 +437,7 @@
       "header": "Cart ({{count}})",
       "empty": "Your cart is empty",
       "ingredients": "Ingredients",
+      "specialNotes": "Special Notes",
       "discountLabel": "Discount %",
       "discountMax": "(max {{max}}%)",
       "discountExceeded": "Max {{max}}%",
@@ -2296,6 +2297,10 @@
       "openingTotal": "Opening Total",
       "driverCashGiven": "Driver Cash Given",
       "driverCashReturned": "Driver Cash Returned",
+      "driverCashBreakdown": "Driver Cash Breakdown",
+      "driverName": "Driver Name",
+      "unknownDriver": "Unknown Driver",
+      "total": "Total",
       "staffPaymentsTotal": "Staff Payments Total",
       "cashCollected": "Cash Collected",
       "cardAmount": "Card Amount",
@@ -3371,6 +3376,31 @@
       "total": "TOTAL",
       "mixed": "Mixed (Cash + Card)",
       "collectCash": "COLLECT CASH FROM CUSTOMER"
+    }
+  },
+  "updates": {
+    "title": {
+      "checking": "Checking for Updates",
+      "available": "Update Available",
+      "downloading": "Downloading Update",
+      "downloaded": "Update Ready",
+      "error": "Update Error",
+      "upToDate": "You're Up to Date"
+    },
+    "checking": "Checking for updates...",
+    "upToDate": {
+      "title": "You're Up to Date!",
+      "description": "The Small POS is running the latest version.",
+      "currentVersion": "Current Version: v{{version}}"
+    },
+    "actions": {
+      "download": "Download",
+      "install": "Install Now",
+      "cancel": "Cancel",
+      "close": "Close",
+      "retry": "Retry",
+      "recheck": "Check Again",
+      "ok": "OK"
     }
   }
 }

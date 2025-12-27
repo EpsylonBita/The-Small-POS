@@ -11,6 +11,11 @@ html, body, #root {
   padding: 0;
 }
 
+/* Dark theme background */
+html.dark, html.dark body, html.dark #root {
+  background: #000000;
+}
+
 /* Base styles for touch interface */
 @layer base {
   * {
@@ -36,6 +41,10 @@ html, body, #root {
     overflow-x: hidden;
     /* Prevent pull-to-refresh on mobile */
     overscroll-behavior-y: contain;
+  }
+
+  html.dark body {
+    background-color: #000000;
   }
   
   /* Disable text selection for touch interface */

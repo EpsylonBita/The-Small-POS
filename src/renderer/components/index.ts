@@ -6,6 +6,7 @@ export { default as BulkActionsBar } from './BulkActionsBar';
 export { default as NavigationSidebar } from './NavigationSidebar';
 export { default as OrderTabsBar } from './OrderTabsBar';
 export { ThemeSwitcher } from './ThemeSwitcher';
+export { default as CustomTitleBar } from './CustomTitleBar';
 export { FloatingActionButton } from './ui/FloatingActionButton';
 
 // Order components
@@ -24,7 +25,6 @@ export { CustomerSearchModal } from './modals/CustomerSearchModal';
 export { CustomerInfoModal } from './modals/CustomerInfoModal';
 export { AddCustomerModal } from './modals/AddCustomerModal';
 export { AddNewAddressModal } from './modals/AddNewAddressModal';
-export { OrderTypeSelectionModal } from './modals/OrderTypeSelectionModal';
 export { PaymentModal } from './modals/PaymentModal';
 export { default as DriverAssignmentModal } from './modals/DriverAssignmentModal';
 export { default as OrderCancellationModal } from './modals/OrderCancellationModal';

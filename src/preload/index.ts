@@ -100,7 +100,7 @@ const ALLOWED_CHANNELS = [
   'update-error',
   'download-progress',
   'update-downloaded',
-  
+
   // Menu-triggered events
   'menu:check-for-updates',
 ] as const;
@@ -150,13 +150,13 @@ const electronAPI = {
           console.error(`[Preload] Error in callback for ${channel}:`, err);
         }
       };
-      
+
       // Store the mapping so we can remove it later
       if (!listenerMap.has(channel)) {
         listenerMap.set(channel, new Map());
       }
       listenerMap.get(channel)!.set(callback, subscription);
-      
+
       ipcRenderer.on(channel, subscription);
       if (channel.startsWith('update-')) {
         console.log(`[Preload] Registered listener for ${channel}`);
@@ -221,6 +221,13 @@ const electronAPI = {
         'window-maximize',
         'window-close',
         'window-toggle-fullscreen',
+        'window-get-state',
+        'window-reload',
+        'window-force-reload',
+        'window-toggle-devtools',
+        'window-zoom-in',
+        'window-zoom-out',
+        'window-zoom-reset',
 
         // Auth
         'auth:login',
@@ -229,6 +236,7 @@ const electronAPI = {
         'auth:validate-session',
         'auth:has-permission',
         'auth:get-session-stats',
+        'auth:setup-pin',
 
         // Orders
         'order:get-all',
@@ -403,6 +411,7 @@ const electronAPI = {
         'menu:update-category',
         'menu:update-subcategory',
         'menu:update-ingredient',
+        'menu:trigger-check-for-updates',
 
         // Printers / device discovery (legacy)
         'printer:list-system-printers',
@@ -860,6 +869,36 @@ const electronAPI = {
   customerGetConflicts: (filters?: any) => {
     return ipcRenderer.invoke('customer:get-conflicts', filters);
   },
+
+  // Sync methods
+  getSyncStatus: () => {
+    return ipcRenderer.invoke('sync:get-status');
+  },
+
+  forceSync: () => {
+    return ipcRenderer.invoke('sync:force');
+  },
+
+  getFinancialSyncStats: () => {
+    return ipcRenderer.invoke('sync:get-financial-stats');
+  },
+
+  getFailedFinancialSyncItems: (limit?: number) => {
+    return ipcRenderer.invoke('sync:get-failed-financial-items', limit);
+  },
+
+  retryFinancialSyncItem: (syncId: string) => {
+    return ipcRenderer.invoke('sync:retry-financial-item', syncId);
+  },
+
+  retryAllFailedFinancialSyncs: () => {
+    return ipcRenderer.invoke('sync:retry-all-failed-financial');
+  },
+
+  getNetworkStatus: () => {
+    return ipcRenderer.invoke('sync:get-network-status');
+  },
+
   // Terminal settings helpers
   getTerminalSettings: () => {
     return ipcRenderer.invoke('terminal-config:get-settings')

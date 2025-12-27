@@ -462,6 +462,14 @@ export class ReceiptGenerator {
     lines.push({ text: this.t('receipt.items.item'), style: 'bold', align: 'left', rightText: this.t('receipt.items.qty') + '   ' + this.t('receipt.items.price') });
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
     
+    // Debug: Log items with specialInstructions
+    console.log('[ReceiptGenerator.generateReceiptBitmapClassic] Items received:', data.items.map((item, idx) => ({
+      idx,
+      name: item.name,
+      specialInstructions: item.specialInstructions,
+      hasSpecialInstructions: !!item.specialInstructions
+    })));
+    
     for (const item of data.items) {
       const qtyPrice = 'x' + item.quantity + '   ' + this.formatCurrency(item.total);
       lines.push({ text: item.name, style: 'bold', align: 'left', rightText: qtyPrice });

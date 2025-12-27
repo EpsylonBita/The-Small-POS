@@ -75,7 +75,7 @@ beforeEach(() => {
   // Clear the queue and history before each test
   queueService.clearQueue();
   queueService.clearHistory();
-  
+
   // Clear printers table and create a test printer for foreign key constraint
   db.exec('DELETE FROM printers');
   testPrinterId = '00000000-0000-0000-0000-000000000001';
@@ -126,7 +126,7 @@ const validDateArb: fc.Arbitrary<Date> = fc
  */
 const receiptDataArb: fc.Arbitrary<ReceiptData> = fc.record({
   orderNumber: fc.stringMatching(/^[A-Z0-9]{4,10}$/),
-  orderType: fc.constantFrom('dine-in' as const, 'takeout' as const, 'delivery' as const),
+  orderType: fc.constantFrom('dine-in' as const, 'pickup' as const, 'delivery' as const),
   timestamp: validDateArb,
   items: fc.array(
     fc.record({
@@ -265,7 +265,7 @@ describe('Print Queue Retry Logic Property Tests', () => {
           for (let i = 0; i < numRetries; i++) {
             // Dequeue to set status to 'printing'
             queueService.dequeue(testPrinterId);
-            
+
             // Increment retry
             const newCount = queueService.incrementRetry(jobId);
             expect(newCount).toBe(i + 1);

@@ -202,20 +202,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, [t]);
 
   const handleCustomerSelected = useCallback((customer: Customer) => {
-    console.log('[OrderFlow] handleCustomerSelected received:', {
-      id: customer.id,
-      name: customer.name,
-      name_on_ringer: customer.name_on_ringer,
-      notes: customer.notes,
-      selected_address_id: (customer as any).selected_address_id,
-      addressCount: customer.addresses?.length,
-      addresses: customer.addresses?.map((a: any) => ({
-        id: a.id,
-        street: a.street_address,
-        notes: a.notes
-      }))
-    });
-
     setSelectedCustomer(customer);
     setIsCustomerSearchModalOpen(false);
 
@@ -230,11 +216,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           ...selectedAddr,
           notes: selectedAddr.notes || customer.notes
         };
-        console.log('[OrderFlow] Using selected address:', {
-          id: addressWithNotes.id,
-          street: addressWithNotes.street_address,
-          notes: addressWithNotes.notes
-        });
         setSelectedAddress(addressWithNotes);
         setIsMenuModalOpen(true);
         return;
@@ -244,11 +225,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     // Use first/default address if available
     if (customer.addresses && customer.addresses.length > 0) {
       const defaultAddr = customer.addresses.find((a: any) => a.is_default) || customer.addresses[0];
-      console.log('[OrderFlow] Using default address:', {
-        id: defaultAddr.id,
-        street: defaultAddr.street_address,
-        notes: defaultAddr.notes
-      });
       setSelectedAddress(defaultAddr);
       setIsMenuModalOpen(true);
     } else if (customer.address) {
@@ -260,7 +236,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         floor_number: customer.floor_number,
         notes: customer.notes,
       };
-      console.log('[OrderFlow] Using legacy address:', legacyAddress);
       setSelectedAddress(legacyAddress);
       setIsMenuModalOpen(true);
     } else {
@@ -542,18 +517,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         });
       }
 
-      // Create order object matching the API expected format and shared types
-      console.log('[OrderFlow] ========== ORDER CREATION DEBUG ==========');
-      console.log('[OrderFlow] selectedAddress:', JSON.stringify(selectedAddress, null, 2));
-      console.log('[OrderFlow] selectedCustomer:', JSON.stringify({
-        id: selectedCustomer?.id,
-        name: selectedCustomer?.name,
-        name_on_ringer: selectedCustomer?.name_on_ringer,
-        ringer_name: (selectedCustomer as any)?.ringer_name
-      }, null, 2));
-      console.log('[OrderFlow] delivery_notes will be:', selectedAddress?.notes);
-      console.log('[OrderFlow] name_on_ringer will be:', selectedCustomer?.name_on_ringer);
-      
       const orderToCreate = {
         // API required fields
         customer_id: selectedCustomer?.id !== 'pickup-customer' ? selectedCustomer?.id : null,
@@ -561,7 +524,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           menu_item_id: item.menuItemId || item.menu_item_id || item.id, // Use menuItemId (Supabase UUID) instead of id (cart ID)
           quantity: item.quantity,
           price: item.price,
-          customizations: item.customizations || item.selectedIngredients || null
+          customizations: item.customizations || item.selectedIngredients || null,
+          notes: item.notes || item.special_instructions || null
         })),
 
         // Use total_amount instead of total (matching shared types)
@@ -612,15 +576,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         staff_shift_id: activeShift?.id || null,
         staff_id: staff?.staffId || null
       };
-
-      // Create order using the store method (handles both local storage and Supabase sync)
-
-      // Debug: Log the final order data before creation
-      console.log('[OrderFlow] ========== FINAL ORDER DATA ==========');
-      console.log('[OrderFlow] orderToCreate.delivery_notes:', orderToCreate.delivery_notes);
-      console.log('[OrderFlow] orderToCreate.name_on_ringer:', orderToCreate.name_on_ringer);
-      console.log('[OrderFlow] selectedAddress:', selectedAddress);
-      console.log('[OrderFlow] selectedCustomer.name_on_ringer:', selectedCustomer?.name_on_ringer);
 
       // Ensure a cashier shift is active before allowing order creation
       try {
@@ -720,7 +675,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         onClose={() => setIsOrderTypeModalOpen(false)}
         title={t('orderFlow.selectOrderType')}
       >
-        <div className="p-2">
+        <div>
           {isTransitioning ? (
             <div className="flex items-center justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white/60"></div>
@@ -732,7 +687,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               {hasDeliveryModule && (
                 <button
                   onClick={() => handleSelectOrderType('delivery')}
-                  className="group relative p-6 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
+                  className="group relative p-8 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
@@ -745,7 +700,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                         {t('orderFlow.deliveryOrder')}
                       </h3>
                       <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                        Παράδοση στο σπίτι
+                        {t('modals.orderTypeSelection.deliveryDescription')}
                       </p>
                     </div>
                   </div>
@@ -755,7 +710,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               {/* Pickup Button - Green (always available) */}
               <button
                 onClick={() => handleSelectOrderType('pickup')}
-                className="group relative p-6 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
+                className="group relative p-8 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-16 h-16 flex items-center justify-center">
@@ -768,7 +723,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
                       {t('orderFlow.pickupOrder')}
                     </h3>
                     <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                      Παραλαβή από το κατάστημα
+                      {t('modals.orderTypeSelection.pickupDescription')}
                     </p>
                   </div>
                 </div>

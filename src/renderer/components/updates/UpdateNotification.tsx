@@ -1,4 +1,5 @@
 import React from 'react';
+import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { UpdateInfo } from 'electron-updater';
 import { useI18n } from '../../contexts/i18n-context';
@@ -54,7 +55,15 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     {/* Render release notes as HTML content safely or plain text */}
                     <div
                         className="text-sm text-gray-400 prose prose-invert prose-sm"
-                        dangerouslySetInnerHTML={{ __html: typeof updateInfo.releaseNotes === 'string' ? updateInfo.releaseNotes : 'Bug fixes and improvements.' }}
+                        dangerouslySetInnerHTML={{
+                            __html: DOMPurify.sanitize(
+                                typeof updateInfo.releaseNotes === 'string' ? updateInfo.releaseNotes : 'Bug fixes and improvements.',
+                                {
+                                    ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
+                                    ALLOWED_ATTR: []
+                                }
+                            )
+                        }}
                     />
                 </div>
 

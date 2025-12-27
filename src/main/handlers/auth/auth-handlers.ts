@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron';
+import * as bcrypt from 'bcryptjs';
 import { serviceRegistry } from '../../service-registry';
 import { handleIPCError, IPCError } from '../utils';
 
@@ -11,6 +12,7 @@ export function registerAuthHandlers(): void {
     'auth:validate-session',
     'auth:has-permission',
     'auth:get-session-stats',
+    'auth:setup-pin',
   ];
   handlers.forEach(handler => ipcMain.removeHandler(handler));
 
@@ -105,5 +107,37 @@ export function registerAuthHandlers(): void {
       const authService = serviceRegistry.requireService('authService');
       return await authService.getSessionStats();
     }, 'auth:get-session-stats');
+  });
+
+  // Setup PIN for first-time use (called from login page)
+  ipcMain.handle('auth:setup-pin', async (_event, { adminPin, staffPin }) => {
+    return handleIPCError(async () => {
+      console.log('[auth:setup-pin] Setting up PINs...');
+
+      const settingsService = serviceRegistry.get('settingsService');
+      if (!settingsService) {
+        throw new IPCError('Settings service not available');
+      }
+
+      // Validate PINs
+      if (!adminPin || adminPin.length < 6 || !/^\d+$/.test(adminPin)) {
+        throw new IPCError('Admin PIN must be at least 6 digits');
+      }
+      if (!staffPin || staffPin.length < 6 || !/^\d+$/.test(staffPin)) {
+        throw new IPCError('Staff PIN must be at least 6 digits');
+      }
+
+      // Hash the PINs with bcrypt
+      const BCRYPT_ROUNDS = 10;
+      const adminPinHash = await bcrypt.hash(adminPin, BCRYPT_ROUNDS);
+      const staffPinHash = await bcrypt.hash(staffPin, BCRYPT_ROUNDS);
+
+      // Save hashed PINs to settings
+      settingsService.setSetting('staff', 'admin_pin_hash', adminPinHash);
+      settingsService.setSetting('staff', 'staff_pin_hash', staffPinHash);
+
+      console.log('[auth:setup-pin] PINs configured successfully');
+      return { success: true };
+    }, 'auth:setup-pin');
   });
 }

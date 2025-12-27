@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import toast from 'react-hot-toast';
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { useFeatures } from '../hooks/useFeatures';
@@ -54,51 +55,55 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     loading: featuresLoading
   } = useFeatures();
 
+  const normalizeStatus = (status: any): SyncStatus => {
+    if (!status) {
+      return {
+        isOnline: navigator.onLine,
+        lastSync: null,
+        pendingItems: 0,
+        syncInProgress: false,
+        error: null,
+        terminalHealth: 80,
+        settingsVersion: 0,
+        menuVersion: 0,
+        pendingPaymentItems: 0,
+        failedPaymentItems: 0,
+      };
+    }
+
+    return {
+      isOnline: typeof status.isOnline === 'boolean' ? status.isOnline : navigator.onLine,
+      lastSync: status.lastSync ?? null,
+      pendingItems: typeof status.pendingItems === 'number' ? status.pendingItems : 0,
+      syncInProgress: !!status.syncInProgress,
+      error: status.error ?? null,
+      terminalHealth: typeof status.terminalHealth === 'number' ? status.terminalHealth : 80,
+      settingsVersion: typeof status.settingsVersion === 'number' ? status.settingsVersion : 0,
+      menuVersion: typeof status.menuVersion === 'number' ? status.menuVersion : 0,
+      pendingPaymentItems: typeof status.pendingPaymentItems === 'number' ? status.pendingPaymentItems : 0,
+      failedPaymentItems: typeof status.failedPaymentItems === 'number' ? status.failedPaymentItems : 0,
+    };
+  };
+
   useEffect(() => {
     console.log('SyncStatusIndicator: mount');
-
-    const normalizeStatus = (status: any): SyncStatus => {
-      if (!status) {
-        return {
-          isOnline: navigator.onLine,
-          lastSync: null,
-          pendingItems: 0,
-          syncInProgress: false,
-          error: null,
-          terminalHealth: 0.8,
-          settingsVersion: 0,
-          menuVersion: 0,
-          pendingPaymentItems: 0,
-          failedPaymentItems: 0,
-        };
-      }
-
-      return {
-        isOnline: typeof status.isOnline === 'boolean' ? status.isOnline : navigator.onLine,
-        lastSync: status.lastSync ?? null,
-        pendingItems: typeof status.pendingItems === 'number' ? status.pendingItems : 0,
-        syncInProgress: !!status.syncInProgress,
-        error: status.error ?? null,
-        terminalHealth: typeof status.terminalHealth === 'number' ? status.terminalHealth : 0.8,
-        settingsVersion: typeof status.settingsVersion === 'number' ? status.settingsVersion : 0,
-        menuVersion: typeof status.menuVersion === 'number' ? status.menuVersion : 0,
-        pendingPaymentItems: typeof status.pendingPaymentItems === 'number' ? status.pendingPaymentItems : 0,
-        failedPaymentItems: typeof status.failedPaymentItems === 'number' ? status.failedPaymentItems : 0,
-      };
-    };
 
     // Get initial sync status
     const loadSyncStatus = async () => {
       try {
-        if (window.electronAPI?.getSyncStatus) {
+        if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
           const status = await window.electronAPI.getSyncStatus();
           console.log('SyncStatusIndicator: initial status', status);
           setSyncStatus(normalizeStatus(status));
+        } else {
+          console.warn('getSyncStatus is not available');
         }
 
-        if ((window as any).electronAPI?.getFinancialSyncStats) {
+        if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
           const stats = await (window as any).electronAPI.getFinancialSyncStats();
           setFinancialStats(stats);
+        } else {
+          console.warn('getFinancialSyncStats is not available');
         }
       } catch (error) {
         console.error('Failed to load sync status:', error);
@@ -108,9 +113,19 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     loadSyncStatus();
 
     // Listen for sync status updates
-    const handleSyncStatusUpdate = (status: any) => {
+    const handleSyncStatusUpdate = async (status: any) => {
       console.log('SyncStatusIndicator: sync:status event', status);
       setSyncStatus(normalizeStatus(status));
+
+      // Also reload financial stats when sync status updates
+      try {
+        if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
+          const stats = await (window as any).electronAPI.getFinancialSyncStats();
+          setFinancialStats(stats);
+        }
+      } catch (err) {
+        console.error('Failed to reload financial stats on sync update:', err);
+      }
     };
 
     const handleNetworkStatus = ({ isOnline }: { isOnline: boolean }) => {
@@ -130,8 +145,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     };
     window.addEventListener('menu-sync:refreshed', handleMenuRefreshed as EventListener);
 
-    // Refresh status every 30 seconds
-    const interval = setInterval(loadSyncStatus, 30000);
+    // Refresh status and financial stats every 30 seconds
+    const interval = setInterval(async () => {
+      await loadSyncStatus();
+    }, 30000);
 
     return () => {
       console.log('SyncStatusIndicator: unmount');
@@ -191,22 +208,38 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const handleForceSync = async () => {
     try {
-      // Check if we're in Electron or browser mode
-      if (window.electronAPI) {
-        // Electron mode - use IPC
-        if ((window as any).electronAPI?.forceSettingsSync) {
-          await (window as any).electronAPI.forceSettingsSync();
-        }
-        if (window.electronAPI?.forceSync) {
-          await window.electronAPI.forceSync();
-        }
+      if (window.electronAPI && typeof window.electronAPI.forceSync === 'function') {
+        setSyncStatus(prev => ({ ...prev, syncInProgress: true }));
+
+        await window.electronAPI.forceSync();
+
+        // Show success message
+        toast.success(t('sync.messages.syncComplete') || 'Sync completed');
+
+        // Reload status and financial stats after sync
+        setTimeout(async () => {
+          try {
+            if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
+              const status = await window.electronAPI.getSyncStatus();
+              setSyncStatus(normalizeStatus(status));
+            }
+
+            if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
+              const stats = await (window as any).electronAPI.getFinancialSyncStats();
+              console.log('Financial stats after sync:', stats);
+              setFinancialStats(stats);
+            }
+          } catch (err) {
+            console.error('Failed to reload sync status:', err);
+          }
+        }, 2000); // Increased timeout to give sync more time to complete
       } else {
-        // Browser mode - make direct API calls
-        console.log('Browser mode: Force sync not available, but simulating...');
-        alert(t('sync.messages.forceSyncElectronOnly'));
+        toast.error(t('sync.messages.forceSyncElectronOnly') || 'Sync is only available in Electron mode');
       }
     } catch (error) {
       console.error('Failed to force sync:', error);
+      toast.error(t('sync.messages.syncFailed') || 'Sync failed');
+      setSyncStatus(prev => ({ ...prev, syncInProgress: false }));
     }
   };
 
@@ -242,227 +275,264 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         )}
       </button>
 
-      {/* Detail Panel */}
+      {/* Detail Panel - Centered Modal */}
       {showDetailPanel && (
-        <div className="absolute top-full left-0 mt-2 bg-gradient-to-br from-gray-900/95 to-gray-800/95 backdrop-blur-xl shadow-2xl rounded-2xl border border-white/10 p-5 min-w-96 z-[100]">
-          <div className="space-y-4">
-            {/* Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-white/10">
-              <div className="flex items-center gap-3">
-                <svg
-                  className={`w-5 h-5 ${isSynced ? 'text-green-400' : 'text-red-400'}`}
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
-                </svg>
-                <h3 className="font-semibold text-white text-lg">{t('sync.labels.syncStatus')}</h3>
-              </div>
-              <button
-                onClick={() => setShowDetailPanel(false)}
-                className="text-gray-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/10"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-[1000] liquid-glass-modal-backdrop"
+            onClick={() => setShowDetailPanel(false)}
+          />
 
-            {/* Status Overview */}
-            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm text-gray-400">{t('sync.labels.connection')}</span>
-                <div className="flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? 'bg-green-400' : 'bg-red-400'} ${syncStatus.isOnline ? 'animate-pulse' : ''}`}></div>
-                  <span className={`text-sm font-semibold ${syncStatus.isOnline ? 'text-green-400' : 'text-red-400'}`}>
-                    {syncStatus.isOnline ? t('sync.labels.online') : t('sync.labels.offline')}
-                  </span>
+          {/* Modal */}
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell w-full max-w-2xl max-h-[90vh] overflow-y-auto z-[1050]">
+            <div className="p-6 space-y-6">
+              {/* Header */}
+              <div className="flex items-center justify-between pb-4 border-b liquid-glass-modal-border">
+                <div className="flex items-center gap-3">
+                  <svg
+                    className={`w-6 h-6 ${isSynced ? 'text-green-400' : 'text-red-400'}`}
+                    fill="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
+                  </svg>
+                  <h3 className="text-2xl font-bold liquid-glass-modal-text">{t('sync.labels.syncStatus')}</h3>
                 </div>
-              </div>
-
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm text-gray-400">{t('sync.labels.lastSync')}</span>
-                <span className="text-sm font-medium text-white">
-                  {formatLastSync()}
-                </span>
-              </div>
-
-              {/* Terminal Type Info */}
-              <div className="flex items-center justify-between pt-3 border-t border-white/10">
-                <span className="text-sm text-gray-400">
-                  {t('terminal.labels.terminalType', 'Terminal Type')}
-                </span>
-                <span
-                  className={`text-sm font-semibold ${isMobileWaiter ? 'text-blue-400' : 'text-green-400'
-                    }`}
-                >
-                  {isMobileWaiter ? t('terminal.type.mobile_waiter', 'Mobile POS') : t('terminal.type.main', 'Main Terminal')}
-                </span>
-              </div>
-
-              {/* Parent Terminal (for mobile waiter) */}
-              {isMobileWaiter && parentTerminalId && (
-                <div className="flex items-center justify-between mt-2">
-                  <span className="text-sm text-gray-400">
-                    {t('terminal.labels.parentTerminal', 'Parent Terminal')}
-                  </span>
-                  <span className="text-sm font-medium text-white font-mono">
-                    {parentTerminalId.substring(0, 8)}...
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Sync Details Grid */}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.pending')}</div>
-                <div className="text-2xl font-bold text-white">{syncStatus.pendingItems}</div>
-              </div>
-
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.health')}</div>
-                <div className={`text-2xl font-bold ${syncStatus.terminalHealth >= 0.8 ? 'text-green-400' :
-                  syncStatus.terminalHealth >= 0.6 ? 'text-yellow-400' : 'text-red-400'
-                  }`}>
-                  {(syncStatus.terminalHealth * 100).toFixed(0)}%
-                </div>
-              </div>
-
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.settings')}</div>
-                <div className="text-lg font-semibold text-white">v{syncStatus.settingsVersion}</div>
-              </div>
-
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.menu')}</div>
-                <div className="text-lg font-semibold text-white">v{syncStatus.menuVersion}</div>
-              </div>
-
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.pendingPayments')}</div>
-                <div className="text-lg font-semibold text-white">{syncStatus.pendingPaymentItems}</div>
-              </div>
-
-              <div className="bg-white/5 rounded-xl p-3 border border-white/10">
-                <div className="text-xs text-gray-400 mb-1">{t('sync.labels.failedPayments')}</div>
-                <div className={`text-lg font-semibold ${syncStatus.failedPaymentItems > 0 ? 'text-red-400' : 'text-white'}`}>
-                  {syncStatus.failedPaymentItems}
-                </div>
-
-              </div>
-            </div>
-
-            {/* Financial Transactions Status */}
-            <div className="mt-4 pt-3 border-t border-white/10">
-              <div className="flex justify-between items-center mb-2">
-                <h4 className="text-sm font-semibold text-gray-300">Financial Transactions</h4>
                 <button
-                  onClick={() => setShowFinancialPanel(true)}
-                  className="text-xs text-blue-400 hover:text-blue-300 underline"
+                  onClick={() => setShowDetailPanel(false)}
+                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                  aria-label={t('common.actions.close')}
                 >
-                  Manage
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
                 </button>
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-white/5 rounded p-2 text-center">
-                  <div className="text-[10px] text-gray-400">Driver</div>
-                  <div className="text-sm font-bold text-white">
-                    {financialStats.driver_earnings.pending > 0 && <span className="text-blue-400">{financialStats.driver_earnings.pending}P</span>}
-                    {financialStats.driver_earnings.pending > 0 && financialStats.driver_earnings.failed > 0 && <span className="mx-1">/</span>}
-                    {financialStats.driver_earnings.failed > 0 && <span className="text-red-400">{financialStats.driver_earnings.failed}F</span>}
-                    {financialStats.driver_earnings.pending === 0 && financialStats.driver_earnings.failed === 0 && <span className="text-green-500">✓</span>}
+
+              {/* Status Overview */}
+              <div className="liquid-glass-modal-card">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-sm liquid-glass-modal-text-muted">{t('sync.labels.connection')}</span>
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? 'bg-green-400' : 'bg-red-400'} ${syncStatus.isOnline ? 'animate-pulse' : ''}`}></div>
+                    <span className={`text-sm font-semibold ${syncStatus.isOnline ? 'text-green-400' : 'text-red-400'}`}>
+                      {syncStatus.isOnline ? t('sync.labels.online') : t('sync.labels.offline')}
+                    </span>
                   </div>
                 </div>
-                <div className="bg-white/5 rounded p-2 text-center">
-                  <div className="text-[10px] text-gray-400">Staff</div>
-                  <div className="text-sm font-bold text-white">
-                    {financialStats.staff_payments.pending > 0 && <span className="text-blue-400">{financialStats.staff_payments.pending}P</span>}
-                    {financialStats.staff_payments.pending > 0 && financialStats.staff_payments.failed > 0 && <span className="mx-1">/</span>}
-                    {financialStats.staff_payments.failed > 0 && <span className="text-red-400">{financialStats.staff_payments.failed}F</span>}
-                    {financialStats.staff_payments.pending === 0 && financialStats.staff_payments.failed === 0 && <span className="text-green-500">✓</span>}
+
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-sm liquid-glass-modal-text-muted">{t('sync.labels.lastSync')}</span>
+                  <span className="text-sm font-medium liquid-glass-modal-text">
+                    {formatLastSync()}
+                  </span>
+                </div>
+
+                {/* Terminal Type Info */}
+                <div className="flex items-center justify-between pt-3 border-t liquid-glass-modal-border">
+                  <span className="text-sm liquid-glass-modal-text-muted">
+                    {t('terminal.labels.terminalType', 'Terminal Type')}
+                  </span>
+                  <span
+                    className={`text-sm font-semibold ${isMobileWaiter ? 'text-blue-400' : 'text-green-400'
+                      }`}
+                  >
+                    {isMobileWaiter ? t('terminal.type.mobile_waiter', 'Mobile POS') : t('terminal.type.main', 'Κεντρικό Τερματικό')}
+                  </span>
+                </div>
+
+                {/* Parent Terminal (for mobile waiter) */}
+                {isMobileWaiter && parentTerminalId && (
+                  <div className="flex items-center justify-between mt-2">
+                    <span className="text-sm liquid-glass-modal-text-muted">
+                      {t('terminal.labels.parentTerminal', 'Parent Terminal')}
+                    </span>
+                    <span className="text-sm font-medium liquid-glass-modal-text font-mono">
+                      {parentTerminalId.substring(0, 8)}...
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Sync Details Grid */}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.pending')}</div>
+                  <div className="text-2xl font-bold liquid-glass-modal-text">{syncStatus.pendingItems}</div>
+                </div>
+
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.health')}</div>
+                  <div className={`text-2xl font-bold ${syncStatus.terminalHealth >= 80 ? 'text-green-400' :
+                    syncStatus.terminalHealth >= 60 ? 'text-yellow-400' : 'text-red-400'
+                    }`}>
+                    {Math.round(syncStatus.terminalHealth)}%
                   </div>
                 </div>
-                <div className="bg-white/5 rounded p-2 text-center">
-                  <div className="text-[10px] text-gray-400">Expenses</div>
-                  <div className="text-sm font-bold text-white">
-                    {financialStats.shift_expenses.pending > 0 && <span className="text-blue-400">{financialStats.shift_expenses.pending}P</span>}
-                    {financialStats.shift_expenses.pending > 0 && financialStats.shift_expenses.failed > 0 && <span className="mx-1">/</span>}
-                    {financialStats.shift_expenses.failed > 0 && <span className="text-red-400">{financialStats.shift_expenses.failed}F</span>}
-                    {financialStats.shift_expenses.pending === 0 && financialStats.shift_expenses.failed === 0 && <span className="text-green-500">✓</span>}
+
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.settings')}</div>
+                  <div className="text-lg font-semibold liquid-glass-modal-text">v{syncStatus.settingsVersion}</div>
+                </div>
+
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.menu')}</div>
+                  <div className="text-lg font-semibold liquid-glass-modal-text">v{syncStatus.menuVersion}</div>
+                </div>
+
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.pendingPayments')}</div>
+                  <div className="text-lg font-semibold liquid-glass-modal-text">{syncStatus.pendingPaymentItems}</div>
+                </div>
+
+                <div className="liquid-glass-modal-card p-3">
+                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.failedPayments')}</div>
+                  <div className={`text-lg font-semibold ${syncStatus.failedPaymentItems > 0 ? 'text-red-400' : 'liquid-glass-modal-text'}`}>
+                    {syncStatus.failedPaymentItems}
                   </div>
                 </div>
               </div>
-            </div>
 
-
-            {/* Order Routing Info */}
-            <OrderSyncRouteIndicator />
-
-            {/* Error Message */}
-            {syncStatus.error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3">
-                <div className="flex items-start gap-2">
-                  <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <div>
-                    <div className="text-sm font-semibold text-red-400 mb-1">{t('sync.labels.error')}</div>
-                    <div className="text-xs text-red-300">{syncStatus.error}</div>
+              {/* Financial Transactions Status */}
+              <div className="pt-4 border-t liquid-glass-modal-border">
+                <div className="flex justify-between items-center mb-3">
+                  <h4 className="text-sm font-semibold liquid-glass-modal-text">{t('sync.financial.title')}</h4>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        try {
+                          if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
+                            const stats = await (window as any).electronAPI.getFinancialSyncStats();
+                            console.log('Manual refresh - Financial stats:', stats);
+                            setFinancialStats(stats);
+                            toast.success('Ανανεώθηκε');
+                          }
+                        } catch (err) {
+                          console.error('Failed to refresh financial stats:', err);
+                          toast.error('Αποτυχία ανανέωσης');
+                        }
+                      }}
+                      className="text-xs text-green-400 hover:text-green-300 underline"
+                      title="Ανανέωση"
+                    >
+                      ↻
+                    </button>
+                    <button
+                      onClick={() => setShowFinancialPanel(true)}
+                      className="text-xs text-blue-400 hover:text-blue-300 underline"
+                    >
+                      {t('sync.actions.manage')}
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="liquid-glass-modal-card p-2 text-center">
+                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.driver')}</div>
+                    <div className="text-xs font-bold liquid-glass-modal-text">
+                      {financialStats.driver_earnings.pending > 0 && (
+                        <div className="text-blue-400">
+                          {financialStats.driver_earnings.pending} {t('sync.financial.pending')}
+                        </div>
+                      )}
+                      {financialStats.driver_earnings.failed > 0 && (
+                        <div className="text-red-400">
+                          {financialStats.driver_earnings.failed} {t('sync.financial.failed')}
+                        </div>
+                      )}
+                      {financialStats.driver_earnings.pending === 0 && financialStats.driver_earnings.failed === 0 && (
+                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="liquid-glass-modal-card p-2 text-center">
+                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.staff')}</div>
+                    <div className="text-xs font-bold liquid-glass-modal-text">
+                      {financialStats.staff_payments.pending > 0 && (
+                        <div className="text-blue-400">
+                          {financialStats.staff_payments.pending} {t('sync.financial.pending')}
+                        </div>
+                      )}
+                      {financialStats.staff_payments.failed > 0 && (
+                        <div className="text-red-400">
+                          {financialStats.staff_payments.failed} {t('sync.financial.failed')}
+                        </div>
+                      )}
+                      {financialStats.staff_payments.pending === 0 && financialStats.staff_payments.failed === 0 && (
+                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="liquid-glass-modal-card p-2 text-center">
+                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.expenses')}</div>
+                    <div className="text-xs font-bold liquid-glass-modal-text">
+                      {financialStats.shift_expenses.pending > 0 && (
+                        <div className="text-blue-400">
+                          {financialStats.shift_expenses.pending} {t('sync.financial.pending')}
+                        </div>
+                      )}
+                      {financialStats.shift_expenses.failed > 0 && (
+                        <div className="text-red-400">
+                          {financialStats.shift_expenses.failed} {t('sync.financial.failed')}
+                        </div>
+                      )}
+                      {financialStats.shift_expenses.pending === 0 && financialStats.shift_expenses.failed === 0 && (
+                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            )}
 
-            {/* Action Buttons */}
-            <div className="flex gap-2 pt-2 border-t border-white/10">
-              <button
-                onClick={handleForceSync}
-                disabled={syncStatus.syncInProgress}
-                className="flex-1 bg-gradient-to-r from-blue-500 to-blue-600 text-white py-2.5 px-4 rounded-xl text-sm font-semibold hover:from-blue-600 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-blue-500/20"
-              >
-                <div className="flex items-center justify-center gap-2">
-                  {syncStatus.syncInProgress ? (
-                    <>
-                      <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      <span>{t('sync.status.syncing')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
-                      <span>{t('sync.actions.forceSync')}</span>
-                    </>
-                  )}
-                </div>
-              </button>
 
-              <button
-                onClick={() => {
-                  if (window.electronAPI?.openSyncLogs) {
-                    window.electronAPI.openSyncLogs();
-                  } else {
-                    console.log('View Logs: Check browser console for sync logs');
-                    alert(t('sync.messages.logsElectronOnly'));
-                  }
-                }}
-                className="bg-white/10 text-white py-2.5 px-4 rounded-xl text-sm font-semibold hover:bg-white/20 transition-all duration-200 border border-white/10"
-              >
-                <div className="flex items-center justify-center gap-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  <span>{t('sync.actions.viewLogs')}</span>
+              {/* Order Routing Info */}
+              <OrderSyncRouteIndicator />
+
+              {/* Error Message */}
+              {syncStatus.error && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3">
+                  <div className="flex items-start gap-2">
+                    <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <div>
+                      <div className="text-sm font-semibold text-red-400 mb-1">{t('sync.labels.error')}</div>
+                      <div className="text-xs text-red-300">{syncStatus.error}</div>
+                    </div>
+                  </div>
                 </div>
-              </button>
+              )}
+
+              {/* Action Buttons */}
+              <div className="pt-4 border-t liquid-glass-modal-border">
+                <button
+                  onClick={handleForceSync}
+                  disabled={syncStatus.syncInProgress}
+                  className="w-full liquid-glass-modal-button bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <div className="flex items-center justify-center gap-2">
+                    {syncStatus.syncInProgress ? (
+                      <>
+                        <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        <span>{t('sync.status.syncing')}</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        <span>{t('sync.actions.forceSync')}</span>
+                      </>
+                    )}
+                  </div>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )
-      }
+        </>
+      )}
       <FinancialSyncPanel
         isOpen={showFinancialPanel}
         onClose={() => setShowFinancialPanel(false)}

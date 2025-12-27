@@ -19,6 +19,7 @@ import { ActivityTracker } from "./services/ActivityTracker";
 import "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
+import CustomTitleBar from "./components/CustomTitleBar";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
 import { updateAdminUrlFromSettings } from "../config/environment";
@@ -220,7 +221,15 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
   if (isConfigured === false) {
     return (
       <ErrorBoundary>
-        <OnboardingPage />
+        <ThemeProvider>
+          <div className="flex flex-col min-h-screen">
+            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
+            <CustomTitleBar />
+            <div className="pt-8">
+              <OnboardingPage />
+            </div>
+          </div>
+        </ThemeProvider>
       </ErrorBoundary>
     );
   }
@@ -254,6 +263,17 @@ function AppContent() {
   const [isLoading, setIsLoading] = useState(true);
   const { setStaff, clearShift } = useShift();
   const autoUpdater = useAutoUpdater();
+
+  // Auto-check for updates on app startup
+  useEffect(() => {
+    // Wait 5 seconds after app starts to check for updates
+    const checkUpdatesTimer = setTimeout(() => {
+      console.log('[App] Auto-checking for updates on startup');
+      autoUpdater.checkForUpdates();
+    }, 5000);
+
+    return () => clearTimeout(checkUpdatesTimer);
+  }, []); // Only run once on mount
 
   // Use custom hook for app events
   const { isShuttingDown } = useAppEvents({
@@ -450,7 +470,16 @@ function AppContent() {
     return (
       <ErrorBoundary>
         <ThemeProvider>
-          <LoginPage onLogin={handleLogin} />
+          <div className="flex flex-col min-h-screen">
+            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
+            <CustomTitleBar
+              updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
+              onCheckForUpdates={autoUpdater.openUpdateDialog}
+            />
+            <div className="pt-8 flex-1">
+              <LoginPage onLogin={handleLogin} />
+            </div>
+          </div>
           <Toaster
             position="top-center"
             toastOptions={{
@@ -470,7 +499,14 @@ function AppContent() {
     <ErrorBoundary>
       <ThemeProvider>
         <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <div className="min-h-screen">
+          <div className="min-h-screen flex flex-col">
+            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
+            <CustomTitleBar
+              updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
+              onCheckForUpdates={autoUpdater.openUpdateDialog}
+            />
+
+            <div className="pt-8 flex-1 flex flex-col">
             {/* Shutdown/Restart Overlay */}
             {isShuttingDown && (
               <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
@@ -483,7 +519,7 @@ function AppContent() {
             )}
 
             {/* Sync Status Indicator - Heart Icon in Top-Left (after navbar) */}
-            <div className="fixed top-4 left-20 z-40">
+            <div className="fixed top-12 left-20 z-40">
               <SyncStatusIndicator />
             </div>
 
@@ -561,6 +597,7 @@ function AppContent() {
               onInstall={autoUpdater.installUpdate}
               onRetry={autoUpdater.checkForUpdates}
             />
+            </div>
           </div>
         </HashRouter>
       </ThemeProvider>

@@ -1,6 +1,7 @@
 {
   "common": {
     "all": "Όλα",
+    "optional": "προαιρετικό",
     "actions": {
       "add": "Προσθήκη",
       "edit": "Επεξεργασία",
@@ -429,6 +430,7 @@
       "header": "Καλάθι ({{count}})",
       "empty": "Το καλάθι σας είναι άδειο",
       "ingredients": "Υλικά",
+      "specialNotes": "Ειδικές Οδηγίες",
       "discountLabel": "Έκπτωση %",
       "discountMax": "(μέγ. {{max}}%)",
       "discountExceeded": "Μέγ. {{max}}%",
@@ -1732,7 +1734,29 @@
       "viewLogs": "Προβολή Αρχείων Καταγραφής",
       "forceSync": "\u0386\u03BC\u03B5\u03C3\u03BF\u03C2 \u03A3\u03C5\u03B3\u03C7\u03C1\u03BF\u03BD\u03B9\u03C3\u03BC\u03CC\u03C2",
       "clearQueue": "Εκκαθάριση Ουράς",
-      "retryFailed": "Επανάληψη Αποτυχημένων"
+      "retryFailed": "Επανάληψη Αποτυχημένων",
+      "manage": "Διαχείριση"
+    },
+    "financial": {
+      "title": "Οικονομικές Συναλλαγές",
+      "subtitle": "Επίλυση αποτυχημένων συγχρονισμών οικονομικών συναλλαγών",
+      "driver": "Οδηγός",
+      "staff": "Προσωπικό",
+      "expenses": "Έξοδα",
+      "pending": "Εκκρεμεί",
+      "failed": "Απέτυχε",
+      "complete": "Ολοκληρώθηκε",
+      "allClear": "Όλα Εντάξει",
+      "noFailedItems": "Δεν βρέθηκαν αποτυχημένες οικονομικές συναλλαγές συγχρονισμού.",
+      "failedItems": "Αποτυχημένα Στοιχεία",
+      "retryAll": "Επανάληψη Όλων",
+      "retryingAll": "Επανάληψη Όλων...",
+      "retry": "Επανάληψη",
+      "attempts": "Προσπάθειες",
+      "viewPayload": "Προβολή Δεδομένων",
+      "operation": "Λειτουργία",
+      "errorMessage": "Μήνυμα Σφάλματος",
+      "createdAt": "Δημιουργήθηκε"
     },
     "conflicts": {
       "title": "Συγκρούσεις Συγχρονισμού",
@@ -1748,16 +1772,11 @@
     }
   },
   "modals": {
-    "orderType": {
-      "title": "Επιλογή Τύπου Παραγγελίας",
-      "pickupDescription": "Ο πελάτης παραλαμβάνει την παραγγελία",
-      "deliveryDescription": "Παράδοση στη διεύθυνση πελάτη"
-    },
     "orderTypeSelection": {
-      "title": "Επιλέξτε Τύπο Παραγγελίας",
+      "title": "Παραγγελία",
       "subtitle": "Επιλέξτε παραλαβή ή παράδοση παραγγελίας",
-      "pickupDescription": "Ο πελάτης παραλαμβάνει την παραγγελία από το εστιατόριο",
-      "deliveryDescription": "Παράδοση παραγγελίας στη διεύθυνση πελάτη"
+      "pickupDescription": "Παραλαβή",
+      "deliveryDescription": "Παράδοση"
     },
     "confirm": {
       "title": "Επιβεβαίωση Ενέργειας",
@@ -1828,7 +1847,12 @@
       "payWithCash": "Ολοκλήρωση παραγγελίας με μετρητά",
       "payWithCard": "Ολοκλήρωση παραγγελίας με κάρτα",
       "cashReceived": "Μετρητά που Παραλήφθηκαν",
-      "change": "Ρέστα: {{amount}}",
+      "enterCashReceived": "Μετρητά που Παραλήφθηκαν",
+      "change": "Ρέστα",
+      "insufficient": "Ανεπαρκή",
+      "completeCash": "Ολοκλήρωση",
+      "cashSimple": "ΜΕΤΡΗΤΑ",
+      "cardSimple": "ΚΑΡΤΑ",
       "back": "Πίσω",
       "completePayment": "Ολοκλήρωση Πληρωμής",
       "processing": "Επεξεργασία...",
@@ -2076,9 +2100,25 @@
     },
     "expense": {
       "title": "Καταγραφή Εξόδου",
+      "subtitle": "Καταγράψτε τα έξοδα της βάρδιας",
       "expenses": "Έξοδα",
+      "newExpense": "Νέο Έξοδο",
+      "type": "Τύπος Εξόδου",
+      "types": {
+        "supplies": "Προμήθειες",
+        "maintenance": "Συντήρηση",
+        "pettyCash": "Ταμείο Μικροδαπανών",
+        "refund": "Επιστροφή Χρημάτων",
+        "other": "Άλλο"
+      },
+      "justification": "Αιτιολογία",
+      "justificationPlaceholder": "Εισάγετε την αιτιολογία για αυτό το έξοδο...",
+      "justificationRequired": "Η αιτιολογία είναι υποχρεωτική για την καταγραφή εξόδου",
+      "description": "Περιγραφή",
       "descriptionPlaceholder": "Περιγραφή",
+      "amount": "Ποσό",
       "amountPlaceholder": "Τιμή",
+      "receiptNumber": "Αριθμός Απόδειξης",
       "receiptPlaceholder": "Αριθμός Απόδειξης (προαιρετικό)",
       "recordButton": "Καταγραφή Εξόδου",
       "noActiveShift": "Δεν βρέθηκε ενεργή βάρδια",
@@ -2088,7 +2128,8 @@
       "recordFailed": "Αποτυχία καταγραφής εξόδου",
       "totalExpenses": "Συνολικά Έξοδα",
       "noExpenses": "Δεν καταγράφηκαν έξοδα για αυτή τη βάρδια",
-      "addButton": "+ Προσθήκη Εξόδου"
+      "addButton": "+ Προσθήκη Εξόδου",
+      "items": "στοιχεία"
     },
     "connectionSettings": {
       "title": "Ρυθμίσεις Σύνδεσης",
@@ -2131,10 +2172,10 @@
       "reasonRequired": "Παρακαλώ παράσχετε λόγο ακύρωσης"
     },
     "orderType": {
-      "title": "Επιλογή Τύπου Παραγγελίας",
-      "pickup": "Παραγγελία Παραλαβής",
+      "title": "Παραγγελία",
+      "pickup": "Παραλαβή",
       "pickupDescription": "Ο πελάτης παραλαμβάνει την παραγγελία από το εστιατόριο",
-      "delivery": "Παραγγελία Διανομής",
+      "delivery": "Παράδοση",
       "deliveryDescription": "Παράδοση παραγγελίας στη διεύθυνση πελάτη"
     },
     "addCustomer": {
@@ -2311,6 +2352,10 @@
       "openingTotal": "Συνολικό Άνοιγμα",
       "driverCashGiven": "Μετρητά που δόθηκαν στον οδηγό",
       "driverCashReturned": "Μετρητά που επιστράφηκαν από τον οδηγό",
+      "driverCashBreakdown": "Ανάλυση Μετρητών Οδηγών",
+      "driverName": "Όνομα Οδηγού",
+      "unknownDriver": "Άγνωστος Οδηγός",
+      "total": "Σύνολο",
       "staffPaymentsTotal": "Σύνολο Πληρωμών Προσωπικού",
       "cashCollected": "Μετρητά που Συλλέχθηκαν",
       "cardAmount": "Ποσό Κάρτας",
@@ -2452,6 +2497,28 @@
       "connected": "Συνδέθηκε στο Admin API ✓",
       "connectionFailed": "Η σύνδεση απέτυχε: {{msg}}",
       "networkError": "Σφάλμα δικτύου"
+    },
+    "orderDetails": {
+      "title": "Λεπτομέρειες Παραγγελίας",
+      "orderNumber": "Παραγγελία",
+      "processing": "Σε Επεξεργασία",
+      "customerInformation": "Πελάτης",
+      "address": "Διεύθυνση",
+      "orderItems": "Προϊόντα",
+      "subtotal": "Υποσύνολο",
+      "tax": "ΦΠΑ",
+      "deliveryFee": "Έξοδα Αποστολής",
+      "total": "Σύνολο",
+      "printReceipt": "Εκτύπωση Απόδειξης",
+      "guestCustomer": "Επισκέπτης",
+      "noPhone": "Χωρίς τηλέφωνο",
+      "noAddress": "Χωρίς διεύθυνση",
+      "noItems": "Δεν υπάρχουν προϊόντα στην παραγγελία",
+      "notes": "Σημειώσεις",
+      "paymentMethod": "Τρόπος Πληρωμής",
+      "card": "Κάρτα",
+      "cash": "Μετρητά",
+      "pending": "Εκκρεμεί"
     }
   },
   "errors": {
@@ -2623,10 +2690,10 @@
     "deliveryTo": "Παράδοση σε: {{address}}",
     "orderFailed": "Αποτυχία δημιουργίας παραγγελίας. Παρακαλώ δοκιμάστε ξανά.",
     "startNewOrder": "Έναρξη Νέας Παραγγελίας",
-    "selectOrderType": "Επιλογή Τύπου Παραγγελίας",
+    "selectOrderType": "Παραγγελία",
     "settingUpOrder": "Ρύθμιση παραγγελίας...",
-    "pickupOrder": "Παραγγελία Παραλαβής",
-    "deliveryOrder": "Παραγγελία Παράδοσης",
+    "pickupOrder": "Παραλαβή",
+    "deliveryOrder": "Παράδοση",
     "deliveryZoneValidation": "Επικύρωση Ζώνης Παράδοσης",
     "overrideRequested": "Το προσωπικό POS ζήτησε παράκαμψη",
     "overrideRequiresApproval": "Η παράκαμψη απαιτεί έγκριση διαχειριστή",
@@ -2636,6 +2703,9 @@
     "reservationComingSoon": "Η δυνατότητα κράτησης θα είναι διαθέσιμη σύντομα"
   },
   "orderDashboard": {
+    "delivery": "Παράδοση",
+    "pickup": "Παραλαβή",
+    "dineIn": "Εντός χώρου",
     "approveOrderFailed": "Αποτυχία έγκρισης παραγγελίας",
     "declineOrderFailed": "Αποτυχία απόρριψης παραγγελίας",
     "driverAssigned": "Ο οδηγός ανατέθηκε σε {{count}} παραγγελία/ες",
@@ -2665,7 +2735,9 @@
     "orderItemsUpdated": "Τα προϊόντα παραγγελίας ενημερώθηκαν για {{count}} παραγγελία/ες",
     "orderItemsFailed": "Αποτυχία ενημέρωσης προϊόντων παραγγελίας",
     "conflictResolved": "Η σύγκρουση επιλύθηκε επιτυχώς",
-    "conflictFailed": "Αποτυχία επίλυσης σύγκρουσης"
+    "conflictFailed": "Αποτυχία επίλυσης σύγκρουσης",
+    "noDeliveryOrdersSelected": "Επιλέξτε παραγγελίες παράδοσης για να αναθέσετε οδηγό",
+    "noCancelledOrdersSelected": "Δεν υπάρχουν ακυρωμένες παραγγελίες"
   },
   "bulkActions": {
     "driver": "Οδηγός",
@@ -2696,33 +2768,37 @@
     "orderNumber": "Παραγγελία #{{number}}",
     "pendingApproval": "Εκκρεμεί Έγκριση",
     "customerInfo": "Στοιχεία Πελάτη",
-    "name": "Όνομα",
+    "name": "Πελάτης",
     "phone": "Τηλέφωνο",
     "orderType": "Τύπος Παραγγελίας",
     "created": "Δημιουργήθηκε",
     "orderItems": "Προϊόντα Παραγγελίας",
     "specialInstructions": "Ειδικές Οδηγίες",
-    "totalAmount": "Συνολικό Ποσό:",
-    "estimatedTime": "Εκτιμώμενος Χρόνος Προετοιμασίας (λεπτά)",
+    "totalAmount": "Συνολικό Ποσό",
+    "estimatedTime": "Εκτιμώμενος Χρόνος Προετοιμασίας",
     "minutesOption": "{{time}} λεπτά",
     "declineReason": "Λόγος Απόρριψης",
-    "declinePlaceholder": "Εισαγάγετε λόγο για την απόρριψη αυτής της παραγγελίας...",
+    "declinePlaceholder": "Εισαγάγετε λόγο...",
     "approving": "Έγκριση...",
-    "approveButton": "Έγκριση Παραγγελίας",
-    "declineButton": "Απόρριψη Παραγγελίας",
+    "approveButton": "Έγκριση",
+    "declineButton": "Απόρριψη",
     "declining": "Απόρριψη...",
-    "confirmDecline": "Επιβεβαίωση Απόρριψης",
+    "confirmDecline": "Επιβεβαίωση",
     "status": "Κατάσταση",
-    "address": "Διεύθυνση Παράδοσης",
-    "noItems": "Δεν υπάρχουν προϊόντα σε αυτή την παραγγελία",
+    "address": "Διεύθυνση",
+    "noItems": "Δεν βρέθηκαν προϊόντα",
     "subtotal": "Υποσύνολο",
-    "tax": "ΦΠΑ",
-    "deliveryFee": "Έξοδα Παράδοσης",
+    "tax": "Φόρος",
+    "deliveryFee": "Έξοδα Αποστολής",
     "discount": "Έκπτωση",
     "printReceipt": "Εκτύπωση Απόδειξης",
     "printing": "Εκτύπωση...",
     "printSuccess": "Η απόδειξη εκτυπώθηκε επιτυχώς",
-    "printFailed": "Αποτυχία εκτύπωσης απόδειξης"
+    "printFailed": "Αποτυχία εκτύπωσης απόδειξης",
+    "guestCustomer": "Επισκέπτης",
+    "loadingItems": "Φόρτωση προϊόντων...",
+    "retryLoadItems": "Προσπάθεια ξανά",
+    "paymentMethod": "Πληρωμή"
   },
   "shiftManager": {
     "noActiveShift": "Δεν υπάρχει ενεργή βάρδια για κλείσιμο",
@@ -3594,6 +3670,31 @@
       "total": "ΣΥΝΟΛΟ",
       "mixed": "Μικτή (Μετρητά + Κάρτα)",
       "collectCash": "ΕΙΣΠΡΑΞΗ ΜΕΤΡΗΤΩΝ ΑΠΟ ΠΕΛΑΤΗ"
+    }
+  },
+  "updates": {
+    "title": {
+      "checking": "Έλεγχος για Ενημερώσεις",
+      "available": "Διαθέσιμη Ενημέρωση",
+      "downloading": "Λήψη Ενημέρωσης",
+      "downloaded": "Ενημέρωση Έτοιμη",
+      "error": "Σφάλμα Ενημέρωσης",
+      "upToDate": "Είστε Ενημερωμένοι"
+    },
+    "checking": "Έλεγχος για ενημερώσεις...",
+    "upToDate": {
+      "title": "Είστε Ενημερωμένοι!",
+      "description": "Το The Small POS τρέχει την τελευταία έκδοση.",
+      "currentVersion": "Τρέχουσα Έκδοση: v{{version}}"
+    },
+    "actions": {
+      "download": "Λήψη",
+      "install": "Εγκατάσταση Τώρα",
+      "cancel": "Ακύρωση",
+      "close": "Κλείσιμο",
+      "retry": "Επανάληψη",
+      "recheck": "Έλεγχος Ξανά",
+      "ok": "OK"
     }
   }
 }

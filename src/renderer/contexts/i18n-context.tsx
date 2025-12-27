@@ -1,3 +1,4 @@
+/// <reference path="../types/electron.d.ts" />
 'use client'
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react'
@@ -35,18 +36,20 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
   useEffect(() => {
     const syncLanguage = async () => {
       try {
-        if (window.electron?.ipcRenderer) {
+        // Type-safe access to electron IPC (may not exist in non-Electron environments)
+        const electron = (window as any).electron;
+        if (electron?.ipcRenderer) {
           // Get language from main process database
-          const dbLanguage = await window.electron.ipcRenderer.invoke('settings:get-language');
+          const dbLanguage = await electron.ipcRenderer.invoke('settings:get-language');
           // Get language from localStorage
           const localLanguage = localStorage.getItem('language');
-          
+
           console.log(`[i18n-context] Sync check - localStorage: "${localLanguage}", database: "${dbLanguage}"`);
-          
+
           // If localStorage has a valid language that differs from database, save to database
           if (localLanguage && ['en', 'el'].includes(localLanguage) && localLanguage !== dbLanguage) {
             console.log(`[i18n-context] Syncing localStorage language "${localLanguage}" to database`);
-            const result = await window.electron.ipcRenderer.invoke('settings:set-language', localLanguage);
+            const result = await electron.ipcRenderer.invoke('settings:set-language', localLanguage);
             console.log(`[i18n-context] Sync to database result:`, result);
             // Update i18n instance to match
             if (i18nInstance.language !== localLanguage) {
@@ -77,9 +80,10 @@ const I18nProviderContent: React.FC<{ children: ReactNode }> = ({ children }) =>
       localStorage.setItem('language', lang);
       console.log(`[i18n-context] Saved to localStorage: "${lang}"`);
       // Save to database (for main process)
-      if (window.electron?.ipcRenderer) {
+      const electron = (window as any).electron;
+      if (electron?.ipcRenderer) {
         console.log(`[i18n-context] Calling settings:set-language IPC with: "${lang}"`);
-        const result = await window.electron.ipcRenderer.invoke('settings:set-language', lang);
+        const result = await electron.ipcRenderer.invoke('settings:set-language', lang);
         console.log(`[i18n-context] IPC result:`, result);
       } else {
         console.warn('[i18n-context] window.electron.ipcRenderer not available');

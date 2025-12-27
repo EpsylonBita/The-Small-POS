@@ -493,6 +493,59 @@ export class SyncService {
     throw new Error('Sync queue not empty after timeout');
   }
 
+  /**
+   * Enhanced version of forceSyncAndWaitForEmpty with progress logging.
+   * Logs queue status every 2 seconds and includes detailed error info on timeout.
+   * 
+   * @param timeoutMs - Maximum time to wait for queue to empty
+   * @param logStep - Optional logging function for step-by-step progress
+   * @returns Promise that resolves when queue is empty or rejects on timeout
+   */
+  public async forceSyncAndWaitForEmptyWithLogging(
+    timeoutMs: number,
+    logStep?: (step: number, msg: string) => void
+  ): Promise<void> {
+    const startTime = Date.now();
+    const LOG_INTERVAL = 2000; // Log every 2 seconds
+    let lastLogTime = 0;
+
+    await this.startSync();
+
+    // Poll until queue is empty or timeout
+    while (Date.now() - startTime < timeoutMs) {
+      const queue = await this.dbManager.getSyncQueue();
+
+      // Log progress every 2 seconds
+      const now = Date.now();
+      if (now - lastLogTime >= LOG_INTERVAL) {
+        if (queue.length > 0) {
+          const tables = [...new Set(queue.map((q: SyncQueue) => q.table_name))].join(', ');
+          const elapsed = ((now - startTime) / 1000).toFixed(1);
+          const message = `Sync queue: ${queue.length} items remaining (tables: ${tables}) [${elapsed}s elapsed]`;
+          console.log(`[Z-Report Submit] ${message}`);
+          if (logStep) {
+            logStep(5, message);
+          }
+        }
+        lastLogTime = now;
+      }
+
+      if (queue.length === 0) {
+        console.log('[Z-Report Submit] Sync queue empty');
+        return;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    // Timeout - get final queue state for detailed error message
+    const finalQueue = await this.dbManager.getSyncQueue();
+    const tables = [...new Set(finalQueue.map((q: SyncQueue) => q.table_name))].join(', ');
+    const errorMessage = `Sync queue not empty after ${timeoutMs / 1000}s timeout. ${finalQueue.length} items remaining (tables: ${tables})`;
+    console.error(`[Z-Report Submit] ${errorMessage}`);
+    throw new Error(errorMessage);
+  }
+
   public getNetworkStatus(): boolean {
     return this.networkMonitor.getIsOnline();
   }

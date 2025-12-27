@@ -224,6 +224,18 @@ export function registerMenuHandlers(): void {
     }
   });
 
+  // Handle menu-triggered check for updates
+  ipcMain.removeHandler('menu:trigger-check-for-updates');
+  ipcMain.handle('menu:trigger-check-for-updates', () => {
+    const currentMainWindow = serviceRegistry.mainWindow;
+    if (currentMainWindow && !currentMainWindow.isDestroyed()) {
+      // Send the event that useAutoUpdater listens for
+      currentMainWindow.webContents.send('menu:check-for-updates');
+      console.log('[menu-handlers] Sent menu:check-for-updates event');
+    }
+    return { success: true };
+  });
+
   // Setup real-time subscriptions for menu changes from admin dashboard
   const setupMenuRealtimeSync = () => {
     try {

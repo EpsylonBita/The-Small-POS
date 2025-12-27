@@ -42,18 +42,26 @@ export class WindowManager {
                 // Add sandbox for better security
                 sandbox: true
             },
-            // Windows-specific optimizations
-            titleBarStyle: process.platform === 'win32' ? 'default' : 'hiddenInset',
-            frame: true,
+            // Custom titlebar - frameless on Windows, hiddenInset on macOS
+            titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+            frame: false, // Frameless window for custom titlebar
             show: false, // Start hidden, show after content loads
             icon: path.join(__dirname, '../../public/icon.png'), // Add app icon
             // Touch-friendly window behavior
             resizable: true,
             maximizable: true,
-            fullscreenable: true // Allow fullscreen toggle via F11 or menu
+            fullscreenable: true, // Allow fullscreen toggle via F11 or menu
+            backgroundColor: '#000000' // Match dark theme default
         });
 
-        console.log('[WindowManager] Window created, setting up handlers...');
+        console.log('[WindowManager] Window created, clearing cache...');
+
+        // Clear cache on startup to prevent stale UI
+        this.mainWindow.webContents.session.clearCache().then(() => {
+            console.log('[WindowManager] Cache cleared successfully');
+        }).catch((err) => {
+            console.error('[WindowManager] Failed to clear cache:', err);
+        });
 
         this.setupEventHandlers();
         this.loadContent();
@@ -340,10 +348,10 @@ export class WindowManager {
             const loadProductionContent = async () => {
                 // Small delay to ensure all IPC handlers are registered before renderer loads
                 await new Promise(resolve => setTimeout(resolve, 500));
-                
+
                 const indexPath = path.join(__dirname, '../renderer/index.html');
                 console.log('[WindowManager] Loading production content from:', indexPath);
-                
+
                 // Check if file exists
                 const fs = require('fs');
                 if (!fs.existsSync(indexPath)) {
@@ -361,7 +369,7 @@ export class WindowManager {
                         console.error('[WindowManager] Failed to list directories:', e);
                     }
                 }
-                
+
                 try {
                     await this.mainWindow!.loadFile(indexPath);
                     console.log('[WindowManager] Production content loaded successfully');
@@ -373,7 +381,7 @@ export class WindowManager {
                     }
                 }
             };
-            
+
             loadProductionContent();
         }
     }

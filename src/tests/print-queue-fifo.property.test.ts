@@ -127,7 +127,7 @@ const receiptDateArb: fc.Arbitrary<Date> = fc
  */
 const receiptDataArb: fc.Arbitrary<ReceiptData> = fc.record({
   orderNumber: fc.stringMatching(/^[A-Z0-9]{4,10}$/),
-  orderType: fc.constantFrom('dine-in' as const, 'takeout' as const, 'delivery' as const),
+  orderType: fc.constantFrom('dine-in' as const, 'pickup' as const, 'delivery' as const),
   timestamp: receiptDateArb,
   items: fc.array(
     fc.record({
