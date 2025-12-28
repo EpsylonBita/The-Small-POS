@@ -11,9 +11,9 @@ export default function ThemeToggle() {
         <button
             onClick={cycle}
             title={t('app.themeToggle.title', { theme })}
-            className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/10 border border-white/20 text-white hover:bg-white/20 transition"
+            className="text-white/70 hover:text-white transition text-2xl p-2"
         >
-            <span className="text-lg leading-none select-none">{label}</span>
+            <span className="leading-none select-none">{label}</span>
         </button>
     );
 }

@@ -2586,7 +2586,7 @@
     "clear": "Clear",
     "loggingIn": "Logging in…",
     "loginButton": "Login",
-    "footer": "POS System v1.0 - Ready for service",
+    "footer": "The Small POS",
     "enterWithoutPin": "Enter Without PIN",
     "noPinWarning": "No PIN set. You can set one in Settings after logging in.",
     "errors": {
@@ -3388,15 +3388,40 @@
       "upToDate": "You're Up to Date"
     },
     "checking": "Checking for updates...",
+    "available": {
+      "version": "Version {{version}}",
+      "currentVersion": "Current: v{{current}} → New: v{{new}}",
+      "released": "Released: {{date}}",
+      "whatsNew": "What's New:"
+    },
+    "downloading": {
+      "progress": "Progress",
+      "speed": "Speed",
+      "downloaded": "Downloaded"
+    },
+    "downloaded": {
+      "ready": "Version {{version}} is ready!",
+      "description": "The update has been downloaded successfully. You can install it now (requires restart) or it will be installed automatically the next time you restart the app.",
+      "warning": "⚠️ Note: The app will restart immediately if you choose \"Install Now\"."
+    },
     "upToDate": {
       "title": "You're Up to Date!",
       "description": "The Small POS is running the latest version.",
       "currentVersion": "Current Version: v{{version}}"
     },
+    "error": {
+      "title": "Update Failed",
+      "timeout": "Update check timed out. Please try again.",
+      "network": "Please check your internet connection and try again.",
+      "generic": "An error occurred while checking or downloading updates."
+    },
     "actions": {
-      "download": "Download",
+      "download": "Download Update",
+      "later": "Later",
+      "cancel": "Cancel Download",
+      "installNow": "Restart & Install Now",
+      "installLater": "Install on Next Restart",
       "install": "Install Now",
-      "cancel": "Cancel",
       "close": "Close",
       "retry": "Retry",
       "recheck": "Check Again",

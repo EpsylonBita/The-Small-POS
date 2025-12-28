@@ -26,6 +26,9 @@ const SENSITIVE_CHANNELS = [
   'shift:close-all-active',
 ];
 
+// Track if we've already logged the mode message (to avoid log spam)
+let hasLoggedMode = false;
+
 /**
  * Filter allowed invoke channels based on environment
  */
@@ -33,8 +36,11 @@ export function filterAllowedInvokes(channels: string[]): string[] {
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
-    // Development: allow all channels
-    console.log('[IPC Security] Development mode - all channels enabled');
+    // Development: allow all channels (only log once)
+    if (!hasLoggedMode) {
+      console.log('[IPC Security] Development mode - all channels enabled');
+      hasLoggedMode = true;
+    }
     return channels;
   }
 
@@ -42,8 +48,10 @@ export function filterAllowedInvokes(channels: string[]): string[] {
   const filtered = channels.filter(ch => !DANGEROUS_CHANNELS_PRODUCTION.includes(ch));
   const removed = channels.filter(ch => DANGEROUS_CHANNELS_PRODUCTION.includes(ch));
 
-  if (removed.length > 0) {
+  // Only log once in production mode
+  if (!hasLoggedMode && removed.length > 0) {
     console.log('[IPC Security] Production mode - blocked dangerous channels:', removed);
+    hasLoggedMode = true;
   }
 
   return filtered;

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, CSSProperties } from 'react';
 import { useTheme } from '../contexts/theme-context';
+import { useWindowState } from '../hooks/useWindowState';
 import {
   Minus,
   Square,
@@ -46,11 +47,9 @@ interface CustomTitleBarProps {
 }
 
 const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false, onCheckForUpdates }) => {
-  console.log('[CustomTitleBar] Component rendering, updateAvailable:', updateAvailable);
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
-  const [isMaximized, setIsMaximized] = useState(false);
-  const [isFullScreen, setIsFullScreen] = useState(false);
+  const { isMaximized, isFullScreen } = useWindowState();
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [isWindows, setIsWindows] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -63,29 +62,6 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
     const isWin = platform.toLowerCase().includes('win');
     console.log('[CustomTitleBar] Platform detected:', platform, 'isWindows:', isWin);
     setIsWindows(isWin);
-  }, []);
-
-  // Check initial window state and poll for fullscreen changes
-  useEffect(() => {
-    const checkWindowState = async () => {
-      if (window.electronAPI?.ipcRenderer) {
-        try {
-          const state = await window.electronAPI.ipcRenderer.invoke('window-get-state');
-          setIsMaximized(state.isMaximized);
-          setIsFullScreen(state.isFullScreen);
-        } catch (error) {
-          console.error('Failed to get window state:', error);
-        }
-      }
-    };
-
-    // Check initial state
-    checkWindowState();
-
-    // Poll for fullscreen state changes every 500ms
-    const interval = setInterval(checkWindowState, 500);
-
-    return () => clearInterval(interval);
   }, []);
 
   // Close menu when clicking outside
@@ -110,8 +86,8 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
 
   const handleMaximize = async () => {
     if (window.electronAPI?.ipcRenderer) {
-      const newState = await window.electronAPI.ipcRenderer.invoke('window-maximize');
-      setIsMaximized(newState);
+      await window.electronAPI.ipcRenderer.invoke('window-maximize');
+      // State will be updated automatically by useWindowState hook polling
     }
   };
 

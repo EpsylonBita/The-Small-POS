@@ -61,9 +61,11 @@ module.exports = (env, argv) => {
       __filename: false
     },
     externals: {
-      '@journeyapps/sqlcipher': 'commonjs @journeyapps/sqlcipher',
       'better-sqlite3': 'commonjs better-sqlite3',
+      // Database encryption dependencies (optional - for production)
+      '@journeyapps/sqlcipher': 'commonjs @journeyapps/sqlcipher',
       'node-machine-id': 'commonjs node-machine-id',
+      // Secure credentials
       'keytar': 'commonjs keytar',
       'bufferutil': 'commonjs bufferutil',
       'utf-8-validate': 'commonjs utf-8-validate',

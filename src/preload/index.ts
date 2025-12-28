@@ -217,6 +217,7 @@ const electronAPI = {
         'app:shutdown',
         'app:restart',
         'app:get-shutdown-status',
+        'app:get-version',
 
         // Window controls
         'window-minimize',

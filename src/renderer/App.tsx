@@ -20,8 +20,10 @@ import "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
 import CustomTitleBar from "./components/CustomTitleBar";
+import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
+import { useWindowState } from "./hooks/useWindowState";
 import { updateAdminUrlFromSettings } from "../config/environment";
 
 // Extend window interface for electron API (Comment 1: secure preload)
@@ -222,13 +224,9 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
     return (
       <ErrorBoundary>
         <ThemeProvider>
-          <div className="flex flex-col min-h-screen">
-            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
-            <CustomTitleBar />
-            <div className="pt-8">
-              <OnboardingPage />
-            </div>
-          </div>
+          <FullscreenAwareLayout>
+            <OnboardingPage />
+          </FullscreenAwareLayout>
         </ThemeProvider>
       </ErrorBoundary>
     );
@@ -470,16 +468,12 @@ function AppContent() {
     return (
       <ErrorBoundary>
         <ThemeProvider>
-          <div className="flex flex-col min-h-screen">
-            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
-            <CustomTitleBar
-              updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
-              onCheckForUpdates={autoUpdater.openUpdateDialog}
-            />
-            <div className="pt-8 flex-1">
-              <LoginPage onLogin={handleLogin} />
-            </div>
-          </div>
+          <FullscreenAwareLayout
+            updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
+            onCheckForUpdates={autoUpdater.openUpdateDialog}
+          >
+            <LoginPage onLogin={handleLogin} />
+          </FullscreenAwareLayout>
           <Toaster
             position="top-center"
             toastOptions={{
@@ -499,14 +493,10 @@ function AppContent() {
     <ErrorBoundary>
       <ThemeProvider>
         <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-          <div className="min-h-screen flex flex-col">
-            {/* Custom Title Bar - Always show (window manager handles platform detection) */}
-            <CustomTitleBar
-              updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
-              onCheckForUpdates={autoUpdater.openUpdateDialog}
-            />
-
-            <div className="pt-8 flex-1 flex flex-col">
+          <FullscreenAwareLayout
+            updateAvailable={autoUpdater.available && !autoUpdater.downloading && !autoUpdater.ready}
+            onCheckForUpdates={autoUpdater.openUpdateDialog}
+          >
             {/* Shutdown/Restart Overlay */}
             {isShuttingDown && (
               <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center">
@@ -597,8 +587,7 @@ function AppContent() {
               onInstall={autoUpdater.installUpdate}
               onRetry={autoUpdater.checkForUpdates}
             />
-            </div>
-          </div>
+          </FullscreenAwareLayout>
         </HashRouter>
       </ThemeProvider>
     </ErrorBoundary>

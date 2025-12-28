@@ -4,13 +4,23 @@
  * Handles window control IPC (minimize, maximize, close).
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, app } from 'electron';
 import { serviceRegistry } from '../service-registry';
 
 /**
  * Register window control IPC handlers
  */
 export function registerWindowHandlers(): void {
+  // App version handler
+  ipcMain.removeHandler('app:get-version');
+  ipcMain.handle('app:get-version', () => {
+    try {
+      return app.getVersion();
+    } catch (e) {
+      return null;
+    }
+  });
+
   // Window control handlers (defensive against dev reloads)
   ipcMain.removeHandler('window-minimize');
   ipcMain.handle('window-minimize', () => {

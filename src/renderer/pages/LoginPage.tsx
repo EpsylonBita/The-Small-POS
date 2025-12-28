@@ -22,6 +22,22 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     const [newPin, setNewPin] = useState("");
     const [confirmPin, setConfirmPin] = useState("");
     const [setupError, setSetupError] = useState("");
+    const [appVersion, setAppVersion] = useState<string>("");
+
+    // Load app version on mount
+    useEffect(() => {
+        const loadVersion = async () => {
+            try {
+                const version = await (window as any).electronAPI?.ipcRenderer?.invoke('app:get-version');
+                if (version) {
+                    setAppVersion(version);
+                }
+            } catch (err) {
+                console.warn('[LoginPage] Failed to get app version:', err);
+            }
+        };
+        loadVersion();
+    }, []);
 
     // Load organization branding on mount
     useEffect(() => {
@@ -183,32 +199,30 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 <div className="pos-login-glow" />
 
                 <div className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
-                    <div className="w-20 h-20 sm:w-28 sm:h-28 rounded-full overflow-hidden shadow-2xl flex items-center justify-center border-2 border-white/30">
-                        {organizationLogo && !logoError ? (
+                    {organizationLogo && !logoError ? (
+                        <img
+                            src={organizationLogo}
+                            alt={organizationName || 'Organization Logo'}
+                            className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl"
+                            onError={() => {
+                                console.warn('[LoginPage] Organization logo failed to load:', organizationLogo);
+                                setLogoError(true);
+                            }}
+                        />
+                    ) : (
+                        <>
                             <img
-                                src={organizationLogo}
-                                alt={organizationName || 'Organization Logo'}
-                                className="w-full h-full object-cover"
-                                onError={() => {
-                                    console.warn('[LoginPage] Organization logo failed to load:', organizationLogo);
-                                    setLogoError(true);
-                                }}
+                                src={logoWhite}
+                                alt="The Small"
+                                className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl dark:hidden"
                             />
-                        ) : (
-                            <>
-                                <img
-                                    src={logoBlack}
-                                    alt="The Small"
-                                    className="w-full h-full object-contain p-2 bg-white dark:hidden"
-                                />
-                                <img
-                                    src={logoWhite}
-                                    alt="The Small"
-                                    className="w-full h-full object-contain p-2 bg-gray-900 hidden dark:block"
-                                />
-                            </>
-                        )}
-                    </div>
+                            <img
+                                src={logoBlack}
+                                alt="The Small"
+                                className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl hidden dark:block"
+                            />
+                        </>
+                    )}
                 </div>
 
                 <div className="text-center mb-4 sm:mb-8 relative z-10">
@@ -375,7 +389,10 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     {noPinSet && (
                         <p className="text-yellow-300 text-xs sm:text-sm mb-2">⚠️ {t('login.noPinWarning', 'No PIN configured. Please create one to continue.')}</p>
                     )}
-                    <p className="text-white/70 text-xs sm:text-sm">{t('login.footer')}</p>
+                    <p className="text-white/70 text-xs sm:text-sm">
+                        {t('login.footer')}
+                        {appVersion && <span className="ml-2 text-white/50">v{appVersion}</span>}
+                    </p>
                 </div>
             </div>
         </div>
