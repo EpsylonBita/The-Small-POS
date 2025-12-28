@@ -25,6 +25,7 @@ test_output.txt
 # OS
 .DS_Store
 Thumbs.db
+nul
 
 # Test artifacts
 test-results/
