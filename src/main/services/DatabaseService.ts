@@ -1,7 +1,6 @@
-import Database from '@journeyapps/sqlcipher';
+import Database from 'better-sqlite3';
 import * as path from 'path';
 import { app } from 'electron';
-import { generateDatabaseEncryptionKey, isDatabaseEncrypted } from '../lib/database-encryption';
 
 // Import domain services
 import { OrderService } from './OrderService';
@@ -77,21 +76,6 @@ export class DatabaseService {
     // Use retry logic for transient failures
     await withRetry(async () => {
       this.db = new Database(this.dbPath);
-
-      // SECURITY: Enable AES-256 database encryption at rest
-      // Protects customer PII, financial data, and credentials from local file access
-      const encryptionKey = generateDatabaseEncryptionKey();
-      this.db.pragma(`key = "${encryptionKey}"`);
-      this.db.pragma('cipher_page_size = 4096');
-      this.db.pragma('kdf_iter = 256000'); // PBKDF2 iterations for key derivation
-
-      // Log encryption status (without exposing key)
-      const encrypted = isDatabaseEncrypted(this.dbPath);
-      if (encrypted) {
-        console.log('[DatabaseService] Database encryption: ENABLED ✅');
-      } else {
-        console.warn('[DatabaseService] Database encryption: WARNING - Plaintext database detected');
-      }
 
       // Disable foreign keys - staff data is managed in Supabase, not locally
       // This prevents foreign key constraint failures when staff_id doesn't exist in local staff table
