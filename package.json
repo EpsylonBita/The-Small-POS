@@ -1,6 +1,6 @@
 {
   "name": "the-small-pos-system",
-  "version": "1.1.39",
+  "version": "1.1.40",
   "description": "Point of Sale system for The Small with offline capabilities",
   "main": "dist/main/main.js",
   "homepage": "./",
@@ -160,16 +160,7 @@
         "nsis"
       ],
       "icon": "public/icon.ico",
-      "verifyUpdateCodeSignature": false,
-      // CODE SIGNING: Disabled for testing phase
-      // When ready for production (handling payments), enable code signing:
-      // 1. Purchase certificate from DigiCert/Sectigo ($215-400/year)
-      // 2. Uncomment lines below
-      // 3. Change verifyUpdateCodeSignature to true
-      // "certificateFile": "./build/certs/certificate.pfx",
-      // "certificatePassword": "env:CSC_KEY_PASSWORD",
-      // "signingHashAlgorithms": ["sha256"],
-      // "signDlls": true
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": false,
