@@ -10,7 +10,7 @@ import { BrowserWindow } from 'electron';
 import { SettingsService } from './SettingsService';
 
 // Security constants
-const BCRYPT_ROUNDS = 10;
+const BCRYPT_ROUNDS = 14; // Increased from 10 to 14 for stronger security (prevents GPU cracking)
 const MIN_PIN_LENGTH = 6;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
@@ -36,8 +36,8 @@ export class AuthService {
   private settingsService: SettingsService;
   private mainWindow: BrowserWindow | null = null;
   private sessionTimeout: NodeJS.Timeout | null = null;
-  private readonly SESSION_DURATION = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
-  private readonly INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
+  private readonly SESSION_DURATION = 2 * 60 * 60 * 1000; // 2 hours (reduced from 8 for POS security)
+  private readonly INACTIVITY_TIMEOUT = 15 * 60 * 1000; // 15 minutes (PCI-DSS compliant, reduced from 30)
   private lastActivity: number = Date.now();
 
   // Rate limiting for brute-force protection

@@ -19,33 +19,24 @@
         }
         
         /* Prevent text selection for touch interface */
-        body {
+        html, body {
             -webkit-user-select: none;
             -moz-user-select: none;
             -ms-user-select: none;
             user-select: none;
             -webkit-touch-callout: none;
             -webkit-tap-highlight-color: transparent;
-            overflow-x: hidden;
+            overflow: hidden;
         }
         
-        /* Touch-friendly scrollbars */
+        /* Hide scrollbars completely */
         ::-webkit-scrollbar {
-            width: 12px;
-            height: 12px;
+            display: none;
         }
-        
-        ::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.1);
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.3);
-            border-radius: 6px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: rgba(255, 255, 255, 0.5);
+
+        * {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
         }
     </style>
 </head>

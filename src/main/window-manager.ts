@@ -167,9 +167,10 @@ export class WindowManager {
         });
 
         // Set Content Security Policy
+        // SECURITY: Strict CSP to prevent XSS attacks
         this.mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
             const csp = this.isDev
-                ? // Development: Allow unsafe-eval for HMR, unsafe-inline for styles
+                ? // Development: Allow unsafe-eval for HMR, unsafe-inline for styles only
                 "default-src 'self'; " +
                 "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://maps.googleapis.com; " +
                 "style-src 'self' 'unsafe-inline'; " +
@@ -177,22 +178,27 @@ export class WindowManager {
                 "img-src 'self' data: https:; " +
                 "font-src 'self' data:; " +
                 "frame-src 'none';"
-                : // Production: Allow inline for webpack bundles, allow Vercel for multi-tenant admin dashboards
+                : // Production: Strict CSP - unsafe-inline removed for scripts
                 "default-src 'self'; " +
                 "base-uri 'self'; " +
                 "object-src 'none'; " +
                 "frame-ancestors 'none'; " +
-                "script-src 'self' 'unsafe-inline' https://maps.googleapis.com; " +
-                "style-src 'self' 'unsafe-inline'; " +
+                "script-src 'self' https://maps.googleapis.com; " + // REMOVED unsafe-inline
+                "style-src 'self' 'unsafe-inline'; " + // Styles still need inline for webpack CSS-in-JS
                 "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://maps.googleapis.com https://www.googleapis.com https://ipapi.co https://ipwho.is https://*.vercel.app https://*.thesmall.com https://*.the-small.ai https://tomikroparisi.the-small.ai; " +
                 "img-src 'self' data: https:; " +
                 "font-src 'self' data:; " +
-                "frame-src 'none';";
+                "frame-src 'none'; " +
+                "upgrade-insecure-requests;"; // Force HTTPS for external resources
 
             callback({
                 responseHeaders: {
                     ...details.responseHeaders,
-                    'Content-Security-Policy': [csp]
+                    'Content-Security-Policy': [csp],
+                    // Additional security headers
+                    'X-Content-Type-Options': ['nosniff'],
+                    'X-Frame-Options': ['DENY'],
+                    'X-XSS-Protection': ['1; mode=block'],
                 }
             });
         });

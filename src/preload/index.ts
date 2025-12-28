@@ -10,10 +10,12 @@
  * - Only whitelisted methods can be invoked
  * - No direct access to Node.js APIs from renderer
  * - All IPC communication is validated and sanitized
+ * - Dangerous channels automatically disabled in production builds
  */
 
 import { contextBridge, ipcRenderer, IpcRendererEvent, desktopCapturer, clipboard } from 'electron';
 import type { RecordStaffPaymentParams, RecordStaffPaymentResponse, StaffPayment } from '../renderer/types/shift';
+import { filterAllowedInvokes } from './ipc-security';
 
 // Whitelisted event channels that renderer can listen to
 const ALLOWED_CHANNELS = [
@@ -284,6 +286,16 @@ const electronAPI = {
         'sync:retry-all-failed-financial',
         'sync:get-unsynced-financial-summary',
         'sync:validate-financial-integrity',
+        'sync:requeue-orphaned-financial',
+        'sync:test-parent-connection',
+        'sync:rediscover-parent',
+
+        // Admin dashboard sync endpoints
+        'sync:fetch-tables',
+        'sync:fetch-reservations',
+        'sync:fetch-suppliers',
+        'sync:fetch-analytics',
+        'sync:fetch-orders',
 
         // Customer cache and CRUD/conflicts
         'customer:invalidate-cache',
@@ -398,8 +410,10 @@ const electronAPI = {
         'report:generate-z-report',
         'report:get-daily-staff-performance',
         'report:submit-z-report',
-        // Remote control input injection
-        'input:inject',
+
+        // SECURITY: Removed 'input:inject' - critical security vulnerability
+        // Remote input injection is extremely dangerous and can lead to full system compromise
+        // If remote support is needed, implement specific, validated actions instead
 
         // Geolocation
         'geo:ip',
@@ -445,7 +459,10 @@ const electronAPI = {
         'modules:save-cache',
       ];
 
-      if (!allowedInvokes.includes(channel)) {
+      // Filter out dangerous channels in production builds
+      const filteredInvokes = filterAllowedInvokes(allowedInvokes);
+
+      if (!filteredInvokes.includes(channel)) {
         console.error(`Attempted to invoke non-whitelisted method: ${channel}`);
         throw new Error(`Unauthorized IPC invoke: ${channel}`);
       }

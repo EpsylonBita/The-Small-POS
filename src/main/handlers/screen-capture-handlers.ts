@@ -40,7 +40,19 @@ export function registerScreenCaptureHandlers(): void {
     }
   });
 
-  // Remote control input injection (used by renderer after HMAC verification)
+  // SECURITY: DISABLED - Remote input injection is a critical security vulnerability
+  // This feature allows arbitrary input injection which can lead to:
+  // - Opening DevTools and executing malicious code
+  // - Navigating to malicious sites
+  // - Exfiltrating sensitive data
+  // - Modifying system settings
+  //
+  // If remote support is required, implement specific, validated actions instead:
+  // - 'remote-support:click-element' with element ID validation
+  // - 'remote-support:navigate-to-page' with page whitelist
+  // - Always require explicit user confirmation for remote actions
+  // - Implement audit logging for all remote support sessions
+  /*
   ipcMain.handle('input:inject', async (_event, inputEvent: any) => {
     try {
       const mainWindow = serviceRegistry.mainWindow;
@@ -79,4 +91,5 @@ export function registerScreenCaptureHandlers(): void {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });
+  */
 }

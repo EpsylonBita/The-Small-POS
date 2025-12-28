@@ -1,0 +1,8 @@
+# SECURITY: Never commit code signing certificates or private keys
+*.pfx
+*.p12
+*.key
+*.pem
+*.cer
+*.crt
+!README.md

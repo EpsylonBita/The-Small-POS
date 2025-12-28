@@ -9,329 +9,516 @@ import {
   RefreshCw,
   Search,
   Filter,
+  ChevronLeft,
   ChevronRight,
   User,
   MapPin,
-  CreditCard,
-  Banknote,
+  Phone,
+  Package,
   Truck,
   Store,
-  Eye
+  Calendar,
+  DollarSign,
+  X
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { getApiUrl } from '../../config/environment';
-import { OrderService } from '../../services/OrderService';
+
+interface OrderItem {
+  id: string;
+  menu_item_id: string;
+  name: string;
+  quantity: number;
+  price: number;
+  unit_price: number;
+  total_price: number;
+  customizations?: Record<string, any>;
+  notes?: string;
+}
 
 interface Order {
   id: string;
   order_number: string;
-  status: 'pending' | 'preparing' | 'ready' | 'completed' | 'cancelled';
-  order_type: 'dine_in' | 'takeaway' | 'delivery';
-  payment_method: 'cash' | 'card' | 'online';
+  status: 'pending' | 'confirmed' | 'preparing' | 'ready' | 'completed' | 'cancelled';
+  order_type: 'dine-in' | 'pickup' | 'delivery';
+  payment_method: 'cash' | 'card' | 'digital_wallet' | 'other';
+  payment_status?: 'pending' | 'paid' | 'partially_paid' | 'refunded' | 'failed';
   total_amount: number;
+  subtotal?: number;
+  tax_amount?: number;
+  delivery_fee?: number;
+  discount_amount?: number;
   customer_name?: string;
   customer_phone?: string;
+  customer_email?: string;
   delivery_address?: string;
-  items_count: number;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  delivery_floor?: string;
+  delivery_notes?: string;
+  table_number?: string;
+  special_instructions?: string;
+  name_on_ringer?: string;
+  order_items: OrderItem[];
   created_at: string;
   updated_at: string;
+  estimated_ready_time?: number;
+}
+
+interface FetchOrdersOptions {
+  status?: string;
+  order_type?: string;
+  date_from?: string;
+  date_to?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
 }
 
 const OrdersPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
+
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [total, setTotal] = useState(0);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+
+  // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [orderTypeFilter, setOrderTypeFilter] = useState<string>('all');
+
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 20;
 
   const isDark = resolvedTheme === 'dark';
   const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
 
   const fetchOrders = useCallback(async () => {
-    // Only fetch if we have a branch ID
-    if (!staff?.branchId) return;
+    if (!window.electron?.ipcRenderer) {
+      console.error('[OrdersPage] Electron API not available');
+      toast.error('Electron API not available');
+      setLoading(false);
+      return;
+    }
 
-    setLoading(true);
+    setSyncing(true);
     try {
-      const ordersData = await OrderService.getInstance().fetchOrders();
-      // Map shared Order type to local Order interface
-      const mappedOrders: Order[] = (ordersData || []).map((o: any) => ({
-        id: o.id,
-        order_number: o.order_number || o.orderNumber || o.id.slice(0, 8),
-        status: o.status,
-        order_type: o.order_type || o.orderType || 'takeaway',
-        payment_method: o.payment_method || o.paymentMethod || 'cash',
-        total_amount: o.total_amount || o.totalAmount || 0,
-        customer_name: o.customer_name || o.customerName,
-        customer_phone: o.customer_phone || o.customerPhone,
-        delivery_address: o.delivery_address || o.deliveryAddress,
-        items_count: o.items?.length || o.itemsCount || 0,
-        created_at: o.created_at || o.createdAt || new Date().toISOString(),
-        updated_at: o.updated_at || o.updatedAt || new Date().toISOString()
-      }));
-      setOrders(mappedOrders);
+      const options: FetchOrdersOptions = {
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
+      };
+
+      if (statusFilter !== 'all') options.status = statusFilter;
+      if (orderTypeFilter !== 'all') options.order_type = orderTypeFilter;
+      if (searchTerm) options.search = searchTerm;
+      if (dateFrom) options.date_from = dateFrom;
+      if (dateTo) options.date_to = dateTo;
+
+      console.log('[OrdersPage] Fetching orders with options:', options);
+      const result = await window.electron.ipcRenderer.invoke('sync:fetch-orders', options);
+      console.log('[OrdersPage] Fetch result:', {
+        success: result.success,
+        ordersCount: result.orders?.length,
+        total: result.total,
+        error: result.error
+      });
+
+      if (result.success) {
+        setOrders(result.orders || []);
+        setTotal(result.total || 0);
+        console.log('[OrdersPage] Orders set:', result.orders?.length || 0);
+      } else {
+        console.error('[OrdersPage] Failed to fetch orders:', result.error);
+        toast.error(result.error || 'Failed to load orders');
+      }
     } catch (error) {
-      console.error('Failed to fetch orders:', error);
-      const msg = (error as any)?.message || 'Failed to load orders';
-      toast.error(t('orders.errors.loadFailed', 'Failed to load orders'));
+      console.error('[OrdersPage] Exception while fetching orders:', error);
+      toast.error('Failed to load orders');
     } finally {
       setLoading(false);
+      setSyncing(false);
     }
-  }, [staff?.branchId, t]);
+  }, [statusFilter, orderTypeFilter, searchTerm, dateFrom, dateTo, currentPage, pageSize, t]);
 
   useEffect(() => {
     fetchOrders();
-    const interval = setInterval(fetchOrders, 30000); // Refresh every 30s
+  }, [fetchOrders]);
+
+  // Auto-refresh every 30 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchOrders();
+    }, 30000);
     return () => clearInterval(interval);
   }, [fetchOrders]);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'pending': return 'bg-yellow-500/20 text-yellow-500 border-yellow-500/30';
-      case 'preparing': return 'bg-blue-500/20 text-blue-500 border-blue-500/30';
-      case 'ready': return 'bg-green-500/20 text-green-500 border-green-500/30';
-      case 'completed': return 'bg-gray-500/20 text-gray-500 border-gray-500/30';
-      case 'cancelled': return 'bg-red-500/20 text-red-500 border-red-500/30';
-      default: return 'bg-gray-500/20 text-gray-500 border-gray-500/30';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'pending': return <Clock className="w-4 h-4" />;
-      case 'preparing': return <RefreshCw className="w-4 h-4 animate-spin" />;
-      case 'ready': return <CheckCircle className="w-4 h-4" />;
-      case 'completed': return <CheckCircle className="w-4 h-4" />;
-      case 'cancelled': return <XCircle className="w-4 h-4" />;
-      default: return <Clock className="w-4 h-4" />;
-    }
+  const getStatusBadge = (status: string) => {
+    const colors: Record<string, string> = {
+      pending: 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/20',
+      confirmed: 'bg-blue-500/10 text-blue-600 border border-blue-500/20',
+      preparing: 'bg-purple-500/10 text-purple-600 border border-purple-500/20',
+      ready: 'bg-green-500/10 text-green-600 border border-green-500/20',
+      completed: 'bg-gray-500/10 text-gray-600 border border-gray-500/20',
+      cancelled: 'bg-red-500/10 text-red-600 border border-red-500/20',
+    };
+    return colors[status] || colors.pending;
   };
 
   const getOrderTypeIcon = (type: string) => {
     switch (type) {
       case 'delivery': return <Truck className="w-4 h-4" />;
-      case 'takeaway': return <ShoppingBag className="w-4 h-4" />;
-      default: return <Store className="w-4 h-4" />;
+      case 'pickup': return <ShoppingBag className="w-4 h-4" />;
+      case 'dine-in': return <Store className="w-4 h-4" />;
+      default: return <ShoppingBag className="w-4 h-4" />;
     }
   };
 
-  const filteredOrders = orders.filter(order => {
-    const matchesStatus = statusFilter === 'all' || order.status === statusFilter;
-    const matchesSearch = !searchTerm ||
-      order.order_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      order.customer_name?.toLowerCase().includes(searchTerm.toLowerCase());
-    return matchesStatus && matchesSearch;
-  });
+  const totalPages = Math.ceil(total / pageSize);
 
-  const statusCounts = {
-    all: orders.length,
-    pending: orders.filter(o => o.status === 'pending').length,
-    preparing: orders.filter(o => o.status === 'preparing').length,
-    ready: orders.filter(o => o.status === 'ready').length,
-    completed: orders.filter(o => o.status === 'completed').length,
+  const handleClearFilters = () => {
+    setStatusFilter('all');
+    setOrderTypeFilter('all');
+    setSearchTerm('');
+    setDateFrom('');
+    setDateTo('');
+    setCurrentPage(1);
   };
 
   if (loading && orders.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
-        <RefreshCw className="w-8 h-8 animate-spin text-cyan-500" />
+        <div className="text-center">
+          <RefreshCw className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
+          <p className={isDark ? 'text-gray-300' : 'text-gray-700'}>Loading orders...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className={`h-full flex ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
-      {/* Orders List */}
-      <div className="flex-1 flex flex-col overflow-hidden p-4">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-cyan-500/20">
-              <ShoppingBag className="w-6 h-6 text-cyan-500" />
-            </div>
+    <div className={`h-full flex flex-col ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+      {/* Header */}
+      <div className={`border-b ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+        <div className="p-6">
+          <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-xl font-bold">{t('orders.title', 'Orders')}</h1>
+              <h1 className="text-2xl font-bold mb-1">{t('orders.title', 'Orders')}</h1>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {t('orders.subtitle', 'Manage and track orders')}
+                {total} {total === 1 ? 'order' : 'orders'} total
               </p>
             </div>
-          </div>
-          <button
-            onClick={fetchOrders}
-            className={`p-2 rounded-lg ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'}`}
-          >
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-
-        {/* Search & Filters */}
-        <div className="flex gap-3 mb-4">
-          <div className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-white'} border ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
-            <Search className="w-4 h-4 text-gray-400" />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder={t('orders.search', 'Search orders...')}
-              className="flex-1 bg-transparent outline-none text-sm"
-            />
-          </div>
-        </div>
-
-        {/* Status Tabs */}
-        <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
-          {(['all', 'pending', 'preparing', 'ready', 'completed'] as const).map((status) => (
             <button
-              key={status}
-              onClick={() => setStatusFilter(status)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap transition-colors flex items-center gap-2 ${statusFilter === status
-                ? 'bg-cyan-500 text-white'
-                : isDark ? 'bg-gray-800 text-gray-300 hover:bg-gray-700' : 'bg-white text-gray-700 hover:bg-gray-100'
-                }`}
+              onClick={fetchOrders}
+              disabled={syncing}
+              className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${
+                isDark
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-blue-500 hover:bg-blue-600 text-white'
+              } ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
-              {t(`orders.status.${status}`, status.charAt(0).toUpperCase() + status.slice(1))}
-              <span className={`px-1.5 py-0.5 rounded text-xs ${statusFilter === status ? 'bg-white/20' : isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
-                {statusCounts[status]}
-              </span>
+              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+              {syncing ? 'Syncing...' : 'Refresh'}
             </button>
-          ))}
-        </div>
+          </div>
 
-        {/* Orders Grid */}
-        <div className="flex-1 overflow-y-auto">
-          {filteredOrders.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-center">
-              <ShoppingBag className="w-12 h-12 text-gray-400 mb-4" />
-              <h3 className="text-lg font-semibold mb-2">{t('orders.noOrders', 'No Orders')}</h3>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {t('orders.noOrdersDesc', 'Orders will appear here when placed.')}
-              </p>
+          {/* Search and Filters */}
+          <div className="space-y-3">
+            <div className={`flex items-center gap-2 px-4 py-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+              <Search className="w-5 h-5 text-gray-400" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search by order number, customer name, or phone..."
+                className="flex-1 bg-transparent outline-none"
+              />
+              {searchTerm && (
+                <button onClick={() => setSearchTerm('')} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-4 h-4" />
+                </button>
+              )}
             </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-              <AnimatePresence>
-                {filteredOrders.map((order) => (
-                  <motion.div
-                    key={order.id}
-                    initial={{ opacity: 0, scale: 0.95 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    onClick={() => setSelectedOrder(order)}
-                    className={`p-4 rounded-xl cursor-pointer transition-all ${isDark ? 'bg-gray-800/50 hover:bg-gray-800' : 'bg-white hover:bg-gray-50'} border ${isDark ? 'border-gray-700' : 'border-gray-200'} ${selectedOrder?.id === order.id ? 'ring-2 ring-cyan-500' : ''}`}
+
+            {/* Filter Toggle */}
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm ${
+                isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+              }`}
+            >
+              <Filter className="w-4 h-4" />
+              {showFilters ? 'Hide Filters' : 'Show Filters'}
+            </button>
+
+            {/* Filters Panel */}
+            <AnimatePresence>
+              {showFilters && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="overflow-hidden"
+                >
+                  <div className={`grid grid-cols-3 gap-3 p-4 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                    <div>
+                      <label className="text-xs mb-1 block opacity-70">Status</label>
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                      >
+                        <option value="all">All Statuses</option>
+                        <option value="pending">Pending</option>
+                        <option value="confirmed">Confirmed</option>
+                        <option value="preparing">Preparing</option>
+                        <option value="ready">Ready</option>
+                        <option value="completed">Completed</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs mb-1 block opacity-70">Order Type</label>
+                      <select
+                        value={orderTypeFilter}
+                        onChange={(e) => setOrderTypeFilter(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                      >
+                        <option value="all">All Types</option>
+                        <option value="dine-in">Dine-In</option>
+                        <option value="pickup">Pickup</option>
+                        <option value="delivery">Delivery</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs mb-1 block opacity-70">Date From</label>
+                      <input
+                        type="date"
+                        value={dateFrom}
+                        onChange={(e) => setDateFrom(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleClearFilters}
+                    className="mt-2 text-sm text-blue-500 hover:text-blue-600"
                   >
-                    <div className="flex items-start justify-between mb-3">
-                      <div>
-                        <p className="font-bold text-lg">{order.order_number}</p>
-                        <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                          {new Date(order.created_at).toLocaleTimeString()}
-                        </p>
-                      </div>
-                      <span className={`px-2 py-1 rounded-lg text-xs font-medium flex items-center gap-1 border ${getStatusColor(order.status)}`}>
-                        {getStatusIcon(order.status)}
-                        {t(`orders.status.${order.status}`, order.status)}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-4 mb-3">
-                      <div className="flex items-center gap-1 text-sm">
-                        {getOrderTypeIcon(order.order_type)}
-                        <span className="capitalize">{order.order_type.replace('_', ' ')}</span>
-                      </div>
-                      <div className="flex items-center gap-1 text-sm">
-                        {order.payment_method === 'cash' ? <Banknote className="w-4 h-4" /> : <CreditCard className="w-4 h-4" />}
-                        <span className="capitalize">{order.payment_method}</span>
-                      </div>
-                    </div>
-                    {order.customer_name && (
-                      <div className="flex items-center gap-2 mb-2 text-sm">
-                        <User className="w-4 h-4 text-gray-400" />
-                        <span>{order.customer_name}</span>
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between pt-3 border-t border-gray-700/50">
-                      <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                        {order.items_count} {t('orders.items', 'items')}
-                      </span>
-                      <span className="font-bold text-lg text-cyan-500">
-                        {currency.format(order.total_amount)}
-                      </span>
-                    </div>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-            </div>
-          )}
+                    Clear all filters
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </div>
 
-      {/* Order Details Panel */}
+      {/* Orders List */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {orders.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
+            <h3 className="text-lg font-semibold mb-2">No Orders Found</h3>
+            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+              No orders match your current filters.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {orders.map((order) => (
+              <motion.div
+                key={order.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className={`p-4 rounded-lg border cursor-pointer transition-all ${
+                  isDark
+                    ? 'bg-gray-800 border-gray-700 hover:border-blue-500'
+                    : 'bg-white border-gray-200 hover:border-blue-400 hover:shadow-md'
+                }`}
+                onClick={() => setSelectedOrder(order)}
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-2">
+                      <span className="font-mono font-bold text-lg">#{order.order_number}</span>
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(order.status)}`}>
+                        {order.status}
+                      </span>
+                      <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                        {getOrderTypeIcon(order.order_type)}
+                        <span>{order.order_type}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      {order.customer_name && (
+                        <div className="flex items-center gap-2">
+                          <User className="w-4 h-4 opacity-50" />
+                          <span>{order.customer_name}</span>
+                        </div>
+                      )}
+                      {order.customer_phone && (
+                        <div className="flex items-center gap-2">
+                          <Phone className="w-4 h-4 opacity-50" />
+                          <span>{order.customer_phone}</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <Package className="w-4 h-4 opacity-50" />
+                        <span>{order.order_items?.length || 0} items</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <div className="text-2xl font-bold mb-1">
+                      {currency.format(order.total_amount)}
+                    </div>
+                    <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                      {new Date(order.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className={`border-t p-4 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+          <div className="flex items-center justify-between">
+            <div className="text-sm opacity-70">
+              Page {currentPage} of {totalPages}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className={`px-3 py-2 rounded-lg ${
+                  currentPage === 1
+                    ? 'opacity-50 cursor-not-allowed'
+                    : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                }`}
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className={`px-3 py-2 rounded-lg ${
+                  currentPage === totalPages
+                    ? 'opacity-50 cursor-not-allowed'
+                    : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                }`}
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Order Detail Modal */}
       <AnimatePresence>
         {selectedOrder && (
           <motion.div
-            initial={{ x: 300, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 300, opacity: 0 }}
-            className={`w-80 border-l ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} p-4 overflow-y-auto`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            onClick={() => setSelectedOrder(null)}
           >
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold">{selectedOrder.order_number}</h2>
-              <button
-                onClick={() => setSelectedOrder(null)}
-                className={`p-1 rounded-lg ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-              >
-                <XCircle className="w-5 h-5" />
-              </button>
-            </div>
-            <div className={`p-3 rounded-lg mb-4 ${getStatusColor(selectedOrder.status)} border`}>
-              <div className="flex items-center gap-2">
-                {getStatusIcon(selectedOrder.status)}
-                <span className="font-medium capitalize">{selectedOrder.status}</span>
-              </div>
-            </div>
-            <div className="space-y-4">
-              <div>
-                <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'} mb-1`}>{t('orders.orderType', 'Order Type')}</p>
-                <div className="flex items-center gap-2">
-                  {getOrderTypeIcon(selectedOrder.order_type)}
-                  <span className="capitalize">{selectedOrder.order_type.replace('_', ' ')}</span>
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className={`max-w-2xl w-full max-h-[90vh] overflow-y-auto rounded-lg ${
+                isDark ? 'bg-gray-800' : 'bg-white'
+              }`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-6">
+                <div className="flex items-start justify-between mb-6">
+                  <div>
+                    <h2 className="text-2xl font-bold mb-2">Order #{selectedOrder.order_number}</h2>
+                    <div className="flex items-center gap-2">
+                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusBadge(selectedOrder.status)}`}>
+                        {selectedOrder.status}
+                      </span>
+                      <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-sm ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                        {getOrderTypeIcon(selectedOrder.order_type)}
+                        <span>{selectedOrder.order_type}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setSelectedOrder(null)}
+                    className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-              </div>
-              <div>
-                <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'} mb-1`}>{t('orders.payment', 'Payment')}</p>
-                <div className="flex items-center gap-2">
-                  {selectedOrder.payment_method === 'cash' ? <Banknote className="w-4 h-4" /> : <CreditCard className="w-4 h-4" />}
-                  <span className="capitalize">{selectedOrder.payment_method}</span>
-                </div>
-              </div>
-              {selectedOrder.customer_name && (
-                <div>
-                  <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'} mb-1`}>{t('orders.customer', 'Customer')}</p>
-                  <div className="flex items-center gap-2">
-                    <User className="w-4 h-4" />
-                    <span>{selectedOrder.customer_name}</span>
+
+                {/* Customer Info */}
+                <div className={`p-4 rounded-lg mb-4 ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                  <h3 className="font-semibold mb-3">Customer Information</h3>
+                  <div className="space-y-2 text-sm">
+                    {selectedOrder.customer_name && (
+                      <div className="flex items-center gap-2">
+                        <User className="w-4 h-4 opacity-50" />
+                        <span>{selectedOrder.customer_name}</span>
+                      </div>
+                    )}
+                    {selectedOrder.customer_phone && (
+                      <div className="flex items-center gap-2">
+                        <Phone className="w-4 h-4 opacity-50" />
+                        <span>{selectedOrder.customer_phone}</span>
+                      </div>
+                    )}
+                    {selectedOrder.delivery_address && (
+                      <div className="flex items-center gap-2">
+                        <MapPin className="w-4 h-4 opacity-50" />
+                        <span>{selectedOrder.delivery_address}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
-              {selectedOrder.delivery_address && (
-                <div>
-                  <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'} mb-1`}>{t('orders.address', 'Address')}</p>
-                  <div className="flex items-center gap-2">
-                    <MapPin className="w-4 h-4" />
-                    <span className="text-sm">{selectedOrder.delivery_address}</span>
+
+                {/* Order Items */}
+                <div className={`p-4 rounded-lg mb-4 ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                  <h3 className="font-semibold mb-3">Order Items</h3>
+                  <div className="space-y-2">
+                    {selectedOrder.order_items?.map((item) => (
+                      <div key={item.id} className="flex justify-between items-center text-sm">
+                        <div>
+                          <span className="font-medium">{item.quantity}x</span> {item.name}
+                        </div>
+                        <div className="font-medium">{currency.format(item.total_price)}</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              )}
-              <div className="pt-4 border-t border-gray-700/50">
-                <div className="flex justify-between items-center">
-                  <span className="font-medium">{t('orders.total', 'Total')}</span>
-                  <span className="text-xl font-bold text-cyan-500">{currency.format(selectedOrder.total_amount)}</span>
+
+                {/* Order Total */}
+                <div className={`p-4 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                  <div className="flex justify-between items-center text-lg font-bold">
+                    <span>Total</span>
+                    <span>{currency.format(selectedOrder.total_amount)}</span>
+                  </div>
+                  <div className={`text-xs mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                    Ordered: {new Date(selectedOrder.created_at).toLocaleString()}
+                  </div>
                 </div>
               </div>
-            </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -340,4 +527,3 @@ const OrdersPage: React.FC = () => {
 };
 
 export default OrdersPage;
-

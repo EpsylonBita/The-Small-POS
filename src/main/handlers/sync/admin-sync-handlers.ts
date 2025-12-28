@@ -5,10 +5,12 @@ import {
   fetchReservationsFromAdmin,
   fetchSuppliersFromAdmin,
   fetchAnalyticsFromAdmin,
+  fetchOrdersFromAdmin,
   type FetchTablesOptions,
   type FetchReservationsOptions,
   type FetchSuppliersOptions,
   type FetchAnalyticsOptions,
+  type FetchOrdersOptions,
 } from '../../api-sync';
 
 /**
@@ -391,6 +393,25 @@ export function setupAdminSyncHandlers(): void {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch analytics',
+      };
+    }
+  });
+
+  // Fetch orders from admin dashboard
+  ipcMain.handle('sync:fetch-orders', async (_event, options?: FetchOrdersOptions) => {
+    try {
+      console.log('[Sync Handlers] sync:fetch-orders called', { options });
+      const result = await fetchOrdersFromAdmin(dbManager, options);
+      return {
+        success: true,
+        orders: result.orders,
+        total: result.total
+      };
+    } catch (error) {
+      console.error('[Sync Handlers] sync:fetch-orders error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch orders',
       };
     }
   });

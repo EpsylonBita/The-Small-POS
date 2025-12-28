@@ -14,7 +14,7 @@
  * - See docs/architecture/REFACTORED_ARCHITECTURE.md for details
  */
 
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog } from 'electron';
 import { serviceRegistry } from './service-registry';
 import {
   initializeDatabase,
@@ -33,6 +33,7 @@ import {
 import { registerAllMainHandlers, registerAllDomainHandlers } from './handlers';
 import { initializeAutoUpdater } from './auto-updater';
 import { createApplicationMenu } from './app-menu';
+import { verifyASARIntegrity } from './lib/asar-integrity';
 
 // Configure Google API key for geolocation BEFORE app is ready
 try {
@@ -48,6 +49,21 @@ try {
 // App ready handler
 app.whenReady().then(async () => {
   try {
+    // SECURITY: Verify ASAR integrity before proceeding
+    // Detects post-installation tampering
+    const integrityCheck = verifyASARIntegrity();
+    if (!integrityCheck.valid && integrityCheck.isASAR) {
+      console.error('[Security] ASAR integrity check failed!');
+      dialog.showErrorBox(
+        'Security Error',
+        'Application integrity check failed. The application may have been tampered with.\n\n' +
+        'Please reinstall from official source.\n\n' +
+        'Error: ' + (integrityCheck.error || 'Unknown')
+      );
+      app.quit();
+      return;
+    }
+
     // Register all main IPC handlers (clipboard, window, geo, etc.)
     registerAllMainHandlers();
 

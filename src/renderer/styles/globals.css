@@ -9,6 +9,7 @@ html, body, #root {
   min-height: 100dvh; /* Dynamic viewport height for mobile */
   margin: 0;
   padding: 0;
+  overflow: hidden;
 }
 
 /* Dark theme background */
@@ -38,7 +39,7 @@ html.dark, html.dark body, html.dark #root {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     background-color: #f8fafc;
-    overflow-x: hidden;
+    overflow: hidden;
     /* Prevent pull-to-refresh on mobile */
     overscroll-behavior-y: contain;
   }

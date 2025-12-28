@@ -48,13 +48,10 @@ module.exports = (env, argv) => {
       new webpack.DefinePlugin({
         'global': 'globalThis',
         'process.env.NODE_ENV': JSON.stringify(mode),
-        'process.env.SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL),
-        'process.env.SUPABASE_ANON_KEY': JSON.stringify(process.env.SUPABASE_ANON_KEY),
-        // NOTE: SUPABASE_SERVICE_ROLE_KEY intentionally NOT bundled - bypasses RLS, security risk
-        'process.env.VITE_SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL),
-        'process.env.VITE_SUPABASE_ANON_KEY': JSON.stringify(process.env.SUPABASE_ANON_KEY),
-        'process.env.NEXT_PUBLIC_SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL),
-        'process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY': JSON.stringify(process.env.SUPABASE_ANON_KEY),
+        // SECURITY: Supabase credentials removed from webpack bundle
+        // They are now stored securely in OS keychain and retrieved at runtime
+        // via src/main/lib/secure-credentials.ts
+        // This prevents credential extraction from ASAR archive
         'process.env.ADMIN_DASHBOARD_URL': JSON.stringify(process.env.ADMIN_DASHBOARD_URL),
         'process.env.TERMINAL_ID': JSON.stringify(process.env.TERMINAL_ID),
       })
@@ -64,7 +61,10 @@ module.exports = (env, argv) => {
       __filename: false
     },
     externals: {
+      '@journeyapps/sqlcipher': 'commonjs @journeyapps/sqlcipher',
       'better-sqlite3': 'commonjs better-sqlite3',
+      'node-machine-id': 'commonjs node-machine-id',
+      'keytar': 'commonjs keytar',
       'bufferutil': 'commonjs bufferutil',
       'utf-8-validate': 'commonjs utf-8-validate',
       // Native printer modules - optional dependencies

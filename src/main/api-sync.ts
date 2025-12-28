@@ -112,6 +112,52 @@ export interface FetchAnalyticsOptions {
   section?: string;
 }
 
+export interface FetchOrdersOptions {
+  status?: string;
+  order_type?: string;
+  date_from?: string;
+  date_to?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface OrderFromAdmin {
+  id: string;
+  order_number: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_email?: string;
+  items: any[];
+  total_amount: number;
+  status: string;
+  order_type?: string;
+  payment_method?: string;
+  payment_status?: string;
+  delivery_address?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  delivery_floor?: string;
+  delivery_notes?: string;
+  table_number?: string;
+  special_instructions?: string;
+  name_on_ringer?: string;
+  driver_id?: string;
+  driver_name?: string;
+  staff_id?: string;
+  staff_shift_id?: string;
+  branch_id?: string;
+  terminal_id?: string;
+  subtotal?: number;
+  tax_amount?: number;
+  delivery_fee?: number;
+  discount_amount?: number;
+  tip_amount?: number;
+  created_at: string;
+  updated_at: string;
+  estimated_ready_time?: number;
+}
+
 /**
  * Resolve terminal settings from database or environment
  * Persisted settings (from connection string) take priority over env vars
@@ -348,5 +394,35 @@ export async function fetchAnalyticsFromAdmin(
 
   console.log(`[POS API Sync] fetchAnalyticsFromAdmin: Success`);
   return data.analytics || { data: data.data || {} };
+}
+
+/**
+ * Fetch all orders from admin dashboard
+ * This fetches orders from Supabase through the admin dashboard API
+ * Used for the Orders Page to display all historical orders
+ */
+export async function fetchOrdersFromAdmin(
+  db: DatabaseManager,
+  options?: FetchOrdersOptions
+): Promise<{ orders: OrderFromAdmin[]; total: number }> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const queryString = buildQueryString(options || {});
+  const url = `${base}/api/pos/orders${queryString}`;
+
+  console.log(`[POS API Sync] fetchOrdersFromAdmin: Fetching orders`, { terminalId, url, options });
+
+  const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchOrdersFromAdmin');
+  const data = await parseApiResponse<{ success: boolean; orders: OrderFromAdmin[]; total?: number }>(
+    response,
+    'fetchOrdersFromAdmin'
+  );
+
+  console.log(`[POS API Sync] fetchOrdersFromAdmin: Success`, { count: data.orders?.length || 0, total: data.total || 0 });
+  return {
+    orders: data.orders || [],
+    total: data.total || data.orders?.length || 0
+  };
 }
 
