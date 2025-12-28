@@ -27,9 +27,9 @@ export const OrderItemSchema = z.object({
 export const OrderCreateSchema = z.object({
   items: z.array(OrderItemSchema).min(1, 'At least one item required').max(100, 'Too many items'),
   customerId: z.string().uuid('Invalid customer ID').optional(),
-  orderType: z.enum(['dine-in', 'takeaway', 'delivery'], { errorMap: () => ({ message: 'Invalid order type' }) }),
+  orderType: z.enum(['dine-in', 'takeaway', 'delivery'] as const),
   total: z.number().positive('Total must be positive').max(1000000, 'Total too large'),
-  payment_method: z.enum(['cash', 'card', 'online'], { errorMap: () => ({ message: 'Invalid payment method' }) }),
+  payment_method: z.enum(['cash', 'card', 'online'] as const),
   delivery_address: z.string().max(500, 'Address too long').optional(),
   customer_phone: z.string().max(20, 'Phone number too long').optional(),
   notes: z.string().max(1000, 'Notes too long').optional(),
@@ -37,13 +37,9 @@ export const OrderCreateSchema = z.object({
 
 export const OrderUpdateSchema = z.object({
   id: z.string().uuid('Invalid order ID'),
-  status: z.enum(['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled'], {
-    errorMap: () => ({ message: 'Invalid status' })
-  }).optional(),
+  status: z.enum(['pending', 'confirmed', 'preparing', 'ready', 'delivered', 'cancelled'] as const).optional(),
   items: z.array(OrderItemSchema).max(100, 'Too many items').optional(),
-  payment_status: z.enum(['pending', 'paid', 'refunded'], {
-    errorMap: () => ({ message: 'Invalid payment status' })
-  }).optional(),
+  payment_status: z.enum(['pending', 'paid', 'refunded'] as const).optional(),
 });
 
 // ==================================================================
@@ -83,12 +79,8 @@ export const CustomerUpdateSchema = z.object({
 export const PaymentSchema = z.object({
   orderId: z.string().uuid('Invalid order ID'),
   amount: z.number().positive('Amount must be positive').max(1000000, 'Amount too large'),
-  payment_method: z.enum(['cash', 'card', 'online'], {
-    errorMap: () => ({ message: 'Invalid payment method' })
-  }),
-  payment_status: z.enum(['pending', 'paid', 'failed', 'refunded'], {
-    errorMap: () => ({ message: 'Invalid payment status' })
-  }),
+  payment_method: z.enum(['cash', 'card', 'online'] as const),
+  payment_status: z.enum(['pending', 'paid', 'failed', 'refunded'] as const),
 });
 
 // ==================================================================
@@ -100,9 +92,7 @@ export const ShiftOpenSchema = z.object({
   openingCash: z.number().min(0, 'Opening cash cannot be negative').max(1000000, 'Opening cash too large'),
   branchId: z.string().uuid('Invalid branch ID'),
   terminalId: z.string().min(1, 'Terminal ID required').max(100, 'Terminal ID too long'),
-  roleType: z.enum(['cashier', 'waiter', 'driver'], {
-    errorMap: () => ({ message: 'Invalid role type' })
-  }),
+  roleType: z.enum(['cashier', 'waiter', 'driver'] as const),
   startingAmount: z.number().min(0, 'Starting amount cannot be negative').max(1000000, 'Starting amount too large').optional(),
 });
 
@@ -148,9 +138,7 @@ export const AuthLoginSchema = z.object({
 
 export const PinSetupSchema = z.object({
   pin: z.string().min(6, 'PIN must be at least 6 characters').max(20, 'PIN too long'),
-  role: z.enum(['admin', 'staff'], {
-    errorMap: () => ({ message: 'Invalid role' })
-  }),
+  role: z.enum(['admin', 'staff'] as const),
 });
 
 // ==================================================================
@@ -166,7 +154,7 @@ export function validateInput<T>(schema: z.ZodSchema<T>, data: unknown): T {
     return schema.parse(data);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      const messages = error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ');
+      const messages = error.issues.map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`).join(', ');
       throw new Error(`Validation failed: ${messages}`);
     }
     throw error;
@@ -184,7 +172,7 @@ export function safeValidate<T>(
   if (result.success) {
     return { success: true, data: result.data };
   } else {
-    const messages = result.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ');
+    const messages = result.error.issues.map((e: z.ZodIssue) => `${e.path.join('.')}: ${e.message}`).join(', ');
     return { success: false, error: `Validation failed: ${messages}` };
   }
 }
