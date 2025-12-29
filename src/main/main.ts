@@ -14,6 +14,11 @@
  * - See docs/architecture/REFACTORED_ARCHITECTURE.md for details
  */
 
+// Load environment variables at runtime (MUST be first)
+// This ensures .env file is available before any modules try to access process.env
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import { app, BrowserWindow, dialog } from 'electron';
 import { serviceRegistry } from './service-registry';
 import {

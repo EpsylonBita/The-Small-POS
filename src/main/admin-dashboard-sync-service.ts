@@ -174,13 +174,12 @@ export class AdminDashboardSyncService {
   private async testConnection(): Promise<void> {
     try {
       const base = this.adminDashboardUrl.replace(/\/$/, '');
-      const token = process.env.ADMIN_API_TOKEN || process.env.ADMIN_DASHBOARD_TOKEN;
+      // Health check doesn't require authentication - use basic headers only
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'x-terminal-id': this.terminalId
       };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
 
       const healthCandidates = [
         `${base}/api/health`,

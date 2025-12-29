@@ -62,6 +62,7 @@ export function registerOrderRetryHandlers(): void {
       for (const item of retryQueue) {
         try {
           // Transform frontend data to database schema
+          // Extract delivery address fields from item or nested address object
           const dbOrderData = {
             customer_name: item.customerName,
             items: item.items,
@@ -71,7 +72,13 @@ export function registerOrderRetryHandlers(): void {
             customer_phone: item.customerPhone,
             customer_email: item.customerEmail,
             table_number: item.tableNumber,
-            delivery_address: item.deliveryAddress,
+            // Full delivery address fields - extract from item or nested address object
+            delivery_address: item.deliveryAddress || item.address?.street_address,
+            delivery_city: item.deliveryCity || item.address?.city,
+            delivery_postal_code: item.deliveryPostalCode || item.address?.postal_code,
+            delivery_floor: item.deliveryFloor || item.address?.floor,
+            delivery_notes: item.deliveryNotes || item.address?.delivery_notes,
+            name_on_ringer: item.nameOnRinger || item.address?.name_on_ringer,
             special_instructions: item.notes,
             estimated_time: item.estimatedTime,
             payment_status: item.paymentStatus,

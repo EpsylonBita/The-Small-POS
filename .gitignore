@@ -5,6 +5,8 @@ node_modules/
 dist/
 release/
 release2/
+*.exe
+*.asar
 *.tsbuildinfo
 
 # Environment files (contain secrets)
@@ -25,7 +27,6 @@ test_output.txt
 # OS
 .DS_Store
 Thumbs.db
-nul
 
 # Test artifacts
 test-results/

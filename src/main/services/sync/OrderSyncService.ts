@@ -137,6 +137,11 @@ export class OrderSyncService {
                         payment_status: o.payment_status ?? 'pending',
                         payment_method: o.payment_method ?? null,
                         notes: o.special_instructions ?? null,
+                        // Delivery address fields - all six fields for complete address sync
+                        delivery_address: (o as any).delivery_address ?? null,
+                        delivery_city: (o as any).delivery_city ?? null,
+                        delivery_postal_code: (o as any).delivery_postal_code ?? null,
+                        delivery_floor: (o as any).delivery_floor ?? null,
                         delivery_notes: (o as any).delivery_notes ?? null,
                         name_on_ringer: (o as any).name_on_ringer ?? null,
                         table_number: o.table_number ?? null,
@@ -294,6 +299,11 @@ export class OrderSyncService {
             p_payment_status: data.payment_status || 'pending',
             p_payment_method: data.payment_method || null,
             p_special_instructions: data.special_instructions || data.notes || null,
+            // Delivery address fields
+            p_delivery_address: data.delivery_address || null,
+            p_delivery_city: data.delivery_city || null,
+            p_delivery_postal_code: data.delivery_postal_code || null,
+            p_delivery_floor: data.delivery_floor || null,
             p_delivery_notes: data.delivery_notes || null,
             p_name_on_ringer: data.name_on_ringer || null,
             p_table_number: tableNumberInt,
@@ -337,6 +347,11 @@ export class OrderSyncService {
             payment_status: data.payment_status || 'pending',
             payment_method: data.payment_method || null,
             special_instructions: data.special_instructions || data.notes || null,
+            // Delivery address fields
+            delivery_address: data.delivery_address || null,
+            delivery_city: data.delivery_city || null,
+            delivery_postal_code: data.delivery_postal_code || null,
+            delivery_floor: data.delivery_floor || null,
             delivery_notes: data.delivery_notes || null,
             name_on_ringer: data.name_on_ringer || null,
             table_number: tableNumberInt,
@@ -461,11 +476,36 @@ export class OrderSyncService {
                     const rows = localItems.map((it: any) => {
                         // Get the menu item ID (stored in subcategories table)
                         // Handle both camelCase (menuItemId) and snake_case (menu_item_id)
-                        const menuItemId = it.menuItemId || it.menu_item_id || it.id;
+                        const menuItemId = it.menuItemId || it.menu_item_id || it.subcategoryId || it.subcategory_id || it.id;
+                        
+                        // Get the menu item name - try multiple sources
+                        // Priority: name > title > menuItemName > menu_item_name
+                        // CRITICAL: Ensure menu_item_name is NEVER null (Requirements 1.3, 1.4)
+                        let menuItemName = it.name || it.title || it.menuItemName || it.menu_item_name;
+                        
+                        // Validate the name is not a truncated ID pattern (Requirements 1.4, 1.5)
+                        const isInvalidName = !menuItemName || 
+                            typeof menuItemName !== 'string' ||
+                            menuItemName.trim() === '' ||
+                            /^Item [a-fA-F0-9]+/.test(menuItemName) ||
+                            /^[a-f0-9]{8}-[a-f0-9]{4}/.test(menuItemName);
+                        
+                        if (isInvalidName) {
+                            // Log error when item has no valid name source (Requirements 1.4, 1.5)
+                            console.error('[OrderSyncService] ❌ Item missing valid name, using fallback:', {
+                                menuItemId,
+                                originalName: menuItemName,
+                                orderId: localOrderId,
+                                remoteOrderId
+                            });
+                            // Use a descriptive fallback that indicates the issue
+                            menuItemName = `Item ${menuItemId?.substring(0, 8) || 'Unknown'}`;
+                        }
 
                         return {
                             order_id: remoteOrderId,
                             menu_item_id: menuItemId,
+                            menu_item_name: menuItemName, // MUST be populated (never null)
                             quantity: it.quantity || 1,
                             unit_price: it.unit_price || it.unitPrice || it.price || 0,
                             total_price: it.total_price || it.totalPrice || ((it.quantity || 1) * (it.unit_price || it.unitPrice || it.price || 0)),
@@ -491,6 +531,17 @@ export class OrderSyncService {
                                 : (it.customizations || null)
                         };
                     });
+                    
+                    // Final validation: ensure no items have null menu_item_name before insert
+                    const itemsWithoutNames = rows.filter((r: any) => !r.menu_item_name);
+                    if (itemsWithoutNames.length > 0) {
+                        console.error('[OrderSyncService] ❌ CRITICAL: Items still have null menu_item_name after processing:', {
+                            count: itemsWithoutNames.length,
+                            orderId: localOrderId,
+                            remoteOrderId
+                        });
+                    }
+                    
                     // Best-effort insert; if schema differs or duplicates occur, swallow and continue
                     const ins = await this.getOrderClient().from('order_items').insert(rows);
                     if (ins.error) {
@@ -880,6 +931,13 @@ export class OrderSyncService {
                 special_instructions: order.special_instructions,
                 table_number: order.table_number,
                 estimated_ready_time: order.estimated_time,
+                // Delivery address fields - all six fields for complete address sync
+                delivery_address: (order as any).delivery_address || null,
+                delivery_city: (order as any).delivery_city || null,
+                delivery_postal_code: (order as any).delivery_postal_code || null,
+                delivery_floor: (order as any).delivery_floor || null,
+                delivery_notes: (order as any).delivery_notes || null,
+                name_on_ringer: (order as any).name_on_ringer || null,
                 created_at: order.created_at,
                 updated_at: order.updated_at,
                 branch_id: this.dbManager.getDatabaseService().settings.getSetting('terminal', 'branch_id', null),

@@ -23,6 +23,8 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
+import OrderDetailsModal from '../components/modals/OrderDetailsModal';
+import CustomerOrderHistoryModal from '../components/modals/CustomerOrderHistoryModal';
 
 interface OrderItem {
   id: string;
@@ -84,6 +86,10 @@ const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+
+  // Customer history modal state
+  const [showCustomerHistory, setShowCustomerHistory] = useState(false);
+  const [customerHistoryPhone, setCustomerHistoryPhone] = useState('');
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -217,11 +223,10 @@ const OrdersPage: React.FC = () => {
             <button
               onClick={fetchOrders}
               disabled={syncing}
-              className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${
-                isDark
-                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                  : 'bg-blue-500 hover:bg-blue-600 text-white'
-              } ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
+              className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${isDark
+                ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                : 'bg-blue-500 hover:bg-blue-600 text-white'
+                } ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
               {syncing ? 'Syncing...' : 'Refresh'}
@@ -249,9 +254,8 @@ const OrdersPage: React.FC = () => {
             {/* Filter Toggle */}
             <button
               onClick={() => setShowFilters(!showFilters)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm ${
-                isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
-              }`}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                }`}
             >
               <Filter className="w-4 h-4" />
               {showFilters ? 'Hide Filters' : 'Show Filters'}
@@ -336,11 +340,10 @@ const OrdersPage: React.FC = () => {
                 key={order.id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                  isDark
-                    ? 'bg-gray-800 border-gray-700 hover:border-blue-500'
-                    : 'bg-white border-gray-200 hover:border-blue-400 hover:shadow-md'
-                }`}
+                className={`p-4 rounded-lg border cursor-pointer transition-all ${isDark
+                  ? 'bg-gray-800 border-gray-700 hover:border-blue-500'
+                  : 'bg-white border-gray-200 hover:border-blue-400 hover:shadow-md'
+                  }`}
                 onClick={() => setSelectedOrder(order)}
               >
                 <div className="flex items-start justify-between">
@@ -402,22 +405,20 @@ const OrdersPage: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                 disabled={currentPage === 1}
-                className={`px-3 py-2 rounded-lg ${
-                  currentPage === 1
-                    ? 'opacity-50 cursor-not-allowed'
-                    : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
-                }`}
+                className={`px-3 py-2 rounded-lg ${currentPage === 1
+                  ? 'opacity-50 cursor-not-allowed'
+                  : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                  }`}
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
                 disabled={currentPage === totalPages}
-                className={`px-3 py-2 rounded-lg ${
-                  currentPage === totalPages
-                    ? 'opacity-50 cursor-not-allowed'
-                    : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
-                }`}
+                className={`px-3 py-2 rounded-lg ${currentPage === totalPages
+                  ? 'opacity-50 cursor-not-allowed'
+                  : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                  }`}
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -427,103 +428,35 @@ const OrdersPage: React.FC = () => {
       )}
 
       {/* Order Detail Modal */}
-      <AnimatePresence>
-        {selectedOrder && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-            onClick={() => setSelectedOrder(null)}
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className={`max-w-2xl w-full max-h-[90vh] overflow-y-auto rounded-lg ${
-                isDark ? 'bg-gray-800' : 'bg-white'
-              }`}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="p-6">
-                <div className="flex items-start justify-between mb-6">
-                  <div>
-                    <h2 className="text-2xl font-bold mb-2">Order #{selectedOrder.order_number}</h2>
-                    <div className="flex items-center gap-2">
-                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusBadge(selectedOrder.status)}`}>
-                        {selectedOrder.status}
-                      </span>
-                      <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-sm ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                        {getOrderTypeIcon(selectedOrder.order_type)}
-                        <span>{selectedOrder.order_type}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setSelectedOrder(null)}
-                    className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
+      <OrderDetailsModal
+        isOpen={!!selectedOrder}
+        orderId={selectedOrder?.id || selectedOrder?.order_number || ''}
+        order={selectedOrder}
+        onClose={() => setSelectedOrder(null)}
+        onShowCustomerHistory={(phone) => {
+          setCustomerHistoryPhone(phone);
+          setShowCustomerHistory(true);
+        }}
+      />
 
-                {/* Customer Info */}
-                <div className={`p-4 rounded-lg mb-4 ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                  <h3 className="font-semibold mb-3">Customer Information</h3>
-                  <div className="space-y-2 text-sm">
-                    {selectedOrder.customer_name && (
-                      <div className="flex items-center gap-2">
-                        <User className="w-4 h-4 opacity-50" />
-                        <span>{selectedOrder.customer_name}</span>
-                      </div>
-                    )}
-                    {selectedOrder.customer_phone && (
-                      <div className="flex items-center gap-2">
-                        <Phone className="w-4 h-4 opacity-50" />
-                        <span>{selectedOrder.customer_phone}</span>
-                      </div>
-                    )}
-                    {selectedOrder.delivery_address && (
-                      <div className="flex items-center gap-2">
-                        <MapPin className="w-4 h-4 opacity-50" />
-                        <span>{selectedOrder.delivery_address}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Order Items */}
-                <div className={`p-4 rounded-lg mb-4 ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                  <h3 className="font-semibold mb-3">Order Items</h3>
-                  <div className="space-y-2">
-                    {selectedOrder.order_items?.map((item) => (
-                      <div key={item.id} className="flex justify-between items-center text-sm">
-                        <div>
-                          <span className="font-medium">{item.quantity}x</span> {item.name}
-                        </div>
-                        <div className="font-medium">{currency.format(item.total_price)}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Order Total */}
-                <div className={`p-4 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                  <div className="flex justify-between items-center text-lg font-bold">
-                    <span>Total</span>
-                    <span>{currency.format(selectedOrder.total_amount)}</span>
-                  </div>
-                  <div className={`text-xs mt-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                    Ordered: {new Date(selectedOrder.created_at).toLocaleString()}
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Customer Order History Modal */}
+      <CustomerOrderHistoryModal
+        isOpen={showCustomerHistory}
+        customerPhone={customerHistoryPhone}
+        customerName={selectedOrder?.customer_name}
+        onClose={() => {
+          setShowCustomerHistory(false);
+          setCustomerHistoryPhone('');
+        }}
+        onViewOrder={(orderId) => {
+          // Close history modal and load the selected order
+          setShowCustomerHistory(false);
+          // Optionally fetch and show the order
+        }}
+      />
     </div>
   );
 };
 
 export default OrdersPage;
+

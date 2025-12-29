@@ -17,6 +17,11 @@ html.dark, html.dark body, html.dark #root {
   background: #000000;
 }
 
+/* Dark theme background */
+html.dark, html.dark body, html.dark #root {
+  background: #000000;
+}
+
 /* Base styles for touch interface */
 @layer base {
   * {

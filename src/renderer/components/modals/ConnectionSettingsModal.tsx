@@ -351,7 +351,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={handlePasteBoth}
-                  title="Paste Terminal ID and API Key from clipboard"
+                  title={t('modals.connectionSettings.pasteBothTooltip')}
                   className={liquidGlassModalButton('secondary', 'md') + ' flex items-center gap-2'}
                 >
                   <Clipboard className="w-4 h-4" />

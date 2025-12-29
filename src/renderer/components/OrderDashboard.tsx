@@ -715,7 +715,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         street: defaultAddress.street || (defaultAddress as any).street_address,
         city: defaultAddress.city,
         postalCode: defaultAddress.postal_code,
-        notes: defaultAddress.delivery_notes || (defaultAddress as any).notes
+        floor: (defaultAddress as any).floor_number || (defaultAddress as any).floor,
+        notes: defaultAddress.delivery_notes || (defaultAddress as any).notes,
+        nameOnRinger: (defaultAddress as any).name_on_ringer
       };
     }
     // Then check address directly on the customer object (legacy/fallback)
@@ -724,7 +726,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         street: (existingCustomer as any).address,
         city: (existingCustomer as any).city || '',
         postalCode: (existingCustomer as any).postal_code || '',
-        notes: (existingCustomer as any).notes || ''
+        floor: (existingCustomer as any).floor || '',
+        notes: (existingCustomer as any).notes || '',
+        nameOnRinger: (existingCustomer as any).name_on_ringer || ''
       };
     }
     // Finally check customerInfo state
@@ -733,7 +737,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         street: customerInfo.address.street,
         city: customerInfo.address.city,
         postalCode: customerInfo.address.postalCode,
-        notes: customerInfo.notes
+        floor: (customerInfo.address as any).floor || '',
+        notes: customerInfo.notes,
+        nameOnRinger: (customerInfo as any).nameOnRinger || ''
       };
     }
     return null;
@@ -758,6 +764,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
       // Build delivery address string from multiple address sources
       let deliveryAddress: string | null = null;
+      let deliveryCity: string | null = null;
+      let deliveryPostalCode: string | null = null;
+      let deliveryFloor: string | null = null;
+      let deliveryNotes: string | null = null;
+      let nameOnRinger: string | null = null;
+      
       if (selectedOrderType === 'delivery') {
         // Priority order for address resolution:
         // 1. orderData.address (from MenuModal)
@@ -779,16 +791,42 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           } else {
             const parts: string[] = [];
             // Check all possible field names for street
-            if (addr.street_address || addr.street) parts.push(addr.street_address || addr.street);
-            if (addr.city) parts.push(addr.city);
-            // Check all possible field names for postal code
-            if (addr.postal_code || addr.postalCode) parts.push(addr.postal_code || addr.postalCode);
-            // Include floor number if available
-            if (addr.floor_number || addr.floor) {
-              const floorPart = `Floor: ${addr.floor_number || addr.floor}`;
-              parts.push(floorPart);
+            const streetValue = addr.street_address || addr.street;
+            if (streetValue) {
+              parts.push(streetValue);
+              deliveryAddress = streetValue; // Store individual field
             }
-            deliveryAddress = parts.filter(Boolean).join(', ');
+            if (addr.city) {
+              parts.push(addr.city);
+              deliveryCity = addr.city;
+            }
+            // Check all possible field names for postal code
+            const postalValue = addr.postal_code || addr.postalCode;
+            if (postalValue) {
+              parts.push(postalValue);
+              deliveryPostalCode = postalValue;
+            }
+            // Include floor number if available
+            const floorValue = addr.floor_number || addr.floor;
+            if (floorValue) {
+              const floorPart = `Floor: ${floorValue}`;
+              parts.push(floorPart);
+              deliveryFloor = String(floorValue);
+            }
+            // Extract delivery notes
+            const notesValue = addr.delivery_notes || addr.notes;
+            if (notesValue) {
+              deliveryNotes = notesValue;
+            }
+            // Extract name on ringer
+            const ringerValue = addr.name_on_ringer || addr.nameOnRinger;
+            if (ringerValue) {
+              nameOnRinger = ringerValue;
+            }
+            // Build concatenated address string for display
+            if (!deliveryAddress && parts.length > 0) {
+              deliveryAddress = parts.filter(Boolean).join(', ');
+            }
           }
         }
 
@@ -798,14 +836,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
             deliveryAddress = legacyCustomerAddress;
           } else if (legacyCustomerAddress.street || legacyCustomerAddress.street_address) {
             const parts: string[] = [];
-            if (legacyCustomerAddress.street_address || legacyCustomerAddress.street) {
-              parts.push(legacyCustomerAddress.street_address || legacyCustomerAddress.street);
+            const streetValue = legacyCustomerAddress.street_address || legacyCustomerAddress.street;
+            if (streetValue) {
+              parts.push(streetValue);
+              if (!deliveryAddress) deliveryAddress = streetValue;
             }
-            if (legacyCustomerAddress.city) parts.push(legacyCustomerAddress.city);
-            if (legacyCustomerAddress.postal_code || legacyCustomerAddress.postalCode) {
-              parts.push(legacyCustomerAddress.postal_code || legacyCustomerAddress.postalCode);
+            if (legacyCustomerAddress.city) {
+              parts.push(legacyCustomerAddress.city);
+              if (!deliveryCity) deliveryCity = legacyCustomerAddress.city;
             }
-            deliveryAddress = parts.filter(Boolean).join(', ');
+            const postalValue = legacyCustomerAddress.postal_code || legacyCustomerAddress.postalCode;
+            if (postalValue) {
+              parts.push(postalValue);
+              if (!deliveryPostalCode) deliveryPostalCode = postalValue;
+            }
+            if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
           }
         }
 
@@ -815,14 +860,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
             deliveryAddress = customerInfoAddress;
           } else if (customerInfoAddress.street) {
             const parts: string[] = [];
-            if (customerInfoAddress.street) parts.push(customerInfoAddress.street);
-            if (customerInfoAddress.city) parts.push(customerInfoAddress.city);
-            if (customerInfoAddress.postalCode) parts.push(customerInfoAddress.postalCode);
-            deliveryAddress = parts.filter(Boolean).join(', ');
+            if (customerInfoAddress.street) {
+              parts.push(customerInfoAddress.street);
+              if (!deliveryAddress) deliveryAddress = customerInfoAddress.street;
+            }
+            if (customerInfoAddress.city) {
+              parts.push(customerInfoAddress.city);
+              if (!deliveryCity) deliveryCity = customerInfoAddress.city;
+            }
+            if (customerInfoAddress.postalCode) {
+              parts.push(customerInfoAddress.postalCode);
+              if (!deliveryPostalCode) deliveryPostalCode = customerInfoAddress.postalCode;
+            }
+            if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
           }
         }
 
         console.log('[OrderDashboard.handleOrderComplete] deliveryAddress built:', deliveryAddress);
+        console.log('[OrderDashboard.handleOrderComplete] Individual fields:', { deliveryCity, deliveryPostalCode, deliveryFloor, deliveryNotes, nameOnRinger });
 
         // Final fallback: Query customer from database if we have customerId but no address yet
         if (!deliveryAddress && (existingCustomer?.id || orderData.customer?.id)) {
@@ -837,10 +892,30 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
               if (Array.isArray(dbCustomer.addresses) && dbCustomer.addresses.length > 0) {
                 const addr = dbCustomer.addresses.find((a: any) => a.is_default) || dbCustomer.addresses[0];
                 const parts: string[] = [];
-                if (addr.street_address || addr.street) parts.push(addr.street_address || addr.street);
-                if (addr.city) parts.push(addr.city);
-                if (addr.postal_code) parts.push(addr.postal_code);
-                deliveryAddress = parts.filter(Boolean).join(', ');
+                const streetValue = addr.street_address || addr.street;
+                if (streetValue) {
+                  parts.push(streetValue);
+                  if (!deliveryAddress) deliveryAddress = streetValue;
+                }
+                if (addr.city) {
+                  parts.push(addr.city);
+                  if (!deliveryCity) deliveryCity = addr.city;
+                }
+                if (addr.postal_code) {
+                  parts.push(addr.postal_code);
+                  if (!deliveryPostalCode) deliveryPostalCode = addr.postal_code;
+                }
+                // Extract additional fields
+                if (addr.floor_number || addr.floor) {
+                  if (!deliveryFloor) deliveryFloor = String(addr.floor_number || addr.floor);
+                }
+                if (addr.delivery_notes || addr.notes) {
+                  if (!deliveryNotes) deliveryNotes = addr.delivery_notes || addr.notes;
+                }
+                if (addr.name_on_ringer) {
+                  if (!nameOnRinger) nameOnRinger = addr.name_on_ringer;
+                }
+                if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
                 console.log('[OrderDashboard.handleOrderComplete] Database fallback address from addresses[]:', deliveryAddress);
               }
               // Check legacy customer.address field
@@ -849,12 +924,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
                   deliveryAddress = dbCustomer.address;
                 } else if (typeof dbCustomer.address === 'object') {
                   const parts: string[] = [];
-                  if (dbCustomer.address.street_address || dbCustomer.address.street) {
-                    parts.push(dbCustomer.address.street_address || dbCustomer.address.street);
+                  const streetValue = dbCustomer.address.street_address || dbCustomer.address.street;
+                  if (streetValue) {
+                    parts.push(streetValue);
+                    if (!deliveryAddress) deliveryAddress = streetValue;
                   }
-                  if (dbCustomer.address.city) parts.push(dbCustomer.address.city);
-                  if (dbCustomer.address.postal_code) parts.push(dbCustomer.address.postal_code);
-                  deliveryAddress = parts.filter(Boolean).join(', ');
+                  if (dbCustomer.address.city) {
+                    parts.push(dbCustomer.address.city);
+                    if (!deliveryCity) deliveryCity = dbCustomer.address.city;
+                  }
+                  if (dbCustomer.address.postal_code) {
+                    parts.push(dbCustomer.address.postal_code);
+                    if (!deliveryPostalCode) deliveryPostalCode = dbCustomer.address.postal_code;
+                  }
+                  if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
                 }
                 console.log('[OrderDashboard.handleOrderComplete] Database fallback address from customer.address:', deliveryAddress);
               }
@@ -933,7 +1016,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
         payment_method: orderData.paymentData?.method || 'cash',
+        // Full delivery address fields for proper sync to Supabase
         delivery_address: deliveryAddress,
+        delivery_city: deliveryCity,
+        delivery_postal_code: deliveryPostalCode,
+        delivery_floor: deliveryFloor,
+        delivery_notes: deliveryNotes,
+        name_on_ringer: nameOnRinger,
         notes: orderData.notes || null
       };
 

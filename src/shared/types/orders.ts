@@ -84,6 +84,9 @@ export interface Order {
   table_number?: string | null; // Allow null for compatibility
   tableNumber?: string; // For backward compatibility
   delivery_address?: string | null; // Allow null for compatibility
+  delivery_city?: string | null; // City for delivery address
+  delivery_postal_code?: string | null; // Postal code for delivery address
+  delivery_floor?: string | null; // Floor for delivery address
   delivery_notes?: string | null; // Notes for delivery address
   name_on_ringer?: string | null; // Name on the ringer/doorbell
   address?: string; // For backward compatibility
@@ -166,6 +169,11 @@ export interface OrderRow {
   order_type?: OrderType;
   table_number?: string;
   delivery_address?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  delivery_floor?: string;
+  delivery_notes?: string;
+  name_on_ringer?: string;
   special_instructions?: string;
   created_at: string;
   updated_at: string;
@@ -212,6 +220,11 @@ export interface OrderCreateParams {
   order_type?: OrderType;
   table_number?: string;
   delivery_address?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  delivery_floor?: string;
+  delivery_notes?: string;
+  name_on_ringer?: string;
   special_instructions?: string;
   estimated_time?: number;
   payment_method?: PaymentMethod;
@@ -229,6 +242,11 @@ export interface OrderUpdateParams {
   order_type?: OrderType;
   table_number?: string;
   delivery_address?: string;
+  delivery_city?: string;
+  delivery_postal_code?: string;
+  delivery_floor?: string;
+  delivery_notes?: string;
+  name_on_ringer?: string;
   special_instructions?: string;
   estimated_time?: number;
   payment_status?: PaymentStatus;

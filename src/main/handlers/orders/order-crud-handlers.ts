@@ -18,18 +18,33 @@ import { getSupabaseConfig } from '../../../shared/supabase-config';
  * 1. Direct name fields (name, item_name, product_name)
  * 2. Embedded menu_item data
  * 3. Local subcategories cache
- * 4. Supabase subcategories table (last resort)
- * 5. Fallback to "Item {id}" or "Unknown Item"
+ * 4. Supabase subcategories table
+ * 5. Supabase menu_items table (new fallback)
+ * 6. Fallback to "Item {id}" or "Unknown Item"
  */
 async function resolveItemName(
   item: any,
   dbManager: any,
   supabaseClient?: any
 ): Promise<string> {
-  // 1. Try direct name fields
-  if (item.name && typeof item.name === 'string' && item.name.trim()) {
+  console.log('[resolveItemName] Resolving item:', {
+    name: item.name,
+    menu_item_id: item.menu_item_id,
+    subcategory_id: item.subcategory_id,
+    hasMenuItemObj: !!item.menu_item
+  });
+
+  // 1. Try direct name fields, BUT ignore generic "Item {hash}" names
+  const isGenericName = item.name && typeof item.name === 'string' && /^Item [a-fA-F0-9]+/.test(item.name);
+
+  if (item.name && typeof item.name === 'string' && item.name.trim() && !isGenericName) {
+    console.log('[resolveItemName] Found existing valid name:', item.name);
     return item.name;
   }
+  if (isGenericName) {
+    console.log(`[resolveItemName] Ignoring generic name "${item.name}", attempting resolution...`);
+  }
+
   if (item.item_name && typeof item.item_name === 'string' && item.item_name.trim()) {
     return item.item_name;
   }
@@ -47,14 +62,26 @@ async function resolveItemName(
     }
   }
 
-  // 3. Try local cache if we have menu_item_id
-  if (item.menu_item_id && dbManager?.getSubcategoryFromCache) {
+  // Also try subcategory object if present
+  if (item.subcategory) {
+    const subName = item.subcategory.name || item.subcategory.name_en || item.subcategory.name_el;
+    if (subName && typeof subName === 'string' && subName.trim()) {
+      console.log('[resolveItemName] Found name in subcategory object:', subName);
+      return subName;
+    }
+  }
+
+  // The ID to use for lookups
+  const itemId = item.menu_item_id || item.subcategory_id;
+
+  // 3. Try local cache if we have an ID
+  if (itemId && dbManager?.getSubcategoryFromCache) {
     try {
-      const cached = dbManager.getSubcategoryFromCache(item.menu_item_id);
+      const cached = dbManager.getSubcategoryFromCache(itemId);
       if (cached) {
         const cachedName = cached.name || cached.name_en || cached.name_el;
         if (cachedName) {
-          console.log(`[resolveItemName] Found name in cache for ${item.menu_item_id}: ${cachedName}`);
+          console.log(`[resolveItemName] Found name in cache for ${itemId}: ${cachedName}`);
           return cachedName;
         }
       }
@@ -63,19 +90,20 @@ async function resolveItemName(
     }
   }
 
-  // 4. Try Supabase as last resort
-  if (item.menu_item_id && supabaseClient) {
+  // 4. Try Supabase subcategories as fallback
+  if (itemId && supabaseClient) {
     try {
+      console.log(`[resolveItemName] Querying Supabase subcategories for ID: ${itemId}`);
       const { data: subcategory, error } = await supabaseClient
         .from('subcategories')
         .select('id, name, name_en, name_el')
-        .eq('id', item.menu_item_id)
+        .eq('id', itemId)
         .single();
 
       if (!error && subcategory) {
         const supabaseName = subcategory.name || subcategory.name_en || subcategory.name_el;
         if (supabaseName) {
-          console.log(`[resolveItemName] Found name in Supabase for ${item.menu_item_id}: ${supabaseName}`);
+          console.log(`[resolveItemName] Found name in Supabase subcategories: ${supabaseName}`);
           // Cache for future use
           if (dbManager?.cacheSubcategory) {
             try {
@@ -91,25 +119,71 @@ async function resolveItemName(
           }
           return supabaseName;
         }
+      } else {
+        console.log(`[resolveItemName] Subcategory not found, trying menu_items`);
       }
     } catch (supabaseError) {
-      console.warn('[resolveItemName] Supabase lookup failed:', supabaseError);
+      console.warn('[resolveItemName] Supabase subcategories lookup failed:', supabaseError);
+    }
+
+    // 5. Try menu_items table as another fallback
+    try {
+      const { data: menuItem, error } = await supabaseClient
+        .from('menu_items')
+        .select('id, name, name_en, name_el')
+        .eq('id', itemId)
+        .single();
+
+      if (!error && menuItem) {
+        const menuItemName = menuItem.name || menuItem.name_en || menuItem.name_el;
+        if (menuItemName) {
+          console.log(`[resolveItemName] Found name in Supabase menu_items: ${menuItemName}`);
+          return menuItemName;
+        }
+      }
+    } catch (menuItemError) {
+      console.warn('[resolveItemName] Supabase menu_items lookup failed:', menuItemError);
     }
   }
 
-  // 5. Final fallback
-  if (item.menu_item_id) {
-    console.warn(`[resolveItemName] Could not resolve name for menu_item_id: ${item.menu_item_id}`);
-    return `Item ${item.menu_item_id.substring(0, 8)}`;
+  // 6. Final fallback
+  if (itemId) {
+    console.warn(`[resolveItemName] Could not resolve name for ID: ${itemId}`);
+    return `Item ${itemId.substring(0, 8)}`;
   }
 
-  console.warn('[resolveItemName] Item has no name and no menu_item_id');
+  console.warn('[resolveItemName] Item has no name and no ID');
   return 'Unknown Item';
+}
+
+/**
+ * Check if a name is a valid item name (not generic/truncated ID)
+ * Returns true if the name is valid, false if it's a generic "Item {hash}" or UUID pattern
+ */
+function isValidItemName(name: string | undefined | null): boolean {
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return false;
+  }
+  // Reject generic "Item {hash}" names
+  if (/^Item [a-fA-F0-9]+/.test(name)) {
+    return false;
+  }
+  // Reject UUID patterns
+  if (/^[a-f0-9]{8}-[a-f0-9]{4}/.test(name)) {
+    return false;
+  }
+  return true;
 }
 
 /**
  * Enrich order items with names from cache or Supabase
  * Used during order creation to ensure all items have names before storage
+ * 
+ * CRITICAL: This function MUST set menu_item_name field on every item
+ * The menu_item_name field is used for sync to Supabase and must be:
+ * - Non-null and non-empty
+ * - NOT a generic "Item {hash}" pattern
+ * - NOT a UUID or truncated ID
  */
 async function enrichOrderItemsWithNames(
   items: any[],
@@ -118,24 +192,101 @@ async function enrichOrderItemsWithNames(
 ): Promise<any[]> {
   if (!items || items.length === 0) return items;
 
+  console.log(`[enrichOrderItemsWithNames] Enriching ${items.length} items`);
+
   const enrichedItems = await Promise.all(items.map(async (item) => {
-    // If item already has a name, keep it
-    if (item.name && typeof item.name === 'string' && item.name.trim()) {
-      return item;
+    try {
+      if (!item) return item; // Safety check
+
+      // 1. Resolve Item Name
+      let resolvedName = item.name;
+      const originalName = item.name;
+
+      // Use helper to resolve name if missing or generic
+      const needsNameResolution = !isValidItemName(item.name);
+      if (needsNameResolution) {
+        resolvedName = await resolveItemName(item, dbManager, supabaseClient);
+        if (resolvedName !== originalName) {
+          console.log(`[enrichOrderItemsWithNames] Enriched item ${item.menu_item_id || 'unknown'} name: ${resolvedName}`);
+        }
+      }
+
+      // 2. Resolve Subcategory Name
+      // OrderDetailsModal expects item.subcategory.name
+      let subcategoryObj = item.subcategory || {};
+      let subcategoryName = subcategoryObj.name || subcategoryObj.name_en || subcategoryObj.name_el;
+
+      if (!subcategoryName) {
+        const subId = item.subcategory_id || item.menu_item?.subcategory_id;
+        if (subId) {
+          // Try local cache first
+          if (dbManager?.getSubcategoryFromCache) {
+            try {
+              const cached = dbManager.getSubcategoryFromCache(subId);
+              if (cached) {
+                const cachedName = cached.name || cached.name_en || cached.name_el;
+                if (cachedName) {
+                  // console.log(`[enrichOrderItemsWithNames] Found subcategory in cache: ${cachedName}`);
+                  subcategoryName = cachedName;
+                }
+              }
+            } catch (e) { /* ignore */ }
+          }
+
+          // Try Supabase fallback if still missing
+          if (!subcategoryName && supabaseClient) {
+            try {
+              const { data: sub, error } = await supabaseClient
+                .from('subcategories')
+                .select('id, name, name_en, name_el')
+                .eq('id', subId)
+                .single();
+
+              if (!error && sub) {
+                subcategoryName = sub.name || sub.name_en || sub.name_el;
+                console.log(`[enrichOrderItemsWithNames] Found subcategory in Supabase: ${subcategoryName}`);
+              }
+            } catch (e) {
+              console.warn('[enrichOrderItemsWithNames] Supabase subcategory lookup failed:', e);
+            }
+          }
+        }
+      }
+
+      // 3. CRITICAL: Set menu_item_name field for sync
+      // This field MUST be set on every item for proper sync to Supabase
+      // Priority: resolved name > existing menu_item_name > subcategory name
+      let menuItemName = resolvedName;
+      
+      // If resolved name is still invalid, try existing menu_item_name
+      if (!isValidItemName(menuItemName)) {
+        menuItemName = item.menu_item_name;
+      }
+      
+      // If still invalid, try subcategory name
+      if (!isValidItemName(menuItemName)) {
+        menuItemName = subcategoryName;
+      }
+      
+      // Final validation - log warning if name is still invalid
+      if (!isValidItemName(menuItemName)) {
+        console.warn(`[enrichOrderItemsWithNames] Item ${item.menu_item_id || 'unknown'} has invalid name after enrichment: "${menuItemName}"`);
+      }
+
+      // Construct enriched item with menu_item_name field
+      return {
+        ...item,
+        name: resolvedName,
+        menu_item_name: menuItemName, // CRITICAL: Always set this field for sync
+        subcategory: {
+          ...subcategoryObj,
+          name: subcategoryName || subcategoryObj.name // Keep existing if valid, or use resolved
+        }
+      };
+    } catch (err) {
+      console.error('[enrichOrderItemsWithNames] Error enriching item:', err);
+      return item; // Return original item on failure
     }
-
-    // Resolve the name
-    const resolvedName = await resolveItemName(item, dbManager, supabaseClient);
-
-    // Log if we had to enrich
-    if (resolvedName !== item.name) {
-      console.log(`[enrichOrderItemsWithNames] Enriched item ${item.menu_item_id || 'unknown'} with name: ${resolvedName}`);
-    }
-
-    return {
-      ...item,
-      name: resolvedName
-    };
   }));
 
   return enrichedItems;
@@ -158,27 +309,66 @@ function createSupabaseClientForNameResolution(): any {
 
 /**
  * Transform database order to frontend format
+ * Ensures items are always parsed from JSON string if needed
  */
 function transformOrder(order: any) {
+  // Parse items if stored as JSON string (Requirements 2.1, 2.3)
+  let items = order.items;
+  if (typeof items === 'string') {
+    try {
+      items = JSON.parse(items);
+    } catch (e) {
+      console.error('[transformOrder] Failed to parse items JSON:', e);
+      items = []; // Graceful fallback to empty array
+    }
+  }
+  
+  // Ensure items is always an array (never null/undefined)
+  if (!Array.isArray(items)) {
+    items = [];
+  }
+
   return {
     id: order.id,
     supabase_id: order.supabase_id, // Include Supabase ID for edit operations
     order_number: order.order_number, // Include snake_case for compatibility
     orderNumber: order.order_number || `ORD-${order.id.slice(-6)}`,
     status: order.status,
-    items: order.items,
+    items: items,
+    total_amount: order.total_amount, // snake_case for frontend compatibility
     totalAmount: order.total_amount,
+    subtotal: order.subtotal,
+    tax_amount: order.tax_amount,
+    tax: order.tax_amount,
+    customer_name: order.customer_name, // snake_case
     customerName: order.customer_name,
+    customer_phone: order.customer_phone, // snake_case
     customerPhone: order.customer_phone,
+    customer_email: order.customer_email,
     customerEmail: order.customer_email,
+    order_type: order.order_type, // snake_case
     orderType: order.order_type || 'takeaway',
     tableNumber: order.table_number,
+    table_number: order.table_number,
+    // Delivery address fields - both snake_case and legacy name
     address: order.delivery_address,
+    delivery_address: order.delivery_address, // Include original snake_case
+    delivery_city: order.delivery_city,
+    delivery_postal_code: order.delivery_postal_code,
+    delivery_floor: order.delivery_floor,
+    delivery_notes: order.delivery_notes,
+    name_on_ringer: order.name_on_ringer,
+    special_instructions: order.special_instructions,
     notes: order.special_instructions,
+    created_at: order.created_at,
     createdAt: order.created_at,
+    updated_at: order.updated_at,
     updatedAt: order.updated_at,
     estimatedTime: order.estimated_time,
+    estimated_time: order.estimated_time,
+    payment_status: order.payment_status,
     paymentStatus: order.payment_status,
+    payment_method: order.payment_method,
     paymentMethod: order.payment_method,
     paymentTransactionId: order.payment_transaction_id,
     // Platform integration fields
@@ -189,7 +379,12 @@ function transformOrder(order: any) {
     // Driver assignment fields
     driver_id: order.driver_id,
     driverId: order.driver_id, // camelCase alias for frontend compatibility
+    driver_name: order.driver_name,
     driverName: order.driver_name, // May be populated from joins or enrichment
+    // Discount fields
+    discount_amount: order.discount_amount,
+    discount_percentage: order.discount_percentage,
+    delivery_fee: order.delivery_fee,
   };
 }
 
@@ -198,12 +393,89 @@ export function registerOrderCrudHandlers(): void {
   const handlers = [
     'order:get-all',
     'order:get-by-id',
+    'order:get-by-customer-phone',
     'order:create',
     'order:delete',
     'order:fetch-items-from-supabase',
     'order:update-items',
   ];
   handlers.forEach(handler => ipcMain.removeHandler(handler));
+
+  // Get orders by customer phone (for customer order history)
+  ipcMain.handle('order:get-by-customer-phone', async (_event, customerPhone: string) => {
+    return handleIPCError(async () => {
+      if (!customerPhone || typeof customerPhone !== 'string') {
+        throw new IPCError('customerPhone is required', 'VALIDATION_ERROR');
+      }
+
+      const dbManager = serviceRegistry.requireService('dbManager');
+
+      // Use getAllOrders to fetch orders - no limit param, we'll filter manually
+      const allOrders = await dbManager.getAllOrders();
+
+      // DEBUG: Checking data availability for first 3 orders to find why address is missing
+      if (allOrders && allOrders.length > 0) {
+        console.log('[order:get-by-customer-phone] DEBUG First 3 DB Results:',
+          allOrders.slice(0, 3).map((o: any) => ({
+            id: o.id,
+            no: o.order_number,
+            addr: o.delivery_address,
+            city: o.delivery_city,
+            fl: o.delivery_floor,
+            items: typeof o.items === 'string' ? JSON.parse(o.items).length : o.items?.length
+          }))
+        );
+      }
+
+      if (!allOrders || allOrders.length === 0) {
+        return { success: true, orders: [] };
+      }
+
+      // Normalize phone for matching (remove spaces, dashes, etc.)
+      const normalizedPhone = customerPhone.replace(/[\s\-\(\)]/g, '');
+
+      // Filter orders by customer phone
+      const customerOrders = allOrders.filter((order: any) => {
+        if (!order.customer_phone) return false;
+        const orderPhone = order.customer_phone.replace(/[\s\-\(\)]/g, '');
+        return orderPhone.includes(normalizedPhone) || normalizedPhone.includes(orderPhone);
+      });
+
+      // Transform and deduplicate
+      const seenNumbers = new Set<string>();
+      const uniqueOrders = customerOrders.filter((o: any) => {
+        if (seenNumbers.has(o.order_number)) return false;
+        seenNumbers.add(o.order_number);
+        return true;
+      });
+
+      // Add items count and sort by date descending
+      const transformedOrders = uniqueOrders
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 50)
+        .map((order: any) => {
+          let itemsCount = 0;
+          try {
+            const items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
+            itemsCount = Array.isArray(items) ? items.length : 0;
+          } catch { }
+
+          return {
+            id: order.id,
+            order_number: order.order_number,
+            status: order.status,
+            order_type: order.order_type,
+            total_amount: order.total_amount,
+            payment_method: order.payment_method,
+            created_at: order.created_at,
+            items_count: itemsCount,
+          };
+        });
+
+      console.log(`[order:get-by-customer-phone] Found ${transformedOrders.length} orders for phone: ${customerPhone}`);
+      return { success: true, orders: transformedOrders };
+    }, 'order:get-by-customer-phone');
+  });
 
   // Get all orders - filtered to only show orders from current business shift
   // Orders from before the last Z-Report are excluded to ensure fresh start
@@ -215,29 +487,56 @@ export function registerOrderCrudHandlers(): void {
       const settingsService = dbManager.getDatabaseService().settings;
 
       // Get the last Z-Report timestamp to filter out old orders
-      // Orders created before this timestamp should not appear in the POS
       const lastZReportTimestamp = settingsService?.getSetting<string>('system', 'last_z_report_timestamp') || null;
 
       console.log(`[order:get-all] Z-Report timestamp from settings: ${lastZReportTimestamp || 'NOT SET'}`);
 
       // Filter orders created AFTER the last Z-Report timestamp
-      // If no Z-Report recorded, show all orders (first run scenario)
       const orders = await withTimeout(
         dbManager.getOrders({ afterTimestamp: lastZReportTimestamp || undefined }),
         TIMING.DATABASE_QUERY_TIMEOUT,
         'Get all orders',
       );
 
-      if (lastZReportTimestamp) {
-        console.log(`[order:get-all] Returning ${orders.length} orders created after Z-Report at ${lastZReportTimestamp}`);
-        // Debug: log order timestamps to verify filtering
-        if (orders.length > 0) {
-          orders.forEach((o: any) => {
-            console.log(`[order:get-all] Order ${o.id?.slice(-6)} created_at: ${o.created_at}, status: ${o.status}`);
-          });
-        }
+      // DEBUG: Log metadata for the first few orders to debug missing address issues
+      if (orders.length > 0) {
+        console.log(`[order:get-all] Fetched ${orders.length} orders. Inspecting first 3 for delivery data:`);
+        orders.slice(0, 3).forEach((o: any, i: number) => {
+          console.log(`[order:get-all] [${i}] ID: ${o.id}, Addr: "${o.delivery_address || ''}", City: "${o.delivery_city || ''}", Floor: "${o.delivery_floor || ''}"`);
+        });
       } else {
-        console.log(`[order:get-all] No Z-Report found, returning all ${orders.length} orders`);
+        console.log('[order:get-all] No orders found.');
+      }
+
+      // Enrich items for ALL fetched orders to ensure names are correct
+      // This is critical because some orders might have generic "Item {hash}" names stored in the DB
+      // Also handles JSON string parsing (Requirements 2.1, 2.2, 2.5)
+      if (orders.length > 0) {
+        const supabaseClient = createSupabaseClientForNameResolution();
+        await Promise.all(orders.map(async (order: any) => {
+          // Parse items if stored as JSON string (Requirements 2.1, 2.3)
+          let items = order.items;
+          if (typeof items === 'string') {
+            try {
+              items = JSON.parse(items);
+            } catch (e) {
+              console.error(`[order:get-all] Failed to parse items JSON for order ${order.id}:`, e);
+              items = []; // Graceful fallback to empty array
+            }
+          }
+          
+          // Ensure items is always an array (never null/undefined)
+          if (!Array.isArray(items)) {
+            items = [];
+          }
+          
+          // Enrich items with names if there are any items
+          if (items.length > 0) {
+            order.items = await enrichOrderItemsWithNames(items, dbManager, supabaseClient);
+          } else {
+            order.items = items; // Ensure empty array is set
+          }
+        }));
       }
 
       const transformedOrders = orders.map(transformOrder);
@@ -270,6 +569,19 @@ export function registerOrderCrudHandlers(): void {
       );
 
       if (!order) return null;
+
+      // Enrich items with proper names before returning
+      let items = order.items;
+      if (typeof items === 'string') {
+        try { items = JSON.parse(items); } catch { items = []; }
+      }
+
+      if (Array.isArray(items) && items.length > 0) {
+        const supabaseClient = createSupabaseClientForNameResolution();
+        const enrichedItems = await enrichOrderItemsWithNames(items, dbManager, supabaseClient);
+        order.items = enrichedItems;
+      }
+
       return transformOrder(order);
     }, 'order:get-by-id');
   });
@@ -312,6 +624,12 @@ export function registerOrderCrudHandlers(): void {
           // 2. Delivery orders without persisted customers always pass a non-empty deliveryAddress string
           // If neither condition is met, this validation will fail with a helpful error message.
           let fallbackAddress: string | null = null;
+          // Track all address fields for complete auto-population (Requirements 3.4)
+          let fallbackCity: string | null = null;
+          let fallbackPostalCode: string | null = null;
+          let fallbackFloor: string | null = null;
+          let fallbackDeliveryNotes: string | null = null;
+          let fallbackNameOnRinger: string | null = null;
 
           if (orderData.customerId) {
             try {
@@ -319,7 +637,7 @@ export function registerOrderCrudHandlers(): void {
               const customer = await dbManager.getCustomerById?.(orderData.customerId);
 
               if (customer) {
-                // Check customer.addresses array first
+                // Check customer.addresses array first (Requirements 3.4)
                 if (Array.isArray(customer.addresses) && customer.addresses.length > 0) {
                   const addr = customer.addresses.find((a: any) => a.is_default) || customer.addresses[0];
                   const parts: string[] = [];
@@ -327,9 +645,24 @@ export function registerOrderCrudHandlers(): void {
                   if (addr.city) parts.push(addr.city);
                   if (addr.postal_code) parts.push(addr.postal_code);
                   fallbackAddress = parts.filter(Boolean).join(', ');
-                  console.log('[IPC order:create] Fallback address from customer.addresses:', fallbackAddress);
+                  
+                  // Extract all address fields for complete auto-population
+                  fallbackCity = addr.city || null;
+                  fallbackPostalCode = addr.postal_code || addr.zipCode || null;
+                  fallbackFloor = addr.floor || addr.floor_number || null;
+                  fallbackDeliveryNotes = addr.delivery_notes || addr.notes || addr.comments || null;
+                  fallbackNameOnRinger = addr.name_on_ringer || addr.bell_name || null;
+                  
+                  console.log('[IPC order:create] Fallback address from customer.addresses:', {
+                    address: fallbackAddress,
+                    city: fallbackCity,
+                    postalCode: fallbackPostalCode,
+                    floor: fallbackFloor,
+                    deliveryNotes: fallbackDeliveryNotes,
+                    nameOnRinger: fallbackNameOnRinger
+                  });
                 }
-                // Check legacy customer.address field
+                // Check legacy customer.address field (Requirements 3.4)
                 else if (customer.address) {
                   if (typeof customer.address === 'string') {
                     fallbackAddress = customer.address;
@@ -341,8 +674,22 @@ export function registerOrderCrudHandlers(): void {
                     if (customer.address.city) parts.push(customer.address.city);
                     if (customer.address.postal_code) parts.push(customer.address.postal_code);
                     fallbackAddress = parts.filter(Boolean).join(', ');
+                    
+                    // Extract all address fields from legacy address object
+                    fallbackCity = customer.address.city || null;
+                    fallbackPostalCode = customer.address.postal_code || customer.address.zipCode || null;
+                    fallbackFloor = customer.address.floor || customer.address.floor_number || null;
+                    fallbackDeliveryNotes = customer.address.delivery_notes || customer.address.notes || customer.address.comments || null;
+                    fallbackNameOnRinger = customer.address.name_on_ringer || customer.address.bell_name || null;
                   }
-                  console.log('[IPC order:create] Fallback address from customer.address:', fallbackAddress);
+                  console.log('[IPC order:create] Fallback address from customer.address:', {
+                    address: fallbackAddress,
+                    city: fallbackCity,
+                    postalCode: fallbackPostalCode,
+                    floor: fallbackFloor,
+                    deliveryNotes: fallbackDeliveryNotes,
+                    nameOnRinger: fallbackNameOnRinger
+                  });
                 }
               }
             } catch (err) {
@@ -351,8 +698,32 @@ export function registerOrderCrudHandlers(): void {
           }
 
           if (fallbackAddress) {
+            // Populate all delivery address fields from customer's saved address (Requirements 3.4)
             orderData.deliveryAddress = fallbackAddress;
-            console.log('[IPC order:create] ✓ Using fallback delivery address:', fallbackAddress);
+            // Only set fallback values if not already provided in orderData
+            if (!orderData.deliveryCity && !orderData.delivery_city) {
+              orderData.deliveryCity = fallbackCity;
+            }
+            if (!orderData.deliveryPostalCode && !orderData.delivery_postal_code) {
+              orderData.deliveryPostalCode = fallbackPostalCode;
+            }
+            if (!orderData.deliveryFloor && !orderData.delivery_floor) {
+              orderData.deliveryFloor = fallbackFloor;
+            }
+            if (!orderData.deliveryNotes && !orderData.delivery_notes) {
+              orderData.deliveryNotes = fallbackDeliveryNotes;
+            }
+            if (!orderData.nameOnRinger && !orderData.name_on_ringer) {
+              orderData.nameOnRinger = fallbackNameOnRinger;
+            }
+            console.log('[IPC order:create] ✓ Using fallback delivery address with all fields:', {
+              address: orderData.deliveryAddress,
+              city: orderData.deliveryCity,
+              postalCode: orderData.deliveryPostalCode,
+              floor: orderData.deliveryFloor,
+              deliveryNotes: orderData.deliveryNotes,
+              nameOnRinger: orderData.nameOnRinger
+            });
           } else {
             // Build a helpful error message with customer context
             const customerName = orderData.customerName || 'Unknown customer';
@@ -414,7 +785,20 @@ export function registerOrderCrudHandlers(): void {
       const supabaseClientForNames = createSupabaseClientForNameResolution();
       const enrichedItems = await enrichOrderItemsWithNames(orderData.items, dbManager, supabaseClientForNames);
 
+      // Validate enriched items - log warning if any item still has invalid name
+      const itemsWithInvalidNames = enrichedItems.filter((item: any) => !isValidItemName(item.menu_item_name));
+      if (itemsWithInvalidNames.length > 0) {
+        console.warn(`[order:create] ⚠️ ${itemsWithInvalidNames.length} item(s) have invalid names after enrichment:`,
+          itemsWithInvalidNames.map((item: any) => ({
+            menu_item_id: item.menu_item_id,
+            name: item.name,
+            menu_item_name: item.menu_item_name
+          }))
+        );
+      }
+
       // Transform frontend data to database schema
+      // Extract delivery address fields from orderData or nested address object
       const dbOrderData = {
         customer_name: orderData.customerName,
         items: enrichedItems,
@@ -424,9 +808,14 @@ export function registerOrderCrudHandlers(): void {
         customer_phone: orderData.customerPhone,
         customer_email: orderData.customerEmail,
         table_number: orderData.tableNumber,
-        delivery_address: orderData.deliveryAddress,
-        delivery_notes: orderData.delivery_notes || orderData.deliveryNotes || null,
-        name_on_ringer: orderData.name_on_ringer || orderData.nameOnRinger || null,
+        // Full delivery address fields - extract from orderData (camelCase or snake_case) or nested address object
+        // Robust extraction logic to handle various frontend payloads
+        delivery_address: orderData.deliveryAddress || orderData.delivery_address || orderData.address?.street_address || orderData.address?.address || orderData.address?.street,
+        delivery_city: orderData.deliveryCity || orderData.delivery_city || orderData.address?.city,
+        delivery_postal_code: orderData.deliveryPostalCode || orderData.delivery_postal_code || orderData.address?.postal_code || orderData.address?.zipCode,
+        delivery_floor: orderData.deliveryFloor || orderData.delivery_floor || orderData.address?.floor || orderData.address?.floor_number,
+        delivery_notes: orderData.deliveryNotes || orderData.delivery_notes || orderData.address?.delivery_notes || orderData.address?.notes || orderData.address?.comments,
+        name_on_ringer: orderData.nameOnRinger || orderData.name_on_ringer || orderData.address?.name_on_ringer || orderData.address?.bell_name,
         special_instructions: orderData.notes,
         estimated_time: orderData.estimatedTime,
         payment_status: orderData.paymentStatus,
@@ -457,7 +846,7 @@ export function registerOrderCrudHandlers(): void {
         setTimeout(async () => {
           try {
             // Import print handler dynamically to avoid circular dependencies
-            const { getPrinterManagerInstance } = await import('../printer-manager-handlers');
+            const { getPrinterManagerInstance } = await import('../printer-manager-handlers.js');
             const printerManager = getPrinterManagerInstance();
 
             if (!printerManager) {
@@ -467,7 +856,7 @@ export function registerOrderCrudHandlers(): void {
 
             // Get the first enabled receipt printer
             const printers = await printerManager.getPrinters();
-            const receiptPrinter = printers.find(p => p.role === 'receipt' && p.enabled) || printers.find(p => p.enabled);
+            const receiptPrinter = printers.find((p: any) => p.role === 'receipt' && p.enabled) || printers.find((p: any) => p.enabled);
 
             if (!receiptPrinter) {
               console.warn('[Auto-Print] No enabled printers configured, skipping auto-print');
@@ -502,8 +891,8 @@ export function registerOrderCrudHandlers(): void {
             }
 
             // Import print types and generator
-            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
-            const { PaperSize, PrintJobType } = await import('../../printer/types/index');
+            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator.js');
+            const { PaperSize, PrintJobType } = await import('../../printer/types/index.js');
 
             // Create Supabase client for name resolution fallback
             const supabaseClientForPrint = createSupabaseClientForNameResolution();

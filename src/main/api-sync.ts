@@ -193,6 +193,13 @@ async function resolveTerminalSettings(db: DatabaseManager): Promise<{
     // ignore, treat as missing API key
   }
 
+  console.log(`[POS API Sync] resolveTerminalSettings:`, {
+    terminalId,
+    hasApiKey: !!apiKey,
+    apiKeyLength: apiKey?.length || 0,
+    apiKeyPreview: apiKey ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : '(not set)'
+  });
+
   return { terminalId, apiKey };
 }
 
@@ -411,7 +418,17 @@ export async function fetchOrdersFromAdmin(
   const queryString = buildQueryString(options || {});
   const url = `${base}/api/pos/orders${queryString}`;
 
-  console.log(`[POS API Sync] fetchOrdersFromAdmin: Fetching orders`, { terminalId, url, options });
+  console.log(`[POS API Sync] fetchOrdersFromAdmin: Fetching orders`, {
+    terminalId,
+    url,
+    options,
+    hasApiKey: !!apiKey,
+    apiKeyLength: apiKey?.length || 0,
+    headers: {
+      'x-terminal-id': headers['x-terminal-id'],
+      'x-pos-api-key': apiKey ? `${apiKey.substring(0, 8)}...` : '(missing)'
+    }
+  });
 
   const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchOrdersFromAdmin');
   const data = await parseApiResponse<{ success: boolean; orders: OrderFromAdmin[]; total?: number }>(

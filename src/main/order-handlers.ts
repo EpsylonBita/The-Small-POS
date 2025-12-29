@@ -483,7 +483,7 @@ export function registerOrderHandlers({
       }
 
       // Validation for specific order types
-      if (orderData.orderType === 'delivery' && !orderData.deliveryAddress) {
+      if (orderData.orderType === 'delivery' && !orderData.deliveryAddress && !orderData.delivery_address) {
         console.warn('[IPC order:create] ❌ Validation failed: Delivery order missing address');
         return { success: false, error: 'Delivery orders must include a delivery address' };
       }
@@ -505,6 +505,7 @@ export function registerOrderHandlers({
       }
 
       // Transform frontend data to match database schema
+      // Extract delivery address fields from orderData or nested address object
       const dbOrderData = {
         customer_name: orderData.customerName,
         items: orderData.items,
@@ -514,7 +515,13 @@ export function registerOrderHandlers({
         customer_phone: orderData.customerPhone,
         customer_email: orderData.customerEmail,
         table_number: orderData.tableNumber,
-        delivery_address: orderData.deliveryAddress,
+        // Full delivery address fields - extract from orderData (camelCase or snake_case) or nested address object
+        delivery_address: orderData.deliveryAddress || orderData.delivery_address || orderData.address?.street_address,
+        delivery_city: orderData.deliveryCity || orderData.delivery_city || orderData.address?.city,
+        delivery_postal_code: orderData.deliveryPostalCode || orderData.delivery_postal_code || orderData.address?.postal_code,
+        delivery_floor: orderData.deliveryFloor || orderData.delivery_floor || orderData.address?.floor || orderData.address?.floor_number,
+        delivery_notes: orderData.deliveryNotes || orderData.delivery_notes || orderData.address?.delivery_notes || orderData.address?.notes,
+        name_on_ringer: orderData.nameOnRinger || orderData.name_on_ringer || orderData.address?.name_on_ringer,
         special_instructions: orderData.notes,
         estimated_time: orderData.estimatedTime,
         payment_status: orderData.paymentStatus,
@@ -698,6 +705,7 @@ export function registerOrderHandlers({
       for (const item of retryQueue) {
         try {
           // Transform frontend data to match database schema
+          // Extract delivery address fields from item or nested address object
           const dbOrderData = {
             customer_name: item.customerName,
             items: item.items,
@@ -707,7 +715,13 @@ export function registerOrderHandlers({
             customer_phone: item.customerPhone,
             customer_email: item.customerEmail,
             table_number: item.tableNumber,
-            delivery_address: item.deliveryAddress,
+            // Full delivery address fields - extract from item or nested address object
+            delivery_address: item.deliveryAddress || item.address?.street_address,
+            delivery_city: item.deliveryCity || item.address?.city,
+            delivery_postal_code: item.deliveryPostalCode || item.address?.postal_code,
+            delivery_floor: item.deliveryFloor || item.address?.floor,
+            delivery_notes: item.deliveryNotes || item.address?.delivery_notes,
+            name_on_ringer: item.nameOnRinger || item.address?.name_on_ringer,
             special_instructions: item.notes,
             estimated_time: item.estimatedTime,
             payment_status: item.paymentStatus,
