@@ -846,7 +846,7 @@ export function registerOrderCrudHandlers(): void {
         setTimeout(async () => {
           try {
             // Import print handler dynamically to avoid circular dependencies
-            const { getPrinterManagerInstance } = await import('../printer-manager-handlers.js');
+            const { getPrinterManagerInstance } = await import('../printer-manager-handlers');
             const printerManager = getPrinterManagerInstance();
 
             if (!printerManager) {
@@ -891,8 +891,8 @@ export function registerOrderCrudHandlers(): void {
             }
 
             // Import print types and generator
-            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator.js');
-            const { PaperSize, PrintJobType } = await import('../../printer/types/index.js');
+            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
+            const { PaperSize, PrintJobType } = await import('../../printer/types/index');
 
             // Create Supabase client for name resolution fallback
             const supabaseClientForPrint = createSupabaseClientForNameResolution();
