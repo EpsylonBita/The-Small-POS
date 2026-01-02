@@ -325,10 +325,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     console.log('[MenuModal.handleAddToCart] notes parameter:', notes, 'type:', typeof notes);
     
     // Ensure item has required properties
-    // Use order-type-specific price: delivery_price for delivery, pickup_price for pickup
-    const basePrice = orderType === 'pickup'
-      ? (item.pickup_price ?? item.price ?? 0)
-      : (item.delivery_price ?? item.price ?? 0);
+    // Use order-type-specific price: three-tier pricing (pickup, delivery, dine-in)
+    const getItemPrice = () => {
+      if (orderType === 'pickup') return item.pickup_price ?? item.price ?? 0;
+      if (orderType === 'delivery') return item.delivery_price ?? item.price ?? 0;
+      if (orderType === 'dine-in') return item.dine_in_price ?? item.pickup_price ?? item.price ?? 0;
+      return item.price ?? 0;
+    };
+    const basePrice = getItemPrice();
     const itemQuantity = quantity || 1;
 
     // Calculate customization price per item
@@ -337,11 +341,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const customizationPrice = customizations.reduce((sum, c) => {
       // Skip "without" items - they don't add to price
       if (c.isWithout) return sum;
-      
-      // Get the ingredient price based on order type
-      const ingredientPrice = orderType === 'pickup'
-        ? (c.ingredient?.pickup_price ?? c.ingredient?.price ?? 0)
-        : (c.ingredient?.delivery_price ?? c.ingredient?.price ?? 0);
+
+      // Get the ingredient price based on order type (three-tier pricing)
+      const getIngredientPrice = () => {
+        if (orderType === 'pickup') return c.ingredient?.pickup_price ?? c.ingredient?.price ?? 0;
+        if (orderType === 'delivery') return c.ingredient?.delivery_price ?? c.ingredient?.price ?? 0;
+        if (orderType === 'dine-in') return c.ingredient?.dine_in_price ?? c.ingredient?.pickup_price ?? c.ingredient?.price ?? 0;
+        return c.ingredient?.price ?? 0;
+      };
+      const ingredientPrice = getIngredientPrice();
 
       return sum + (ingredientPrice * c.quantity);
     }, 0);

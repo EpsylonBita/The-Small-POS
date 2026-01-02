@@ -352,10 +352,13 @@ export function registerPrintHandlers() {
               const quantity = custom.quantity || 1;
               const name = custom.name || custom.ingredient?.name || 'Unknown';
               const isLittle = custom.isLittle || custom.is_little;
-              // Get price from ingredient
-              const price = order.order_type === 'delivery'
-                ? custom.ingredient?.delivery_price
-                : custom.ingredient?.pickup_price || custom.ingredient?.price;
+              // Get price from ingredient (three-tier pricing)
+              const getIngredientPrice = () => {
+                if (order.order_type === 'delivery') return custom.ingredient?.delivery_price ?? custom.ingredient?.price;
+                if (order.order_type === 'dine-in') return custom.ingredient?.dine_in_price ?? custom.ingredient?.pickup_price ?? custom.ingredient?.price;
+                return custom.ingredient?.pickup_price ?? custom.ingredient?.price;
+              };
+              const price = getIngredientPrice();
 
               let modName = name;
               if (isLittle) modName += ' (little)';

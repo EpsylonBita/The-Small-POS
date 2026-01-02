@@ -8,7 +8,7 @@ interface MenuItemGridProps {
   selectedCategory: string;
   selectedSubcategory?: string;
   onItemSelect: (item: MenuItem) => void;
-  orderType?: 'pickup' | 'delivery';
+  orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSyncMenu?: () => void;
   onQuickAdd?: (item: MenuItem, quantity: number) => void;
 }
@@ -210,10 +210,14 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-2 sm:gap-3">
         {menuItems.map((item) => {
-          // Get the correct price based on order type
-          const displayPrice = orderType === 'pickup'
-            ? (item.pickup_price || item.price)
-            : (item.delivery_price || item.price);
+          // Get the correct price based on order type (three-tier pricing)
+          const getDisplayPrice = () => {
+            if (orderType === 'pickup') return item.pickup_price || item.price;
+            if (orderType === 'delivery') return item.delivery_price || item.price;
+            if (orderType === 'dine-in') return item.dine_in_price || item.pickup_price || item.price;
+            return item.price;
+          };
+          const displayPrice = getDisplayPrice();
 
           return (
             <MenuItemCard

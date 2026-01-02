@@ -63,6 +63,7 @@ export interface Ingredient {
   price: number;
   pickup_price?: number; // Order-type specific add-on price (pickup)
   delivery_price?: number; // Order-type specific add-on price (delivery)
+  dine_in_price?: number; // Order-type specific add-on price (dine-in)
   cost: number; // Computed from cost_per_unit
   image_url?: string;
   stock_quantity: number; // Computed from stock_quantity or current_stock
@@ -100,6 +101,7 @@ export interface MenuItem {
   base_price?: number; // DB field (nullable) - fallback price
   pickup_price?: number; // DB field (NOT NULL) - pickup-specific price
   delivery_price?: number; // DB field (NOT NULL) - delivery-specific price
+  dine_in_price?: number; // DB field (NOT NULL) - dine-in-specific price
   image_url?: string | null; // DB field (nullable)
   preparation_time?: number | null; // DB field (nullable, default 0)
   preparationTime?: number; // Computed field (alias for preparation_time)

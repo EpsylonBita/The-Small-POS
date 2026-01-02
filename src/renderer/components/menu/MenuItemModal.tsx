@@ -204,21 +204,24 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     toast.success(t('menu.messages.itemAddedToCart', { name: menuItem.name }));
   };
 
-  // Calculate total price with order type consideration
+  // Calculate total price with order type consideration (three-tier pricing)
   const getBasePrice = () => {
     if (!menuItem) return 0;
     if (orderType === 'pickup' && menuItem.pickup_price) {
       return menuItem.pickup_price;
     } else if (orderType === 'delivery' && menuItem.delivery_price) {
       return menuItem.delivery_price;
+    } else if (orderType === 'dine-in' && menuItem.dine_in_price) {
+      return menuItem.dine_in_price;
     }
     return menuItem.base_price || menuItem.price || 0;
   };
 
   const basePrice = getBasePrice();
   const getIngredientUnitPrice = (ing: Ingredient) => {
-    if (orderType === 'pickup' && (ing as any).pickup_price !== undefined) return (ing as any).pickup_price as number;
-    if (orderType === 'delivery' && (ing as any).delivery_price !== undefined) return (ing as any).delivery_price as number;
+    if (orderType === 'pickup' && ing.pickup_price !== undefined) return ing.pickup_price;
+    if (orderType === 'delivery' && ing.delivery_price !== undefined) return ing.delivery_price;
+    if (orderType === 'dine-in' && ing.dine_in_price !== undefined) return ing.dine_in_price;
     return ing.price || 0;
   };
   // Only charge for ingredients that are NOT marked as "without"
