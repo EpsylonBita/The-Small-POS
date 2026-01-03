@@ -507,4 +507,142 @@ export function registerShiftHandlers(): void {
             return rolesByStaff;
         }, 'shift:get-staff-roles');
     });
+
+    // Handler: shift:get-scheduled-shifts
+    /**
+     * Fetch scheduled shifts from admin dashboard (salon_staff_shifts table)
+     * This syncs the pre-planned schedules from admin dashboard to POS
+     */
+    ipcMain.handle('shift:get-scheduled-shifts', async (_event, params: {
+        branchId: string;
+        startDate: string;  // ISO date string
+        endDate: string;    // ISO date string
+        staffId?: string;   // Optional filter by staff
+    }) => {
+        return handleIPCError(async () => {
+            const supabaseUrl = SUPABASE_CONFIG.url;
+            const supabaseKey = SUPABASE_CONFIG.anonKey;
+
+            if (!supabaseUrl || !supabaseKey) {
+                throw new IPCError('Supabase configuration missing', 'SERVICE_UNAVAILABLE');
+            }
+
+            if (!params.branchId) {
+                throw new IPCError('Branch ID is required', 'VALIDATION_ERROR');
+            }
+
+            console.log('[shift:get-scheduled-shifts] Fetching scheduled shifts:', {
+                branchId: params.branchId,
+                startDate: params.startDate,
+                endDate: params.endDate,
+                staffId: params.staffId
+            });
+
+            // Build query for salon_staff_shifts with staff details
+            let query = `${supabaseUrl}/rest/v1/salon_staff_shifts?select=id,staff_id,branch_id,start_time,end_time,break_start,break_end,status,notes,staff(id,first_name,last_name,staff_code)&branch_id=eq.${params.branchId}&start_time=gte.${params.startDate}&start_time=lte.${params.endDate}`;
+
+            if (params.staffId) {
+                query += `&staff_id=eq.${params.staffId}`;
+            }
+
+            const response = await fetch(query, {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            if (!response.ok) {
+                const txt = await response.text();
+                throw new IPCError(`Failed to fetch scheduled shifts: ${response.status} ${response.statusText} - ${txt}`, 'NETWORK_ERROR');
+            }
+
+            const data = await response.json();
+            console.log('[shift:get-scheduled-shifts] Fetched', data?.length || 0, 'scheduled shifts');
+
+            // Map to consistent format for POS
+            const scheduledShifts = (data || []).map((shift: any) => ({
+                id: shift.id,
+                staffId: shift.staff_id,
+                branchId: shift.branch_id,
+                startTime: shift.start_time,
+                endTime: shift.end_time,
+                breakStart: shift.break_start,
+                breakEnd: shift.break_end,
+                status: shift.status,
+                notes: shift.notes,
+                staffName: shift.staff ? `${shift.staff.first_name || ''} ${shift.staff.last_name || ''}`.trim() : 'Unknown',
+                staffCode: shift.staff?.staff_code || ''
+            }));
+
+            return scheduledShifts;
+        }, 'shift:get-scheduled-shifts');
+    });
+
+    // Handler: shift:get-today-scheduled-shifts
+    /**
+     * Get scheduled shifts for today for a specific branch
+     * Convenience handler for quick access to today's schedule
+     */
+    ipcMain.handle('shift:get-today-scheduled-shifts', async (_event, branchId: string) => {
+        return handleIPCError(async () => {
+            const supabaseUrl = SUPABASE_CONFIG.url;
+            const supabaseKey = SUPABASE_CONFIG.anonKey;
+
+            if (!supabaseUrl || !supabaseKey) {
+                throw new IPCError('Supabase configuration missing', 'SERVICE_UNAVAILABLE');
+            }
+
+            if (!branchId) {
+                throw new IPCError('Branch ID is required', 'VALIDATION_ERROR');
+            }
+
+            // Calculate today's date range
+            const today = new Date();
+            const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
+            const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59).toISOString();
+
+            console.log('[shift:get-today-scheduled-shifts] Fetching today\'s shifts:', {
+                branchId,
+                startOfDay,
+                endOfDay
+            });
+
+            const query = `${supabaseUrl}/rest/v1/salon_staff_shifts?select=id,staff_id,branch_id,start_time,end_time,break_start,break_end,status,notes,staff(id,first_name,last_name,staff_code)&branch_id=eq.${branchId}&start_time=gte.${startOfDay}&start_time=lte.${endOfDay}&order=start_time.asc`;
+
+            const response = await fetch(query, {
+                method: 'GET',
+                headers: {
+                    'apikey': supabaseKey,
+                    'Authorization': `Bearer ${supabaseKey}`,
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            if (!response.ok) {
+                const txt = await response.text();
+                throw new IPCError(`Failed to fetch today's scheduled shifts: ${response.status} ${response.statusText} - ${txt}`, 'NETWORK_ERROR');
+            }
+
+            const data = await response.json();
+            console.log('[shift:get-today-scheduled-shifts] Fetched', data?.length || 0, 'scheduled shifts for today');
+
+            // Map to consistent format
+            return (data || []).map((shift: any) => ({
+                id: shift.id,
+                staffId: shift.staff_id,
+                branchId: shift.branch_id,
+                startTime: shift.start_time,
+                endTime: shift.end_time,
+                breakStart: shift.break_start,
+                breakEnd: shift.break_end,
+                status: shift.status,
+                notes: shift.notes,
+                staffName: shift.staff ? `${shift.staff.first_name || ''} ${shift.staff.last_name || ''}`.trim() : 'Unknown',
+                staffCode: shift.staff?.staff_code || ''
+            }));
+        }, 'shift:get-today-scheduled-shifts');
+    });
 }

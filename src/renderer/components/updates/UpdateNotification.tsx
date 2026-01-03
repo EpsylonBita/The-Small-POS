@@ -34,7 +34,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
         <LiquidGlassModal
             isOpen={isOpen}
             onClose={onClose}
-            title="Update Available" // Hardcoded for simplified plan compliance, ideally t('updates.available')
+            title={t('updates.title.available')}
             size="md"
         >
             <div className="space-y-4">
@@ -43,15 +43,15 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                     </svg>
                     <div>
-                        <h3 className="text-lg font-bold text-white">Version {updateInfo.version}</h3>
+                        <h3 className="text-lg font-bold text-white">{t('updates.available.version', { version: updateInfo.version })}</h3>
                         <p className="text-sm text-gray-300">
-                            Released: {new Date(updateInfo.releaseDate).toLocaleDateString()}
+                            {t('updates.available.released', { date: new Date(updateInfo.releaseDate).toLocaleDateString() })}
                         </p>
                     </div>
                 </div>
 
                 <div className="bg-black/20 rounded-lg p-4 max-h-48 overflow-y-auto">
-                    <h4 className="text-sm font-semibold text-gray-300 mb-2">What's New:</h4>
+                    <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
                     {/* Render release notes as HTML content safely or plain text */}
                     <div
                         className="text-sm text-gray-400 prose prose-invert prose-sm"
@@ -73,14 +73,14 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                         onClick={onDownload}
                         fullWidth
                     >
-                        Download Now
+                        {t('updates.actions.download')}
                     </POSGlassButton>
                     <POSGlassButton
                         variant="secondary"
                         onClick={onInstallLater}
                         fullWidth
                     >
-                        Remind Me Later
+                        {t('updates.actions.later')}
                     </POSGlassButton>
                 </div>
             </div>

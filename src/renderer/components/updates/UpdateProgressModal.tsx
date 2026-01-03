@@ -1,6 +1,7 @@
 import React from 'react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { ProgressInfo } from 'electron-updater';
+import { useI18n } from '../../contexts/i18n-context';
 
 interface UpdateProgressModalProps {
     isOpen: boolean;
@@ -13,6 +14,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
     progress,
     onCancel
 }) => {
+    const { t } = useI18n();
     const percent = progress?.percent || 0;
     const speed = (progress?.bytesPerSecond || 0) / 1024 / 1024; // MB/s
     const transferred = (progress?.transferred || 0) / 1024 / 1024; // MB
@@ -22,7 +24,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
         <LiquidGlassModal
             isOpen={isOpen}
             onClose={() => { }} // Prevent closing via backdrop/esc during download
-            title="Downloading Update..."
+            title={t('updates.title.downloading')}
             size="md"
             closeOnBackdrop={false}
             closeOnEscape={false}
@@ -38,15 +40,15 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
 
                 <div className="grid grid-cols-2 gap-4 text-sm">
                     <div className="bg-white/5 p-3 rounded-lg">
-                        <span className="block text-gray-400">Progress</span>
+                        <span className="block text-gray-400">{t('updates.downloading.progress')}</span>
                         <span className="block text-xl font-bold text-white">{percent.toFixed(0)}%</span>
                     </div>
                     <div className="bg-white/5 p-3 rounded-lg">
-                        <span className="block text-gray-400">Speed</span>
+                        <span className="block text-gray-400">{t('updates.downloading.speed')}</span>
                         <span className="block text-xl font-bold text-white">{speed.toFixed(1)} MB/s</span>
                     </div>
                     <div className="bg-white/5 p-3 rounded-lg">
-                        <span className="block text-gray-400">Downloaded</span>
+                        <span className="block text-gray-400">{t('updates.downloading.downloaded')}</span>
                         <span className="block text-xl font-bold text-white">{transferred.toFixed(1)} / {total.toFixed(1)} MB</span>
                     </div>
                 </div>
@@ -57,7 +59,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
                         onClick={onCancel}
                         className="px-8"
                     >
-                        Cancel Download
+                        {t('updates.actions.cancel')}
                     </POSGlassButton>
                 </div>
             </div>

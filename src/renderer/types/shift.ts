@@ -317,3 +317,31 @@ export interface RecordExpenseResponse {
   error?: string;
 }
 
+/**
+ * Scheduled shift from admin dashboard (salon_staff_shifts table)
+ * These are pre-planned shifts created in the admin dashboard
+ */
+export interface ScheduledShift {
+  id: string;
+  staffId: string;
+  branchId: string;
+  startTime: string;
+  endTime: string;
+  breakStart?: string;
+  breakEnd?: string;
+  status: 'scheduled' | 'active' | 'completed' | 'cancelled' | 'no_show';
+  notes?: string;
+  staffName: string;
+  staffCode: string;
+}
+
+/**
+ * Parameters for fetching scheduled shifts
+ */
+export interface GetScheduledShiftsParams {
+  branchId: string;
+  startDate: string;
+  endDate: string;
+  staffId?: string;
+}
+
