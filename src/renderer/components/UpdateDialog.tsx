@@ -1,8 +1,8 @@
 import React from 'react';
-import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
+import { useI18n } from '../contexts/i18n-context';
 
 /**
  * UpdateDialog Component
@@ -54,7 +54,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
   onInstall,
   onRetry,
 }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
 
   const getTitle = (): string => {
     switch (status) {
@@ -137,7 +137,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
 
 // Checking state - spinner while checking for updates
 const CheckingState: React.FC = () => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   return (
     <div className="flex flex-col items-center justify-center py-8 space-y-4">
       <div className="w-12 h-12 border-4 border-cyan-500 border-t-transparent rounded-full animate-spin" />
@@ -162,7 +162,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
   onClose,
   currentVersion
 }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   const releaseNotes = getReleaseNotesHtml(updateInfo?.releaseNotes);
 
   return (
@@ -237,7 +237,7 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
   progress,
   onCancel
 }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   const percent = progress?.percent || 0;
   const speed = (progress?.bytesPerSecond || 0) / 1024 / 1024; // MB/s
   const transferred = (progress?.transferred || 0) / 1024 / 1024; // MB
@@ -301,7 +301,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
   onInstall,
   onClose
 }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   const version = updateInfo?.version || 'New Version';
 
   const handleInstall = (e: React.MouseEvent) => {
@@ -383,7 +383,7 @@ const ErrorState: React.FC<ErrorStateProps> = ({
   onRetry,
   onClose
 }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   return (
     <div className="space-y-6 text-center">
       {/* Error icon */}
@@ -439,7 +439,7 @@ interface UpToDateStateProps {
 }
 
 const UpToDateState: React.FC<UpToDateStateProps> = ({ onClose, currentVersion, onRetry }) => {
-  const { t } = useTranslation();
+  const { t } = useI18n();
   return (
     <div className="space-y-6 text-center">
       {/* Check icon */}

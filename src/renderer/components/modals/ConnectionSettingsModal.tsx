@@ -8,6 +8,7 @@ import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, 
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 
 interface Props {
   isOpen: boolean
@@ -28,6 +29,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
+  const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
+  const [isClearingOperational, setIsClearingOperational] = useState(false)
 
 
 
@@ -628,25 +631,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     </div>
                   </div>
                   <button
-                    onClick={async () => {
-                      const confirmed = confirm(t('settings.database.confirmClearOperational', '⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?'))
-                      if (!confirmed) return
-
-                      try {
-                        toast.loading(t('settings.database.clearingOperational', 'Clearing operational data...'))
-                        const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
-                        toast.dismiss()
-                        if (result?.success) {
-                          toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
-                        } else {
-                          toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-                        }
-                      } catch (e) {
-                        console.error('Failed to clear operational data:', e)
-                        toast.dismiss()
-                        toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-                      }
-                    }}
+                    onClick={() => setShowClearOperationalConfirm(true)}
                     className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-amber-600/30 border-2 border-amber-500 hover:bg-amber-600/50 text-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.5)]`}
                   >
                     {t('settings.database.clearOperationalButton', 'Clear')}
@@ -698,6 +683,45 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             onClose={() => setShowPrinterSettingsModal(false)}
           />
         )}
+
+        {/* Clear Operational Data Confirmation Dialog */}
+        <ConfirmDialog
+          isOpen={showClearOperationalConfirm}
+          onClose={() => setShowClearOperationalConfirm(false)}
+          onConfirm={async () => {
+            setIsClearingOperational(true)
+            try {
+              const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
+              if (result?.success) {
+                toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
+                setShowClearOperationalConfirm(false)
+              } else {
+                toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+              }
+            } catch (e) {
+              console.error('Failed to clear operational data:', e)
+              toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+            } finally {
+              setIsClearingOperational(false)
+            }
+          }}
+          title={t('settings.database.confirmClearOperationalTitle', 'Clear Operational Data')}
+          message={t('settings.database.confirmClearOperationalMessage', 'This action cannot be undone. All operational data will be permanently deleted.')}
+          variant="warning"
+          confirmText={t('settings.database.clearOperationalButton', 'Clear')}
+          cancelText={t('common.actions.cancel', 'Cancel')}
+          isLoading={isClearingOperational}
+          requireCheckbox={t('settings.database.confirmClearOperationalCheckbox', 'I understand that this will delete all orders, shifts, drawers, payments, and driver earnings')}
+          details={
+            <ul className="list-disc list-inside space-y-1 text-white/70">
+              <li>{t('settings.database.clearItem.orders', 'All orders')}</li>
+              <li>{t('settings.database.clearItem.shifts', 'All staff shifts')}</li>
+              <li>{t('settings.database.clearItem.drawers', 'All cash drawer sessions')}</li>
+              <li>{t('settings.database.clearItem.payments', 'All payments and expenses')}</li>
+              <li>{t('settings.database.clearItem.earnings', 'All driver earnings')}</li>
+            </ul>
+          }
+        />
       </div>
     </LiquidGlassModal>
   )

@@ -236,9 +236,6 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 }
 
 import { useAutoUpdater } from "./hooks/useAutoUpdater";
-import { UpdateNotification } from "./components/updates/UpdateNotification";
-import { UpdateProgressModal } from "./components/updates/UpdateProgressModal";
-import { UpdateReadyModal } from "./components/updates/UpdateReadyModal";
 import { UpdateDialog } from "./components/UpdateDialog";
 import type { UpdateStatus } from "./components/UpdateDialog";
 
@@ -551,32 +548,10 @@ function AppContent() {
               }}
             />
 
-            {/* Auto Updater Modals */}
-            <UpdateNotification
-              isOpen={autoUpdater.showNotification}
-              onClose={autoUpdater.dismissUpdate}
-              updateInfo={autoUpdater.updateInfo}
-              onDownload={autoUpdater.downloadUpdate}
-              onInstallLater={autoUpdater.dismissUpdate}
-            />
-
-            <UpdateProgressModal
-              isOpen={autoUpdater.downloading}
-              progress={autoUpdater.progress}
-              onCancel={autoUpdater.cancelDownload}
-            />
-
-            <UpdateReadyModal
-              isOpen={autoUpdater.ready}
-              updateInfo={autoUpdater.updateInfo}
-              onInstallNow={autoUpdater.installUpdate}
-              onInstallOnRestart={autoUpdater.dismissUpdate}
-            />
-
-            {/* Menu-triggered Update Dialog (Requirements: 2.1) */}
+            {/* Unified Update Dialog - handles all update states */}
             <UpdateDialog
-              isOpen={autoUpdater.updateDialogOpen}
-              onClose={autoUpdater.closeUpdateDialog}
+              isOpen={autoUpdater.updateDialogOpen || autoUpdater.showNotification || autoUpdater.downloading || autoUpdater.ready}
+              onClose={autoUpdater.updateDialogOpen ? autoUpdater.closeUpdateDialog : autoUpdater.dismissUpdate}
               status={getUpdateStatus(autoUpdater)}
               updateInfo={autoUpdater.updateInfo}
               progress={autoUpdater.progress}

@@ -1396,6 +1396,16 @@
       "clearOperationalHelp": "Clears orders, shifts, drawers, payments. Keeps settings.",
       "clearOperationalButton": "Clear",
       "confirmClearOperational": "⚠️ WARNING ⚠️\n\nThis will clear ALL operational data:\n• All orders\n• All staff shifts\n• All cash drawer sessions\n• All payments and expenses\n• All driver earnings\n\nConnection settings and menu data will be preserved.\n\nAre you sure you want to continue?",
+      "confirmClearOperationalTitle": "Clear Operational Data",
+      "confirmClearOperationalMessage": "This action cannot be undone. All operational data will be permanently deleted.",
+      "confirmClearOperationalCheckbox": "I understand that this will delete all orders, shifts, drawers, payments, and driver earnings",
+      "clearItem": {
+        "orders": "All orders",
+        "shifts": "All staff shifts",
+        "drawers": "All cash drawer sessions",
+        "payments": "All payments and expenses",
+        "earnings": "All driver earnings"
+      },
       "clearingOperational": "Clearing operational data...",
       "operationalCleared": "All operational data cleared successfully",
       "operationalClearFailed": "Failed to clear operational data",
@@ -3480,6 +3490,10 @@
       "retry": "Retry",
       "recheck": "Check Again",
       "ok": "OK"
+    },
+    "toast": {
+      "readyToDownload": "Version {{version}} is ready to download",
+      "clickToView": "Click to view details"
     }
   }
 }

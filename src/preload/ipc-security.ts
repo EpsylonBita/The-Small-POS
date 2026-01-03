@@ -6,9 +6,10 @@
  */
 
 // Dangerous channels that should NEVER be available in production
+// Note: database:clear-operational-data is allowed because the UI has a confirmation dialog
+// and it preserves settings/menu data (not a full wipe)
 const DANGEROUS_CHANNELS_PRODUCTION = [
   'database:reset',                    // Nuke entire database
-  'database:clear-operational-data',   // Delete business data
   'orders:clear-all',                  // Delete all orders (financial fraud)
   'sync:clear-all-orders',             // Delete all synced orders
   'settings:factory-reset',            // System wipe

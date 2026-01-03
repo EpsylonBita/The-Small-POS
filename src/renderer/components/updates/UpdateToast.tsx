@@ -1,12 +1,13 @@
 import React from 'react';
 import { toast, Toast } from 'react-hot-toast';
+import { useI18n } from '../../contexts/i18n-context';
 
 /**
  * UpdateToast Component
- * 
+ *
  * A clickable toast notification for background update availability.
  * When clicked, it dismisses the toast and triggers the onOpenDialog callback.
- * 
+ *
  * Requirements: 3.3, 3.4
  */
 
@@ -17,6 +18,8 @@ interface UpdateToastProps {
 }
 
 export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDialog }) => {
+  const { t: translate } = useI18n();
+
   const handleClick = () => {
     toast.dismiss(t.id);
     onOpenDialog();
@@ -36,11 +39,11 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
     >
       <span className="text-2xl">🔄</span>
       <div>
-        <div className="font-semibold text-white">Update Available</div>
+        <div className="font-semibold text-white">{translate('updates.title.available')}</div>
         <div className="text-sm text-white/80">
-          Version {version} is ready to download
+          {translate('updates.toast.readyToDownload', { version })}
         </div>
-        <div className="text-xs text-white/60 mt-1">Click to view details</div>
+        <div className="text-xs text-white/60 mt-1">{translate('updates.toast.clickToView')}</div>
       </div>
     </div>
   );
