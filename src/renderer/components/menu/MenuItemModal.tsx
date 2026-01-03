@@ -15,7 +15,7 @@ interface MenuItemModalProps {
   isOpen: boolean;
   onClose: () => void;
   menuItem: MenuItem | null;
-  orderType?: 'pickup' | 'delivery';
+  orderType?: 'pickup' | 'delivery' | 'dine-in';
   onAddToCart: (item: MenuItem, quantity: number, customizations: SelectedIngredient[], notes: string) => void;
   isCustomizable?: boolean;
   // Edit mode props - pre-populate with existing customizations

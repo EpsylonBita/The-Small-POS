@@ -30,7 +30,7 @@ interface MenuItem {
 
 interface MenuItemCardProps {
   item: MenuItem;
-  orderType?: 'pickup' | 'delivery';
+  orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSelect: () => void;
   onQuickAdd?: (item: MenuItem, quantity: number) => void;
 }
