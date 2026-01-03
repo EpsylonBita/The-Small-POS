@@ -65,7 +65,7 @@ export function useScheduledShifts(options: UseScheduledShiftsOptions): UseSched
         staffId,
       };
 
-      const result = await window.electron.ipcRenderer.invoke('shift:get-scheduled-shifts', params);
+      const result = await window.electron?.ipcRenderer.invoke('shift:get-scheduled-shifts', params);
 
       if (Array.isArray(result)) {
         setScheduledShifts(result);
@@ -124,7 +124,7 @@ export function useTodayScheduledShifts(branchId: string): UseScheduledShiftsRes
     setError(null);
 
     try {
-      const result = await window.electron.ipcRenderer.invoke('shift:get-today-scheduled-shifts', branchId);
+      const result = await window.electron?.ipcRenderer.invoke('shift:get-today-scheduled-shifts', branchId);
 
       if (Array.isArray(result)) {
         setScheduledShifts(result);
