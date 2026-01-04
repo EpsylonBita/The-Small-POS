@@ -416,16 +416,19 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
                     </div>
                   ) : (
-                    Object.entries(filteredByColor).map(([color, ingredients]) => (
+                    Object.entries(filteredByColor).map(([color, ingredients]) => {
+                      // Get the category name from the first ingredient in this color group
+                      const categoryName = ingredients[0]?.category_name || t('menu.itemModal.ingredients');
+                      return (
                       <div key={color}>
-                        {/* Color Header */}
+                        {/* Color Header with Category Name */}
                         <div className="flex items-center gap-2 mb-3">
                           <span
                             className="h-4 w-4 rounded-full border-2 border-white/30 shadow-lg"
                             style={{ backgroundColor: color }}
                           />
                           <span className="text-sm font-medium liquid-glass-modal-text-muted">
-                            {ingredients.length} {ingredients.length === 1 ? 'ingredient' : 'ingredients'}
+                            {ingredients.length} {categoryName}
                           </span>
                         </div>
 
@@ -553,7 +556,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                           })}
                         </div>
                       </div>
-                    ))
+                    );
+                    })
                   )}
                 </div>
               </div>

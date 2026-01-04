@@ -43,6 +43,7 @@ import {
   Heart,
   ChefHat,
   UtensilsCrossed,
+  Warehouse,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
@@ -168,6 +169,8 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <Heart className={iconClass} strokeWidth={2} />;
       case 'ChefHat':
         return <ChefHat className={iconClass} strokeWidth={2} />;
+      case 'Warehouse':
+        return <Warehouse className={iconClass} strokeWidth={2} />;
       default:
         // Log unknown icons for debugging
         console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);

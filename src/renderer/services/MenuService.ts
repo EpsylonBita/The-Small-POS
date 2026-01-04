@@ -56,6 +56,7 @@ export interface IngredientCategory {
 export interface Ingredient {
   id: string;
   category_id?: string; // DB field (NULLABLE) - may be empty if no category assigned
+  category_name?: string; // Category name from ingredient_categories for display
   name: string; // Computed field: name_en || name || 'Unknown'
   name_en?: string; // English name from database
   name_el?: string; // Greek name from database
@@ -454,8 +455,15 @@ class MenuService {
           is_active,
           image_url,
           display_order,
+          item_color,
           created_at,
-          updated_at
+          updated_at,
+          ingredient_categories (
+            id,
+            name,
+            flavor_type,
+            color_code
+          )
         `)
         .eq('category_id', categoryId)
         .eq('is_active', true)
@@ -562,9 +570,14 @@ class MenuService {
       }
     }
 
+    // Get category name from joined data
+    const category = (raw as any).ingredient_categories;
+    const categoryName = category?.name || undefined;
+
     return {
       id: raw.id,
       category_id: raw.category_id || undefined, // NULLABLE in DB - may be undefined
+      category_name: categoryName, // Category name for display in UI
       name: raw.name_en || raw.name || 'Unknown',
       description: raw.description || '',
       price: raw.price || 0,
@@ -578,7 +591,7 @@ class MenuService {
       is_available: raw.is_available ?? true,
       allergens: raw.allergen_info || [],
       display_order: raw.display_order || 0,
-      item_color: (raw as any).item_color || '#6B7280', // Default gray if not set
+      item_color: (raw as any).item_color || category?.color_code || '#6B7280', // Fallback to category color, then default gray
       flavor_type: flavorType, // From ingredient_categories.flavor_type field
       created_at: raw.created_at,
       updated_at: raw.updated_at,
