@@ -56,6 +56,7 @@ export class RealtimeOrderHandler {
   private client: SupabaseClient<any, 'public', any>
   // Resubscribe/backoff state
   private ordersChannel: RealtimeChannel | null = null
+  private ordersDeleteChannel: RealtimeChannel | null = null  // Separate channel for DELETE events (no filter)
   private itemsChannel: RealtimeChannel | null = null
   private retryAttempts = 0
   private resubscribeTimer?: NodeJS.Timeout
@@ -217,6 +218,7 @@ export class RealtimeOrderHandler {
     })
 
     this.subscribeOrdersChannel()
+    this.subscribeOrdersDeleteChannel()  // Separate channel for DELETE events (no filter works with DELETE)
     this.subscribeItemsChannel()
   }
 
@@ -251,6 +253,61 @@ export class RealtimeOrderHandler {
       })
 
     this.ordersChannel = ch
+    this.channels.push(ch)
+  }
+
+  /**
+   * Subscribe to DELETE events separately without a filter.
+   * Supabase realtime filters check against the `new` record, but DELETE events
+   * have no `new` record (only `old`). So filters don't work for DELETE events.
+   * We subscribe without a filter and check branch_id locally.
+   */
+  private subscribeOrdersDeleteChannel() {
+    // Clean any existing
+    if (this.ordersDeleteChannel) {
+      try { this.client.removeChannel(this.ordersDeleteChannel) } catch { /* noop */ }
+      this.ordersDeleteChannel = null
+    }
+
+    const channelName = `orders_delete_rt_${this.terminalId}_${Date.now()}`
+    console.log('[RealtimeOrderHandler] Setting up DELETE-only orders channel:', channelName)
+
+    const ch = this.client
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'orders',
+          // NO FILTER - filters don't work for DELETE events
+        } as any,
+        (payload: any) => {
+          console.log('[RealtimeOrderHandler] Received DELETE event from dedicated channel:', {
+            oldId: payload.old?.id,
+            oldBranchId: payload.old?.branch_id,
+            ourBranchId: this.branchId
+          })
+
+          // Filter locally: only process if branch matches (or no branch filter)
+          if (!this.branchId || payload.old?.branch_id === this.branchId) {
+            this.handleOrderChange(payload)
+          } else {
+            console.log('[RealtimeOrderHandler] Ignoring DELETE for different branch')
+          }
+        }
+      )
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          console.log('[RealtimeOrderHandler] Orders DELETE channel subscribed ✓')
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          console.warn('[RealtimeOrderHandler] Orders DELETE channel error:', status)
+          // Re-subscribe after delay
+          setTimeout(() => this.subscribeOrdersDeleteChannel(), 5000)
+        }
+      })
+
+    this.ordersDeleteChannel = ch
     this.channels.push(ch)
   }
 

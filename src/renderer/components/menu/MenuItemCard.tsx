@@ -159,31 +159,40 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
 
       {/* Customizable Label - Orange Text Only */}
       {item.is_customizable && (
-        <div className="mb-1.5">
-          <span className="text-xs font-medium text-orange-500">
+        <div className="mb-1">
+          <span className="text-xs sm:text-sm font-semibold text-orange-500 antialiased">
             {t('menu.item.customizable')}
           </span>
         </div>
       )}
 
-      {/* Item Name - Compact */}
-      <h3 className={`text-xs sm:text-sm font-bold mb-1 sm:mb-2 line-clamp-2 ${
+      {/* Item Name - Larger and Clearer */}
+      <h3 className={`text-base sm:text-lg font-bold mb-1 line-clamp-2 leading-tight antialiased ${
         resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
       }`}>
         {item.name}
       </h3>
 
-      {/* Spacer to push price to bottom */}
-      <div className="flex-1" />
+      {/* Item Description - Gray text */}
+      {item.description && (
+        <p className={`text-xs sm:text-sm leading-snug line-clamp-2 mb-1 antialiased ${
+          resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+        }`}>
+          {item.description}
+        </p>
+      )}
 
-      {/* Price Section - Compact */}
+      {/* Spacer to push price to bottom */}
+      <div className="flex-1 min-h-1" />
+
+      {/* Price Section - Clear and Readable */}
       <div className="flex flex-col">
-        <span className={`text-sm sm:text-base font-bold ${
+        <span className={`text-base sm:text-lg font-bold antialiased ${
           resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
         }`}>
           {item.is_customizable ? t('menu.item.from') : ''}€{item.price.toFixed(2)}
         </span>
-        <span className={`text-[10px] sm:text-xs ${
+        <span className={`text-xs sm:text-sm antialiased ${
           resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
         }`}>
           {orderType === 'pickup' ? t('menu.item.pickup') : t('menu.item.delivery')}

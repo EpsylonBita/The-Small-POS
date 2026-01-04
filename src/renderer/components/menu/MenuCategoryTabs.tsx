@@ -151,14 +151,14 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
             <button
               key={category.id}
               onClick={() => handleCategoryChange(category.id)}
-              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 whitespace-nowrap min-h-[36px] touch-feedback active:scale-95 flex-shrink-0 ${
+              className={`px-3 py-2 rounded-lg text-sm font-semibold antialiased transition-all duration-200 whitespace-nowrap min-h-[36px] touch-feedback active:scale-95 flex-shrink-0 ${
                 selectedCategory === category.id
                   ? resolvedTheme === 'dark'
-                    ? 'bg-blue-600/50 text-blue-200 border border-blue-400/40'
+                    ? 'bg-blue-600 text-white border border-blue-500'
                     : 'bg-blue-500 text-white'
                   : resolvedTheme === 'dark'
-                    ? 'bg-gray-800/60 text-gray-300 border border-gray-700/50'
-                    : 'bg-gray-100 text-gray-700 border border-gray-200'
+                    ? 'bg-gray-800 text-gray-200 border border-gray-700'
+                    : 'bg-gray-100 text-gray-800 border border-gray-300'
               }`}
             >
               {category.name}
@@ -175,14 +175,14 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
               <button
                 key={subcategory.id}
                 onClick={() => handleSubcategoryChange(subcategory.id)}
-                className={`px-3 sm:px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 whitespace-nowrap min-h-[40px] touch-feedback active:scale-95 ${
+                className={`px-3 sm:px-4 py-2 rounded-full text-sm font-semibold antialiased transition-all duration-200 whitespace-nowrap min-h-[40px] touch-feedback active:scale-95 ${
                   selectedSubcategory === subcategory.id
                     ? resolvedTheme === 'dark'
-                      ? 'bg-gradient-to-r from-green-600/40 to-green-500/40 text-green-300 shadow-[0_3px_15px_rgba(34,197,94,0.4)] border border-green-400/30'
-                      : 'bg-gradient-to-r from-green-500 to-green-600 text-white shadow-[0_3px_15px_rgba(34,197,94,0.5)]'
+                      ? 'bg-green-600 text-white border border-green-500'
+                      : 'bg-green-500 text-white'
                     : resolvedTheme === 'dark'
-                      ? 'bg-gray-800/40 text-gray-400 hover:bg-gray-700/50 active:bg-gray-600/50 border border-gray-700/40 shadow-[0_2px_8px_rgba(0,0,0,0.3)]'
-                      : 'bg-gray-100/70 text-gray-600 hover:bg-gray-200/70 active:bg-gray-300/70 border border-gray-200 shadow-[0_2px_8px_rgba(0,0,0,0.1)]'
+                      ? 'bg-gray-800 text-gray-200 hover:bg-gray-700 border border-gray-700'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-300'
                 }`}
               >
                 {subcategory.name}

@@ -23,6 +23,7 @@ import { CustomerService } from '../services/CustomerService';
 import { WindowManager } from '../window-manager';
 import { ModuleSyncService } from '../services/ModuleSyncService';
 import { getSupabaseClient, isSupabaseConfigured } from '../../shared/supabase-config';
+import { setupRealtimeHandlers } from '../index';
 import {
   initializePrinterManager,
   registerPrinterManagerHandlers,
@@ -415,11 +416,31 @@ export function setupServiceCallbacks(mainWindow: BrowserWindow): void {
  */
 export function startSync(): void {
   const syncService = serviceRegistry.syncService;
+  const dbManager = serviceRegistry.dbManager;
+  const mainWindow = serviceRegistry.mainWindow;
+  const heartbeatService = serviceRegistry.heartbeatService;
+  const settingsService = serviceRegistry.settingsService;
+
   if (syncService) {
     if (isSupabaseConfigured()) {
       console.log('🔄 Starting auto-sync and realtime subscriptions...');
       syncService.startAutoSync();
       syncService.setupRealtimeSubscriptions();
+
+      // Initialize RealtimeOrderHandler for order sync (INSERT/UPDATE/DELETE from Supabase)
+      if (dbManager && heartbeatService) {
+        const branchId = settingsService?.getSetting('terminal', 'branch_id', null) as string | null;
+        const terminalId = heartbeatService.getTerminalId();
+
+        console.log('📡 Starting realtime order handlers...');
+        setupRealtimeHandlers({
+          mainWindow,
+          dbManager,
+          heartbeatService,
+          branchId,
+          terminalId,
+        });
+      }
     } else {
       console.log('⏭️ Skipping sync services (Supabase not configured - onboarding mode)');
     }

@@ -269,7 +269,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[95vh] z-[1101] flex flex-col">
+      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col">
         {/* Header */}
         <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
           <div className="flex justify-between items-start gap-4">
@@ -416,16 +416,28 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
                     </div>
                   ) : (
-                    Object.entries(filteredByColor).map(([color, ingredients]) => (
+                    Object.entries(filteredByColor).map(([color, ingredients]) => {
+                      // Get the category name from the first ingredient in this color group
+                      const categoryName = ingredients[0]?.category_name || t('menu.itemModal.ingredients');
+                      return (
                       <div key={color}>
-                        {/* Color Header */}
+                        {/* Color Header with Category Name */}
                         <div className="flex items-center gap-2 mb-3">
                           <span
-                            className="h-4 w-4 rounded-full border-2 border-white/30 shadow-lg"
-                            style={{ backgroundColor: color }}
+                            className="h-4 w-4 rounded-full border-2 shadow-lg"
+                            style={{
+                              backgroundColor: color,
+                              borderColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.2)'
+                            }}
                           />
-                          <span className="text-sm font-medium liquid-glass-modal-text-muted">
-                            {ingredients.length} {ingredients.length === 1 ? 'ingredient' : 'ingredients'}
+                          <span
+                            className="text-sm font-semibold"
+                            style={{
+                              color: resolvedTheme === 'dark' ? '#e2e8f0' : '#334155',
+                              textRendering: 'geometricPrecision'
+                            }}
+                          >
+                            {ingredients.length} {categoryName}
                           </span>
                         </div>
 
@@ -438,8 +450,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             const isLittle = selectedItem?.isLittle || false;
                             const isWithout = selectedItem?.isWithout || false;
 
-                            // Helper function to convert hex to rgba
-                            const hexToRgba = (hex: string, alpha: number) => {
+                            // Helper function to convert hex to vivid rgba with strong saturation boost
+                            const hexToVividRgba = (hex: string, alpha: number) => {
                               const r = parseInt(hex.slice(1, 3), 16);
                               const g = parseInt(hex.slice(3, 5), 16);
                               const b = parseInt(hex.slice(5, 7), 16);
@@ -449,19 +461,24 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             return (
                               <div
                                 key={ingredient.id}
-                                className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left backdrop-blur-sm ${isSelected
+                                className={`relative p-3 rounded-xl border-2 transition-all duration-200 text-left ${isSelected
                                     ? isWithout
-                                      ? 'border-red-400/60 shadow-lg scale-[1.02]'
-                                      : 'border-white/40 shadow-lg scale-[1.02]'
-                                    : 'border-white/10 hover:border-white/30'
+                                      ? 'border-red-400 shadow-lg scale-[1.02]'
+                                      : 'shadow-lg scale-[1.02]'
+                                    : 'hover:scale-[1.01]'
                                   }`}
                                 style={{
                                   backgroundColor: isSelected
                                     ? isWithout
-                                      ? 'rgba(239, 68, 68, 0.2)' // Red tint for "without"
-                                      : hexToRgba(color, 0.3)
-                                    : hexToRgba(color, 0.15),
-                                  borderColor: isSelected && !isWithout ? hexToRgba(color, 0.6) : undefined
+                                      ? 'rgba(239, 68, 68, 0.5)' // Vivid red for "without"
+                                      : hexToVividRgba(color, 0.7) // Strong color when selected
+                                    : hexToVividRgba(color, 0.45), // Vivid base color
+                                  borderColor: isSelected && !isWithout
+                                    ? hexToVividRgba(color, 1)
+                                    : hexToVividRgba(color, 0.6),
+                                  boxShadow: isSelected
+                                    ? `0 4px 15px ${hexToVividRgba(color, 0.5)}, inset 0 1px 0 rgba(255,255,255,0.2)`
+                                    : `0 2px 8px ${hexToVividRgba(color, 0.25)}`
                                 }}
                               >
                                 {/* Main clickable area for toggle */}
@@ -470,16 +487,28 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                   className="w-full text-left"
                                 >
                                   <div className="flex flex-col gap-1 pr-8">
-                                    <span className={`font-medium text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : 'liquid-glass-modal-text'
-                                      }`}>
+                                    <span
+                                      className={`font-semibold text-sm line-clamp-2 ${isWithout ? 'line-through text-red-400' : ''}`}
+                                      style={{
+                                        color: isWithout ? undefined : (resolvedTheme === 'dark' ? '#f1f5f9' : '#1e293b'),
+                                        textRendering: 'geometricPrecision',
+                                        WebkitFontSmoothing: 'subpixel-antialiased'
+                                      }}
+                                    >
                                       {isWithout && <span className="no-underline mr-1">🚫</span>}
                                       {getIngredientName(ingredient)}
                                       {isLittle && isSelected && !isWithout && (
-                                        <span className="ml-1 text-xs text-blue-400">({t('menu.itemModal.little')})</span>
+                                        <span className="ml-1 text-xs text-blue-400 font-medium">({t('menu.itemModal.little')})</span>
                                       )}
                                     </span>
                                     {getIngredientUnitPrice(ingredient) > 0 && !isWithout && (
-                                      <span className="text-xs text-green-500 font-semibold">
+                                      <span
+                                        className="text-xs font-bold"
+                                        style={{
+                                          color: resolvedTheme === 'dark' ? '#4ade80' : '#16a34a',
+                                          textShadow: resolvedTheme === 'dark' ? '0 0 2px rgba(74, 222, 128, 0.3)' : 'none'
+                                        }}
+                                      >
                                         +€{getIngredientUnitPrice(ingredient).toFixed(2)}
                                       </span>
                                     )}
@@ -500,14 +529,24 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                         e.stopPropagation();
                                         handleIngredientQuantityChange(ingredient.id, currentQuantity - 1);
                                       }}
-                                      className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 active:bg-white/40 flex items-center justify-center transition-all touch-feedback"
+                                      className="w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback"
+                                      style={{
+                                        backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
+                                      }}
                                       title={t('common.actions.decrease')}
                                     >
-                                      <span className="text-white font-bold text-sm">−</span>
+                                      <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>−</span>
                                     </button>
 
                                     {/* Quantity display */}
-                                    <span className="min-w-[24px] text-center text-sm font-bold text-white">
+                                    <span
+                                      className="min-w-[28px] text-center text-sm"
+                                      style={{
+                                        color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b',
+                                        fontWeight: 800,
+                                        textShadow: resolvedTheme === 'dark' ? '0 1px 3px rgba(0,0,0,0.5)' : '0 1px 2px rgba(255,255,255,0.8)'
+                                      }}
+                                    >
                                       {currentQuantity}
                                     </span>
 
@@ -517,10 +556,13 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                         e.stopPropagation();
                                         handleIngredientQuantityChange(ingredient.id, currentQuantity + 1);
                                       }}
-                                      className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 active:bg-white/40 flex items-center justify-center transition-all touch-feedback"
+                                      className="w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback"
+                                      style={{
+                                        backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.15)',
+                                      }}
                                       title={t('common.actions.increase')}
                                     >
-                                      <span className="text-white font-bold text-sm">+</span>
+                                      <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>+</span>
                                     </button>
                                   </div>
                                 ) : isSelected && isWithout ? (
@@ -530,10 +572,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, false);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-7 h-7 rounded-full bg-red-500/30 hover:bg-red-500/50 flex items-center justify-center transition-all"
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-red-500/40 hover:bg-red-500/60 flex items-center justify-center transition-all"
                                     title={t('common.actions.remove')}
                                   >
-                                    <span className="text-white font-bold text-sm">×</span>
+                                    <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>×</span>
                                   </button>
                                 ) : (
                                   /* Plus button when not selected - tap to add */
@@ -542,10 +584,13 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       e.stopPropagation();
                                       handleIngredientToggle(ingredient, true);
                                     }}
-                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 active:bg-white/30 flex items-center justify-center transition-all touch-feedback opacity-60 hover:opacity-100"
+                                    className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full flex items-center justify-center transition-all touch-feedback opacity-70 hover:opacity-100"
+                                    style={{
+                                      backgroundColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.1)',
+                                    }}
                                     title={t('common.actions.add')}
                                   >
-                                    <span className="text-white font-bold text-sm">+</span>
+                                    <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px' }}>+</span>
                                   </button>
                                 )}
                               </div>
@@ -553,7 +598,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                           })}
                         </div>
                       </div>
-                    ))
+                    );
+                    })
                   )}
                 </div>
               </div>

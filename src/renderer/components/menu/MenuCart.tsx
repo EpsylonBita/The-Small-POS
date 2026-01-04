@@ -101,10 +101,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const totalAfterDiscount = subtotal - discountAmount;
 
   return (
-    <div className={`w-full sm:w-72 md:w-80 border-l border-gray-200/20 flex flex-col ${
-      resolvedTheme === 'dark' ? 'bg-gray-900/30' : 'bg-gray-50/30'
-    }`}>
-      <div className="p-4 border-b border-gray-200/20">
+    <div className={`w-full sm:w-72 md:w-80 border-l flex flex-col ${
+      resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
+    }`} style={{ height: '73vh' }}>
+      <div className={`p-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
         <h3 className={`text-lg font-semibold ${
           resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
         }`}>
@@ -118,7 +118,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             <ShoppingCart className={`w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 ${
               resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
             }`} />
-            <p className={`text-sm sm:text-base ${
+            <p className={`text-sm sm:text-base antialiased ${
               resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
             }`}>
               {t('menu.cart.empty')}
@@ -131,19 +131,19 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 key={item.id}
                 className={`p-3 rounded-lg border transition-all duration-200 ${
                   resolvedTheme === 'dark'
-                    ? 'bg-gray-800/50 border-gray-700/50 hover:border-blue-500/50 hover:bg-gray-800/70'
-                    : 'bg-white/50 border-gray-200/50 hover:border-blue-400/50 hover:bg-white/70'
+                    ? 'bg-gray-800 border-gray-700 hover:border-blue-500 hover:bg-gray-750'
+                    : 'bg-white border-gray-200 hover:border-blue-400 hover:bg-gray-50'
                 } ${onEditItem ? 'cursor-pointer' : ''}`}
                 onClick={() => onEditItem?.(item)}
               >
                 <div className="flex justify-between items-start mb-2">
-                  <h4 className={`font-medium flex-1 ${
+                  <h4 className={`font-semibold flex-1 antialiased ${
                     resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                   }`}>
                     {item.name}
                   </h4>
                   <div className="flex items-center gap-2">
-                    <span className={`font-semibold ${
+                    <span className={`font-semibold antialiased ${
                       resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
                     }`}>
                       {formatCurrency(item.totalPrice || 0)}
@@ -166,8 +166,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   </div>
                 </div>
                 {/* Quantity controls */}
-                <div 
-                  className={`flex items-center justify-between mt-2 ${
+                <div
+                  className={`flex items-center justify-between mt-2 antialiased ${
                     resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
                   }`}
                   onClick={(e) => e.stopPropagation()} // Prevent card click when using quantity controls
@@ -193,7 +193,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     >
                       −
                     </button>
-                    <span className="min-w-[24px] text-center font-medium">{item.quantity}</span>
+                    <span className="min-w-[24px] text-center font-semibold antialiased">{item.quantity}</span>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -211,15 +211,15 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       +
                     </button>
                   </div>
-                  <span className="text-sm">
+                  <span className="text-sm font-medium antialiased">
                     × {formatCurrency(item.price || 0)}
                   </span>
                 </div>
                 {item.customizations && item.customizations.length > 0 && (
                   <div className={`mt-2 pt-2 border-t ${
-                    resolvedTheme === 'dark' ? 'border-gray-700/50' : 'border-gray-200/50'
+                    resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
                   }`}>
-                    <div className={`text-xs font-medium mb-1 ${
+                    <div className={`text-xs font-semibold mb-1 antialiased ${
                       resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
                     }`}>
                       {t('menu.cart.ingredients')}:
@@ -229,26 +229,26 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         const ingredientName = getIngredientName(c.ingredient);
                         const quantityText = c.quantity > 1 ? ` ×${c.quantity}` : '';
                         const littleText = c.isLittle ? ` (${t('menu.itemModal.little')})` : '';
-                        
+
                         return (
                           <span
                             key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
-                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
                               resolvedTheme === 'dark'
-                                ? 'bg-blue-500/20 text-blue-300'
+                                ? 'bg-blue-600 text-blue-100'
                                 : 'bg-blue-100 text-blue-700'
                             }`}
                           >
                             {ingredientName}
                             {quantityText && (
                               <span className={`ml-1 font-bold ${
-                                resolvedTheme === 'dark' ? 'text-blue-200' : 'text-blue-800'
+                                resolvedTheme === 'dark' ? 'text-blue-50' : 'text-blue-800'
                               }`}>
                                 {quantityText}
                               </span>
                             )}
                             {littleText && (
-                              <span className="ml-1 opacity-70">{littleText}</span>
+                              <span className="ml-1 opacity-80">{littleText}</span>
                             )}
                           </span>
                         );
@@ -259,14 +259,14 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {/* Special Notes */}
                 {item.notes && item.notes.trim() && (
                   <div className={`mt-2 pt-2 border-t ${
-                    resolvedTheme === 'dark' ? 'border-gray-700/50' : 'border-gray-200/50'
+                    resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
                   }`}>
-                    <div className={`text-xs font-medium mb-1 ${
+                    <div className={`text-xs font-semibold mb-1 antialiased ${
                       resolvedTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
                     }`}>
                       📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
                     </div>
-                    <p className={`text-xs italic ${
+                    <p className={`text-xs italic antialiased ${
                       resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
                     }`}>
                       {item.notes}
@@ -280,12 +280,14 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {/* Cart Footer */}
-      <div className="p-4 border-t border-gray-200/20 space-y-3">
+      <div className={`p-4 border-t space-y-3 ${
+        resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+      }`}>
         {/* Discount Input */}
         {onDiscountChange && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label className={`text-sm font-medium ${
+              <label className={`text-sm font-semibold antialiased ${
                 resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
               }`}>
                 {t('menu.cart.discountLabel')}
@@ -295,7 +297,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 min="0"
                 max={maxDiscountPercentage}
                 step="0.1"
-                value={discountPercentage}
+                value={discountPercentage || ''}
                 onChange={(e) => {
                   if (!onDiscountChange) return;
                   const v = parseFloat(e.target.value) || 0;
@@ -306,16 +308,16 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     onDiscountChange(v);
                   }, 150);
                 }}
-                className={`w-20 px-2 py-1 text-sm border rounded ${
+                className={`w-20 px-2 py-1 text-sm font-medium border rounded antialiased ${
                   resolvedTheme === 'dark'
-                    ? 'bg-gray-700/50 border-gray-600 text-white'
-                    : 'bg-white/50 border-gray-300 text-gray-900'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500/50`}
-                placeholder={t('forms.placeholders.zero')}
+                    ? 'bg-gray-700 border-gray-600 text-white'
+                    : 'bg-white border-gray-300 text-gray-900'
+                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                placeholder=""
               />
             </div>
             {discountPercentage > maxDiscountPercentage && (
-              <p className="text-xs text-red-500 text-right">
+              <p className="text-xs text-red-500 text-right font-medium antialiased">
                 {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
               </p>
             )}
@@ -323,7 +325,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
 
         {/* Subtotal */}
-        <div className="flex justify-between items-center text-sm">
+        <div className="flex justify-between items-center text-sm font-medium antialiased">
           <span className={resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
             {t('menu.cart.subtotal')}
           </span>
@@ -334,7 +336,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         {/* Discount Display */}
         {discountAmount > 0 && (
-          <div className="flex justify-between items-center text-sm">
+          <div className="flex justify-between items-center text-sm font-medium antialiased">
             <span className={`${
               resolvedTheme === 'dark' ? 'text-green-400' : 'text-green-600'
             }`}>
@@ -349,7 +351,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
 
         {/* Total */}
-        <div className="flex justify-between items-center pt-2 border-t border-gray-200/20">
+        <div className={`flex justify-between items-center pt-2 border-t antialiased ${
+          resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+        }`}>
           <span className={`text-lg font-semibold ${
             resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
           }`}>
@@ -365,13 +369,13 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         <button
           onClick={onCheckout}
           disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving}
-          className={`w-full py-3 rounded-xl font-semibold transition-all duration-300 ${
+          className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
             uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving
-              ? 'bg-gray-400/50 text-gray-500 cursor-not-allowed'
+              ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
               : editMode
-                ? 'bg-amber-600/80 text-white hover:bg-amber-600/90 hover:scale-[1.02]'
-                : 'bg-blue-600/80 text-white hover:bg-blue-600/90 hover:scale-[1.02]'
-          } backdrop-blur-sm`}
+                ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'
+                : 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-[1.02]'
+          }`}
         >
           {isSaving ? (
             <span className="flex items-center justify-center gap-2">

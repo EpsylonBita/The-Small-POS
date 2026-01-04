@@ -176,6 +176,13 @@ export function OrderApprovalPanel({
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
   const [fullOrder, setFullOrder] = React.useState<any>(order);
 
+  // Additional delivery fields
+  const deliveryCity = (order as any).delivery_city || '';
+  const deliveryPostalCode = (order as any).delivery_postal_code || '';
+  const deliveryFloor = (order as any).delivery_floor || '';
+  const deliveryNotes = (order as any).delivery_notes || '';
+  const nameOnRinger = (order as any).name_on_ringer || '';
+
   // Log payment method for debugging
   console.log('[OrderApprovalPanel] order.payment_method:', (order as any).payment_method);
   console.log('[OrderApprovalPanel] order.paymentMethod:', (order as any).paymentMethod);
@@ -576,16 +583,55 @@ export function OrderApprovalPanel({
                 </div>
 
                 {/* Delivery Address Card - Show only for delivery orders */}
-                {orderType === 'delivery' && deliveryAddress && (
+                {orderType === 'delivery' && (deliveryAddress || deliveryCity) && (
                   <div className="liquid-glass-modal-card">
                     <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                       <MapPin className="w-4 h-4" />
                       {t('orderApprovalPanel.address') || 'Διεύθυνση'}
                     </h4>
-                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5">
+                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-2">
+                      {/* Main Address */}
                       <p className="font-medium liquid-glass-modal-text">
-                        {deliveryAddress}
+                        {deliveryAddress || t('orderApprovalPanel.noAddress') || 'No address'}
                       </p>
+
+                      {/* City & Postal Code */}
+                      {(deliveryCity || deliveryPostalCode) && (
+                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                          <span>🏙️</span>
+                          <span>
+                            {[deliveryCity, deliveryPostalCode].filter(Boolean).join(', ')}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Floor */}
+                      {deliveryFloor && (
+                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                          <span>🏢</span>
+                          <span>{t('orderApprovalPanel.floor') || 'Floor'}: {deliveryFloor}</span>
+                        </div>
+                      )}
+
+                      {/* Name on Ringer */}
+                      {nameOnRinger && (
+                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                          <span>🔔</span>
+                          <span>{t('orderApprovalPanel.nameOnRinger') || 'Bell'}: {nameOnRinger}</span>
+                        </div>
+                      )}
+
+                      {/* Delivery Notes */}
+                      {deliveryNotes && (
+                        <div className="mt-2 pt-2 border-t border-white/10">
+                          <div className="flex items-start gap-2 text-sm">
+                            <span>📝</span>
+                            <span className="liquid-glass-modal-text-muted italic">
+                              {deliveryNotes}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

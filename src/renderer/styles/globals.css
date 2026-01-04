@@ -26,15 +26,19 @@ html.dark, html.dark body, html.dark #root {
 @layer base {
   * {
     box-sizing: border-box;
+    /* Ensure crisp text rendering everywhere */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
-  
+
   html {
     font-size: 16px;
     -webkit-text-size-adjust: 100%;
     /* Prevent iOS zoom on input focus */
     touch-action: manipulation;
   }
-  
+
   body {
     margin: 0;
     padding: 0;
@@ -43,6 +47,7 @@ html.dark, html.dark body, html.dark #root {
       sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
     background-color: #f8fafc;
     overflow: hidden;
     /* Prevent pull-to-refresh on mobile */

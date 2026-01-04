@@ -328,8 +328,16 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           get()._invalidateCache();
         };
 
-        // Listen for order deletions
-        const handleOrderDelete = ({ orderId }: { orderId: string }) => {
+        // Listen for order deletions (handles both direct orderId and realtime payload formats)
+        const handleOrderDelete = (data: { orderId?: string; old?: { id: string } }) => {
+          // Support both formats: { orderId } or { old: { id } } from realtime
+          const orderId = data.orderId || data.old?.id;
+
+          if (!orderId) {
+            console.warn('📡 Received order deletion with no orderId:', data);
+            return;
+          }
+
           console.log('📡 Received order deletion:', { orderId });
 
           set((state) => ({
@@ -417,7 +425,6 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         // Register IPC listeners
         window.electronAPI.onOrderRealtimeUpdate(handleOrderRealtimeUpdate);
         window.electronAPI.onOrderStatusUpdated(handleOrderStatusUpdate);
-        window.electronAPI.onOrderDeleted(handleOrderDelete);
         window.electronAPI.onOrderPaymentUpdated(handlePaymentUpdate);
 
         // Register listener for new orders
@@ -432,6 +439,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         if (window.electronAPI.onOrderUpdated) {
           unsubscribeOrderUpdated = window.electronAPI.onOrderUpdated(handleOrderUpdated);
           console.log('✅ Registered order-updated listener');
+        }
+
+        // Register listener for order deletions
+        if (window.electronAPI.onOrderDeleted) {
+          window.electronAPI.onOrderDeleted(handleOrderDelete);
+          console.log('✅ Registered order-deleted listener');
         }
 
         // Listen for orders cleared event

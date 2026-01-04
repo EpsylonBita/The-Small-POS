@@ -63,8 +63,8 @@
   --modal-c-glass: #bbbbbc;
   --modal-c-light: #fff;
   --modal-c-dark: #000;
-  --modal-c-content: #224;
-  --modal-c-action: #0052f5;
+  --modal-c-content: #1a1a2e;  /* Darker, more vivid text */
+  --modal-c-action: #2563eb;   /* Vivid blue like admin dashboard */
   --modal-c-bg: #E8E8E9;
   --modal-glass-reflex-dark: 1;
   --modal-glass-reflex-light: 1;
@@ -102,8 +102,8 @@
   --modal-c-glass: #bbbbbc;
   --modal-c-light: #fff;
   --modal-c-dark: #000;
-  --modal-c-content: #e1e1e1;
-  --modal-c-action: #03d5ff;
+  --modal-c-content: #f8fafc;  /* Brighter, crisper white */
+  --modal-c-action: #60a5fa;   /* Vivid blue for dark theme */
   --modal-c-bg: #000000;
   --modal-glass-reflex-dark: 2;
   --modal-glass-reflex-light: 0.3;
@@ -442,9 +442,8 @@
   width: 100%;
   padding: 0;
   border-radius: 20px;
-  /* True Liquid Glass Effect */
-  /* True Liquid Glass Effect */
-  background: rgba(255, 255, 255, 0.1);
+  /* True Liquid Glass Effect - restored */
+  background: rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(40px) saturate(200%);
   -webkit-backdrop-filter: blur(40px) saturate(200%);
   /* Glass Border */
@@ -461,9 +460,9 @@
   flex-direction: column;
 }
 
-/* Dark theme - Clean solid dark background */
+/* Dark theme - Liquid Glass */
 .dark .liquid-glass-modal-shell {
-  /* Dark Theme Liquid Glass */
+  /* Dark Theme Liquid Glass - restored */
   background: rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(40px) saturate(200%);
   -webkit-backdrop-filter: blur(40px) saturate(200%);
@@ -633,15 +632,24 @@
 .liquid-glass-modal-text {
   color: var(--modal-c-content);
   opacity: 1;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  font-weight: 500;
+  /* Prevent blur from affecting text */
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .liquid-glass-modal-text-muted {
   color: var(--modal-c-content);
-  opacity: 0.9;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  opacity: 0.85;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  /* Prevent blur from affecting text */
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .liquid-glass-modal-border {
@@ -666,25 +674,28 @@
   align-items: center;
   justify-content: space-between;
   padding: 1.5rem 2rem;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
   background: transparent !important;
   flex-shrink: 0;
 }
 
 .dark .liquid-glass-modal-header {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   background: transparent !important;
 }
 
 .liquid-glass-modal-title {
   font-size: 1.625rem;
-  font-weight: 600;
-  color: rgba(0, 0, 0, 0.9);
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  color: #0f172a !important;  /* Slate-900 - vivid dark */
+  letter-spacing: -0.02em;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: subpixel-antialiased;
 }
 
 .dark .liquid-glass-modal-title {
-  color: rgba(255, 255, 255, 0.95);
+  color: #f8fafc !important;  /* Slate-50 - crisp white */
+  text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
 .liquid-glass-modal-close {
@@ -725,15 +736,22 @@
 }
 
 .liquid-glass-modal-content {
-  color: rgba(0, 0, 0, 0.85);
+  color: #1e293b;  /* Slate-800 - vivid dark */
   padding: 2rem;
   overflow-y: auto;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* Create stacking context for crisp text over glass */
+  isolation: isolate;
+  /* Ensure text renders crisply */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 .dark .liquid-glass-modal-content {
-  color: rgba(255, 255, 255, 0.9);
+  color: #f1f5f9;  /* Slate-100 - crisp light */
 }
 
 /* Status variant classes for POS */
@@ -2159,4 +2177,133 @@ svg.pos-neon-logo {
   opacity: 0.6;
   pointer-events: none;
   z-index: 0;
+}
+
+/* ===== CRISP INGREDIENT TEXT STYLES ===== */
+/* Ensures sharp, vivid text for menu ingredient selection */
+
+.ingredient-text-crisp {
+  color: var(--modal-c-content);
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  /* GPU acceleration for crisp rendering */
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  will-change: auto;
+}
+
+/* Vivid ingredient card text - Light theme */
+.liquid-glass-modal-shell .font-medium {
+  color: #1e293b !important;  /* Slate-800 - vivid dark */
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.05);
+  -webkit-font-smoothing: subpixel-antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.dark .liquid-glass-modal-shell .font-medium {
+  color: #f1f5f9 !important;  /* Slate-100 - vivid light */
+  text-shadow: 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* Ingredient price text - more vivid green */
+.liquid-glass-modal-shell .text-green-500 {
+  color: #22c55e !important;  /* Vivid green-500 */
+  font-weight: 600;
+  text-shadow: 0 0 1px rgba(34, 197, 94, 0.3);
+}
+
+.dark .liquid-glass-modal-shell .text-green-500 {
+  color: #4ade80 !important;  /* Vivid green-400 for dark */
+  text-shadow: 0 0 2px rgba(74, 222, 128, 0.4);
+}
+
+/* Category color dot text - vivid */
+.liquid-glass-modal-shell .liquid-glass-modal-text-muted {
+  color: #475569 !important;  /* Slate-600 */
+  font-weight: 500;
+}
+
+.dark .liquid-glass-modal-shell .liquid-glass-modal-text-muted {
+  color: #cbd5e1 !important;  /* Slate-300 */
+}
+
+/* Ingredient card buttons - crisp white text */
+.liquid-glass-modal-shell button span.text-white {
+  color: #ffffff !important;
+  font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  -webkit-font-smoothing: subpixel-antialiased;
+}
+
+/* Quantity display in ingredient cards */
+.liquid-glass-modal-shell .min-w-\\[24px\\] {
+  color: #ffffff !important;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Modal title - extra vivid */
+.liquid-glass-modal-title {
+  font-size: 1.625rem;
+  font-weight: 700;
+  color: #0f172a !important;  /* Slate-900 */
+  letter-spacing: -0.02em;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: subpixel-antialiased;
+}
+
+.dark .liquid-glass-modal-title {
+  color: #ffffff !important;
+  text-shadow: 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+/* Flavor type tabs - vivid active state */
+.liquid-glass-modal-shell .bg-blue-500 {
+  background-color: #3b82f6 !important;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.4);
+}
+
+.liquid-glass-modal-shell .bg-orange-500 {
+  background-color: #f97316 !important;
+  box-shadow: 0 4px 14px rgba(249, 115, 22, 0.4);
+}
+
+.liquid-glass-modal-shell .bg-pink-500 {
+  background-color: #ec4899 !important;
+  box-shadow: 0 4px 14px rgba(236, 72, 153, 0.4);
+}
+
+/* Red text for "without" items - more vivid */
+.liquid-glass-modal-shell .text-red-400 {
+  color: #f87171 !important;
+  font-weight: 600;
+}
+
+.dark .liquid-glass-modal-shell .text-red-400 {
+  color: #fb7185 !important;  /* Rose-400 */
+}
+
+/* Blue text for "little" indicator */
+.liquid-glass-modal-shell .text-blue-400 {
+  color: #60a5fa !important;
+  font-weight: 500;
+}
+
+/* Ensure ingredient grid items have sharp borders */
+.liquid-glass-modal-shell .rounded-xl.border-2 {
+  border-width: 2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.dark .liquid-glass-modal-shell .rounded-xl.border-2 {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Fix backdrop blur not affecting modal content text */
+.liquid-glass-modal-content,
+.liquid-glass-modal-shell > div {
+  isolation: isolate;
 }

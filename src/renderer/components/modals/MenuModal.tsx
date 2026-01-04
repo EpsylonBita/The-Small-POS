@@ -573,9 +573,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           </div>
         )}
 
-        <div className="flex flex-col sm:flex-row h-full overflow-hidden">
+        <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0 h-full">
           {/* Left Panel - Menu */}
-          <div className="flex-1 flex flex-col min-w-0 min-h-0">
+          <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
               onCategoryChange={setSelectedCategory}
@@ -592,8 +592,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             />
           </div>
 
-          {/* Right Panel - Cart - Fixed at bottom on mobile, sidebar on desktop */}
-          <div className="flex-shrink-0 h-auto sm:h-full max-h-[40vh] sm:max-h-full overflow-hidden">
+          {/* Right Panel - Cart - Full height of modal */}
+          <div className="flex-shrink-0 h-full overflow-hidden flex">
             <MenuCart
               cartItems={cartItems}
               onCheckout={handleCheckout}
