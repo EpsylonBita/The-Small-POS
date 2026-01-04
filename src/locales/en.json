@@ -447,7 +447,8 @@
       "deliveryFee": "Delivery Fee:",
       "total": "Total:",
       "completeOrder": "Complete Order",
-      "qty": "Qty:"
+      "qty": "Qty:",
+      "without": "Without"
     },
     "emptyState": {
       "title": "No Menu Items",
@@ -2789,7 +2790,18 @@
     "printReceipt": "Print Receipt",
     "printing": "Printing...",
     "printSuccess": "Receipt printed successfully",
-    "printFailed": "Failed to print receipt"
+    "printFailed": "Failed to print receipt",
+    "guestCustomer": "Guest",
+    "loadingItems": "Loading items...",
+    "retryLoadItems": "Retry",
+    "paymentMethod": "Payment",
+    "addressRoad": "Street",
+    "postalCode": "Postal Code",
+    "city": "City",
+    "floor": "Floor",
+    "nameOnRinger": "Name on ringer",
+    "deliveryNotes": "Delivery notes",
+    "noAddress": "No address"
   },
   "shiftManager": {
     "noActiveShift": "No active shift to close",

@@ -440,7 +440,8 @@
       "deliveryFee": "Κόστος Παράδοσης:",
       "total": "Σύνολο:",
       "completeOrder": "Ολοκλήρωση Παραγγελίας",
-      "qty": "Ποσ.:"
+      "qty": "Ποσ.:",
+      "without": "Χωρίς"
     },
     "emptyState": {
       "title": "Δεν Υπάρχουν Προϊόντα Μενού",
@@ -2830,7 +2831,14 @@
     "guestCustomer": "Επισκέπτης",
     "loadingItems": "Φόρτωση προϊόντων...",
     "retryLoadItems": "Προσπάθεια ξανά",
-    "paymentMethod": "Πληρωμή"
+    "paymentMethod": "Πληρωμή",
+    "addressRoad": "Οδός",
+    "postalCode": "Τ.Κ.",
+    "city": "Πόλη",
+    "floor": "Όροφος",
+    "nameOnRinger": "Όνομα στο κουδούνι",
+    "deliveryNotes": "Σημειώσεις παράδοσης",
+    "noAddress": "Χωρίς διεύθυνση"
   },
   "shiftManager": {
     "noActiveShift": "Δεν υπάρχει ενεργή βάρδια για κλείσιμο",

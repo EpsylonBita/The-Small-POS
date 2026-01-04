@@ -320,10 +320,39 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   }, [isOpen]);
 
-  const handleAddToCart = (item: any, quantity: number, customizations: any[], notes: string) => {
-    // Debug: Log notes parameter
-    console.log('[MenuModal.handleAddToCart] notes parameter:', notes, 'type:', typeof notes);
-    
+  const handleAddToCart = async (item: any, quantity: number, customizations: any[], notes: string) => {
+    // Get category ID from the item, or fallback to selected category
+    const itemCategoryId = item.category_id || item.categoryId || item.category;
+
+    // Look up category name - try multiple strategies:
+    // 1. First try the item's category_id from local categories state
+    // 2. Then try the currently selected category (which is the category tab the user is on)
+    // 3. Finally, fetch categories from service if not found (race condition fallback)
+    let categoryName: string | null = null;
+
+    // Strategy 1: Look up by item's category_id in local state
+    if (itemCategoryId && categories.length > 0) {
+      categoryName = categories.find(cat => cat.id === itemCategoryId)?.name || null;
+    }
+
+    // Strategy 2: Use selected category if it's a real category (not "all" or "featured")
+    if (!categoryName && selectedCategory && selectedCategory !== 'all' && selectedCategory !== 'featured') {
+      categoryName = categories.find(cat => cat.id === selectedCategory)?.name || null;
+    }
+
+    // Strategy 3: If categories state is empty or lookup failed, fetch from service
+    if (!categoryName && itemCategoryId) {
+      try {
+        const freshCategories = await menuService.getMenuCategories();
+        const foundCategory = freshCategories.find((cat: any) => cat.id === itemCategoryId);
+        if (foundCategory) {
+          categoryName = foundCategory.name || foundCategory.name_en || null;
+        }
+      } catch (error) {
+        console.error('Failed to fetch categories for category name lookup:', error);
+      }
+    }
+
     // Ensure item has required properties
     // Use order-type-specific price: three-tier pricing (pickup, delivery, dine-in)
     const getItemPrice = () => {
@@ -375,6 +404,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       totalPrice: totalPriceWithQuantity, // TOTAL price = (base + customizations) * quantity
       basePrice: basePrice, // Store base price separately (without customizations)
       unitPrice: pricePerItem, // Store unit price (base + customizations, without quantity)
+      flavorType: item.flavor_type || null, // Store flavor type (savory/sweet) for display
+      categoryName: categoryName, // Store main category name (e.g., "Crepes", "Waffles")
     };
 
     // If we're editing an existing cart item, remove the old one first
@@ -406,7 +437,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             unit_price: item.unitPrice || item.price,
             total_price: item.totalPrice,
             notes: item.notes,
-            customizations: item.customizations
+            customizations: item.customizations,
+            categoryName: item.categoryName // Include category name for display in orders
           })),
           total,
           notes: ''

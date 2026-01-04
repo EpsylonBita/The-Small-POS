@@ -327,45 +327,47 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 )}
               </div>
 
-              {/* Mode Toggles */}
-              <div className="flex items-center gap-4">
-                {/* Without Mode Toggle */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <span className="text-sm liquid-glass-modal-text">{t('menu.itemModal.without') || 'Without'}</span>
-                  <button
-                    onClick={() => {
-                      setIsWithoutMode(!isWithoutMode);
-                      if (!isWithoutMode) setIsLittleMode(false); // Turn off little mode when enabling without
-                    }}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isWithoutMode ? 'bg-red-500' : 'bg-gray-300 dark:bg-gray-600'
-                      }`}
-                    title={t('menu.itemModal.withoutHint') || 'Mark ingredients to remove (no price change)'}
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isWithoutMode ? 'translate-x-6' : 'translate-x-1'
-                        }`}
-                    />
-                  </button>
-                </label>
+              {/* Mode Toggles - Rounded glow buttons */}
+              <div className="flex items-center gap-3">
+                {/* Without Mode Toggle - Red glow */}
+                <button
+                  onClick={() => {
+                    setIsWithoutMode(!isWithoutMode);
+                    if (!isWithoutMode) setIsLittleMode(false); // Turn off little mode when enabling without
+                  }}
+                  className={`px-4 py-2 rounded-full font-semibold text-sm transition-all duration-300 ${
+                    isWithoutMode
+                      ? 'bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.6),0_0_40px_rgba(239,68,68,0.3)] scale-105 border-2 border-red-300'
+                      : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-red-100 dark:hover:bg-red-900/30 hover:border-red-300 dark:hover:border-red-700'
+                  }`}
+                  title={t('menu.itemModal.withoutHint') || 'Mark ingredients to remove (no price change)'}
+                  style={{
+                    textRendering: 'geometricPrecision',
+                    WebkitFontSmoothing: 'subpixel-antialiased'
+                  }}
+                >
+                  {t('menu.itemModal.without') || 'Without'}
+                </button>
 
-                {/* Little Mode Toggle */}
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <span className="text-sm liquid-glass-modal-text">{t('menu.itemModal.little')}</span>
-                  <button
-                    onClick={() => {
-                      setIsLittleMode(!isLittleMode);
-                      if (!isLittleMode) setIsWithoutMode(false); // Turn off without mode when enabling little
-                    }}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${isLittleMode ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'
-                      }`}
-                    title={t('menu.itemModal.littleHint')}
-                  >
-                    <span
-                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isLittleMode ? 'translate-x-6' : 'translate-x-1'
-                        }`}
-                    />
-                  </button>
-                </label>
+                {/* Little Mode Toggle - Orange glow */}
+                <button
+                  onClick={() => {
+                    setIsLittleMode(!isLittleMode);
+                    if (!isLittleMode) setIsWithoutMode(false); // Turn off without mode when enabling little
+                  }}
+                  className={`px-4 py-2 rounded-full font-semibold text-sm transition-all duration-300 ${
+                    isLittleMode
+                      ? 'bg-orange-500 text-white shadow-[0_0_20px_rgba(249,115,22,0.6),0_0_40px_rgba(249,115,22,0.3)] scale-105 border-2 border-orange-300'
+                      : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-orange-100 dark:hover:bg-orange-900/30 hover:border-orange-300 dark:hover:border-orange-700'
+                  }`}
+                  title={t('menu.itemModal.littleHint')}
+                  style={{
+                    textRendering: 'geometricPrecision',
+                    WebkitFontSmoothing: 'subpixel-antialiased'
+                  }}
+                >
+                  {t('menu.itemModal.little')}
+                </button>
               </div>
             </div>
 
@@ -430,13 +432,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                               borderColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.2)'
                             }}
                           />
-                          <span
-                            className="text-sm font-semibold"
-                            style={{
-                              color: resolvedTheme === 'dark' ? '#e2e8f0' : '#334155',
-                              textRendering: 'geometricPrecision'
-                            }}
-                          >
+                          <span className="text-sm font-medium liquid-glass-modal-text-muted">
                             {ingredients.length} {categoryName}
                           </span>
                         </div>

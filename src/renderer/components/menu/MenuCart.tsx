@@ -11,6 +11,8 @@ interface CartItem {
   quantity: number;
   price: number;
   totalPrice: number;
+  categoryName?: string; // Main category (e.g., "Crepes", "Waffles")
+  flavorType?: 'savory' | 'sweet' | null; // Flavor type for display
   customizations?: Array<{
     ingredient: {
       id: string;
@@ -20,9 +22,11 @@ interface CartItem {
       price?: number;
       pickup_price?: number;
       delivery_price?: number;
+      category_name?: string;
     };
     quantity: number;
     isLittle?: boolean;
+    isWithout?: boolean;
   }>;
   notes?: string;
 }
@@ -137,11 +141,22 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 onClick={() => onEditItem?.(item)}
               >
                 <div className="flex justify-between items-start mb-2">
-                  <h4 className={`font-semibold flex-1 antialiased ${
-                    resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                  }`}>
-                    {item.name}
-                  </h4>
+                  <div className="flex-1">
+                    {/* Category label */}
+                    {item.categoryName && (
+                      <div className={`text-[10px] uppercase tracking-wider font-medium mb-0.5 antialiased ${
+                        resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                      }`}>
+                        {item.categoryName}
+                      </div>
+                    )}
+                    {/* Item name (subcategory) */}
+                    <h4 className={`font-semibold antialiased ${
+                      resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
+                    }`}>
+                      {item.name}
+                    </h4>
+                  </div>
                   <div className="flex items-center gap-2">
                     <span className={`font-semibold antialiased ${
                       resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
@@ -219,41 +234,85 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   <div className={`mt-2 pt-2 border-t ${
                     resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
                   }`}>
-                    <div className={`text-xs font-semibold mb-1 antialiased ${
-                      resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                    }`}>
-                      {t('menu.cart.ingredients')}:
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {item.customizations.map((c, idx) => {
-                        const ingredientName = getIngredientName(c.ingredient);
-                        const quantityText = c.quantity > 1 ? ` ×${c.quantity}` : '';
-                        const littleText = c.isLittle ? ` (${t('menu.itemModal.little')})` : '';
+                    {/* Separate "with" and "without" ingredients */}
+                    {(() => {
+                      const withIngredients = item.customizations.filter(c => !c.isWithout);
+                      const withoutIngredients = item.customizations.filter(c => c.isWithout);
 
-                        return (
-                          <span
-                            key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
-                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
-                              resolvedTheme === 'dark'
-                                ? 'bg-blue-600 text-blue-100'
-                                : 'bg-blue-100 text-blue-700'
-                            }`}
-                          >
-                            {ingredientName}
-                            {quantityText && (
-                              <span className={`ml-1 font-bold ${
-                                resolvedTheme === 'dark' ? 'text-blue-50' : 'text-blue-800'
+                      return (
+                        <>
+                          {/* Added ingredients */}
+                          {withIngredients.length > 0 && (
+                            <>
+                              <div className={`text-xs font-semibold mb-1 antialiased ${
+                                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
                               }`}>
-                                {quantityText}
-                              </span>
-                            )}
-                            {littleText && (
-                              <span className="ml-1 opacity-80">{littleText}</span>
-                            )}
-                          </span>
-                        );
-                      })}
-                    </div>
+                                {t('menu.cart.ingredients')}:
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {withIngredients.map((c, idx) => {
+                                  const ingredientName = getIngredientName(c.ingredient);
+                                  const quantityText = c.quantity > 1 ? ` ×${c.quantity}` : '';
+                                  const littleText = c.isLittle ? ` (${t('menu.itemModal.little')})` : '';
+
+                                  return (
+                                    <span
+                                      key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
+                                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
+                                        resolvedTheme === 'dark'
+                                          ? 'bg-blue-600 text-blue-100'
+                                          : 'bg-blue-100 text-blue-700'
+                                      }`}
+                                    >
+                                      + {ingredientName}
+                                      {quantityText && (
+                                        <span className={`ml-1 font-bold ${
+                                          resolvedTheme === 'dark' ? 'text-blue-50' : 'text-blue-800'
+                                        }`}>
+                                          {quantityText}
+                                        </span>
+                                      )}
+                                      {littleText && (
+                                        <span className="ml-1 opacity-80">{littleText}</span>
+                                      )}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
+
+                          {/* Without ingredients */}
+                          {withoutIngredients.length > 0 && (
+                            <>
+                              <div className={`text-xs font-semibold mb-1 antialiased ${withIngredients.length > 0 ? 'mt-2' : ''} ${
+                                resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-500'
+                              }`}>
+                                🚫 {t('menu.cart.without') || 'Χωρίς'}:
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {withoutIngredients.map((c, idx) => {
+                                  const ingredientName = getIngredientName(c.ingredient);
+
+                                  return (
+                                    <span
+                                      key={`${item.id}-without-${c.ingredient.id}-${idx}`}
+                                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
+                                        resolvedTheme === 'dark'
+                                          ? 'bg-red-600/80 text-red-100 line-through'
+                                          : 'bg-red-100 text-red-700 line-through'
+                                      }`}
+                                    >
+                                      {ingredientName}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
                 {/* Special Notes */}
