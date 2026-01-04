@@ -430,6 +430,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                               borderColor: resolvedTheme === 'dark' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.2)'
                             }}
                           />
+<<<<<<< HEAD
                           <span
                             className="text-sm font-semibold"
                             style={{
@@ -437,6 +438,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                               textRendering: 'geometricPrecision'
                             }}
                           >
+=======
+                          <span className="text-sm font-medium liquid-glass-modal-text-muted">
+>>>>>>> b5b0a77b6baf19ab346c0c6c348e87d5d3e6807f
                             {ingredients.length} {categoryName}
                           </span>
                         </div>
