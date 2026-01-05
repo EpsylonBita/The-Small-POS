@@ -375,13 +375,17 @@ export function registerPrintHandlers() {
         // Use enhanced name resolution with cache and Supabase fallback
         const itemName = await resolveItemName(item, db, supabaseClient);
 
+        // Get category name from item (passed from cart/order creation)
+        const categoryName = item.categoryName || item.category_name || undefined;
+
         return {
           name: itemName,
           quantity: item.quantity || 1,
           unitPrice: item.unit_price || item.price || 0,
           total: item.total_price || (item.price * item.quantity) || 0,
           modifiers: modifiers.length > 0 ? modifiers : undefined,
-          specialInstructions: item.notes || item.special_instructions || undefined
+          specialInstructions: item.notes || item.special_instructions || undefined,
+          categoryName: categoryName
         };
       }));
 

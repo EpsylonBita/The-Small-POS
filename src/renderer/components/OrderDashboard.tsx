@@ -509,12 +509,26 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   // Handler for clicking on customer card - select and proceed directly to menu
   const handleCustomerSelectedDirect = (customer: any) => {
-    setExistingCustomer(customer);
-
     // Map customer data to form
     const defaultAddress = customer.addresses && customer.addresses.length > 0
       ? customer.addresses[0]
       : null;
+
+    // For delivery orders, validate that customer has an address
+    if (orderType === 'delivery') {
+      const hasAddress = defaultAddress?.street_address || defaultAddress?.street || customer.address;
+      if (!hasAddress) {
+        toast.error(t('orderDashboard.customerNoAddress') || 'This customer has no delivery address. Please add an address first.');
+        // Keep the modal open and prompt to add address
+        setExistingCustomer(customer);
+        setCustomerModalMode('addAddress');
+        setShowPhoneLookupModal(false);
+        setShowAddCustomerModal(true);
+        return;
+      }
+    }
+
+    setExistingCustomer(customer);
 
     setCustomerInfo({
       name: customer.name,
@@ -568,13 +582,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   };
 
   const handleNewCustomerAdded = (customer: any) => {
-    // Store the customer info and proceed to menu
-    setExistingCustomer(customer);
-
     // Map customer data to customerInfo state
     const defaultAddress = customer.addresses && customer.addresses.length > 0
       ? customer.addresses[0]
       : null;
+
+    // For delivery orders, validate that customer has an address
+    if (orderType === 'delivery') {
+      const hasAddress = defaultAddress?.street_address || defaultAddress?.street || customer.address;
+      if (!hasAddress) {
+        toast.error(t('orderDashboard.customerNoAddress') || 'This customer has no delivery address. Please add an address first.');
+        // Keep the add customer modal open in addAddress mode
+        setExistingCustomer(customer);
+        setCustomerModalMode('addAddress');
+        return;
+      }
+    }
+
+    // Store the customer info and proceed to menu
+    setExistingCustomer(customer);
 
     setCustomerInfo({
       name: customer.name,

@@ -312,6 +312,11 @@ export class ReceiptGenerator {
     lines.push({ text: '', style: 'small', align: 'left' });
     
     for (const item of data.items) {
+      // Category name (if available) - shown above item name
+      if (item.categoryName) {
+        lines.push({ text: item.categoryName.toUpperCase(), style: 'small', align: 'left' });
+      }
+
       // Item name bold with quantity and price on right
       const qtyPrice = 'x' + item.quantity + '   ' + this.formatCurrency(item.total);
       lines.push({ text: item.name, style: 'bold', align: 'left', rightText: qtyPrice });
@@ -328,7 +333,7 @@ export class ReceiptGenerator {
           }
         }
       }
-      
+
       // Special instructions
       if (item.specialInstructions) {
         lines.push({ text: '  * ' + item.specialInstructions, style: 'bold', align: 'left' });
@@ -471,6 +476,11 @@ export class ReceiptGenerator {
     })));
     
     for (const item of data.items) {
+      // Category name (if available) - shown above item name
+      if (item.categoryName) {
+        lines.push({ text: item.categoryName.toUpperCase(), style: 'small', align: 'left' });
+      }
+
       const qtyPrice = 'x' + item.quantity + '   ' + this.formatCurrency(item.total);
       lines.push({ text: item.name, style: 'bold', align: 'left', rightText: qtyPrice });
 
@@ -485,12 +495,12 @@ export class ReceiptGenerator {
           }
         }
       }
-      
+
       if (item.specialInstructions) {
         lines.push({ text: '  * ' + item.specialInstructions, style: 'small', align: 'left' });
       }
     }
-    
+
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
 
@@ -691,6 +701,11 @@ export class ReceiptGenerator {
   private addItemLine(builder: EscPosBuilder, item: PrintOrderItem): void {
     const priceStr = this.formatCurrency(item.total);
     const qtyStr = 'x' + item.quantity.toString();
+
+    // Category name (if available) - shown above item name
+    if (item.categoryName) {
+      builder.textLine(item.categoryName.toUpperCase());
+    }
 
     // Item name bold with quantity and price on same line
     builder.bold(true);

@@ -301,7 +301,7 @@ export function OrderApprovalPanel({
     return uniqueItems.map((item: any) => {
       // Extract customizations/ingredients - handle both array and object formats
       // Requirements: 2.2 - Display customizations as sub-items with prices
-      let customizationsList: { name: string; price: number }[] = [];
+      let customizationsList: { name: string; price: number; isWithout?: boolean; categoryName?: string }[] = [];
       const rawCustomizations = item.customizations || item.modifiers || item.ingredients || item.selectedIngredients;
 
       // Helper to extract price from ingredient object - check all possible price fields
@@ -357,13 +357,25 @@ export function OrderApprovalPanel({
         return 'Unknown';
       };
 
+      // Helper to extract category name from customization
+      const extractCategoryName = (c: any): string | undefined => {
+        return c.ingredient?.category_name || c.category_name || c.categoryName || undefined;
+      };
+
+      // Helper to check if item is "without" (removed)
+      const isWithoutItem = (c: any): boolean => {
+        return c.isWithout === true || c.is_without === true || c.without === true;
+      };
+
       if (rawCustomizations) {
         if (Array.isArray(rawCustomizations)) {
           customizationsList = rawCustomizations
             .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
             .map((c: any) => ({
               name: extractName(c),
-              price: extractPrice(c)
+              price: extractPrice(c),
+              isWithout: isWithoutItem(c),
+              categoryName: extractCategoryName(c)
             }));
         } else if (typeof rawCustomizations === 'object' && rawCustomizations !== null) {
           const values = Object.values(rawCustomizations);
@@ -371,7 +383,9 @@ export function OrderApprovalPanel({
             .filter((c: any) => c && (c.ingredient || c.name || c.name_en || c.customizationId))
             .map((c: any) => ({
               name: extractName(c),
-              price: extractPrice(c)
+              price: extractPrice(c),
+              isWithout: isWithoutItem(c),
+              categoryName: extractCategoryName(c)
             }));
         }
       }
@@ -386,7 +400,8 @@ export function OrderApprovalPanel({
         price: unitPrice,
         total_price: item.total_price || item.totalPrice || (unitPrice * (item.quantity || 1)),
         special_instructions: item.special_instructions || item.notes || item.instructions || undefined,
-        customizations: customizationsList
+        customizations: customizationsList,
+        categoryName: item.categoryName || item.category_name || null // Main category (e.g., "Crepes")
       };
     });
   }, [fullOrder, order]);
@@ -589,47 +604,76 @@ export function OrderApprovalPanel({
                       <MapPin className="w-4 h-4" />
                       {t('orderApprovalPanel.address') || 'Διεύθυνση'}
                     </h4>
-                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-2">
-                      {/* Main Address */}
-                      <p className="font-medium liquid-glass-modal-text">
-                        {deliveryAddress || t('orderApprovalPanel.noAddress') || 'No address'}
-                      </p>
+                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-3">
+                      {/* Address Road */}
+                      {deliveryAddress && (
+                        <div className="flex flex-col">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.addressRoad') || 'Οδός'}
+                          </span>
+                          <span className="font-medium liquid-glass-modal-text">
+                            {deliveryAddress}
+                          </span>
+                        </div>
+                      )}
 
-                      {/* City & Postal Code */}
-                      {(deliveryCity || deliveryPostalCode) && (
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <span>🏙️</span>
-                          <span>
-                            {[deliveryCity, deliveryPostalCode].filter(Boolean).join(', ')}
+                      {/* Postal Code */}
+                      {deliveryPostalCode && (
+                        <div className="flex flex-col">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.postalCode') || 'Τ.Κ.'}
+                          </span>
+                          <span className="font-medium liquid-glass-modal-text">
+                            {deliveryPostalCode}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* City */}
+                      {deliveryCity && (
+                        <div className="flex flex-col">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.city') || 'Πόλη'}
+                          </span>
+                          <span className="font-medium liquid-glass-modal-text">
+                            {deliveryCity}
                           </span>
                         </div>
                       )}
 
                       {/* Floor */}
                       {deliveryFloor && (
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <span>🏢</span>
-                          <span>{t('orderApprovalPanel.floor') || 'Floor'}: {deliveryFloor}</span>
+                        <div className="flex flex-col">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.floor') || 'Όροφος'}
+                          </span>
+                          <span className="font-medium liquid-glass-modal-text">
+                            {deliveryFloor}
+                          </span>
                         </div>
                       )}
 
                       {/* Name on Ringer */}
                       {nameOnRinger && (
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <span>🔔</span>
-                          <span>{t('orderApprovalPanel.nameOnRinger') || 'Bell'}: {nameOnRinger}</span>
+                        <div className="flex flex-col">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.nameOnRinger') || 'Όνομα στο κουδούνι'}
+                          </span>
+                          <span className="font-medium liquid-glass-modal-text">
+                            {nameOnRinger}
+                          </span>
                         </div>
                       )}
 
                       {/* Delivery Notes */}
                       {deliveryNotes && (
-                        <div className="mt-2 pt-2 border-t border-white/10">
-                          <div className="flex items-start gap-2 text-sm">
-                            <span>📝</span>
-                            <span className="liquid-glass-modal-text-muted italic">
-                              {deliveryNotes}
-                            </span>
-                          </div>
+                        <div className="flex flex-col pt-2 border-t border-white/10">
+                          <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
+                            {t('orderApprovalPanel.deliveryNotes') || 'Σημειώσεις'}
+                          </span>
+                          <span className="liquid-glass-modal-text italic">
+                            {deliveryNotes}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -697,7 +741,7 @@ export function OrderApprovalPanel({
                     </div>
                   ) : normalizedItems.length > 0 ? (
                     <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-                      {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[] }, idx: number) => (
+                      {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null }, idx: number) => (
                         <div
                           key={idx}
                           className="flex items-start justify-between p-3 bg-white/5 dark:bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
@@ -707,6 +751,13 @@ export function OrderApprovalPanel({
                               {item.quantity}x
                             </div>
                             <div className="flex-1">
+                              {/* Category label */}
+                              {item.categoryName && (
+                                <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
+                                  {item.categoryName}
+                                </div>
+                              )}
+                              {/* Item name (subcategory) */}
                               <div className="font-medium liquid-glass-modal-text">
                                 {item.name}
                               </div>
@@ -717,14 +768,25 @@ export function OrderApprovalPanel({
                               )}
                               {item.customizations && item.customizations.length > 0 && (
                                 <div className="mt-2 space-y-1">
-                                  {item.customizations.map((c: { name: string; price: number }, i: number) => (
-                                    <div key={i} className="flex justify-between text-xs liquid-glass-modal-text-muted">
+                                  {/* Added ingredients */}
+                                  {item.customizations.filter((c: any) => !c.isWithout).map((c: { name: string; price: number }, i: number) => (
+                                    <div key={`add-${i}`} className="flex justify-between text-xs liquid-glass-modal-text-muted">
                                       <span>+ {c.name}</span>
                                       {c.price > 0 && (
                                         <span>{formatCurrency(c.price)}</span>
                                       )}
                                     </div>
                                   ))}
+                                  {/* Without ingredients */}
+                                  {item.customizations.filter((c: any) => c.isWithout).length > 0 && (
+                                    <div className="mt-1 pt-1 border-t border-red-500/20">
+                                      {item.customizations.filter((c: any) => c.isWithout).map((c: { name: string }, i: number) => (
+                                        <div key={`without-${i}`} className="flex justify-between text-xs text-red-400">
+                                          <span className="line-through">🚫 {c.name}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>

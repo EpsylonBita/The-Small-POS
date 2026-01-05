@@ -16,10 +16,11 @@ export interface OrderItem {
   total_price: number;
   notes?: string;
   customizations?: any;
+  categoryName?: string; // Main category name (e.g., "Crepes", "Waffles")
 }
 
 /**
- * Supabase order_items response with nested subcategories
+ * Supabase order_items response with nested subcategories and categories
  */
 interface SupabaseOrderItemResponse {
   id: string;
@@ -34,11 +35,25 @@ interface SupabaseOrderItemResponse {
     name: string;
     name_en?: string;
     name_el?: string;
+    category_id?: string;
+    categories?: {
+      id: string;
+      name: string;
+      name_en?: string;
+      name_el?: string;
+    }[] | null;
   } | {
     id: string;
     name: string;
     name_en?: string;
     name_el?: string;
+    category_id?: string;
+    categories?: {
+      id: string;
+      name: string;
+      name_en?: string;
+      name_el?: string;
+    }[] | null;
   }[] | null;
 }
 
@@ -89,7 +104,7 @@ export class RealtimeOrderHandler {
     try {
       console.log(`[RealtimeOrderHandler] Fetching order items for order ${orderId}`)
       
-      // Fetch order_items with nested subcategories select
+      // Fetch order_items with nested subcategories and categories select
       const { data: items, error } = await this.client
         .from('order_items')
         .select(`
@@ -104,7 +119,14 @@ export class RealtimeOrderHandler {
             id,
             name,
             name_en,
-            name_el
+            name_el,
+            category_id,
+            categories (
+              id,
+              name,
+              name_en,
+              name_el
+            )
           )
         `)
         .eq('order_id', orderId)
@@ -132,43 +154,50 @@ export class RealtimeOrderHandler {
 
   /**
    * Transforms Supabase order_items response to local OrderItem format.
-   * Resolves menu_item_id to subcategory names.
-   * 
-   * @param items - Array of Supabase order_items with nested subcategories
+   * Resolves menu_item_id to subcategory names and extracts category names.
+   *
+   * @param items - Array of Supabase order_items with nested subcategories and categories
    * @param _orderId - The order ID for logging purposes (unused but kept for future debugging)
    * @returns Array of OrderItem objects in local format
-   * 
+   *
    * Requirements: 1.4
    */
   private transformOrderItems(items: SupabaseOrderItemResponse[], _orderId: string): OrderItem[] {
     return items.map((item, index) => {
-      // Resolve name from subcategories (menu_item_id references subcategories.id)
+      // Resolve name and category from subcategories (menu_item_id references subcategories.id)
       let itemName: string = ''
-      
-      // First try to get name from nested subcategories
+      let categoryName: string | undefined = undefined
+
+      // First try to get name and category from nested subcategories
       if (item.subcategories) {
         // Handle both single object and array formats from Supabase
         const subcategory = Array.isArray(item.subcategories) ? item.subcategories[0] : item.subcategories
         if (subcategory) {
           itemName = subcategory.name || subcategory.name_en || subcategory.name_el || ''
+
+          // Extract category name from nested categories (array from Supabase)
+          if (subcategory.categories && Array.isArray(subcategory.categories) && subcategory.categories.length > 0) {
+            const category = subcategory.categories[0]
+            categoryName = category.name || category.name_en || category.name_el || undefined
+          }
         }
       }
-      
+
       // If no name from subcategories, try to extract from customizations
       if (!itemName) {
         itemName = this.extractNameFromCustomizations(item.customizations)
       }
-      
+
       // Fallback to generic name with price
       if (!itemName) {
         const price = parseFloat(String(item.unit_price)) || 0
         itemName = `Item ${index + 1} (€${price.toFixed(2)})`
       }
-      
+
       const unitPrice = parseFloat(String(item.unit_price)) || 0
       const quantity = item.quantity || 1
       const totalPrice = parseFloat(String(item.total_price)) || (unitPrice * quantity)
-      
+
       return {
         id: item.id,
         menu_item_id: item.menu_item_id || undefined,
@@ -178,7 +207,8 @@ export class RealtimeOrderHandler {
         unit_price: unitPrice,
         total_price: totalPrice,
         notes: item.notes,
-        customizations: item.customizations
+        customizations: item.customizations,
+        categoryName: categoryName
       }
     })
   }

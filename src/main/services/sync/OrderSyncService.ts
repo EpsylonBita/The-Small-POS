@@ -85,6 +85,97 @@ export class OrderSyncService {
         this.featureService = service;
     }
 
+    /**
+     * Reconcile local orders with Supabase - remove orders that were deleted remotely.
+     * This handles the case where DELETE events were missed (e.g., before realtime subscription was active).
+     */
+    public async reconcileDeletedOrders(): Promise<void> {
+        try {
+            const localOrders = await this.dbManager.getAllOrders();
+            if (localOrders.length === 0) {
+                console.log('[OrderSyncService] No local orders to reconcile');
+                return;
+            }
+
+            // Get all order IDs that have been synced to Supabase (have supabase_id or client_order_id match)
+            const localOrderIds = localOrders.map(o => o.id);
+
+            console.log(`[OrderSyncService] Reconciling ${localOrders.length} local orders with Supabase...`);
+
+            // Query Supabase to find which orders still exist (by client_order_id)
+            const orderClient = this.getOrderClient();
+            const { data: remoteOrders, error } = await orderClient
+                .from('orders')
+                .select('id, client_order_id')
+                .in('client_order_id', localOrderIds);
+
+            if (error) {
+                // If client_order_id column doesn't exist, try fallback approach
+                const msg = String(error?.message || '');
+                if (/42703|column .* does not exist/i.test(msg)) {
+                    console.warn('[OrderSyncService] client_order_id column not available, skipping reconciliation');
+                    return;
+                }
+                console.error('[OrderSyncService] Failed to reconcile orders:', error);
+                return;
+            }
+
+            // Build set of client_order_ids that exist remotely
+            const remoteClientIds = new Set((remoteOrders || []).map((o: any) => o.client_order_id));
+
+            // Find local orders that no longer exist in Supabase
+            const deletedOrderIds: string[] = [];
+            for (const localOrder of localOrders) {
+                if (!remoteClientIds.has(localOrder.id)) {
+                    deletedOrderIds.push(localOrder.id);
+                }
+            }
+
+            if (deletedOrderIds.length === 0) {
+                console.log('[OrderSyncService] All local orders exist in Supabase ✓');
+                return;
+            }
+
+            console.log(`[OrderSyncService] Found ${deletedOrderIds.length} orders deleted from Supabase, removing from local DB...`);
+
+            // Delete orders from local database
+            const db = (this.dbManager as any).db || (this.dbManager.getDatabaseService() as any).db;
+            if (db) {
+                // Check if order_items table exists
+                let hasOrderItemsTable = false;
+                try {
+                    const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='order_items'").get();
+                    hasOrderItemsTable = !!tableCheck;
+                } catch { /* ignore */ }
+
+                for (const orderId of deletedOrderIds) {
+                    try {
+                        // Delete order items first if table exists (foreign key constraint)
+                        if (hasOrderItemsTable) {
+                            try {
+                                db.prepare('DELETE FROM order_items WHERE order_id = ?').run(orderId);
+                            } catch { /* ignore if table doesn't exist */ }
+                        }
+                        // Delete the order
+                        db.prepare('DELETE FROM orders WHERE id = ?').run(orderId);
+                        console.log(`[OrderSyncService] Deleted stale order from local DB: ${orderId}`);
+
+                        // Notify renderer
+                        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                            this.mainWindow.webContents.send('order-deleted', { orderId });
+                        }
+                    } catch (err) {
+                        console.error(`[OrderSyncService] Failed to delete local order ${orderId}:`, err);
+                    }
+                }
+            }
+
+            console.log(`[OrderSyncService] Reconciliation complete - removed ${deletedOrderIds.length} stale orders`);
+        } catch (err) {
+            console.error('[OrderSyncService] Order reconciliation failed:', err);
+        }
+    }
+
     public async backfillMissingOrdersQueue(): Promise<void> {
         try {
             const localOrders = await this.dbManager.getAllOrders();

@@ -97,7 +97,7 @@ export class InterTerminalCommunicationService extends BaseService {
         this.parentTerminalInfo = null;
         this.lastReachable = false;
         // Optionally notify UI
-        if (this.mainWindow) {
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
             this.mainWindow.webContents.send('parent-terminal-discovered', null);
         }
     }
@@ -174,7 +174,7 @@ export class InterTerminalCommunicationService extends BaseService {
             console.log('[InterTerminal] Parent terminal discovered:', this.parentTerminalInfo);
 
             // Emit event to UI
-            if (this.mainWindow) {
+            if (this.mainWindow && !this.mainWindow.isDestroyed()) {
                 this.mainWindow.webContents.send('parent-terminal-discovered', this.parentTerminalInfo);
             }
 

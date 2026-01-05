@@ -215,13 +215,16 @@ export class SyncService {
     this.notifyRenderer('sync:status', await this.getSyncStatus());
 
     try {
-      // 1. Backfill missing orders
+      // 1. Reconcile deleted orders (remove local orders that were deleted from Supabase)
+      await this.orderSyncService.reconcileDeletedOrders();
+
+      // 2. Backfill missing orders
       await this.orderSyncService.backfillMissingOrdersQueue();
 
-      // 2. Sync local to remote
+      // 3. Sync local to remote
       await this.syncLocalToRemote();
 
-      // 3. Sync remote to local (simplified for now, mostly handled by realtime)
+      // 4. Sync remote to local (simplified for now, mostly handled by realtime)
       this.lastSync = new Date().toISOString();
       this.notifyRenderer('sync:complete', { timestamp: this.lastSync });
     } catch (error) {

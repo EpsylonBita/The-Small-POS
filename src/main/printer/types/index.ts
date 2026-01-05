@@ -221,6 +221,7 @@ export interface PrintOrderItem {
   modifiers?: string[] | PrintOrderItemModifier[]; // Support both formats
   specialInstructions?: string;
   category?: string; // For routing to category-specific printers
+  categoryName?: string; // Display name of the category (e.g., "Crepes", "Waffles")
 }
 
 /**
