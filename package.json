@@ -1,10 +1,6 @@
 {
   "name": "the-small-pos-system",
-<<<<<<< HEAD
   "version": "1.1.54",
-=======
-  "version": "1.1.52",
->>>>>>> 12b0c4207e4e09de965750ece11bb999bbff2bc7
   "description": "Point of Sale system for The Small with offline capabilities",
   "main": "dist/main/main.js",
   "homepage": "./",
