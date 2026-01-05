@@ -32,6 +32,8 @@ import { OrderDashboardSkeleton } from './skeletons';
 import { ErrorDisplay } from './error';
 import type { Order } from '../types/orders';
 import type { RestaurantTable } from '../types/tables';
+import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
+import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 
 interface OrderDashboardProps {
   className?: string;
@@ -61,6 +63,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   // Module-based feature flags
   const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
+
+  // Delivery validation hook
+  const { validateAddress: validateDeliveryAddress } = useDeliveryValidation();
 
   // Get organizationId from module context (with localStorage fallback)
   const { organizationId: moduleOrgId } = useModules();
@@ -148,6 +153,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [isValidatingAddress, setIsValidatingAddress] = useState(false);
   const [addressValid, setAddressValid] = useState(false);
+  const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
@@ -503,21 +509,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     setSpecialInstructions('');
     setTableNumber('');
     setAddressValid(false);
+    setDeliveryZoneInfo(null);
     setShowPhoneLookupModal(false);
     setShowCustomerInfoModal(false);
   };
 
   // Handler for clicking on customer card - select and proceed directly to menu
-  const handleCustomerSelectedDirect = (customer: any) => {
+  const handleCustomerSelectedDirect = async (customer: any) => {
+    console.log('[handleCustomerSelectedDirect] Called with customer:', JSON.stringify({
+      id: customer?.id,
+      name: customer?.name,
+      address: customer?.address,
+      addresses: customer?.addresses
+    }, null, 2));
+    console.log('[handleCustomerSelectedDirect] Current orderType:', orderType);
+
     // Map customer data to form
     const defaultAddress = customer.addresses && customer.addresses.length > 0
       ? customer.addresses[0]
       : null;
+    console.log('[handleCustomerSelectedDirect] defaultAddress:', JSON.stringify(defaultAddress, null, 2));
 
     // For delivery orders, validate that customer has an address
     if (orderType === 'delivery') {
       const hasAddress = defaultAddress?.street_address || defaultAddress?.street || customer.address;
+      console.log('[handleCustomerSelectedDirect] Delivery check - hasAddress:', hasAddress);
       if (!hasAddress) {
+        console.log('[handleCustomerSelectedDirect] No address - opening addAddress modal');
         toast.error(t('orderDashboard.customerNoAddress') || 'This customer has no delivery address. Please add an address first.');
         // Keep the modal open and prompt to add address
         setExistingCustomer(customer);
@@ -526,6 +544,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         setShowAddCustomerModal(true);
         return;
       }
+
+      // Validate delivery zone for the address
+      try {
+        const addressString = [
+          defaultAddress?.street_address || defaultAddress?.street || customer.address || '',
+          defaultAddress?.city || customer.city || '',
+          defaultAddress?.postal_code || customer.postal_code || ''
+        ].filter(Boolean).join(', ');
+
+        if (addressString) {
+          const validationResult = await validateDeliveryAddress(addressString, 0);
+          if (validationResult) {
+            setDeliveryZoneInfo(validationResult);
+          }
+        }
+      } catch (error) {
+        console.error('[OrderDashboard] Error validating delivery zone:', error);
+        // Continue without zone info - validation will happen in PaymentModal
+      }
+    } else {
+      // Clear delivery zone info for non-delivery orders
+      setDeliveryZoneInfo(null);
     }
 
     setExistingCustomer(customer);
@@ -581,28 +621,63 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     setShowAddCustomerModal(true);
   };
 
-  const handleNewCustomerAdded = (customer: any) => {
+  const handleNewCustomerAdded = async (customer: any) => {
+    console.log('[handleNewCustomerAdded] Called with customer:', JSON.stringify({
+      id: customer?.id,
+      name: customer?.name,
+      address: customer?.address,
+      addresses: customer?.addresses,
+      selected_address_id: customer?.selected_address_id
+    }, null, 2));
+    console.log('[handleNewCustomerAdded] Current orderType:', orderType);
+
     // Map customer data to customerInfo state
     const defaultAddress = customer.addresses && customer.addresses.length > 0
       ? customer.addresses[0]
       : null;
+    console.log('[handleNewCustomerAdded] defaultAddress:', JSON.stringify(defaultAddress, null, 2));
 
     // For delivery orders, validate that customer has an address
     if (orderType === 'delivery') {
       const hasAddress = defaultAddress?.street_address || defaultAddress?.street || customer.address;
+      console.log('[handleNewCustomerAdded] Delivery check - hasAddress:', hasAddress);
       if (!hasAddress) {
+        console.log('[handleNewCustomerAdded] No address found - keeping addAddress modal open');
         toast.error(t('orderDashboard.customerNoAddress') || 'This customer has no delivery address. Please add an address first.');
         // Keep the add customer modal open in addAddress mode
         setExistingCustomer(customer);
         setCustomerModalMode('addAddress');
         return;
       }
+
+      // Validate delivery zone for the address
+      try {
+        const addressString = [
+          defaultAddress?.street_address || defaultAddress?.street || customer.address || '',
+          defaultAddress?.city || customer.city || '',
+          defaultAddress?.postal_code || customer.postal_code || ''
+        ].filter(Boolean).join(', ');
+
+        if (addressString) {
+          const validationResult = await validateDeliveryAddress(addressString, 0);
+          if (validationResult) {
+            setDeliveryZoneInfo(validationResult);
+          }
+        }
+      } catch (error) {
+        console.error('[OrderDashboard] Error validating delivery zone:', error);
+        // Continue without zone info - validation will happen in PaymentModal
+      }
+    } else {
+      // Clear delivery zone info for non-delivery orders
+      setDeliveryZoneInfo(null);
     }
 
     // Store the customer info and proceed to menu
+    console.log('[handleNewCustomerAdded] Setting existingCustomer to:', customer?.name);
     setExistingCustomer(customer);
 
-    setCustomerInfo({
+    const customerInfoData = {
       name: customer.name,
       phone: customer.phone,
       email: customer.email || '',
@@ -618,21 +693,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         coordinates: customer.coordinates || undefined,
       },
       notes: defaultAddress?.notes || customer.notes || '',
-    });
+    };
+    console.log('[handleNewCustomerAdded] Setting customerInfo to:', JSON.stringify(customerInfoData, null, 2));
+    setCustomerInfo(customerInfoData);
 
     if (defaultAddress?.notes || customer.notes) {
       setSpecialInstructions(defaultAddress?.notes || customer.notes || '');
     }
 
     // Close add customer modal and open menu modal
+    console.log('[handleNewCustomerAdded] Opening MenuModal');
     setShowAddCustomerModal(false);
     setShowMenuModal(true);
   };
 
   // Handler for saving customer info from modal (New Order Flow)
   const handleNewOrderCustomerInfoSave = (info: any) => {
+    console.log('[handleNewOrderCustomerInfoSave] Called with info:', JSON.stringify(info, null, 2));
     // Update local state
-    setCustomerInfo({
+    const customerInfoData = {
       name: info.name,
       phone: info.phone,
       email: info.email,
@@ -643,9 +722,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         coordinates: info.coordinates
       },
       notes: ''
-    });
+    };
+    console.log('[handleNewOrderCustomerInfoSave] Setting customerInfo:', JSON.stringify(customerInfoData, null, 2));
+    setCustomerInfo(customerInfoData);
 
     // Close customer info modal and open menu modal
+    console.log('[handleNewOrderCustomerInfoSave] Opening MenuModal');
     setShowCustomerInfoModal(false);
     setShowMenuModal(true);
   };
@@ -715,21 +797,27 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
   // Helper functions for menu modal
   const getCustomerForMenu = () => {
+    console.log('[getCustomerForMenu] BUILD v2026.01.05.1 - existingCustomer:', !!existingCustomer, 'customerInfo:', !!customerInfo);
     if (existingCustomer) {
-      return {
+      const result = {
         id: existingCustomer.id,
         name: existingCustomer.name,
         phone: existingCustomer.phone,
         email: existingCustomer.email
       };
+      console.log('[getCustomerForMenu] Returning from existingCustomer:', result);
+      return result;
     } else if (customerInfo) {
-      return {
+      const result = {
         id: 'new',
         name: customerInfo.name,
         phone: customerInfo.phone,
         email: customerInfo.email
       };
+      console.log('[getCustomerForMenu] Returning from customerInfo:', result);
+      return result;
     }
+    console.log('[getCustomerForMenu] Returning null');
     return null;
   };
 
@@ -737,37 +825,55 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     // First check the customer_addresses array
     if (existingCustomer?.addresses && existingCustomer.addresses.length > 0) {
       const defaultAddress = existingCustomer.addresses.find(addr => addr.is_default) || existingCustomer.addresses[0];
-      return {
-        street: defaultAddress.street || (defaultAddress as any).street_address,
-        city: defaultAddress.city,
-        postalCode: defaultAddress.postal_code,
-        floor: (defaultAddress as any).floor_number || (defaultAddress as any).floor,
-        notes: defaultAddress.delivery_notes || (defaultAddress as any).notes,
-        nameOnRinger: (defaultAddress as any).name_on_ringer
-      };
+      // Handle both snake_case (from API) and camelCase field names
+      const streetValue = (defaultAddress as any).street_address || defaultAddress.street;
+      if (streetValue) {
+        console.log('[getSelectedAddress] Found address from existingCustomer.addresses:', streetValue);
+        return {
+          street: streetValue,
+          street_address: streetValue, // Include both for compatibility
+          city: defaultAddress.city,
+          postalCode: defaultAddress.postal_code,
+          floor: (defaultAddress as any).floor_number || (defaultAddress as any).floor,
+          notes: defaultAddress.delivery_notes || (defaultAddress as any).notes,
+          nameOnRinger: (defaultAddress as any).name_on_ringer
+        };
+      }
     }
     // Then check address directly on the customer object (legacy/fallback)
     if ((existingCustomer as any)?.address) {
-      return {
-        street: (existingCustomer as any).address,
-        city: (existingCustomer as any).city || '',
-        postalCode: (existingCustomer as any).postal_code || '',
-        floor: (existingCustomer as any).floor || '',
-        notes: (existingCustomer as any).notes || '',
-        nameOnRinger: (existingCustomer as any).name_on_ringer || ''
-      };
+      const addrValue = (existingCustomer as any).address;
+      const streetValue = typeof addrValue === 'string' ? addrValue : (addrValue?.street_address || addrValue?.street || '');
+      if (streetValue) {
+        console.log('[getSelectedAddress] Found address from existingCustomer.address:', streetValue);
+        return {
+          street: streetValue,
+          street_address: streetValue,
+          city: (existingCustomer as any).city || '',
+          postalCode: (existingCustomer as any).postal_code || '',
+          floor: (existingCustomer as any).floor || '',
+          notes: (existingCustomer as any).notes || '',
+          nameOnRinger: (existingCustomer as any).name_on_ringer || ''
+        };
+      }
     }
     // Finally check customerInfo state
     if (customerInfo?.address) {
-      return {
-        street: customerInfo.address.street,
-        city: customerInfo.address.city,
-        postalCode: customerInfo.address.postalCode,
-        floor: (customerInfo.address as any).floor || '',
-        notes: customerInfo.notes,
-        nameOnRinger: (customerInfo as any).nameOnRinger || ''
-      };
+      const streetValue = customerInfo.address.street || (customerInfo.address as any).street_address || '';
+      if (streetValue) {
+        console.log('[getSelectedAddress] Found address from customerInfo.address:', streetValue);
+        return {
+          street: streetValue,
+          street_address: streetValue,
+          city: customerInfo.address.city,
+          postalCode: customerInfo.address.postalCode,
+          floor: (customerInfo.address as any).floor || '',
+          notes: customerInfo.notes,
+          nameOnRinger: (customerInfo as any).nameOnRinger || ''
+        };
+      }
     }
+    console.log('[getSelectedAddress] No address found. existingCustomer:', !!existingCustomer, 'customerInfo:', !!customerInfo);
     return null;
   };
 
@@ -1807,6 +1913,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         selectedCustomer={getCustomerForMenu()}
         selectedAddress={getSelectedAddress()}
         orderType={selectedOrderType || 'pickup'}
+        deliveryZoneInfo={deliveryZoneInfo}
         onOrderComplete={handleOrderComplete}
       />
 

@@ -285,19 +285,19 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           />
 
           {/* Modal */}
-          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell w-full max-w-2xl max-h-[90vh] overflow-y-auto z-[1050]">
-            <div className="p-6 space-y-6">
+          <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell w-full max-w-2xl max-h-[90vh] overflow-y-auto z-[1050] rounded-3xl">
+            <div className="p-6 space-y-6 rounded-3xl">
               {/* Header */}
-              <div className="flex items-center justify-between pb-4 border-b liquid-glass-modal-border">
+              <div className="flex items-center justify-between pb-4 border-b liquid-glass-modal-border rounded-t-3xl">
                 <div className="flex items-center gap-3">
                   <svg
-                    className={`w-6 h-6 ${isSynced ? 'text-green-400' : 'text-red-400'}`}
+                    className={`w-7 h-7 ${isSynced ? 'text-green-500' : 'text-red-500'}`}
                     fill="currentColor"
                     viewBox="0 0 24 24"
                   >
                     <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
                   </svg>
-                  <h3 className="text-2xl font-bold liquid-glass-modal-text">{t('sync.labels.syncStatus')}</h3>
+                  <h3 className="text-2xl font-extrabold text-black dark:text-white">{t('sync.labels.syncStatus')}</h3>
                 </div>
                 <button
                   onClick={() => setShowDetailPanel(false)}
@@ -311,31 +311,31 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               </div>
 
               {/* Status Overview */}
-              <div className="liquid-glass-modal-card">
+              <div className="liquid-glass-modal-card rounded-2xl">
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-sm liquid-glass-modal-text-muted">{t('sync.labels.connection')}</span>
+                  <span className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.labels.connection')}</span>
                   <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? 'bg-green-400' : 'bg-red-400'} ${syncStatus.isOnline ? 'animate-pulse' : ''}`}></div>
-                    <span className={`text-sm font-semibold ${syncStatus.isOnline ? 'text-green-400' : 'text-red-400'}`}>
+                    <div className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? 'bg-green-500' : 'bg-red-500'} ${syncStatus.isOnline ? 'animate-pulse' : ''}`}></div>
+                    <span className={`text-sm font-extrabold ${syncStatus.isOnline ? 'text-green-700 dark:text-green-300' : 'text-red-700 dark:text-red-300'}`}>
                       {syncStatus.isOnline ? t('sync.labels.online') : t('sync.labels.offline')}
                     </span>
                   </div>
                 </div>
 
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-sm liquid-glass-modal-text-muted">{t('sync.labels.lastSync')}</span>
-                  <span className="text-sm font-medium liquid-glass-modal-text">
+                  <span className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.labels.lastSync')}</span>
+                  <span className="text-sm font-extrabold text-slate-800 dark:text-white">
                     {formatLastSync()}
                   </span>
                 </div>
 
                 {/* Terminal Type Info */}
                 <div className="flex items-center justify-between pt-3 border-t liquid-glass-modal-border">
-                  <span className="text-sm liquid-glass-modal-text-muted">
+                  <span className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">
                     {t('terminal.labels.terminalType', 'Terminal Type')}
                   </span>
                   <span
-                    className={`text-sm font-semibold ${isMobileWaiter ? 'text-blue-400' : 'text-green-400'
+                    className={`text-sm font-extrabold ${isMobileWaiter ? 'text-blue-700 dark:text-blue-300' : 'text-green-700 dark:text-green-300'
                       }`}
                   >
                     {isMobileWaiter ? t('terminal.type.mobile_waiter', 'Mobile POS') : t('terminal.type.main', 'Κεντρικό Τερματικό')}
@@ -345,10 +345,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 {/* Parent Terminal (for mobile waiter) */}
                 {isMobileWaiter && parentTerminalId && (
                   <div className="flex items-center justify-between mt-2">
-                    <span className="text-sm liquid-glass-modal-text-muted">
+                    <span className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">
                       {t('terminal.labels.parentTerminal', 'Parent Terminal')}
                     </span>
-                    <span className="text-sm font-medium liquid-glass-modal-text font-mono">
+                    <span className="text-sm font-extrabold text-purple-800 dark:text-purple-300 font-mono">
                       {parentTerminalId.substring(0, 8)}...
                     </span>
                   </div>
@@ -357,47 +357,47 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
               {/* Sync Details Grid */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.pending')}</div>
-                  <div className="text-2xl font-bold liquid-glass-modal-text">{syncStatus.pendingItems}</div>
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.pending')}</div>
+                  <div className="text-2xl font-extrabold text-blue-800 dark:text-blue-300">{syncStatus.pendingItems}</div>
                 </div>
 
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.health')}</div>
-                  <div className={`text-2xl font-bold ${syncStatus.terminalHealth >= 80 ? 'text-green-400' :
-                    syncStatus.terminalHealth >= 60 ? 'text-yellow-400' : 'text-red-400'
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.health')}</div>
+                  <div className={`text-2xl font-extrabold ${syncStatus.terminalHealth >= 80 ? 'text-green-700 dark:text-green-300' :
+                    syncStatus.terminalHealth >= 60 ? 'text-yellow-700 dark:text-yellow-300' : 'text-red-700 dark:text-red-300'
                     }`}>
                     {Math.round(syncStatus.terminalHealth)}%
                   </div>
                 </div>
 
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.settings')}</div>
-                  <div className="text-lg font-semibold liquid-glass-modal-text">v{syncStatus.settingsVersion}</div>
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.settings')}</div>
+                  <div className="text-lg font-extrabold text-purple-800 dark:text-purple-300">v{syncStatus.settingsVersion}</div>
                 </div>
 
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.menu')}</div>
-                  <div className="text-lg font-semibold liquid-glass-modal-text">v{syncStatus.menuVersion}</div>
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.menu')}</div>
+                  <div className="text-lg font-extrabold text-cyan-800 dark:text-cyan-300">v{syncStatus.menuVersion}</div>
                 </div>
 
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.pendingPayments')}</div>
-                  <div className="text-lg font-semibold liquid-glass-modal-text">{syncStatus.pendingPaymentItems}</div>
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.pendingPayments')}</div>
+                  <div className="text-lg font-extrabold text-orange-800 dark:text-orange-300">{syncStatus.pendingPaymentItems}</div>
                 </div>
 
-                <div className="liquid-glass-modal-card p-3">
-                  <div className="text-xs liquid-glass-modal-text-muted mb-1">{t('sync.labels.failedPayments')}</div>
-                  <div className={`text-lg font-semibold ${syncStatus.failedPaymentItems > 0 ? 'text-red-400' : 'liquid-glass-modal-text'}`}>
+                <div className="liquid-glass-modal-card p-3 rounded-xl">
+                  <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.failedPayments')}</div>
+                  <div className={`text-lg font-extrabold ${syncStatus.failedPaymentItems > 0 ? 'text-red-700 dark:text-red-300' : 'text-green-800 dark:text-green-300'}`}>
                     {syncStatus.failedPaymentItems}
                   </div>
                 </div>
               </div>
 
               {/* Financial Transactions Status */}
-              <div className="pt-4 border-t liquid-glass-modal-border">
+              <div className="pt-4 border-t liquid-glass-modal-border rounded-2xl">
                 <div className="flex justify-between items-center mb-3">
-                  <h4 className="text-sm font-semibold liquid-glass-modal-text">{t('sync.financial.title')}</h4>
+                  <h4 className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.financial.title')}</h4>
                   <div className="flex gap-2">
                     <button
                       onClick={async () => {
@@ -413,71 +413,71 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                           toast.error('Αποτυχία ανανέωσης');
                         }
                       }}
-                      className="text-xs text-green-400 hover:text-green-300 underline"
+                      className="text-xs font-semibold text-green-500 hover:text-green-400 underline"
                       title="Ανανέωση"
                     >
                       ↻
                     </button>
                     <button
                       onClick={() => setShowFinancialPanel(true)}
-                      className="text-xs text-blue-400 hover:text-blue-300 underline"
+                      className="text-xs font-semibold text-blue-500 hover:text-blue-400 underline"
                     >
                       {t('sync.actions.manage')}
                     </button>
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-2">
-                  <div className="liquid-glass-modal-card p-2 text-center">
-                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.driver')}</div>
-                    <div className="text-xs font-bold liquid-glass-modal-text">
+                  <div className="liquid-glass-modal-card p-2 text-center rounded-xl">
+                    <div className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.financial.driver')}</div>
+                    <div className="text-xs font-bold mt-1">
                       {financialStats.driver_earnings.pending > 0 && (
-                        <div className="text-blue-400">
+                        <div className="text-blue-700 dark:text-blue-300">
                           {financialStats.driver_earnings.pending} {t('sync.financial.pending')}
                         </div>
                       )}
                       {financialStats.driver_earnings.failed > 0 && (
-                        <div className="text-red-400">
+                        <div className="text-red-700 dark:text-red-300">
                           {financialStats.driver_earnings.failed} {t('sync.financial.failed')}
                         </div>
                       )}
                       {financialStats.driver_earnings.pending === 0 && financialStats.driver_earnings.failed === 0 && (
-                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                        <span className="text-green-700 dark:text-green-300">{t('sync.financial.complete')}</span>
                       )}
                     </div>
                   </div>
-                  <div className="liquid-glass-modal-card p-2 text-center">
-                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.staff')}</div>
-                    <div className="text-xs font-bold liquid-glass-modal-text">
+                  <div className="liquid-glass-modal-card p-2 text-center rounded-xl">
+                    <div className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.financial.staff')}</div>
+                    <div className="text-xs font-bold mt-1">
                       {financialStats.staff_payments.pending > 0 && (
-                        <div className="text-blue-400">
+                        <div className="text-blue-700 dark:text-blue-300">
                           {financialStats.staff_payments.pending} {t('sync.financial.pending')}
                         </div>
                       )}
                       {financialStats.staff_payments.failed > 0 && (
-                        <div className="text-red-400">
+                        <div className="text-red-700 dark:text-red-300">
                           {financialStats.staff_payments.failed} {t('sync.financial.failed')}
                         </div>
                       )}
                       {financialStats.staff_payments.pending === 0 && financialStats.staff_payments.failed === 0 && (
-                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                        <span className="text-green-700 dark:text-green-300">{t('sync.financial.complete')}</span>
                       )}
                     </div>
                   </div>
-                  <div className="liquid-glass-modal-card p-2 text-center">
-                    <div className="text-[10px] liquid-glass-modal-text-muted">{t('sync.financial.expenses')}</div>
-                    <div className="text-xs font-bold liquid-glass-modal-text">
+                  <div className="liquid-glass-modal-card p-2 text-center rounded-xl">
+                    <div className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">{t('sync.financial.expenses')}</div>
+                    <div className="text-xs font-bold mt-1">
                       {financialStats.shift_expenses.pending > 0 && (
-                        <div className="text-blue-400">
+                        <div className="text-blue-700 dark:text-blue-300">
                           {financialStats.shift_expenses.pending} {t('sync.financial.pending')}
                         </div>
                       )}
                       {financialStats.shift_expenses.failed > 0 && (
-                        <div className="text-red-400">
+                        <div className="text-red-700 dark:text-red-300">
                           {financialStats.shift_expenses.failed} {t('sync.financial.failed')}
                         </div>
                       )}
                       {financialStats.shift_expenses.pending === 0 && financialStats.shift_expenses.failed === 0 && (
-                        <span className="text-green-500">✓ {t('sync.financial.complete')}</span>
+                        <span className="text-green-700 dark:text-green-300">{t('sync.financial.complete')}</span>
                       )}
                     </div>
                   </div>
@@ -490,37 +490,37 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
               {/* Error Message */}
               {syncStatus.error && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3">
+                <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-3">
                   <div className="flex items-start gap-2">
-                    <svg className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg className="w-5 h-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                     <div>
-                      <div className="text-sm font-semibold text-red-400 mb-1">{t('sync.labels.error')}</div>
-                      <div className="text-xs text-red-300">{syncStatus.error}</div>
+                      <div className="text-sm font-bold text-red-700 dark:text-red-400 mb-1">{t('sync.labels.error')}</div>
+                      <div className="text-xs font-semibold text-red-600 dark:text-red-300">{syncStatus.error}</div>
                     </div>
                   </div>
                 </div>
               )}
 
               {/* Action Buttons */}
-              <div className="pt-4 border-t liquid-glass-modal-border">
+              <div className="pt-4 border-t liquid-glass-modal-border rounded-2xl">
                 <button
                   onClick={handleForceSync}
                   disabled={syncStatus.syncInProgress}
-                  className="w-full liquid-glass-modal-button bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full py-3 px-4 rounded-2xl font-bold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
                 >
                   <div className="flex items-center justify-center gap-2">
                     {syncStatus.syncInProgress ? (
                       <>
-                        <svg className="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-5 h-5 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
                         <span>{t('sync.status.syncing')}</span>
                       </>
                     ) : (
                       <>
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
                         <span>{t('sync.actions.forceSync')}</span>

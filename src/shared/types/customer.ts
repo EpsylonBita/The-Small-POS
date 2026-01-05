@@ -22,6 +22,7 @@ export interface CustomerAddress {
   is_default: boolean;
   delivery_notes?: string;
   notes?: string; // Alias for delivery_notes (Supabase field name)
+  name_on_ringer?: string; // Name to display on delivery ringer
   created_at?: string;
   updated_at?: string;
   // Sync metadata

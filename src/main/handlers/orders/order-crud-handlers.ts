@@ -398,6 +398,7 @@ export function registerOrderCrudHandlers(): void {
     'order:delete',
     'order:fetch-items-from-supabase',
     'order:update-items',
+    'order:save-from-remote',
   ];
   handlers.forEach(handler => ipcMain.removeHandler(handler));
 
@@ -1309,5 +1310,73 @@ export function registerOrderCrudHandlers(): void {
 
       return { success: true, orderId: actualOrderId };
     }, 'order:update-items');
+  });
+
+  // Save order from remote (Admin API fallback) - bypasses validation for orders already created in Supabase
+  ipcMain.handle('order:save-from-remote', async (_event, { orderData }) => {
+    return handleIPCError(async () => {
+      const dbManager = serviceRegistry.requireService('dbManager');
+      const mainWindow = serviceRegistry.get('mainWindow');
+
+      console.log('[order:save-from-remote] Saving order from remote:', orderData.id);
+
+      // Check if order already exists locally by supabase ID
+      const existingOrder = await dbManager.getOrderBySupabaseId?.(orderData.id);
+      if (existingOrder) {
+        console.log('[order:save-from-remote] Order already exists locally:', existingOrder.id);
+        return { success: true, orderId: existingOrder.id, alreadyExists: true };
+      }
+
+      // Transform Supabase order data to local database schema
+      const dbOrderData = {
+        supabase_id: orderData.id,
+        order_number: orderData.order_number,
+        customer_name: orderData.customer_name,
+        customer_phone: orderData.customer_phone,
+        customer_email: orderData.customer_email,
+        customer_id: orderData.customer_id,
+        items: orderData.items || [],
+        total_amount: orderData.total_amount || 0,
+        subtotal: orderData.subtotal || 0,
+        tax_amount: orderData.tax_amount || 0,
+        discount_amount: orderData.discount_amount || 0,
+        delivery_fee: orderData.delivery_fee || 0,
+        status: orderData.status || 'pending',
+        order_type: orderData.order_type || 'pickup',
+        table_number: orderData.table_number,
+        delivery_address: orderData.delivery_address,
+        delivery_city: orderData.delivery_city,
+        delivery_postal_code: orderData.delivery_postal_code,
+        delivery_floor: orderData.delivery_floor,
+        delivery_notes: orderData.delivery_notes || orderData.notes,
+        name_on_ringer: orderData.name_on_ringer,
+        special_instructions: orderData.special_instructions || orderData.notes,
+        estimated_time: orderData.estimated_time,
+        payment_status: orderData.payment_status || 'pending',
+        payment_method: orderData.payment_method || 'cash',
+        payment_transaction_id: orderData.payment_transaction_id,
+        branch_id: orderData.branch_id,
+        organization_id: orderData.organization_id,
+        staff_shift_id: orderData.staff_shift_id,
+        created_at: orderData.created_at || new Date().toISOString(),
+        updated_at: orderData.updated_at || new Date().toISOString(),
+      };
+
+      const createdOrder = await dbManager.insertOrder(dbOrderData);
+
+      if (!createdOrder || !createdOrder.id) {
+        console.error('[order:save-from-remote] ❌ Failed to save order locally');
+        throw new IPCError('Failed to save remote order locally', 'DATABASE_ERROR');
+      }
+
+      console.log('[order:save-from-remote] ✅ Order saved locally:', createdOrder.id);
+
+      // Notify renderer about the new order
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('order-created', transformOrder(createdOrder));
+      }
+
+      return { success: true, orderId: createdOrder.id };
+    }, 'order:save-from-remote');
   });
 }

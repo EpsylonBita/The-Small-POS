@@ -462,15 +462,15 @@
 
 /* Dark theme - Liquid Glass */
 .dark .liquid-glass-modal-shell {
-  /* Dark Theme Liquid Glass - restored */
-  background: rgba(0, 0, 0, 0.3);
-  backdrop-filter: blur(40px) saturate(200%);
-  -webkit-backdrop-filter: blur(40px) saturate(200%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  /* True Liquid Glass Effect - Dark Theme */
+  background: rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.6),
-    0 8px 24px rgba(0, 0, 0, 0.4),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    0 20px 60px rgba(0, 0, 0, 0.4),
+    0 8px 24px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 @keyframes modalEnter {
@@ -610,22 +610,22 @@
 }
 
 .liquid-glass-modal-card {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(12px) saturate(var(--modal-saturation));
-  -webkit-backdrop-filter: blur(12px) saturate(var(--modal-saturation));
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(241, 245, 249, 0.8);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  border: 1px solid rgba(203, 213, 225, 0.5);
   border-radius: 1rem;
   padding: 1.5rem;
   box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+    0 4px 16px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 .dark .liquid-glass-modal-card {
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(30, 41, 59, 0.8);
   border-color: rgba(255, 255, 255, 0.1);
   box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.3),
+    0 4px 16px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -736,7 +736,7 @@
 }
 
 .liquid-glass-modal-content {
-  color: #1e293b;  /* Slate-800 - vivid dark */
+  color: #0f172a;  /* Slate-900 - extra vivid dark */
   padding: 2rem;
   overflow-y: auto;
   flex: 1;
@@ -745,13 +745,17 @@
   flex-direction: column;
   /* Create stacking context for crisp text over glass */
   isolation: isolate;
-  /* Ensure text renders crisply */
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  /* Ensure text renders crisply - use subpixel for better clarity */
+  -webkit-font-smoothing: subpixel-antialiased;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: geometricPrecision;
+  /* Prevent blur inheritance */
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .dark .liquid-glass-modal-content {
-  color: #f1f5f9;  /* Slate-100 - crisp light */
+  color: #f8fafc;  /* Slate-50 - brightest white */
 }
 
 /* Status variant classes for POS */
@@ -2306,4 +2310,73 @@ svg.pos-neon-logo {
 .liquid-glass-modal-content,
 .liquid-glass-modal-shell > div {
   isolation: isolate;
+}
+
+/* ===== CRISP TEXT OVER GLASS - Z Report & Heavy Text Modals ===== */
+/* Creates a readable layer over the glass blur effect */
+
+.glass-crisp-text-layer {
+  /* Semi-solid background that blocks blur from affecting text */
+  background: rgba(248, 250, 252, 0.85);
+  /* Subtle inner shadow for depth */
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.03);
+  /* Crisp text rendering */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* Isolate from parent blur */
+  isolation: isolate;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+.dark .glass-crisp-text-layer {
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.1);
+}
+
+/* Modal content with crisp text - keeps glass header visible */
+.liquid-glass-modal-content.glass-crisp-content {
+  background: rgba(248, 250, 252, 0.92);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.dark .liquid-glass-modal-content.glass-crisp-content {
+  background: rgba(15, 23, 42, 0.92);
+}
+
+/* Ultra crisp text class for important values */
+.text-crisp {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern" 1;
+  text-shadow: none;
+}
+
+/* Z Report specific - GLASS with crisp dark text (no glow) */
+.z-report-content {
+  /* Keep it transparent/glass */
+  background: transparent;
+  border-radius: 16px;
+  padding: 1rem;
+  /* GPU acceleration for sharper rendering */
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+.dark .z-report-content {
+  background: transparent;
+}
+
+/* Crisp text rendering - no shadows/glow */
+.z-report-content,
+.z-report-content * {
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
+  text-rendering: geometricPrecision !important;
+  text-shadow: none !important;
 }

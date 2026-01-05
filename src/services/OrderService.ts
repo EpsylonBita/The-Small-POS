@@ -547,6 +547,24 @@ export class OrderService {
       const result = await response.json();
       const newOrder = result.data || result;
       debugLogger.info(`Created order via Admin API: ${newOrder.id}`, 'OrderService');
+
+      // Sync the order to local SQLite so it appears in the POS order list
+      if (typeof window !== 'undefined') {
+        const api = (window as any).electronAPI;
+        if (api?.invoke) {
+          try {
+            const syncResp = await api.invoke('order:save-from-remote', { orderData: newOrder });
+            if (syncResp?.success) {
+              debugLogger.info(`Synced remote order to local DB: ${syncResp.orderId}`, 'OrderService');
+            } else {
+              debugLogger.warn('Failed to sync remote order to local DB', syncResp, 'OrderService');
+            }
+          } catch (syncErr) {
+            debugLogger.warn('Error syncing remote order to local DB', syncErr, 'OrderService');
+          }
+        }
+      }
+
       return newOrder;
     } catch (error) {
       const posError = ErrorFactory.network('Failed to create order');

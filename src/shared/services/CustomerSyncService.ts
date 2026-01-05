@@ -196,6 +196,7 @@ export class CustomerSyncService {
 
   /**
    * Create new customer with version=1
+   * Also creates an address in customer_addresses if address data is provided
    */
   async createCustomer(data: Partial<Customer>): Promise<Customer> {
     try {
@@ -231,6 +232,64 @@ export class CustomerSyncService {
         .single()
 
       if (error) throw error
+
+      // Check if address data was provided - create address in customer_addresses table
+      const addressData = data as any
+      const hasAddressData = addressData.address || addressData.street_address ||
+        addressData.city || addressData.postal_code || addressData.postalCode
+
+      if (hasAddressData && created.id) {
+        try {
+          const addressPayload: any = {
+            customer_id: created.id,
+            organization_id: this.organizationId,
+            street_address: addressData.address ?? addressData.street_address ?? '',
+            city: addressData.city ?? '',
+            postal_code: addressData.postal_code ?? addressData.postalCode ?? null,
+            floor_number: addressData.floor_number ?? addressData.floorNumber ?? null,
+            notes: addressData.notes ?? addressData.delivery_notes ?? null,
+            name_on_ringer: addressData.name_on_ringer ?? addressData.nameOnRinger ?? null,
+            address_type: 'delivery',
+            is_default: true,
+            version: 1,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }
+
+          // Add coordinates if provided - convert to GeoJSON Point format
+          if (addressData.coordinates) {
+            const coords = addressData.coordinates
+            // Handle both { lat, lng } and GeoJSON Point format
+            if (coords.type === 'Point' && Array.isArray(coords.coordinates)) {
+              // Already GeoJSON format
+              addressPayload.coordinates = coords
+            } else if (coords.lat !== undefined && coords.lng !== undefined) {
+              // Convert { lat, lng } to GeoJSON Point (note: GeoJSON is [lng, lat] order)
+              addressPayload.coordinates = {
+                type: 'Point',
+                coordinates: [coords.lng, coords.lat]
+              }
+            }
+          }
+
+          const { data: createdAddress, error: addressError } = await this.supabase
+            .from('customer_addresses')
+            .insert(addressPayload)
+            .select()
+            .single()
+
+          if (addressError) {
+            console.error('[CustomerSyncService] Failed to create address:', addressError)
+            // Don't throw - customer was created successfully, address failed
+          } else {
+            // Include the address in the returned customer
+            created.customer_addresses = [createdAddress]
+          }
+        } catch (addressErr) {
+          console.error('[CustomerSyncService] Error creating address:', addressErr)
+          // Don't throw - customer was created successfully
+        }
+      }
 
       return this.normalizeCustomerData(created)
     } catch (error) {
@@ -818,6 +877,7 @@ export class CustomerSyncService {
       is_default: data.is_default,
       delivery_notes: data.delivery_notes !== undefined ? data.delivery_notes : (data.notes !== undefined ? data.notes : null),
       notes: data.notes !== undefined ? data.notes : (data.delivery_notes !== undefined ? data.delivery_notes : null),
+      name_on_ringer: data.name_on_ringer,
       version: data.version,
       created_at: data.created_at,
       updated_at: data.updated_at

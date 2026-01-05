@@ -43,6 +43,7 @@ export interface CustomerAddress {
   is_default: boolean
   delivery_notes: string | null
   notes: string | null
+  name_on_ringer: string | null
 
   // Sync metadata
   version: number

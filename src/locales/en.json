@@ -103,6 +103,15 @@
       "g": "g",
       "l": "l",
       "ml": "ml"
+    },
+    "roleNames": {
+      "cashier": "Cashier",
+      "kitchen": "Kitchen",
+      "driver": "Driver",
+      "waiter": "Waiter",
+      "manager": "Manager",
+      "admin": "Admin",
+      "staff": "Staff"
     }
   },
   "dashboard": {
@@ -448,7 +457,9 @@
       "total": "Total:",
       "completeOrder": "Complete Order",
       "qty": "Qty:",
-      "without": "Without"
+      "without": "Without",
+      "minimumNotMet": "Minimum order not met",
+      "addMoreToOrder": "Add {{amount}} more to complete order"
     },
     "emptyState": {
       "title": "No Menu Items",
@@ -726,6 +737,8 @@
       "phoneRequired": "Phone number is required",
       "nameRequired": "Name is required",
       "addressRequired": "Address is required",
+      "nameOnRingerRequired": "Name on ringer is required",
+      "floorRequired": "Floor number is required",
       "confirmDelete": "Delete this customer and all associated data?"
     },
     "loyalty": {
@@ -1763,7 +1776,26 @@
       "viewLogs": "View Sync Logs",
       "forceSync": "Force Sync",
       "clearQueue": "Clear Queue",
-      "retryFailed": "Retry Failed"
+      "retryFailed": "Retry Failed",
+      "manage": "Manage"
+    },
+    "financial": {
+      "title": "Financial Transactions",
+      "subtitle": "Manage pending and failed financial sync items",
+      "driver": "Driver Earnings",
+      "staff": "Staff Payments",
+      "expenses": "Expenses",
+      "pending": "pending",
+      "failed": "failed",
+      "complete": "Complete",
+      "allClear": "All Clear",
+      "noFailedItems": "No pending or failed items to sync",
+      "failedItems": "Failed Items",
+      "retryAll": "Retry All",
+      "retryingAll": "Retrying All...",
+      "retry": "Retry",
+      "attempts": "Attempts",
+      "viewPayload": "View Payload"
     },
     "conflicts": {
       "title": "Sync Conflicts",
@@ -2020,8 +2052,10 @@
       "expensesLabel": "- Expenses",
       "staffPaymentsLabel": "- Staff Payments",
       "expectedAmountLabel": "= Expected Amount",
-      "cashierPaymentLabel": "💵 Cashier Payment (from drawer)",
-      "closingCashLabel": "💵 Closing Cash (counted)",
+      "cashierPaymentLabel": "Cashier Payment (from drawer)",
+      "cashierPaymentHelper": "Amount cashier takes from register",
+      "closingCashLabel": "Closing Cash (counted)",
+      "closingCashHelper": "Total cash remaining in register",
       "checkoutButton": "✓ Checkout",
       "shiftBreakdown": "Shift Breakdown",
       "totalOrders": "Total Orders",
@@ -2165,7 +2199,7 @@
       "phonePlaceholder": "Enter phone number",
       "emailLabel": "Email (optional)",
       "emailPlaceholder": "Enter email address",
-      "nameOnRingerLabel": "Name on Ringer (optional)",
+      "nameOnRingerLabel": "Name on Ringer",
       "nameOnRingerPlaceholder": "Name for apartment ringer",
       "addressLabel": "Address *",
       "streetPlaceholder": "Enter delivery address in Greece...",
@@ -2173,7 +2207,7 @@
       "cityPlaceholder": "Enter city",
       "postcodeLabel": "Postal Code",
       "postcodePlaceholder": "Enter postal code",
-      "floorLabel": "Floor Number (optional)",
+      "floorLabel": "Floor Number",
       "floorPlaceholder": "e.g., 2nd floor, Ground floor",
       "notesLabel": "Notes (optional)",
       "notesPlaceholder": "Additional delivery notes or special instructions",
@@ -2191,6 +2225,8 @@
       "phoneRequired": "Phone number is required",
       "emailInvalid": "Please enter a valid email address",
       "streetRequired": "Address is required",
+      "nameOnRingerRequired": "Name on ringer is required",
+      "floorRequired": "Floor number is required",
       "save": "Add Customer",
       "saveAddress": "Save Address",
       "saving": "Saving...",

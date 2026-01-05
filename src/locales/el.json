@@ -101,6 +101,15 @@
       "g": "g",
       "l": "l",
       "ml": "ml"
+    },
+    "roleNames": {
+      "cashier": "Ταμίας",
+      "kitchen": "Κουζίνα",
+      "driver": "Οδηγός",
+      "waiter": "Σερβιτόρος",
+      "manager": "Διευθυντής",
+      "admin": "Διαχειριστής",
+      "staff": "Προσωπικό"
     }
   },
   "dashboard": {
@@ -441,7 +450,9 @@
       "total": "Σύνολο:",
       "completeOrder": "Ολοκλήρωση Παραγγελίας",
       "qty": "Ποσ.:",
-      "without": "Χωρίς"
+      "without": "Χωρίς",
+      "minimumNotMet": "Δεν καλύπτεται η ελάχιστη παραγγελία",
+      "addMoreToOrder": "Προσθέστε {{amount}} ακόμα για να ολοκληρώσετε"
     },
     "emptyState": {
       "title": "Δεν Υπάρχουν Προϊόντα Μενού",
@@ -2045,8 +2056,10 @@
       "expensesLabel": "- Έξοδα",
       "staffPaymentsLabel": "- Πληρωμές Προσωπικού",
       "expectedAmountLabel": "= Αναμενόμενο Ποσό",
-      "cashierPaymentLabel": "💵 Πληρωμή Ταμία (από ταμείο)",
-      "closingCashLabel": "💵 Τελικά Μετρητά (μετρημένα)",
+      "cashierPaymentLabel": "Πληρωμή Ταμία (από ταμείο)",
+      "cashierPaymentHelper": "Ποσό που παίρνει ο ταμίας από το ταμείο",
+      "closingCashLabel": "Τελικά Μετρητά (μετρημένα)",
+      "closingCashHelper": "Σύνολο μετρητών που απομένουν στο ταμείο",
       "checkoutButton": "✓ Ολοκλήρωση",
       "shiftBreakdown": "Ανάλυση Βάρδιας",
       "totalOrders": "Σύνολο Παραγγελιών",

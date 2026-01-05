@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2 } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatCurrency } from '../../utils/format';
@@ -42,6 +42,8 @@ interface MenuCartProps {
   onDiscountChange?: (percentage: number) => void;
   editMode?: boolean; // When true, shows "Save Changes" instead of "Complete Order"
   isSaving?: boolean; // When true, shows loading state on save button
+  orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
+  minimumOrderAmount?: number; // Minimum order amount for delivery zones
 }
 
 export const MenuCart: React.FC<MenuCartProps> = ({
@@ -54,7 +56,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   maxDiscountPercentage = 30,
   onDiscountChange,
   editMode = false,
-  isSaving = false
+  isSaving = false,
+  orderType,
+  minimumOrderAmount = 0
 }) => {
   const { t } = useTranslation();
 
@@ -103,6 +107,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const subtotal = getSubtotal();
   const discountAmount = subtotal * (discountPercentage / 100);
   const totalAfterDiscount = subtotal - discountAmount;
+
+  // Minimum order validation for delivery orders
+  const isDeliveryOrder = orderType === 'delivery';
+  const isBelowMinimum = isDeliveryOrder && minimumOrderAmount > 0 && totalAfterDiscount < minimumOrderAmount;
+  const shortfall = isBelowMinimum ? minimumOrderAmount - totalAfterDiscount : 0;
 
   return (
     <div className={`w-full sm:w-72 md:w-80 border-l flex flex-col ${
@@ -425,11 +434,36 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           </span>
         </div>
 
+        {/* Minimum Order Warning for Delivery */}
+        {isBelowMinimum && !editMode && (
+          <div className={`flex items-center gap-2 p-3 rounded-lg mb-3 ${
+            resolvedTheme === 'dark'
+              ? 'bg-orange-500/20 border border-orange-500/30'
+              : 'bg-orange-50 border border-orange-200'
+          }`}>
+            <AlertTriangle className={`w-5 h-5 flex-shrink-0 ${
+              resolvedTheme === 'dark' ? 'text-orange-400' : 'text-orange-500'
+            }`} />
+            <div className="flex-1">
+              <p className={`text-sm font-medium antialiased ${
+                resolvedTheme === 'dark' ? 'text-orange-400' : 'text-orange-600'
+              }`}>
+                {t('menu.cart.minimumNotMet', 'Minimum order not met')}
+              </p>
+              <p className={`text-xs antialiased ${
+                resolvedTheme === 'dark' ? 'text-orange-300/80' : 'text-orange-500/80'
+              }`}>
+                {t('menu.cart.addMoreToOrder', 'Add {{amount}} more to complete order', { amount: formatCurrency(shortfall) })}
+              </p>
+            </div>
+          </div>
+        )}
+
         <button
           onClick={onCheckout}
-          disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving}
+          disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)}
           className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
-            uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving
+            uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)
               ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
               : editMode
                 ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'

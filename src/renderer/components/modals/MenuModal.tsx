@@ -6,6 +6,8 @@ import { MenuCart } from '../menu/MenuCart';
 import { MenuItemModal } from '../menu/MenuItemModal';
 import { PaymentModal } from './PaymentModal';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { menuService } from '../../services/MenuService';
@@ -66,6 +68,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   const { t } = useTranslation();
   const { maxDiscountPercentage } = useDiscountSettings();
+  const { validateAddress: validateDeliveryAddress } = useDeliveryValidation({ debounceMs: 0 });
+  const { staff } = useShift();
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
@@ -75,13 +79,25 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
-  
+
   // State for editing a cart item
   const [editingCartItem, setEditingCartItem] = useState<any>(null);
-  
+
+  // State for locally fetched delivery zone info (when not provided via props)
+  const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
+
+  // State for default minimum order amount (from delivery zones)
+  const [defaultMinimumOrderAmount, setDefaultMinimumOrderAmount] = useState<number>(0);
+
   // Track if we've loaded items for this edit session to prevent infinite loops
   const hasLoadedItemsRef = React.useRef(false);
   const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
+
+  // Effective delivery zone info - use prop if available, otherwise use locally fetched
+  const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
+
+  // Effective minimum order amount - prefer zone-specific, fallback to default
+  const effectiveMinimumOrderAmount = effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount;
 
   // Fetch order items from backend
   const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
@@ -125,8 +141,84 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       lastEditOrderIdRef.current = undefined;
       // Reset cart when modal closes to ensure clean state for next open
       setCartItems([]);
+      // Clear locally fetched delivery zone info and default minimum
+      setLocalDeliveryZoneInfo(null);
+      setDefaultMinimumOrderAmount(0);
     }
   }, [isOpen, cartItems.length]);
+
+  // Fetch delivery zone info when modal opens for delivery orders (if not provided via props)
+  useEffect(() => {
+    const fetchDeliveryZoneInfo = async () => {
+      // Only fetch if: modal is open, order type is delivery, no zone info provided, has address, not in edit mode
+      if (!isOpen || orderType !== 'delivery' || deliveryZoneInfo || editMode || !selectedAddress) {
+        return;
+      }
+
+      // Build address string from selectedAddress
+      const addressParts = [
+        selectedAddress.street_address || selectedAddress.street || '',
+        selectedAddress.city || '',
+        selectedAddress.postal_code || selectedAddress.postalCode || ''
+      ].filter(Boolean);
+
+      if (addressParts.length === 0) {
+        return;
+      }
+
+      const addressString = addressParts.join(', ');
+
+      try {
+        const result = await validateDeliveryAddress(addressString, 0);
+        if (result) {
+          setLocalDeliveryZoneInfo(result);
+        }
+      } catch (error) {
+        console.error('[MenuModal] Error validating delivery zone:', error);
+      }
+    };
+
+    fetchDeliveryZoneInfo();
+  }, [isOpen, orderType, deliveryZoneInfo, editMode, selectedAddress, validateDeliveryAddress]);
+
+  // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
+  useEffect(() => {
+    const fetchDeliveryZones = async () => {
+      // Only fetch if: modal is open, order type is delivery, no zone info yet, not in edit mode
+      if (!isOpen || orderType !== 'delivery' || editMode) {
+        return;
+      }
+
+      // If we already have effective zone info with minimum amount, skip
+      if (effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount !== undefined) {
+        return;
+      }
+
+      const branchId = staff?.branchId || localStorage.getItem('branch_id');
+      if (!branchId) {
+        return;
+      }
+
+      try {
+        const { posApiGet } = await import('../../utils/api-helpers');
+        const result = await posApiGet<any[]>(`pos/delivery-zones?branch_id=${branchId}`);
+
+        if (result.success && result.data) {
+          const zones = Array.isArray(result.data) ? result.data : (result.data as any).zones || [];
+          // Find the first active zone with a minimum order amount, or use the lowest minimum from all active zones
+          const activeZones = zones.filter((z: any) => z.is_active);
+          if (activeZones.length > 0) {
+            const minAmount = activeZones[0].min_order_amount || activeZones[0].minimum_order_amount || 0;
+            setDefaultMinimumOrderAmount(minAmount);
+          }
+        }
+      } catch (error) {
+        console.error('[MenuModal] Error fetching delivery zones:', error);
+      }
+    };
+
+    fetchDeliveryZones();
+  }, [isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
 
   // Transform customizations from Supabase format to MenuCart format
   const transformCustomizations = (customizations: any): any[] => {
@@ -521,7 +613,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           paymentData,
           discountPercentage,
           discountAmount,
-          deliveryZoneInfo // Pass delivery zone info to OrderDashboard for correct fee calculation
+          deliveryZoneInfo: effectiveDeliveryZoneInfo // Pass delivery zone info to OrderDashboard for correct fee calculation
         });
       }
 
@@ -585,17 +677,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                 <p className="liquid-glass-modal-text-muted text-xs mt-1">
                   {t('modals.menu.deliveryTo', { address: `${selectedAddress.street_address || selectedAddress.street}, ${selectedAddress.postal_code || selectedAddress.city}` })}
                 </p>
-                {deliveryZoneInfo?.zone && (
+                {effectiveDeliveryZoneInfo?.zone && (
                   <div className="flex items-center gap-3 mt-2 text-xs liquid-glass-modal-text">
                     <span className="inline-flex items-center px-2 py-1 rounded-md bg-blue-500/20 text-blue-400 font-medium">
-                      {t('modals.menu.zone')}: {deliveryZoneInfo.zone.name}
+                      {t('modals.menu.zone')}: {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span className="inline-flex items-center">
-                      {t('modals.menu.fee')}: €{deliveryZoneInfo.zone.deliveryFee.toFixed(2)}
+                      {t('modals.menu.fee')}: €{effectiveDeliveryZoneInfo.zone.deliveryFee.toFixed(2)}
                     </span>
-                    {deliveryZoneInfo.zone.estimatedTime && (
+                    {effectiveDeliveryZoneInfo.zone.estimatedTime && (
                       <span className="inline-flex items-center">
-                        {t('modals.menu.eta')}: {deliveryZoneInfo.zone.estimatedTime.min}-{deliveryZoneInfo.zone.estimatedTime.max} min
+                        {t('modals.menu.eta')}: {effectiveDeliveryZoneInfo.zone.estimatedTime.min}-{effectiveDeliveryZoneInfo.zone.estimatedTime.max} min
                       </span>
                     )}
                   </div>
@@ -637,6 +729,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onDiscountChange={editMode ? undefined : setDiscountPercentage}
               editMode={editMode}
               isSaving={isSavingEdit}
+              orderType={orderType}
+              minimumOrderAmount={effectiveMinimumOrderAmount}
             />
           </div>
         </div>
@@ -669,7 +763,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           orderTotal={cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) * (1 - discountPercentage / 100)}
           discountAmount={cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) * (discountPercentage / 100)}
           orderType={orderType}
-          minimumOrderAmount={deliveryZoneInfo?.zone?.minimumOrderAmount || 0}
+          minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount || 0}
           onPaymentComplete={handlePaymentComplete}
           isProcessing={isProcessingOrder}
         />

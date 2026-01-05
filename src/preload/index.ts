@@ -248,6 +248,7 @@ const electronAPI = {
         'order:update-status',
         'order:update-items',
         'order:delete',
+        'order:save-from-remote',
         'order:save-for-retry',
         'order:get-retry-queue',
         'order:process-retry-queue',

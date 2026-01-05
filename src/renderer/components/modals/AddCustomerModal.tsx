@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
+import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getApiUrl, environment } from '../../../config/environment';
 import { Customer } from '../../../shared/types/customer';
@@ -317,7 +317,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   return (
     <div className="relative">
       <div className="relative">
-        <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+        <MapPin className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
         <input
           type="text"
           value={value}
@@ -809,6 +809,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.address = t('modals.addCustomer.addressOutsideArea');
     }
 
+    if (!formData.nameOnRinger.trim()) {
+      newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired', 'Name on ringer is required');
+    }
+
+    if (!formData.floorNumber.trim()) {
+      newErrors.floorNumber = t('modals.addCustomer.floorRequired', 'Floor number is required');
+    }
+
     if (formData.email && !/\S+@\S+\.\S+/.test(formData.email)) {
       newErrors.email = t('modals.addCustomer.emailInvalid');
     }
@@ -819,12 +827,16 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    console.log('[AddCustomerModal.handleSubmit] BUILD v2026.01.05.2 - Called with mode:', mode, 'initialCustomer:', initialCustomer?.id, initialCustomer?.name);
+    console.log('[AddCustomerModal.handleSubmit] formData:', JSON.stringify(formData, null, 2));
 
     if (!validateForm()) {
+      console.log('[AddCustomerModal.handleSubmit] Validation failed');
       return;
     }
 
     setIsSubmitting(true);
+    console.log('[AddCustomerModal.handleSubmit] Starting submission...');
 
     try {
       // Get credentials from main process first (where connection string is stored), then localStorage fallback
@@ -888,10 +900,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
           if (result && result.success) {
             const newAddress = result.data;
+            console.log('[AddCustomerModal] addAddress success - newAddress from API:', JSON.stringify(newAddress, null, 2));
             // Return the customer with the new address info
             const updatedCustomer = {
               ...initialCustomer,
-              // Update legacy fields for immediate UI feedback if needed, 
+              // Update legacy fields for immediate UI feedback if needed,
               // though proper selection should use selected_address_id
               address: formData.address.trim(),
               postal_code: formData.postalCode ? formData.postalCode.trim() : initialCustomer.postal_code,
@@ -903,6 +916,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               // Ensure addresses array includes the new one if we have it locally
               addresses: initialCustomer.addresses ? [...initialCustomer.addresses, newAddress] : [newAddress]
             };
+            console.log('[AddCustomerModal] Calling onCustomerAdded with updatedCustomer:', JSON.stringify({
+              id: updatedCustomer.id,
+              name: updatedCustomer.name,
+              address: updatedCustomer.address,
+              addresses: updatedCustomer.addresses,
+              selected_address_id: updatedCustomer.selected_address_id
+            }, null, 2));
 
             onCustomerAdded(updatedCustomer);
           } else {
@@ -1112,9 +1132,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         throw new Error(result?.error || 'Failed to create customer');
       }
     } catch (error) {
-      console.error('Error in AddCustomerModal submit:', error);
+      console.error('[AddCustomerModal.handleSubmit] Error:', error);
+      console.error('[AddCustomerModal.handleSubmit] Mode was:', mode, 'initialCustomer:', initialCustomer?.id);
       setErrors({ submit: error instanceof Error ? error.message : t('modals.addCustomer.failed') });
     } finally {
+      console.log('[AddCustomerModal.handleSubmit] Finally block - isSubmitting set to false');
       setIsSubmitting(false);
     }
   };
@@ -1156,10 +1178,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Phone Number - disabled in addAddress mode */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.phoneLabel')}
+            {t('modals.addCustomer.phoneLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Phone className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="tel"
               value={formData.phone}
@@ -1178,7 +1200,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Address with Simple Input + Delivery Validation */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.addressLabel')}
+            {t('modals.addCustomer.addressLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
             <AddressAutocomplete
@@ -1270,7 +1292,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.cityLabel')}
           </label>
           <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="text"
               value={formData.city}
@@ -1286,22 +1308,25 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
             {t('modals.addCustomer.postcodeLabel')}
           </label>
-          <input
-            type="text"
-            value={formData.postalCode}
-            onChange={(e) => handleInputChange('postalCode', e.target.value)}
-            placeholder={t('modals.addCustomer.postcodePlaceholder')}
-            className={inputBase(resolvedTheme)}
-          />
+          <div className="relative">
+            <Hash className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
+            <input
+              type="text"
+              value={formData.postalCode}
+              onChange={(e) => handleInputChange('postalCode', e.target.value)}
+              placeholder={t('modals.addCustomer.postcodePlaceholder')}
+              className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
+            />
+          </div>
         </div>
 
         {/* Name - disabled in addAddress mode */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameLabel')}
+            {t('modals.addCustomer.nameLabel').replace(' *', '')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="text"
               value={formData.name}
@@ -1323,7 +1348,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.emailLabel')}
           </label>
           <div className="relative">
-            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="email"
               value={formData.email}
@@ -1342,10 +1367,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Name on Ringer */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameOnRingerLabel')}
+            {t('modals.addCustomer.nameOnRingerLabel')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="text"
               value={formData.nameOnRinger}
@@ -1354,15 +1379,18 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
+          {errors.nameOnRinger && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.nameOnRinger}</p>
+          )}
         </div>
 
         {/* Floor Number */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.floorLabel')}
+            {t('modals.addCustomer.floorLabel')} <span className="text-red-500">*</span>
           </label>
           <div className="relative">
-            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <input
               type="text"
               value={formData.floorNumber}
@@ -1371,6 +1399,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               className={`${inputBase(resolvedTheme)} pl-10 pr-4`}
             />
           </div>
+          {errors.floorNumber && (
+            <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.floorNumber}</p>
+          )}
         </div>
 
         {/* Notes */}
@@ -1379,7 +1410,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             {t('modals.addCustomer.notesLabel')}
           </label>
           <div className="relative">
-            <FileText className="absolute left-3 top-3 w-5 h-5 text-gray-400" />
+            <FileText className="absolute left-3 top-3 w-5 h-5 text-blue-500 dark:text-blue-400" />
             <textarea
               value={formData.notes}
               onChange={(e) => handleInputChange('notes', e.target.value)}
@@ -1409,7 +1440,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           <button
             type="submit"
             disabled={isSubmitting}
-            className="liquid-glass-modal-button flex-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.1)] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex-1 py-3 px-4 rounded-2xl font-bold text-white bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
           >
             {isSubmitting
               ? t('modals.addCustomer.saving')

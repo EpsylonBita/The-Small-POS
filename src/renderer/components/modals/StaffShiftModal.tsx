@@ -54,6 +54,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const { t } = useTranslation();
   const { staff, activeShift, refreshActiveShift, setStaff, setActiveShiftImmediate } = useShift();
 
+  // Helper function to translate role names
+  const translateRoleName = (roleName: string): string => {
+    const key = `common.roleNames.${roleName.toLowerCase()}`;
+    const translated = t(key);
+    // If translation not found, return original name
+    return translated === key ? roleName : translated;
+  };
+
   const { getSetting } = useTerminalSettings();
 
   // Check-in multi-step state
@@ -1525,25 +1533,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                           const isDriver = role.role_name === 'driver';
                                           const isKitchen = role.role_name === 'kitchen';
 
-                                          let badgeStyle = "bg-gray-600/20 text-gray-300 border-gray-500/30";
-                                          if (isCashier || role.is_primary) badgeStyle = "bg-orange-500/20 text-orange-300 border-orange-400/40";
-                                          else if (isDriver) badgeStyle = "bg-blue-500/20 text-blue-300 border-blue-400/40";
-                                          else if (isKitchen) badgeStyle = "bg-red-500/20 text-red-300 border-red-400/40";
+                                          let badgeStyle = "bg-transparent text-gray-300 border-gray-400";
+                                          if (isCashier || role.is_primary) badgeStyle = "bg-transparent text-orange-400 border-orange-400";
+                                          else if (isDriver) badgeStyle = "bg-transparent text-cyan-400 border-cyan-400";
+                                          else if (isKitchen) badgeStyle = "bg-transparent text-rose-400 border-rose-400";
 
                                           return (
                                             <span
                                               key={idx}
-                                              className={`inline-flex items-center gap-1.5 rounded-full border-2 px-3 py-1 text-xs font-bold backdrop-blur-sm transition-all ${badgeStyle}`}
+                                              className={`inline-flex items-center gap-1.5 rounded-full border-2 px-3 py-1 text-sm font-bold transition-all ${badgeStyle}`}
                                             >
                                               {(role.is_primary || isCashier) && (
                                                 <span className="text-orange-400">★</span>
                                               )}
-                                              {role.role_display_name}
+                                              {translateRoleName(role.role_name)}
                                             </span>
                                           );
                                         })
                                     ) : (
-                                      <span className="text-sm text-gray-500">{staffMember.role_display_name}</span>
+                                      <span className="text-sm text-gray-500">{translateRoleName(staffMember.role_name)}</span>
                                     )}
                                   </div>
                                 </div>
@@ -1587,7 +1595,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                     <div className="space-y-1">
                       <h3 className="text-2xl font-bold text-white tracking-tight">{selectedStaff.name}</h3>
-                      <p className="text-base font-medium text-blue-300/80">{selectedStaff.role_display_name}</p>
+                      <p className="text-base font-medium text-blue-300/80">{translateRoleName(selectedStaff.role_name)}</p>
                     </div>
                   </div>
 
@@ -1696,7 +1704,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               <div className="flex flex-1 flex-col justify-center">
                                 <div className="flex items-center gap-2">
                                   <span className="text-lg font-bold text-white">
-                                    {role.role_display_name}
+                                    {translateRoleName(role.role_name)}
                                   </span>
                                   {role.is_primary && (
                                     <span className="text-orange-400 shadow-orange-500/20 drop-shadow-sm">★</span>
@@ -1728,7 +1736,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           {/* Content */}
                           <div className="flex flex-1 flex-col justify-center">
                             <span className="text-lg font-bold text-white">
-                              {selectedStaff.role_display_name}
+                              {translateRoleName(selectedStaff.role_name)}
                             </span>
                             <span className="text-sm text-blue-200/60">
                               {t('modals.staffShift.yourAssignedRole')}
@@ -2554,48 +2562,48 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                 return (
                   <div className={liquidGlassModalCard() + ' space-y-4'}>
-                    <h3 className="text-xl font-bold liquid-glass-modal-text mb-4">{t('modals.staffShift.shiftBreakdown')}</h3>
+                    <h3 className="text-xl font-bold text-slate-800 dark:text-white mb-4">{t('modals.staffShift.shiftBreakdown')}</h3>
 
                     {/* Totals */}
                     <div className="grid grid-cols-2 gap-3">
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalOrders')}</div>
-                        <div className="text-lg font-bold liquid-glass-modal-text">{overall.totalCount}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalOrders')}</div>
+                        <div className="text-lg font-bold text-slate-800 dark:text-white">{overall.totalCount}</div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalSales')}</div>
-                        <div className="text-xl font-bold text-green-400">${overall.totalAmount.toFixed(2)}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalSales')}</div>
+                        <div className="text-xl font-bold text-green-500">${overall.totalAmount.toFixed(2)}</div>
                       </div>
                     </div>
 
                     {/* Pickup / Delivery by method */}
                     <div className="grid grid-cols-2 gap-3">
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.pickupCash')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.pickupCash')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text">{instore.cashCount} orders</span>
-                          <span className="font-bold text-green-400">${instore.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{instore.cashCount} orders</span>
+                          <span className="font-bold text-green-500">${instore.cashTotal.toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.pickupCard')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.pickupCard')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text">{instore.cardCount} orders</span>
-                          <span className="font-bold liquid-glass-modal-text">${instore.cardTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{instore.cardCount} orders</span>
+                          <span className="font-bold text-slate-800 dark:text-white">${instore.cardTotal.toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.deliveryCash')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.deliveryCash')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text">{delivery.cashCount} orders</span>
-                          <span className="font-bold text-green-400">${delivery.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{delivery.cashCount} orders</span>
+                          <span className="font-bold text-green-500">${delivery.cashTotal.toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.deliveryCard')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.deliveryCard')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text">{delivery.cardCount} orders</span>
-                          <span className="font-bold liquid-glass-modal-text">${delivery.cardTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{delivery.cardCount} orders</span>
+                          <span className="font-bold text-slate-800 dark:text-white">${delivery.cardTotal.toFixed(2)}</span>
                         </div>
                       </div>
                     </div>
@@ -2603,33 +2611,33 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Totals by channel with cash amount */}
                     <div className="grid grid-cols-2 gap-3">
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalPickupOrders')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalPickupOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text font-semibold">{totalPickupOrders} orders</span>
-                          <span className="font-bold text-green-400">${(instore.cashTotal + instore.cardTotal).toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalPickupOrders} orders</span>
+                          <span className="font-bold text-green-500">${(instore.cashTotal + instore.cardTotal).toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalDeliveryOrders')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalDeliveryOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text font-semibold">{totalDeliveryOrders} orders</span>
-                          <span className="font-bold text-green-400">${(delivery.cashTotal + delivery.cardTotal).toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalDeliveryOrders} orders</span>
+                          <span className="font-bold text-green-500">${(delivery.cashTotal + delivery.cardTotal).toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalOrders')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text font-semibold">{overall.totalCount} orders</span>
-                          <span className="font-bold text-green-400">${overall.totalAmount.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{overall.totalCount} orders</span>
+                          <span className="font-bold text-green-500">${overall.totalAmount.toFixed(2)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
-                        <div className="liquid-glass-modal-text-muted text-xs mb-1">{t('modals.staffShift.totalCashOrders')}</div>
+                        <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalCashOrders')}</div>
 
 
                         <div className="flex justify-between text-sm">
-                          <span className="liquid-glass-modal-text font-semibold">{totalCashOrdersCount} orders</span>
-                          <span className="font-bold text-green-400">${overall.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalCashOrdersCount} orders</span>
+                          <span className="font-bold text-green-500">${overall.cashTotal.toFixed(2)}</span>
                         </div>
                       </div>
                     </div>
@@ -2686,10 +2694,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               {effectiveShift?.role_type === 'cashier' && (
                 <div className={liquidGlassModalCard() + ' space-y-3'}>
                   <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-bold liquid-glass-modal-text">{t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}</h3>
+                    <h3 className="text-lg font-bold text-slate-800 dark:text-white">{t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}</h3>
                     <button
                       onClick={() => setShowStaffPaymentForm(!showStaffPaymentForm)}
-                      className="text-sm text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                      className="text-sm font-semibold text-blue-500 hover:text-blue-400 flex items-center gap-1"
                     >
                       <Plus className="w-4 h-4" /> {t('modals.staffShift.addPayment', 'Add Payment')}
                     </button>
@@ -2938,7 +2946,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div className="space-y-3">
                   {/* Cashier Payment */}
                   <div className="bg-white/5 rounded-lg p-4 border border-white/10">
-                    <label className="block text-xs font-semibold text-gray-300 mb-2 uppercase tracking-wide">
+                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
+                      <Euro className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.cashierPaymentLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -2955,12 +2964,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         className="liquid-glass-modal-input flex-1 text-2xl font-bold text-center"
                       />
                     </div>
-                    <p className="text-xs text-gray-400 mt-2">Amount you're taking from the drawer</p>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mt-2">{t('modals.staffShift.cashierPaymentHelper')}</p>
                   </div>
 
                   {/* Closing Cash */}
                   <div className="bg-white/5 rounded-lg p-4 border border-white/10">
-                    <label className="block text-xs font-semibold text-gray-300 mb-2 uppercase tracking-wide">
+                    <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide flex items-center gap-2">
+                      <Euro className="w-4 h-4 text-green-500" />
                       {t('modals.staffShift.closingCashLabel')}
                     </label>
                     <div className="flex items-center gap-3">
@@ -2979,7 +2989,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         autoFocus
                       />
                     </div>
-                    <p className="text-xs text-gray-400 mt-2">Physical cash count in the drawer</p>
+                    <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mt-2">{t('modals.staffShift.closingCashHelper')}</p>
                   </div>
 
                   {/* Live Variance Calculation */}
@@ -3141,7 +3151,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                     {/* Driver Payment Input */}
                     <div className="bg-white/5 rounded-lg p-4 border border-white/10">
-                      <label className="block text-xs font-semibold text-gray-300 mb-2 uppercase tracking-wide">
+                      <label className="block text-xs font-bold text-slate-600 dark:text-slate-300 mb-2 uppercase tracking-wide">
                         {t('modals.staffShift.driverPaymentInput', 'ΠΛΗΡΩΜΗ ΟΔΗΓΟΥ (Enter your payment amount)')}
                       </label>
                       <div className="flex items-center gap-3">
@@ -3159,7 +3169,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           autoFocus
                         />
                       </div>
-                      <p className="text-xs text-gray-400 mt-2">
+                      <p className="text-xs font-medium text-slate-500 dark:text-slate-400 mt-2">
                         {t('modals.staffShift.driverPaymentHelp', 'Enter the amount you received from the cashier as payment')}
                       </p>
                     </div>
