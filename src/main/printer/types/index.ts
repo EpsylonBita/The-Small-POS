@@ -211,6 +211,8 @@ export interface PrintOrderItemModifier {
   name: string;
   price?: number;
   quantity?: number;
+  isWithout?: boolean; // Flag for "without" - ingredient removed, show as "ΧΩΡΙΣ:" in receipt
+  isLittle?: boolean; // Flag for "little" portion - show "(λίγο)" suffix in receipt
 }
 
 export interface PrintOrderItem {
@@ -236,14 +238,21 @@ export interface ReceiptData {
   tax: number;
   tip?: number;
   deliveryFee?: number;
+  discount?: number; // Discount amount applied to the order
+  discountPercentage?: number; // Discount percentage (for display purposes)
   total: number;
   paymentMethod: string;
   customerName?: string;
   customerPhone?: string;
-  deliveryAddress?: string;
+  deliveryAddress?: string; // Combined address (fallback)
+  streetAddress?: string;   // Road name with number
+  postalCode?: string;      // Postal code number
+  city?: string;            // Name of the city
+  floorNumber?: string;     // Number of the floor
   deliveryNotes?: string;
   ringerName?: string;
   tableName?: string;
+  driverName?: string; // Assigned driver name for delivery orders
 }
 
 /**

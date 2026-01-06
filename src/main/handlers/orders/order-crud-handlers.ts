@@ -192,7 +192,8 @@ async function enrichOrderItemsWithNames(
 ): Promise<any[]> {
   if (!items || items.length === 0) return items;
 
-  console.log(`[enrichOrderItemsWithNames] Enriching ${items.length} items`);
+  // Debug logging disabled to reduce console spam - uncomment for debugging
+  // console.log(`[enrichOrderItemsWithNames] Enriching ${items.length} items`);
 
   const enrichedItems = await Promise.all(items.map(async (item) => {
     try {
@@ -206,9 +207,10 @@ async function enrichOrderItemsWithNames(
       const needsNameResolution = !isValidItemName(item.name);
       if (needsNameResolution) {
         resolvedName = await resolveItemName(item, dbManager, supabaseClient);
-        if (resolvedName !== originalName) {
-          console.log(`[enrichOrderItemsWithNames] Enriched item ${item.menu_item_id || 'unknown'} name: ${resolvedName}`);
-        }
+        // Debug logging disabled
+        // if (resolvedName !== originalName) {
+        //   console.log(`[enrichOrderItemsWithNames] Enriched item ${item.menu_item_id || 'unknown'} name: ${resolvedName}`);
+        // }
       }
 
       // 2. Resolve Subcategory Name
@@ -244,10 +246,11 @@ async function enrichOrderItemsWithNames(
 
               if (!error && sub) {
                 subcategoryName = sub.name || sub.name_en || sub.name_el;
-                console.log(`[enrichOrderItemsWithNames] Found subcategory in Supabase: ${subcategoryName}`);
+                // Debug logging disabled
+                // console.log(`[enrichOrderItemsWithNames] Found subcategory in Supabase: ${subcategoryName}`);
               }
             } catch (e) {
-              console.warn('[enrichOrderItemsWithNames] Supabase subcategory lookup failed:', e);
+              // Silently ignore lookup failures - not critical
             }
           }
         }
@@ -257,20 +260,82 @@ async function enrichOrderItemsWithNames(
       // This field MUST be set on every item for proper sync to Supabase
       // Priority: resolved name > existing menu_item_name > subcategory name
       let menuItemName = resolvedName;
-      
+
       // If resolved name is still invalid, try existing menu_item_name
       if (!isValidItemName(menuItemName)) {
         menuItemName = item.menu_item_name;
       }
-      
+
       // If still invalid, try subcategory name
       if (!isValidItemName(menuItemName)) {
         menuItemName = subcategoryName;
       }
-      
+
       // Final validation - log warning if name is still invalid
       if (!isValidItemName(menuItemName)) {
         console.warn(`[enrichOrderItemsWithNames] Item ${item.menu_item_id || 'unknown'} has invalid name after enrichment: "${menuItemName}"`);
+      }
+
+      // 4. Resolve Category Name for receipt printing
+      // If categoryName is not set, look it up from subcategories -> categories
+      // Note: menu_item_id in orders actually refers to subcategories.id, not menu_items.id
+      let categoryName = item.categoryName || item.category_name;
+
+      // Debug logging disabled to reduce console spam
+      // console.log(`[enrichOrderItemsWithNames] Item ${item.name} initial categoryName:`, categoryName);
+
+      if (!categoryName) {
+        const itemId = item.menu_item_id || item.id;
+        // Debug logging disabled
+        // console.log(`[enrichOrderItemsWithNames] Looking up categoryName for item id: ${itemId}, hasSupabase: ${!!supabaseClient}`);
+        if (itemId && supabaseClient) {
+          try {
+            // The item id is actually a subcategory id - look up in subcategories table first
+            const { data: subcategoryData, error: subcategoryError } = await supabaseClient
+              .from('subcategories')
+              .select('category_id')
+              .eq('id', itemId)
+              .single();
+
+            // Debug logging disabled
+            // console.log(`[enrichOrderItemsWithNames] subcategories query result:`, { subcategoryData, subcategoryError });
+
+            let categoryId = subcategoryData?.category_id;
+
+            // Fallback: If not found in subcategories, try menu_items table
+            if (subcategoryError || !categoryId) {
+              const { data: menuItemData, error: menuItemError } = await supabaseClient
+                .from('menu_items')
+                .select('category_id')
+                .eq('id', itemId)
+                .single();
+
+              // Debug logging disabled
+              // console.log(`[enrichOrderItemsWithNames] menu_items query result:`, { menuItemData, menuItemError });
+              categoryId = menuItemData?.category_id;
+            }
+
+            // Now get the category name
+            if (categoryId) {
+              const { data: categoryData, error: categoryError } = await supabaseClient
+                .from('menu_categories')
+                .select('name, name_en, name_el')
+                .eq('id', categoryId)
+                .single();
+
+              // Debug logging disabled
+              // console.log(`[enrichOrderItemsWithNames] categories query result:`, { categoryData, categoryError });
+
+              if (!categoryError && categoryData) {
+                categoryName = categoryData.name_el || categoryData.name || categoryData.name_en;
+                // Debug logging disabled
+                // console.log(`[enrichOrderItemsWithNames] Resolved categoryName from Supabase: ${categoryName}`);
+              }
+            }
+          } catch (e) {
+            // Silently ignore - category name is nice to have but not critical
+          }
+        }
       }
 
       // Construct enriched item with menu_item_name field
@@ -278,14 +343,15 @@ async function enrichOrderItemsWithNames(
         ...item,
         name: resolvedName,
         menu_item_name: menuItemName, // CRITICAL: Always set this field for sync
+        categoryName: categoryName || null, // Category name for receipt printing
         subcategory: {
           ...subcategoryObj,
           name: subcategoryName || subcategoryObj.name // Keep existing if valid, or use resolved
         }
       };
     } catch (err) {
-      console.error('[enrichOrderItemsWithNames] Error enriching item:', err);
-      return item; // Return original item on failure
+      // Silently return original item on failure - enrichment is non-critical
+      return item;
     }
   }));
 
@@ -804,6 +870,10 @@ export function registerOrderCrudHandlers(): void {
         customer_name: orderData.customerName,
         items: enrichedItems,
         total_amount: orderData.totalAmount || 0,
+        subtotal: orderData.subtotal || orderData.totalAmount || 0,
+        discount_amount: orderData.discountAmount || orderData.discount_amount || 0,
+        discount_percentage: orderData.discountPercentage || orderData.discount_percentage || 0,
+        delivery_fee: orderData.deliveryFee || orderData.delivery_fee || 0,
         status: orderData.status,
         order_type: orderData.orderType,
         customer_phone: orderData.customerPhone,
@@ -908,27 +978,29 @@ export function registerOrderCrudHandlers(): void {
                   ? JSON.parse(item.customizations)
                   : item.customizations;
 
-                // Process customizations object
-                Object.values(customizations || {}).forEach((custom: any) => {
+                // Process customizations (array or object)
+                const customizationValues = Array.isArray(customizations) ? customizations : Object.values(customizations || {});
+                customizationValues.forEach((custom: any) => {
                   if (custom && typeof custom === 'object') {
                     const quantity = custom.quantity || 1;
                     const name = custom.name || custom.ingredient?.name || 'Unknown';
                     const isLittle = custom.isLittle || custom.is_little;
-                    // Get price from ingredient (three-tier pricing)
+                    const isWithout = custom.isWithout || custom.is_without;
+                    // Get price from ingredient (three-tier pricing) - only for "with" items
                     const getIngredientPrice = () => {
+                      if (isWithout) return 0; // No price for "without" items
                       if (order.order_type === 'delivery') return custom.ingredient?.delivery_price ?? custom.ingredient?.price;
                       if (order.order_type === 'dine-in') return custom.ingredient?.dine_in_price ?? custom.ingredient?.pickup_price ?? custom.ingredient?.price;
                       return custom.ingredient?.pickup_price ?? custom.ingredient?.price;
                     };
                     const price = getIngredientPrice();
 
-                    let modName = name;
-                    if (isLittle) modName += ' (λίγο)';
-
                     modifiers.push({
-                      name: modName,
-                      quantity: quantity > 1 ? quantity : undefined,
-                      price: price || undefined
+                      name: name,
+                      quantity: isWithout ? undefined : (quantity > 1 ? quantity : undefined),
+                      price: isWithout ? undefined : (price || undefined),
+                      isWithout: isWithout || false,
+                      isLittle: isLittle || false
                     });
                   }
                 });
@@ -958,6 +1030,10 @@ export function registerOrderCrudHandlers(): void {
             }
 
             // Build receipt data
+            // Get discount amount and percentage from order (stored as discount_amount/discount_percentage in DB)
+            const discountAmount = (order as any).discount_amount || 0;
+            const discountPercentage = (order as any).discount_percentage || 0;
+
             const receiptData: any = {
               orderNumber: order.order_number || order.id.substring(0, 8),
               orderType: orderType,
@@ -967,6 +1043,8 @@ export function registerOrderCrudHandlers(): void {
               tax: (order as any).tax || 0,
               tip: (order as any).tip || 0,
               deliveryFee: order.delivery_fee || 0,
+              discount: discountAmount > 0 ? discountAmount : undefined,
+              discountPercentage: discountPercentage > 0 ? discountPercentage : undefined,
               total: order.total_amount || 0,
               paymentMethod: order.payment_method || 'cash',
               customerName: order.customer_name || undefined,
@@ -974,18 +1052,11 @@ export function registerOrderCrudHandlers(): void {
               deliveryAddress: order.delivery_address || undefined,
               deliveryNotes: (order as any).delivery_notes || undefined,
               ringerName: (order as any).name_on_ringer || undefined,
-              tableName: order.table_number || undefined
+              tableName: order.table_number || undefined,
+              driverName: (order as any).driver_name || undefined
             };
 
-            console.log('[Auto-Print] Receipt data prepared:', {
-              orderNumber: receiptData.orderNumber,
-              itemCount: receiptData.items.length,
-              total: receiptData.total,
-              deliveryNotes: receiptData.deliveryNotes,
-              ringerName: receiptData.ringerName,
-              orderDeliveryNotes: (order as any).delivery_notes,
-              orderNameOnRinger: (order as any).name_on_ringer
-            });
+            console.log(`[Auto-Print] Receipt data prepared for ${receiptData.orderNumber}, ${receiptData.items.length} items`);
 
             // Get language and currency settings
             const settingsService = serviceRegistry.settingsService;
@@ -1006,7 +1077,8 @@ export function registerOrderCrudHandlers(): void {
               greekRenderMode: greekRenderMode
             });
 
-            const receiptBuffer = generator.generateReceipt(receiptData);
+            // Use async generation to avoid blocking main thread during bitmap rendering
+            const receiptBuffer = await generator.generateReceiptAsync(receiptData);
             console.log('[Auto-Print] Receipt buffer generated:', receiptBuffer.length, 'bytes');
 
             // Submit print job

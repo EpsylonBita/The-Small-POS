@@ -114,10 +114,13 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const shortfall = isBelowMinimum ? minimumOrderAmount - totalAfterDiscount : 0;
 
   return (
-    <div className={`w-full sm:w-72 md:w-80 border-l flex flex-col ${
-      resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
-    }`} style={{ height: '73vh' }}>
-      <div className={`p-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
+    <div
+      className={`flex flex-col h-full w-full border-l ${
+        resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
+      }`}
+    >
+      {/* Header - flex-shrink-0 keeps it fixed size */}
+      <div className={`flex-shrink-0 p-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
         <h3 className={`text-lg font-semibold ${
           resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
         }`}>
@@ -125,7 +128,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         </h3>
       </div>
 
-      <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
+      {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 touch-scroll scrollbar-hide">
         {uniqueCartItems.length === 0 ? (
           <div className="text-center py-6 sm:py-8">
             <ShoppingCart className={`w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 ${
@@ -347,10 +351,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         )}
       </div>
 
-      {/* Cart Footer */}
-      <div className={`p-4 border-t space-y-3 ${
-        resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-      }`}>
+      {/* Cart Footer - flex-shrink-0 keeps it fixed at bottom */}
+      <div
+        className={`flex-shrink-0 p-4 border-t space-y-3 ${
+          resolvedTheme === 'dark' ? 'border-gray-700 bg-gray-900' : 'border-gray-200 bg-gray-50'
+        }`}
+      >
         {/* Discount Input */}
         {onDiscountChange && (
           <div className="space-y-2">

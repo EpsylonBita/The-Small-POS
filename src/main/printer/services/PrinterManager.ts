@@ -876,7 +876,7 @@ export class PrinterManager
     if (isRawEscPosData(job.data)) {
       printData = job.data.buffer;
     } else {
-      printData = this.generatePrintData(job, printer);
+      printData = await this.generatePrintData(job, printer);
     }
 
     // Send to printer
@@ -884,9 +884,9 @@ export class PrinterManager
   }
 
   /**
-   * Generate print data from job
+   * Generate print data from job (async to avoid blocking main thread during bitmap rendering)
    */
-  private generatePrintData(job: QueuedJob, printer: PrinterConfig): Buffer {
+  private async generatePrintData(job: QueuedJob, printer: PrinterConfig): Promise<Buffer> {
     // Get language and currency from local_settings
     let language: 'en' | 'el' = 'en';
     let currency = '€';
@@ -952,7 +952,8 @@ export class PrinterManager
 
     switch (job.type) {
       case PrintJobType.RECEIPT:
-        return this.receiptGenerator.generateReceipt(job.data as any);
+        // Use async generation to prevent blocking main thread during bitmap rendering
+        return await this.receiptGenerator.generateReceiptAsync(job.data as any);
       case PrintJobType.KITCHEN_TICKET:
         return this.receiptGenerator.generateKitchenTicket(job.data as any);
       case PrintJobType.TEST:

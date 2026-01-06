@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { serviceRegistry } from '../../service-registry';
 import { getSupabaseClient } from '../../../shared/supabase-config';
 import { initializeMainLanguageFromSettings } from '../../lib/main-i18n';
+import type { SettingCategory } from '../../../shared/types/database';
 
 /**
  * Registers settings-related IPC handlers (general settings, terminal config,
@@ -131,6 +132,17 @@ export function registerSettingsHandlers(): void {
     } catch (error) {
       console.error('settings:get-local failed:', error);
       return {};
+    }
+  });
+
+  // Get individual setting by category and key
+  ipcMain.removeHandler('settings:get');
+  ipcMain.handle('settings:get', async (_event, category: string, key: string, defaultValue?: any) => {
+    try {
+      return settingsService.getSetting(category as SettingCategory, key, defaultValue);
+    } catch (error) {
+      console.error('settings:get failed:', error);
+      return defaultValue;
     }
   });
 

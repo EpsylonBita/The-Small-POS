@@ -132,7 +132,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const tax = displayOrder.tax || displayOrder.tax_amount || 0;
   const deliveryFee = displayOrder.delivery_fee || 0;
   const discountAmount = displayOrder.discount_amount || 0;
+  const discountPercentage = displayOrder.discount_percentage || 0;
   const total = displayOrder.total || displayOrder.total_amount || 0;
+  // Calculate original subtotal before discount (for display purposes)
+  const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
   const status = displayOrder.status || 'pending';
   const orderType = displayOrder.order_type || displayOrder.orderType || 'delivery';
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
@@ -149,7 +152,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // Edge Case Handling (Requirements 5.3, 5.5):
   // - Returns empty array when customizations is null/undefined
   // - Handles malformed JSON strings gracefully without crashing
-  const parseCustomizations = (customizations: any): { name: string; price: number }[] => {
+  const parseCustomizations = (customizations: any): { name: string; price: number; isWithout?: boolean }[] => {
     // Handle null/undefined - return empty array (Requirement 5.3)
     if (customizations === null || customizations === undefined) return [];
 
@@ -199,6 +202,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       return 'Unknown';
     };
 
+    // Check if item is "without" (removed ingredient)
+    const isWithoutItem = (c: any): boolean => {
+      return c.isWithout === true || c.is_without === true || c.without === true;
+    };
+
     // Handle JSON string format - parse it first (Requirement 5.5)
     let parsedCustomizations = customizations;
     if (typeof customizations === 'string') {
@@ -217,7 +225,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         .filter((c: any) => c && (c.ingredient || c.name || c.name_en))
         .map((c: any) => ({
           name: extractName(c),
-          price: extractPrice(c)
+          price: isWithoutItem(c) ? 0 : extractPrice(c),
+          isWithout: isWithoutItem(c)
         }));
     }
     if (typeof parsedCustomizations === 'object' && parsedCustomizations !== null) {
@@ -225,7 +234,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         .filter((c: any) => c && (c.ingredient || c.name || c.name_en))
         .map((c: any) => ({
           name: extractName(c),
-          price: extractPrice(c)
+          price: isWithoutItem(c) ? 0 : extractPrice(c),
+          isWithout: isWithoutItem(c)
         }));
     }
     return [];
@@ -444,8 +454,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       {items.length > 0 ? (
                         items.map((item: any, index: number) => {
                           const customizations = parseCustomizations(item.customizations);
-                          // Show subcategory with fallback to item name
-                          const itemSubcategory = item.subcategory?.name || item.subcategory?.name_en || item.subcategory?.name_el || item.category_name || '';
+                          // Category name (e.g., "ΚΡΕΠΕΣ ΓΛΥΚΕΣ") - shown above item name
+                          const categoryName = item.categoryName || item.category_name || '';
 
                           return (
                             <div
@@ -459,20 +469,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                     {item.quantity || 1}x
                                   </div>
                                   <div className="flex-1">
+                                    {/* Category name above item */}
+                                    {categoryName && (
+                                      <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
+                                        {categoryName}
+                                      </div>
+                                    )}
+                                    {/* Item name (subcategory) */}
                                     <div className="font-medium liquid-glass-modal-text">
                                       {item.name || item.menu_item?.name || 'Item'}
                                     </div>
-                                    {itemSubcategory && (
-                                      <div className="text-xs liquid-glass-modal-text-muted">
-                                        {itemSubcategory}
-                                      </div>
-                                    )}
-                                    {/* Show subcategory ID for debugging if name is missing */}
-                                    {!itemSubcategory && item.menu_item_id && (
-                                      <div className="text-xs liquid-glass-modal-text-muted opacity-50">
-                                        Item ID: {item.menu_item_id.slice(-8)}
-                                      </div>
-                                    )}
                                   </div>
                                 </div>
                                 <div className="text-right">
@@ -487,17 +493,32 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                               {/* Customizations/Ingredients */}
                               {customizations.length > 0 && (
-                                <div className="ml-11 mt-2 space-y-1 border-l-2 border-green-500/30 pl-3">
-                                  {customizations.map((c, idx) => (
-                                    <div key={idx} className="flex justify-between text-xs">
-                                      <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
-                                        <span className="text-green-400">+</span> {c.name}
-                                      </span>
-                                      {c.price > 0 && (
-                                        <span className="text-green-400 font-medium">+{formatCurrency(c.price)}</span>
-                                      )}
+                                <div className="ml-11 mt-2 space-y-1">
+                                  {/* Added ingredients */}
+                                  {customizations.filter(c => !c.isWithout).length > 0 && (
+                                    <div className="border-l-2 border-green-500/30 pl-3 space-y-1">
+                                      {customizations.filter(c => !c.isWithout).map((c, idx) => (
+                                        <div key={`add-${idx}`} className="flex justify-between text-xs">
+                                          <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
+                                            <span className="text-green-400">+</span> {c.name}
+                                          </span>
+                                          {c.price > 0 && (
+                                            <span className="text-green-400 font-medium">+{formatCurrency(c.price)}</span>
+                                          )}
+                                        </div>
+                                      ))}
                                     </div>
-                                  ))}
+                                  )}
+                                  {/* Without ingredients */}
+                                  {customizations.filter(c => c.isWithout).length > 0 && (
+                                    <div className="border-l-2 border-red-500/30 pl-3 space-y-1 mt-1">
+                                      {customizations.filter(c => c.isWithout).map((c, idx) => (
+                                        <div key={`without-${idx}`} className="flex justify-between text-xs text-red-400">
+                                          <span className="line-through">🚫 {c.name}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               )}
 
@@ -521,7 +542,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     <div className="mt-6 pt-6 border-t border-gray-200/50 dark:border-gray-700/50 space-y-2">
                       <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                         <span>{t('modals.orderDetails.subtotal') || 'Subtotal'}</span>
-                        <span>{formatCurrency(subtotal)}</span>
+                        <div className="flex items-center gap-2">
+                          {discountAmount > 0 && (
+                            <span className="line-through text-xs text-gray-500">{formatCurrency(originalSubtotal)}</span>
+                          )}
+                          <span>{formatCurrency(subtotal)}</span>
+                        </div>
                       </div>
                       {tax > 0 && (
                         <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
@@ -536,8 +562,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         </div>
                       )}
                       {discountAmount > 0 && (
-                        <div className="flex justify-between text-sm text-green-400">
-                          <span>{t('modals.orderDetails.discount') || 'Discount'}</span>
+                        <div className="flex justify-between text-sm text-green-400 font-medium">
+                          <span>
+                            🏷️ {t('modals.orderDetails.discount') || 'Discount'}
+                            {discountPercentage > 0 && ` (${discountPercentage}%)`}
+                          </span>
                           <span>-{formatCurrency(discountAmount)}</span>
                         </div>
                       )}

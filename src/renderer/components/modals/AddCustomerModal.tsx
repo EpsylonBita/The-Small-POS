@@ -1094,6 +1094,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
         notes: formData.notes ? formData.notes.trim() : undefined,
         name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
+        // Branch association - assign customer to the terminal's branch
+        branch_id: terminalBranchId || undefined,
         // Include delivery validation data and coordinates
         coordinates: addressCoordinates,
         // Note: delivery_validation might require schema update in Main process to be persisted

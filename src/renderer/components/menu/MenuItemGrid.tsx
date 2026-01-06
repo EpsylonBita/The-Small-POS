@@ -234,6 +234,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
               }}
               orderType={orderType}
               onSelect={() => onItemSelect(item)}
+              onQuickAdd={onQuickAdd ? (_cardItem, quantity) => onQuickAdd(item, quantity) : undefined}
             />
           );
         })}

@@ -1,4 +1,4 @@
-import React, { memo, useState, useEffect, useCallback } from 'react';
+import React, { memo, useState, useEffect, useCallback, useRef } from 'react';
 import { useOrderStore } from '../hooks/useOrderStore';
 import { useShift } from '../contexts/shift-context';
 import type { OrderItem } from '../types/orders';
@@ -120,6 +120,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   const [pendingCancelOrders, setPendingCancelOrders] = useState<string[]>([]);
   const [showApprovalPanel, setShowApprovalPanel] = useState(false);
   const [selectedOrderForApproval, setSelectedOrderForApproval] = useState<Order | null>(null);
+  const [isViewOnlyMode, setIsViewOnlyMode] = useState(true); // View-only mode for order details (no approve/decline)
 
   // State for edit modals
   const [showEditOptionsModal, setShowEditOptionsModal] = useState(false);
@@ -158,11 +159,58 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
 
+  // Refs for click-outside detection to auto-close bulk actions bar
+  const bulkActionsBarRef = useRef<HTMLDivElement>(null);
+  const orderGridRef = useRef<HTMLDivElement>(null);
+
   // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
   const isMenuModalOpenRef = React.useRef(false);
   useEffect(() => {
     isMenuModalOpenRef.current = showMenuModal || showEditMenuModal;
   }, [showMenuModal, showEditMenuModal]);
+
+  // Click-outside handler to auto-close bulk actions bar
+  useEffect(() => {
+    // Only add listener when there are selected orders
+    if (selectedOrders.length === 0) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+
+      // Check if click is inside the bulk actions bar
+      if (bulkActionsBarRef.current?.contains(target)) {
+        return;
+      }
+
+      // Check if click is inside the order grid (allows selecting other orders)
+      if (orderGridRef.current?.contains(target)) {
+        return;
+      }
+
+      // Check if click is inside any modal (don't close while modals are open)
+      const isInsideModal = (target as Element).closest?.('[role="dialog"], .modal, [data-modal]');
+      if (isInsideModal) {
+        return;
+      }
+
+      // Check if click is on the FAB (new order button)
+      const isOnFab = (target as Element).closest?.('button.fixed');
+      if (isOnFab) {
+        return;
+      }
+
+      // Clear selection when clicking outside
+      setSelectedOrders([]);
+      setSelectionType(null);
+    };
+
+    // Use mousedown for immediate response (before any other click handlers)
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [selectedOrders.length]);
 
   // Silent refresh of orders grid every 15 seconds
   // Uses silentRefresh which doesn't trigger loading states or flash the UI
@@ -1106,6 +1154,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         return sum + ((item.price || 0) * (item.quantity || 1));
       }, 0) || orderData.total || 0;
       const discountAmount = orderData.discountAmount || 0;
+      const discountPercentage = orderData.discountPercentage || 0;
 
       // Get delivery fee from delivery zone info if available, otherwise use 0
       let deliveryFee = 0;
@@ -1129,6 +1178,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           menuItemId: item.menuItemId || item.menu_item_id || item.id,
           // Preserve category_id for analytics (if available from menu item spread)
           category_id: item.category_id || null,
+          // Preserve categoryName for receipt printing and order display
+          categoryName: item.categoryName || null,
           name: item.name || item.title || item.menu_item_name || 'Item',
           quantity: item.quantity || 1,
           // unitPrice = price per item with customizations (without quantity multiplication)
@@ -1144,6 +1195,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         total_amount: total,
         subtotal: subtotal,
         discount_amount: discountAmount,
+        discount_percentage: discountPercentage,
         delivery_fee: deliveryFee,
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
@@ -1218,6 +1270,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           const ord = orders.find(o => o.id === selectedOrders[0]);
           if (ord) {
             setSelectedOrderForApproval(ord); // reuse approval panel state container for viewing
+            setIsViewOnlyMode(true); // View mode - only print button, no approve/decline
             setShowApprovalPanel(true);
           }
         }
@@ -1646,19 +1699,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       />
 
       {/* Bulk Actions */}
-      <BulkActionsBar
-        selectedCount={selectedOrders.length}
-        selectionType={selectionType}
-        activeTab={activeTab}
-        onBulkAction={handleBulkAction}
-        onClearSelection={handleClearSelection}
-        isLoading={isBulkActionLoading}
-      />
+      <div ref={bulkActionsBarRef}>
+        <BulkActionsBar
+          selectedCount={selectedOrders.length}
+          selectionType={selectionType}
+          activeTab={activeTab}
+          onBulkAction={handleBulkAction}
+          onClearSelection={handleClearSelection}
+          isLoading={isBulkActionLoading}
+        />
+      </div>
 
       {/* Orders Grid or Tables Grid based on active tab */}
       {activeTab === 'tables' ? (
         /* Tables Grid - shown when Tables tab is active */
-        <div className={`rounded-xl p-4 ${resolvedTheme === 'light'
+        <div ref={orderGridRef} className={`rounded-xl p-4 ${resolvedTheme === 'light'
           ? 'bg-white/80 border border-gray-200/50'
           : 'bg-white/5 border border-white/10'
           }`}>
@@ -1702,12 +1757,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         </div>
       ) : (
         /* Orders Grid - shown for Orders/Delivered/Canceled tabs */
-        <OrderGrid
-          selectedOrders={selectedOrders}
-          onToggleOrderSelection={handleToggleOrderSelection}
-          onOrderDoubleClick={handleOrderDoubleClick}
-          activeTab={activeTab as 'orders' | 'delivered' | 'canceled'}
-        />
+        <div ref={orderGridRef}>
+          <OrderGrid
+            selectedOrders={selectedOrders}
+            onToggleOrderSelection={handleToggleOrderSelection}
+            onOrderDoubleClick={handleOrderDoubleClick}
+            activeTab={activeTab as 'orders' | 'delivered' | 'canceled'}
+          />
+        </div>
       )}
 
       {/* Floating Action Button for New Order */}
@@ -1926,8 +1983,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           onClose={() => {
             setShowApprovalPanel(false);
             setSelectedOrderForApproval(null);
+            setIsViewOnlyMode(true); // Reset to view-only mode
           }}
-          viewOnly={selectedOrders.length === 1}
+          viewOnly={isViewOnlyMode}
         />
       )}
 

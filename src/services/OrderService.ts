@@ -365,14 +365,6 @@ export class OrderService {
   // Create new order - local-first via IPC, fallback to Admin API
   async createOrder(orderData: Partial<Order>): Promise<Order> {
     try {
-      // Debug log incoming data
-      console.log('[OrderService.createOrder] Incoming orderData:', {
-        address: (orderData as any).address,
-        delivery_address: orderData.delivery_address,
-        order_type: orderData.order_type,
-        orderType: orderData.orderType,
-      });
-
       // Normalize incoming orderData for main process expectations
       // NOTE: For delivery orders, if deliveryAddress is missing, the backend will attempt
       // to resolve the address from the customer record using customerId. Ensure that:
@@ -386,6 +378,11 @@ export class OrderService {
         customerEmail: (orderData as any).customerEmail ?? orderData.customer_email,
         items: orderData.items || [],
         totalAmount: (orderData.totalAmount ?? orderData.total_amount) as number,
+        // Discount and fee fields
+        subtotal: (orderData as any).subtotal ?? (orderData as any).total ?? null,
+        discountAmount: (orderData as any).discountAmount ?? (orderData as any).discount_amount ?? 0,
+        discountPercentage: (orderData as any).discountPercentage ?? (orderData as any).discount_percentage ?? 0,
+        deliveryFee: (orderData as any).deliveryFee ?? (orderData as any).delivery_fee ?? 0,
         status: orderData.status,
         orderType: (orderData.orderType ?? orderData.order_type) as any,
         tableNumber: orderData.tableNumber ?? orderData.table_number,
@@ -398,15 +395,6 @@ export class OrderService {
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
       };
-
-      console.log('[OrderService.createOrder] Normalized data:', {
-        deliveryAddress: normalized.deliveryAddress,
-        delivery_notes: normalized.delivery_notes,
-        name_on_ringer: normalized.name_on_ringer,
-        orderType: normalized.orderType,
-        itemsCount: normalized.items?.length,
-        firstItemCustomizations: normalized.items?.[0]?.customizations,
-      });
 
       // 1) Try local-first via IPC
       if (typeof window !== 'undefined') {

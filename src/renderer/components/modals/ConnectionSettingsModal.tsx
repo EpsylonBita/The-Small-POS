@@ -4,7 +4,7 @@ import { toast } from 'react-hot-toast'
 import { getApiUrl } from '../../../config/environment'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -32,6 +32,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
   const [isClearingOperational, setIsClearingOperational] = useState(false)
 
+  // Session timeout settings
+  const [showSecuritySettings, setShowSecuritySettings] = useState(false)
+  const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
+  const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
+
 
 
 
@@ -43,6 +48,19 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setTerminalId(lsTerminal)
     setApiKey(lsApiKey)
     setPin(lsPin)
+
+    // Load session timeout settings from main process
+    const loadSecuritySettings = async () => {
+      try {
+        const enabled = await window.electron?.ipcRenderer?.invoke('settings:get', 'system', 'session_timeout_enabled')
+        const minutes = await window.electron?.ipcRenderer?.invoke('settings:get', 'system', 'session_timeout_minutes')
+        setSessionTimeoutEnabled(enabled ?? false)
+        setSessionTimeoutMinutes(String(minutes ?? 15))
+      } catch (e) {
+        console.warn('Failed to load security settings:', e)
+      }
+    }
+    loadSecuritySettings()
   }, [isOpen])
 
   const handleSaveConnection = async () => {
@@ -143,6 +161,40 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const handleSaveTheme = (newTheme: 'light' | 'dark' | 'auto') => {
     setTheme(newTheme)
     toast.success(t('modals.connectionSettings.themeUpdated'))
+  }
+
+  const handleToggleSessionTimeout = async (enabled: boolean) => {
+    try {
+      await window.electron?.ipcRenderer?.invoke('settings:update-local', {
+        settingType: 'system',
+        settings: { session_timeout_enabled: enabled }
+      })
+      setSessionTimeoutEnabled(enabled)
+      toast.success(enabled
+        ? t('modals.connectionSettings.sessionTimeoutEnabled', 'Session timeout enabled')
+        : t('modals.connectionSettings.sessionTimeoutDisabled', 'Session timeout disabled'))
+    } catch (e) {
+      console.error('Failed to toggle session timeout:', e)
+      toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to update session timeout'))
+    }
+  }
+
+  const handleSaveSessionTimeout = async () => {
+    const minutes = parseInt(sessionTimeoutMinutes, 10)
+    if (isNaN(minutes) || minutes < 1 || minutes > 480) {
+      toast.error(t('modals.connectionSettings.sessionTimeoutInvalid', 'Timeout must be 1-480 minutes'))
+      return
+    }
+    try {
+      await window.electron?.ipcRenderer?.invoke('settings:update-local', {
+        settingType: 'system',
+        settings: { session_timeout_minutes: minutes }
+      })
+      toast.success(t('modals.connectionSettings.sessionTimeoutSaved', { minutes }) || `Session timeout set to ${minutes} minutes`)
+    } catch (e) {
+      console.error('Failed to save session timeout:', e)
+      toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to save session timeout'))
+    }
   }
 
   const handlePasteBoth = async () => {
@@ -518,6 +570,102 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               </button>
             </div>
           </div>
+        </div>
+
+        {/* Security Settings - Session Timeout */}
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showSecuritySettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+          <button
+            onClick={() => setShowSecuritySettings(!showSecuritySettings)}
+            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
+          >
+            <div className="flex items-center gap-3">
+              <Timer className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.6)]" />
+              <div className="text-left">
+                <span className="font-medium block">{t('modals.connectionSettings.security', 'Security')}</span>
+                <span className={`text-xs liquid-glass-modal-text-muted`}>
+                  {sessionTimeoutEnabled
+                    ? t('modals.connectionSettings.sessionTimeoutStatus', { minutes: sessionTimeoutMinutes }) || `Auto-logout after ${sessionTimeoutMinutes} min`
+                    : t('modals.connectionSettings.sessionTimeoutOff', 'Session timeout disabled')}
+                </span>
+              </div>
+            </div>
+            <ChevronDown className={`w-5 h-5 transition-transform ${showSecuritySettings ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showSecuritySettings && (
+            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
+              {/* Session Timeout Toggle */}
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <div className="text-left min-w-0">
+                    <span className={`font-medium block liquid-glass-modal-text`}>{t('modals.connectionSettings.sessionTimeout', 'Session Timeout')}</span>
+                    <span className={`text-xs liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.sessionTimeoutHelp', 'Auto-logout after inactivity')}</span>
+                  </div>
+                </div>
+                {/* Proper iOS-style switch */}
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sessionTimeoutEnabled}
+                    onChange={(e) => handleToggleSessionTimeout(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-amber-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                </label>
+              </div>
+
+              {/* Timeout Duration */}
+              <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
+                <div className="text-left min-w-0">
+                  <span className={`font-medium block liquid-glass-modal-text`}>{t('modals.connectionSettings.timeoutDuration', 'Timeout Duration')}</span>
+                  <span className={`text-xs liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.timeoutRange', '1-480 minutes')}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={sessionTimeoutMinutes}
+                    onChange={e => setSessionTimeoutMinutes(e.target.value)}
+                    onBlur={handleSaveSessionTimeout}
+                    min={1}
+                    max={480}
+                    disabled={!sessionTimeoutEnabled}
+                    className={`w-20 px-3 py-2 rounded-lg border text-center transition-all ${
+                      sessionTimeoutEnabled
+                        ? 'bg-white/10 border-gray-500 text-white'
+                        : 'bg-gray-800/50 border-gray-700 text-gray-500 cursor-not-allowed'
+                    }`}
+                  />
+                  <span className={`text-sm ${sessionTimeoutEnabled ? 'liquid-glass-modal-text-muted' : 'text-gray-600'}`}>
+                    {t('common.minutes', 'min')}
+                  </span>
+                </div>
+              </div>
+
+              {/* Quick presets */}
+              {sessionTimeoutEnabled && (
+                <div className="flex items-center gap-2 pt-2">
+                  <span className="text-xs liquid-glass-modal-text-muted mr-2">{t('common.presets', 'Presets')}:</span>
+                  {[5, 15, 30, 60].map((mins) => (
+                    <button
+                      key={mins}
+                      onClick={() => {
+                        setSessionTimeoutMinutes(String(mins));
+                        // Auto-save after a short delay
+                        setTimeout(handleSaveSessionTimeout, 100);
+                      }}
+                      className={`px-3 py-1 text-sm rounded-lg transition-all ${
+                        sessionTimeoutMinutes === String(mins)
+                          ? 'bg-amber-500/30 border border-amber-400 text-amber-300'
+                          : 'bg-white/10 border border-gray-600 text-gray-300 hover:bg-white/20'
+                      }`}
+                    >
+                      {mins}m
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Database Management */}

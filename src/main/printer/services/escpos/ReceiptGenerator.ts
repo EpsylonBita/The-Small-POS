@@ -16,7 +16,7 @@ import {
   ReceiptTemplate,
 } from '../../types';
 import { EscPosBuilder, PAPER_WIDTH_CHARS, CharacterSetType, CODE_PAGE_NUMBERS } from './EscPosBuilder';
-import { GreekBitmapRenderer, TextLine } from './GreekBitmapRenderer';
+import { GreekBitmapRenderer, TextLine, TextStyle } from './GreekBitmapRenderer';
 import mainI18n from '../../../lib/main-i18n';
 
 // ============================================================================
@@ -203,6 +203,35 @@ export class ReceiptGenerator {
   }
 
   /**
+   * Generate receipt ASYNCHRONOUSLY - does NOT block the main thread
+   * Use this for all receipt generation to prevent UI freezing
+   */
+  async generateReceiptAsync(data: ReceiptData): Promise<Buffer> {
+    const characterSet = this.config.characterSet || 'PC437_USA';
+    const greekRenderMode = this.config.greekRenderMode || 'text';
+    const receiptTemplate = this.config.receiptTemplate || 'classic';
+
+    console.log('[ReceiptGenerator] ========== ASYNC RECEIPT GENERATION ==========');
+    console.log('[ReceiptGenerator] Template:', receiptTemplate, 'Greek mode:', greekRenderMode);
+
+    // Modern template always uses bitmap with styled pillow headers
+    if (receiptTemplate === 'modern') {
+      console.log('[ReceiptGenerator] >>> USING MODERN TEMPLATE (async bitmap)');
+      return this.generateReceiptBitmapModernAsync(data);
+    }
+
+    // Classic template - always use bitmap rendering for consistent appearance
+    if (greekRenderMode === 'bitmap' || receiptTemplate === 'classic') {
+      console.log('[ReceiptGenerator] >>> USING CLASSIC BITMAP (async bitmap)');
+      return this.generateReceiptBitmapClassicAsync(data);
+    }
+
+    // Fallback: text mode (already fast, no async needed)
+    console.log('[ReceiptGenerator] >>> USING TEXT MODE (sync - already fast)');
+    return this.generateReceiptTextMode(data);
+  }
+
+  /**
    * Generate receipt using bitmap rendering for Greek text
    * This renders all text as images to ensure proper Greek character display
    * on printers that don't have Greek font support - MODERN style with pillow headers
@@ -241,52 +270,71 @@ export class ReceiptGenerator {
     lines.push({ text: this.t('receipt.order.orderNumber', { number: data.orderNumber }), style: 'header', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
 
-    // Customer info section - different layout for delivery vs other types
+    // Customer info section - ALL WITH BOLD LABELS for delivery
     if (data.orderType === 'delivery') {
-      // Delivery order - show all customer details
+      // Delivery order - show all customer details with BOLD labels
       if (data.customerName) {
-        lines.push({ text: this.t('receipt.order.customer'), style: 'normal', align: 'left', rightText: data.customerName });
+        lines.push({ text: this.t('receipt.order.customer'), style: 'bold', align: 'left', rightText: data.customerName });
       }
       if (data.customerPhone) {
-        lines.push({ text: this.t('receipt.order.phone'), style: 'normal', align: 'left', rightText: data.customerPhone });
+        lines.push({ text: this.t('receipt.order.phone'), style: 'bold', align: 'left', rightText: data.customerPhone });
       }
-      
-      // Parse delivery address - it may contain structured info
-      if (data.deliveryAddress) {
-        lines.push({ text: '', style: 'small', align: 'left' });
-        lines.push({ text: this.t('receipt.order.address'), style: 'bold', align: 'left' });
-        
-        // Try to parse address components if it's a structured string
-        // Format might be: "Street 123, PostCode City, Floor: X"
-        const addressParts = this.parseDeliveryAddress(data.deliveryAddress);
-        
-        if (addressParts.street) {
-          lines.push({ text: addressParts.street, style: 'normal', align: 'left' });
+
+      // Address on SEPARATE LINES - Use separate fields if available
+      lines.push({ text: '', style: 'small', align: 'left' });
+      if (data.streetAddress) {
+        // Use separate address fields (preferred)
+        lines.push({ text: this.t('receipt.order.address'), style: 'bold', align: 'left', rightText: data.streetAddress });
+        if (data.postalCode) {
+          lines.push({ text: this.t('receipt.delivery.postCode'), style: 'bold', align: 'left', rightText: data.postalCode });
         }
-        if (addressParts.postCode || addressParts.city) {
-          const cityLine = [addressParts.postCode, addressParts.city].filter(Boolean).join(' ');
-          lines.push({ text: cityLine, style: 'normal', align: 'left' });
+        if (data.city) {
+          lines.push({ text: this.t('receipt.delivery.city'), style: 'bold', align: 'left', rightText: data.city });
+        }
+        if (data.floorNumber) {
+          lines.push({ text: this.t('receipt.delivery.floor'), style: 'bold', align: 'left', rightText: data.floorNumber });
+        }
+      } else if (data.deliveryAddress) {
+        // Fallback: parse combined address string
+        lines.push({ text: this.t('receipt.order.address'), style: 'bold', align: 'left' });
+
+        const addressParts = this.parseDeliveryAddress(data.deliveryAddress);
+
+        if (addressParts.street) {
+          lines.push({ text: addressParts.street, style: 'bold', align: 'left' });
+        }
+        if (addressParts.city) {
+          lines.push({ text: this.t('receipt.delivery.city'), style: 'bold', align: 'left', rightText: addressParts.city });
+        }
+        if (addressParts.postCode) {
+          lines.push({ text: this.t('receipt.delivery.postCode'), style: 'bold', align: 'left', rightText: addressParts.postCode });
         }
         if (addressParts.floor) {
-          lines.push({ text: this.t('receipt.delivery.floor'), style: 'normal', align: 'left', rightText: addressParts.floor });
+          lines.push({ text: this.t('receipt.delivery.floor'), style: 'bold', align: 'left', rightText: addressParts.floor });
         }
-        
+
         // If no structured parsing worked, just show the raw address
         if (!addressParts.street && !addressParts.postCode && !addressParts.city) {
-          lines.push({ text: data.deliveryAddress, style: 'normal', align: 'left' });
+          lines.push({ text: data.deliveryAddress, style: 'bold', align: 'left' });
         }
       }
-      
-      // Show ringer name from customer data (not from address parsing)
+
+      // Ringer name - BOLD
       if (data.ringerName) {
-        lines.push({ text: this.t('receipt.delivery.ringer'), style: 'normal', align: 'left', rightText: data.ringerName });
+        lines.push({ text: this.t('receipt.delivery.ringer'), style: 'bold', align: 'left', rightText: data.ringerName });
       }
-      
-      // Show delivery notes if present
+
+      // Delivery notes
       if (data.deliveryNotes) {
         lines.push({ text: '', style: 'small', align: 'left' });
         lines.push({ text: this.t('receipt.delivery.notes'), style: 'bold', align: 'left' });
         lines.push({ text: data.deliveryNotes, style: 'normal', align: 'left' });
+      }
+
+      // Driver name - BOLD with emoji
+      if (data.driverName) {
+        lines.push({ text: '', style: 'small', align: 'left' });
+        lines.push({ text: '🚗 ' + this.t('receipt.delivery.driver'), style: 'bold', align: 'left', rightText: data.driverName });
       }
     } else {
       // Non-delivery orders
@@ -327,9 +375,17 @@ export class ReceiptGenerator {
           if (typeof modifier === 'string') {
             lines.push({ text: '  + ' + modifier, style: 'small', align: 'left' });
           } else {
-            const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
-            const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
-            lines.push({ text: '  + ' + modifier.name + modQty, style: 'small', align: 'left', rightText: modPrice });
+            // Handle "without" items - show with ΧΩΡΙΣ: prefix and bold style
+            if (modifier.isWithout) {
+              lines.push({ text: '  ΧΩΡΙΣ: ' + modifier.name, style: 'bold', align: 'left' });
+            } else {
+              // Handle normal and "little" items
+              const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
+              const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
+              const littleSuffix = modifier.isLittle ? ' (λίγο)' : '';
+              const style = modifier.isLittle ? 'bold' : 'small';
+              lines.push({ text: '  + ' + modifier.name + littleSuffix + modQty, style, align: 'left', rightText: modPrice });
+            }
           }
         }
       }
@@ -355,12 +411,18 @@ export class ReceiptGenerator {
     if (data.deliveryFee && data.deliveryFee > 0) {
       lines.push({ text: this.t('receipt.totals.deliveryFee'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.deliveryFee) });
     }
+    // Show discount (as negative amount) - Modern template
+    if (data.discount && data.discount > 0) {
+      const discountLabel = this.t('receipt.totals.discount') || 'Έκπτωση';
+      const percentageText = data.discountPercentage ? ` (${data.discountPercentage}%)` : '';
+      lines.push({ text: discountLabel + percentageText, style: 'normal', align: 'left', rightText: '-' + this.formatCurrency(data.discount) });
+    }
     if (data.tip && data.tip > 0) {
       lines.push({ text: this.t('receipt.totals.tip'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.tip) });
     }
 
     lines.push({ text: '', style: 'small', align: 'left' });
-    
+
     // Total - big and prominent in black box
     lines.push({ text: this.t('receipt.totals.total') + ' ' + this.formatCurrency(data.total), style: 'boxHeader', align: 'center', inverted: true });
     lines.push({ text: '', style: 'small', align: 'left' });
@@ -398,16 +460,212 @@ export class ReceiptGenerator {
   }
 
   /**
-   * Generate receipt using bitmap rendering - CLASSIC style (simple layout, no pillow headers)
-   * Uses bitmap for Greek text but with a simpler layout similar to text mode
+   * ASYNC version of generateReceiptBitmapModern - does NOT block main thread
    */
-  private generateReceiptBitmapClassic(data: ReceiptData): Buffer {
+  private async generateReceiptBitmapModernAsync(data: ReceiptData): Promise<Buffer> {
     const renderer = new GreekBitmapRenderer(this.config.paperSize);
     const buffers: Buffer[] = [];
 
-    // Initialize printer
-    buffers.push(Buffer.from([0x1B, 0x40]));  // ESC @ - Initialize
+    buffers.push(Buffer.from([0x1B, 0x40]));
 
+    const lines: TextLine[] = this.buildModernReceiptLines(data);
+
+    try {
+      const bitmapBuffer = await renderer.renderLinesAsync(lines);
+      buffers.push(bitmapBuffer);
+    } catch (error) {
+      console.error('[ReceiptGenerator] Async Modern bitmap rendering failed:', error);
+      return this.generateReceiptTextMode(data);
+    }
+
+    buffers.push(Buffer.from([0x1D, 0x56, 0x42, 0x03]));
+    return Buffer.concat(buffers);
+  }
+
+  /**
+   * Build lines array for Modern receipt (shared between sync and async)
+   */
+  private buildModernReceiptLines(data: ReceiptData): TextLine[] {
+    const lines: TextLine[] = [];
+
+    // HEADER
+    lines.push({ text: '', style: 'normal', align: 'left' });
+    if (this.config.storeName) {
+      lines.push({ text: this.config.storeName, style: 'title', align: 'center' });
+    }
+    if (this.config.storeAddress) {
+      lines.push({ text: this.config.storeAddress, style: 'small', align: 'center' });
+    }
+    if (this.config.storePhone) {
+      lines.push({ text: this.config.storePhone, style: 'small', align: 'center' });
+    }
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // ORDER INFO
+    const orderTypeLabel = this.formatOrderType(data.orderType);
+    lines.push({ text: orderTypeLabel, style: 'boxHeader', align: 'center', inverted: true });
+    lines.push({ text: '', style: 'small', align: 'left' });
+    lines.push({ text: this.t('receipt.order.orderNumber', { number: data.orderNumber }), style: 'header', align: 'center' });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // Customer info
+    if (data.orderType === 'delivery') {
+      if (data.customerName) {
+        lines.push({ text: this.t('receipt.order.customer'), style: 'bold', align: 'left', rightText: data.customerName });
+      }
+      if (data.customerPhone) {
+        lines.push({ text: this.t('receipt.order.phone'), style: 'bold', align: 'left', rightText: data.customerPhone });
+      }
+      lines.push({ text: '', style: 'small', align: 'left' });
+      if (data.streetAddress) {
+        lines.push({ text: this.t('receipt.order.address'), style: 'bold', align: 'left', rightText: data.streetAddress });
+        if (data.postalCode) {
+          lines.push({ text: this.t('receipt.delivery.postCode'), style: 'bold', align: 'left', rightText: data.postalCode });
+        }
+        if (data.city) {
+          lines.push({ text: this.t('receipt.delivery.city'), style: 'bold', align: 'left', rightText: data.city });
+        }
+        if (data.floorNumber) {
+          lines.push({ text: this.t('receipt.delivery.floor'), style: 'bold', align: 'left', rightText: data.floorNumber });
+        }
+      } else if (data.deliveryAddress) {
+        lines.push({ text: this.t('receipt.order.address'), style: 'bold', align: 'left' });
+        const addressParts = this.parseDeliveryAddress(data.deliveryAddress);
+        if (addressParts.street) lines.push({ text: addressParts.street, style: 'bold', align: 'left' });
+        if (addressParts.city) lines.push({ text: this.t('receipt.delivery.city'), style: 'bold', align: 'left', rightText: addressParts.city });
+        if (addressParts.postCode) lines.push({ text: this.t('receipt.delivery.postCode'), style: 'bold', align: 'left', rightText: addressParts.postCode });
+        if (addressParts.floor) lines.push({ text: this.t('receipt.delivery.floor'), style: 'bold', align: 'left', rightText: addressParts.floor });
+        if (!addressParts.street && !addressParts.postCode && !addressParts.city) {
+          lines.push({ text: data.deliveryAddress, style: 'bold', align: 'left' });
+        }
+      }
+      if (data.ringerName) {
+        lines.push({ text: this.t('receipt.delivery.ringer'), style: 'bold', align: 'left', rightText: data.ringerName });
+      }
+      if (data.deliveryNotes) {
+        lines.push({ text: '', style: 'small', align: 'left' });
+        lines.push({ text: this.t('receipt.delivery.notes'), style: 'bold', align: 'left' });
+        lines.push({ text: data.deliveryNotes, style: 'normal', align: 'left' });
+      }
+      if (data.driverName) {
+        lines.push({ text: '', style: 'small', align: 'left' });
+        lines.push({ text: '🚗 ' + this.t('receipt.delivery.driver'), style: 'bold', align: 'left', rightText: data.driverName });
+      }
+    } else {
+      if (data.customerName) {
+        lines.push({ text: this.t('receipt.order.customer'), style: 'normal', align: 'left', rightText: data.customerName });
+      }
+      if (data.customerPhone) {
+        lines.push({ text: this.t('receipt.order.phone'), style: 'normal', align: 'left', rightText: data.customerPhone });
+      }
+      if (data.tableName && data.orderType === 'dine-in') {
+        lines.push({ text: this.t('receipt.order.table'), style: 'normal', align: 'left', rightText: data.tableName });
+      }
+    }
+
+    lines.push({ text: '', style: 'small', align: 'left' });
+    lines.push({ text: this.t('receipt.order.date'), style: 'small', align: 'left', rightText: this.formatDate(data.timestamp) });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // ITEMS
+    lines.push({ text: this.t('receipt.items.item'), style: 'boxHeader', align: 'center', inverted: true });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    for (const item of data.items) {
+      const qtyPrice = 'x' + item.quantity + '   ' + this.formatCurrency(item.total);
+      lines.push({ text: item.name, style: 'bold', align: 'left', rightText: qtyPrice });
+      if (item.modifiers && item.modifiers.length > 0) {
+        for (const modifier of item.modifiers) {
+          if (typeof modifier === 'string') {
+            lines.push({ text: '  + ' + modifier, style: 'small', align: 'left' });
+          } else {
+            if (modifier.isWithout) {
+              lines.push({ text: '  ΧΩΡΙΣ: ' + modifier.name, style: 'bold', align: 'left' });
+            } else {
+              const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
+              const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
+              const littleSuffix = modifier.isLittle ? ' (λίγο)' : '';
+              const style = modifier.isLittle ? 'bold' : 'small';
+              lines.push({ text: '  + ' + modifier.name + littleSuffix + modQty, style: style as TextStyle, align: 'left', rightText: modPrice });
+            }
+          }
+        }
+      }
+      if (item.specialInstructions) {
+        lines.push({ text: '  * ' + item.specialInstructions, style: 'bold', align: 'left' });
+      }
+    }
+
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // TOTALS
+    if (data.subtotal > 0) {
+      lines.push({ text: this.t('receipt.totals.subtotal'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.subtotal) });
+    }
+    if (data.tax > 0) {
+      lines.push({ text: this.t('receipt.totals.tax'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.tax) });
+    }
+    if (data.deliveryFee && data.deliveryFee > 0) {
+      lines.push({ text: this.t('receipt.totals.deliveryFee'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.deliveryFee) });
+    }
+    if (data.discount && data.discount > 0) {
+      const discountLabel = this.t('receipt.totals.discount') || 'Έκπτωση';
+      const percentageText = data.discountPercentage ? ` (${data.discountPercentage}%)` : '';
+      lines.push({ text: discountLabel + percentageText, style: 'normal', align: 'left', rightText: '-' + this.formatCurrency(data.discount) });
+    }
+    if (data.tip && data.tip > 0) {
+      lines.push({ text: this.t('receipt.totals.tip'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.tip) });
+    }
+
+    lines.push({ text: '', style: 'small', align: 'left' });
+    lines.push({ text: this.t('receipt.totals.total') + ' ' + this.formatCurrency(data.total), style: 'boxHeader', align: 'center', inverted: true });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // PAYMENT
+    const paymentLabel = this.formatPaymentMethod(data.paymentMethod);
+    lines.push({ text: this.t('receipt.payment.payment'), style: 'normal', align: 'left', rightText: paymentLabel });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // FOOTER
+    lines.push({ text: '─────────────────────────────────────────────', style: 'small', align: 'center' });
+    if (this.config.footerMessage) {
+      lines.push({ text: this.config.footerMessage, style: 'normal', align: 'center' });
+    } else {
+      lines.push({ text: this.t('receipt.header.thankYou'), style: 'normal', align: 'center' });
+    }
+    lines.push({ text: '', style: 'normal', align: 'left' });
+    lines.push({ text: '', style: 'normal', align: 'left' });
+
+    return lines;
+  }
+
+  /**
+   * ASYNC version of generateReceiptBitmapClassic - does NOT block main thread
+   */
+  private async generateReceiptBitmapClassicAsync(data: ReceiptData): Promise<Buffer> {
+    const renderer = new GreekBitmapRenderer(this.config.paperSize);
+    const buffers: Buffer[] = [];
+
+    buffers.push(Buffer.from([0x1B, 0x40]));
+
+    const lines: TextLine[] = this.buildClassicReceiptLines(data);
+
+    try {
+      const bitmapBuffer = await renderer.renderLinesAsync(lines);
+      buffers.push(bitmapBuffer);
+    } catch (error) {
+      console.error('[ReceiptGenerator] Async Classic bitmap rendering failed:', error);
+      return this.generateReceiptTextMode(data);
+    }
+
+    buffers.push(Buffer.from([0x1D, 0x56, 0x42, 0x03]));
+    return Buffer.concat(buffers);
+  }
+
+  /**
+   * Build lines array for Classic receipt (shared between sync and async)
+   */
+  private buildClassicReceiptLines(data: ReceiptData): TextLine[] {
     const lines: TextLine[] = [];
 
     // HEADER - Store name
@@ -426,26 +684,73 @@ export class ReceiptGenerator {
 
     // ORDER INFO - Simple text (no box header)
     lines.push({ text: this.t('receipt.order.orderNumber', { number: data.orderNumber }), style: 'header', align: 'center' });
-    
+
     const orderTypeLabel = this.formatOrderType(data.orderType);
     lines.push({ text: this.t('receipt.order.type') + ' ' + orderTypeLabel, style: 'normal', align: 'left' });
 
-    // Customer info
+    // Customer info - ALL WITH BOLD LABELS
     if (data.orderType === 'delivery') {
+      // Customer name - BOLD
       if (data.customerName) {
-        lines.push({ text: this.t('receipt.order.customer') + ' ' + data.customerName, style: 'normal', align: 'left' });
+        lines.push({ text: this.t('receipt.order.customer') + ' ' + data.customerName, style: 'bold', align: 'left' });
       }
+      // Phone - BOLD
       if (data.customerPhone) {
-        lines.push({ text: this.t('receipt.order.phone') + ' ' + data.customerPhone, style: 'normal', align: 'left' });
+        lines.push({ text: this.t('receipt.order.phone') + ' ' + data.customerPhone, style: 'bold', align: 'left' });
       }
-      if (data.deliveryAddress) {
-        lines.push({ text: this.t('receipt.order.address') + ' ' + data.deliveryAddress, style: 'normal', align: 'left' });
+      // Address on SEPARATE LINES - Use separate fields if available, fallback to combined address
+      if (data.streetAddress) {
+        // Use separate address fields (preferred)
+        lines.push({ text: this.t('receipt.order.address') + ' ' + data.streetAddress, style: 'bold', align: 'left' });
+        if (data.postalCode) {
+          lines.push({ text: this.t('receipt.delivery.postCode') + ' ' + data.postalCode, style: 'bold', align: 'left' });
+        }
+        if (data.city) {
+          lines.push({ text: this.t('receipt.delivery.city') + ' ' + data.city, style: 'bold', align: 'left' });
+        }
+        if (data.floorNumber) {
+          lines.push({ text: this.t('receipt.delivery.floor') + ' ' + data.floorNumber, style: 'bold', align: 'left' });
+        }
+      } else if (data.deliveryAddress) {
+        // Fallback: parse combined address string (e.g., "Iliados 10, Thessaloniki 546 41, Floor: 0")
+        const addressParts = data.deliveryAddress.split(',').map(p => p.trim());
+        // First part is street address
+        if (addressParts[0]) {
+          lines.push({ text: this.t('receipt.order.address') + ' ' + addressParts[0], style: 'bold', align: 'left' });
+        }
+        // Second part might be city + postal code
+        if (addressParts[1]) {
+          // Try to extract postal code (pattern like "546 41" or "54641")
+          const postalMatch = addressParts[1].match(/(\d{3}\s?\d{2})/);
+          if (postalMatch) {
+            const city = addressParts[1].replace(postalMatch[0], '').trim();
+            if (city) {
+              lines.push({ text: this.t('receipt.delivery.city') + ' ' + city, style: 'bold', align: 'left' });
+            }
+            lines.push({ text: this.t('receipt.delivery.postCode') + ' ' + postalMatch[1], style: 'bold', align: 'left' });
+          } else {
+            lines.push({ text: this.t('receipt.delivery.city') + ' ' + addressParts[1], style: 'bold', align: 'left' });
+          }
+        }
+        // Third part might be Floor
+        if (addressParts[2]) {
+          const floorMatch = addressParts[2].match(/Floor:\s*(.+)/i);
+          if (floorMatch) {
+            lines.push({ text: this.t('receipt.delivery.floor') + ' ' + floorMatch[1], style: 'bold', align: 'left' });
+          }
+        }
       }
+      // Ringer - BOLD
       if (data.ringerName) {
-        lines.push({ text: this.t('receipt.delivery.ringer') + ' ' + data.ringerName, style: 'normal', align: 'left' });
+        lines.push({ text: this.t('receipt.delivery.ringer') + ' ' + data.ringerName, style: 'bold', align: 'left' });
       }
+      // Notes
       if (data.deliveryNotes) {
         lines.push({ text: this.t('receipt.delivery.notes') + ' ' + data.deliveryNotes, style: 'normal', align: 'left' });
+      }
+      // Driver - BOLD with emoji
+      if (data.driverName) {
+        lines.push({ text: '🚗 ' + this.t('receipt.delivery.driver') + ' ' + data.driverName, style: 'bold', align: 'left' });
       }
     } else {
       if (data.tableName && data.orderType === 'dine-in') {
@@ -458,7 +763,7 @@ export class ReceiptGenerator {
         lines.push({ text: this.t('receipt.order.phone') + ' ' + data.customerPhone, style: 'normal', align: 'left' });
       }
     }
-    
+
     lines.push({ text: this.t('receipt.order.date') + ' ' + this.formatDate(data.timestamp), style: 'small', align: 'left' });
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
@@ -466,15 +771,7 @@ export class ReceiptGenerator {
     // ITEMS SECTION - Header with qty and price aligned right
     lines.push({ text: this.t('receipt.items.item'), style: 'bold', align: 'left', rightText: this.t('receipt.items.qty') + '   ' + this.t('receipt.items.price') });
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
-    
-    // Debug: Log items with specialInstructions
-    console.log('[ReceiptGenerator.generateReceiptBitmapClassic] Items received:', data.items.map((item, idx) => ({
-      idx,
-      name: item.name,
-      specialInstructions: item.specialInstructions,
-      hasSpecialInstructions: !!item.specialInstructions
-    })));
-    
+
     for (const item of data.items) {
       // Category name (if available) - shown above item name
       if (item.categoryName) {
@@ -489,9 +786,17 @@ export class ReceiptGenerator {
           if (typeof modifier === 'string') {
             lines.push({ text: '  + ' + modifier, style: 'small', align: 'left' });
           } else {
-            const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
-            const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
-            lines.push({ text: '  + ' + modifier.name + modQty, style: 'small', align: 'left', rightText: modPrice });
+            // Handle "without" items - show with ΧΩΡΙΣ: prefix and bold style
+            if (modifier.isWithout) {
+              lines.push({ text: '  ΧΩΡΙΣ: ' + modifier.name, style: 'bold', align: 'left' });
+            } else {
+              // Handle normal and "little" items
+              const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
+              const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
+              const littleSuffix = modifier.isLittle ? ' (λίγο)' : '';
+              const style = modifier.isLittle ? 'bold' : 'small';
+              lines.push({ text: '  + ' + modifier.name + littleSuffix + modQty, style, align: 'left', rightText: modPrice });
+            }
           }
         }
       }
@@ -513,6 +818,12 @@ export class ReceiptGenerator {
     }
     if (data.deliveryFee && data.deliveryFee > 0) {
       lines.push({ text: this.t('receipt.totals.deliveryFee'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.deliveryFee) });
+    }
+    // Show discount (as negative amount)
+    if (data.discount && data.discount > 0) {
+      const discountLabel = this.t('receipt.totals.discount') || 'Έκπτωση';
+      const percentageText = data.discountPercentage ? ` (${data.discountPercentage}%)` : '';
+      lines.push({ text: discountLabel + percentageText, style: 'normal', align: 'left', rightText: '-' + this.formatCurrency(data.discount) });
     }
     if (data.tip && data.tip > 0) {
       lines.push({ text: this.t('receipt.totals.tip'), style: 'normal', align: 'left', rightText: this.formatCurrency(data.tip) });
@@ -538,7 +849,22 @@ export class ReceiptGenerator {
     lines.push({ text: '', style: 'normal', align: 'left' });
     lines.push({ text: '', style: 'normal', align: 'left' });
 
-    // Render
+    return lines;
+  }
+
+  /**
+   * Generate receipt using bitmap rendering - CLASSIC style (simple layout, no pillow headers)
+   * Uses bitmap for Greek text but with a simpler layout similar to text mode
+   */
+  private generateReceiptBitmapClassic(data: ReceiptData): Buffer {
+    const renderer = new GreekBitmapRenderer(this.config.paperSize);
+    const buffers: Buffer[] = [];
+
+    buffers.push(Buffer.from([0x1B, 0x40]));  // ESC @ - Initialize
+
+    const lines: TextLine[] = this.buildClassicReceiptLines(data);
+
+    // Render synchronously (blocks main thread)
     try {
       const bitmapBuffer = renderer.renderLinesSync(lines);
       buffers.push(bitmapBuffer);
@@ -616,48 +942,69 @@ export class ReceiptGenerator {
     builder.twoColumnRow(this.t('receipt.order.type'), orderTypeLabel);
 
     if (data.orderType === 'delivery') {
-      // Delivery order - show all customer details
+      // Delivery order - show all customer details with BOLD labels
       if (data.customerName) {
-        builder.twoColumnRow(this.t('receipt.order.customer'), data.customerName);
+        builder.bold(true).twoColumnRow(this.t('receipt.order.customer'), data.customerName).bold(false);
       }
       if (data.customerPhone) {
-        builder.twoColumnRow(this.t('receipt.order.phone'), data.customerPhone);
+        builder.bold(true).twoColumnRow(this.t('receipt.order.phone'), data.customerPhone).bold(false);
       }
-      
-      // Parse and display delivery address components
-      if (data.deliveryAddress) {
-        builder.emptyLine();
-        builder.bold(true).textLine(this.t('receipt.order.address')).bold(false);
-        
-        const addressParts = this.parseDeliveryAddress(data.deliveryAddress);
-        
-        if (addressParts.street) {
-          builder.textLine('  ' + addressParts.street);
+
+      // Address on SEPARATE LINES - Use separate fields if available
+      builder.emptyLine();
+      if (data.streetAddress) {
+        // Use separate address fields (preferred)
+        builder.bold(true).twoColumnRow(this.t('receipt.order.address'), data.streetAddress).bold(false);
+        if (data.postalCode) {
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.postCode'), data.postalCode).bold(false);
         }
-        if (addressParts.postCode || addressParts.city) {
-          const cityLine = [addressParts.postCode, addressParts.city].filter(Boolean).join(' ');
-          builder.textLine('  ' + cityLine);
+        if (data.city) {
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.city'), data.city).bold(false);
+        }
+        if (data.floorNumber) {
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.floor'), data.floorNumber).bold(false);
+        }
+      } else if (data.deliveryAddress) {
+        // Fallback: parse combined address string
+        builder.bold(true).textLine(this.t('receipt.order.address')).bold(false);
+
+        const addressParts = this.parseDeliveryAddress(data.deliveryAddress);
+
+        if (addressParts.street) {
+          builder.bold(true).textLine('  ' + addressParts.street).bold(false);
+        }
+        if (addressParts.city) {
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.city'), addressParts.city).bold(false);
+        }
+        if (addressParts.postCode) {
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.postCode'), addressParts.postCode).bold(false);
         }
         if (addressParts.floor) {
-          builder.twoColumnRow(this.t('receipt.delivery.floor'), addressParts.floor);
+          builder.bold(true).twoColumnRow(this.t('receipt.delivery.floor'), addressParts.floor).bold(false);
         }
-        
+
         // If no structured parsing worked, just show the raw address
         if (!addressParts.street && !addressParts.postCode && !addressParts.city) {
-          builder.textLine('  ' + data.deliveryAddress);
+          builder.bold(true).textLine('  ' + data.deliveryAddress).bold(false);
         }
       }
-      
-      // Show ringer name from customer data
+
+      // Ringer name - BOLD
       if (data.ringerName) {
-        builder.twoColumnRow(this.t('receipt.delivery.ringer'), data.ringerName);
+        builder.bold(true).twoColumnRow(this.t('receipt.delivery.ringer'), data.ringerName).bold(false);
       }
-      
-      // Show delivery notes
+
+      // Delivery notes
       if (data.deliveryNotes) {
         builder.emptyLine();
         builder.bold(true).textLine(this.t('receipt.delivery.notes')).bold(false);
         builder.textLine('  ' + data.deliveryNotes);
+      }
+
+      // Driver name - BOLD
+      if (data.driverName) {
+        builder.emptyLine();
+        builder.bold(true).textLine('🚗 ' + this.t('receipt.delivery.driver') + ' ' + data.driverName).bold(false);
       }
     } else {
       // Non-delivery orders
@@ -721,14 +1068,27 @@ export class ReceiptGenerator {
         if (typeof modifier === 'string') {
           builder.textLine('  + ' + modifier);
         } else {
-          const modName = modifier.name;
-          const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
-          const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
-          // Two column: modifier name on left, price on right
-          if (modPrice) {
-            builder.twoColumnRow('  + ' + modName + modQty, modPrice);
+          // Handle "without" items - show with ΧΩΡΙΣ: prefix and bold style
+          if (modifier.isWithout) {
+            builder.bold(true).textLine('  ΧΩΡΙΣ: ' + modifier.name).bold(false);
           } else {
-            builder.textLine('  + ' + modName + modQty);
+            // Handle normal and "little" items
+            const modName = modifier.name;
+            const modQty = modifier.quantity && modifier.quantity > 1 ? ' x' + modifier.quantity : '';
+            const littleSuffix = modifier.isLittle ? ' (λίγο)' : '';
+            const modPrice = modifier.price ? this.formatCurrency(modifier.price) : '';
+            // Two column: modifier name on left, price on right
+            if (modifier.isLittle) {
+              builder.bold(true);
+            }
+            if (modPrice) {
+              builder.twoColumnRow('  + ' + modName + littleSuffix + modQty, modPrice);
+            } else {
+              builder.textLine('  + ' + modName + littleSuffix + modQty);
+            }
+            if (modifier.isLittle) {
+              builder.bold(false);
+            }
           }
         }
       }
@@ -750,6 +1110,13 @@ export class ReceiptGenerator {
 
     if (data.deliveryFee && data.deliveryFee > 0) {
       builder.twoColumnRow(this.t('receipt.totals.deliveryFee'), this.formatCurrency(data.deliveryFee));
+    }
+
+    // Show discount (as negative amount) - Text mode
+    if (data.discount && data.discount > 0) {
+      const discountLabel = this.t('receipt.totals.discount') || 'Έκπτωση';
+      const percentageText = data.discountPercentage ? ` (${data.discountPercentage}%)` : '';
+      builder.twoColumnRow(discountLabel + percentageText, '-' + this.formatCurrency(data.discount));
     }
 
     if (data.tip && data.tip > 0) {

@@ -37,7 +37,7 @@ export class AuthService {
   private mainWindow: BrowserWindow | null = null;
   private sessionTimeout: NodeJS.Timeout | null = null;
   private readonly SESSION_DURATION = 2 * 60 * 60 * 1000; // 2 hours (reduced from 8 for POS security)
-  private readonly INACTIVITY_TIMEOUT = 15 * 60 * 1000; // 15 minutes (PCI-DSS compliant, reduced from 30)
+  private readonly DEFAULT_INACTIVITY_TIMEOUT_MINUTES = 15; // Default: 15 minutes (PCI-DSS compliant)
   private lastActivity: number = Date.now();
 
   // Rate limiting for brute-force protection
@@ -60,13 +60,36 @@ export class AuthService {
     }, 60000);
   }
 
+  /**
+   * Get session timeout settings from SettingsService
+   * Returns { enabled: boolean, timeoutMs: number }
+   */
+  private getSessionTimeoutSettings(): { enabled: boolean; timeoutMs: number } {
+    const enabled = this.settingsService.getSetting<boolean>('system', 'session_timeout_enabled', false);
+    const minutes = this.settingsService.getSetting<number>('system', 'session_timeout_minutes', this.DEFAULT_INACTIVITY_TIMEOUT_MINUTES);
+
+    return {
+      enabled: enabled ?? false,
+      timeoutMs: (minutes ?? this.DEFAULT_INACTIVITY_TIMEOUT_MINUTES) * 60 * 1000
+    };
+  }
+
   private async checkInactivity(): Promise<void> {
+    // Check if session timeout is enabled
+    const { enabled, timeoutMs } = this.getSessionTimeoutSettings();
+
+    if (!enabled) {
+      // Session timeout is disabled, skip the check
+      return;
+    }
+
     const now = Date.now();
     const timeSinceLastActivity = now - this.lastActivity;
 
-    if (timeSinceLastActivity > this.INACTIVITY_TIMEOUT) {
+    if (timeSinceLastActivity > timeoutMs) {
       const activeSession = await this.dbManager.getActiveSession();
       if (activeSession) {
+        console.log(`[AuthService] Session timeout after ${Math.round(timeSinceLastActivity / 60000)} minutes of inactivity`);
         await this.logout();
         this.notifyRenderer('session-timeout', { reason: 'inactivity' });
       }
@@ -461,6 +484,7 @@ export class AuthService {
         return null;
       }
 
+      const { enabled, timeoutMs } = this.getSessionTimeoutSettings();
       const loginTime = new Date(session.loginTime);
       const now = new Date();
       const sessionDuration = now.getTime() - loginTime.getTime();
@@ -474,7 +498,8 @@ export class AuthService {
         sessionDuration,
         remainingTime: Math.max(0, remainingTime),
         timeSinceActivity,
-        inactivityWarning: timeSinceActivity > (this.INACTIVITY_TIMEOUT * 0.8) // Warning at 80% of timeout
+        sessionTimeoutEnabled: enabled,
+        inactivityWarning: enabled && timeSinceActivity > (timeoutMs * 0.8) // Warning at 80% of timeout
       };
     } catch (error) {
       console.error('Error getting session stats:', error);

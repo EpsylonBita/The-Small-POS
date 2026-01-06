@@ -418,6 +418,7 @@ export function OrderApprovalPanel({
   const taxAmount = (order as any).tax_amount || (order as any).taxAmount || 0;
   const deliveryFee = (order as any).delivery_fee || (order as any).deliveryFee || 0;
   const discountAmount = (order as any).discount_amount || (order as any).discountAmount || 0;
+  const discountPercentage = (order as any).discount_percentage || (order as any).discountPercentage || 0;
   const totalAmount = (order as any).total_amount || order.totalAmount || subtotal;
 
   const handleApprove = useCallback(async () => {
@@ -829,8 +830,11 @@ export function OrderApprovalPanel({
                       </div>
                     )}
                     {discountAmount > 0 && (
-                      <div className="flex justify-between text-sm text-green-500">
-                        <span>{t('orderApprovalPanel.discount') || 'Έκπτωση'}</span>
+                      <div className="flex justify-between text-sm text-green-500 font-medium">
+                        <span>
+                          🏷️ {t('orderApprovalPanel.discount') || 'Έκπτωση'}
+                          {discountPercentage > 0 && ` (${discountPercentage}%)`}
+                        </span>
                         <span>-{formatCurrency(discountAmount)}</span>
                       </div>
                     )}

@@ -214,6 +214,11 @@ export class CustomerSyncService {
         customerData.organization_id = this.organizationId
       }
 
+      // Include branch_id if provided - associates customer with a specific branch
+      if ((data as any).branch_id) {
+        customerData.branch_id = (data as any).branch_id
+      }
+
       // Map name field (DB column is 'name', not 'full_name')
       if ((data as any).full_name || (data as any).name) {
         customerData.name = (data as any).name || (data as any).full_name

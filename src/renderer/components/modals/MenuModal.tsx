@@ -416,6 +416,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     // Get category ID from the item, or fallback to selected category
     const itemCategoryId = item.category_id || item.categoryId || item.category;
 
+    console.log('[handleAddToCart] Starting category lookup:', {
+      itemName: item.name,
+      itemCategoryId,
+      selectedCategory,
+      categoriesCount: categories.length
+    });
+
     // Look up category name - try multiple strategies:
     // 1. First try the item's category_id from local categories state
     // 2. Then try the currently selected category (which is the category tab the user is on)
@@ -425,11 +432,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     // Strategy 1: Look up by item's category_id in local state
     if (itemCategoryId && categories.length > 0) {
       categoryName = categories.find(cat => cat.id === itemCategoryId)?.name || null;
+      console.log('[handleAddToCart] Strategy 1 result:', categoryName);
     }
 
     // Strategy 2: Use selected category if it's a real category (not "all" or "featured")
     if (!categoryName && selectedCategory && selectedCategory !== 'all' && selectedCategory !== 'featured') {
       categoryName = categories.find(cat => cat.id === selectedCategory)?.name || null;
+      console.log('[handleAddToCart] Strategy 2 result:', categoryName);
     }
 
     // Strategy 3: If categories state is empty or lookup failed, fetch from service
@@ -439,11 +448,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         const foundCategory = freshCategories.find((cat: any) => cat.id === itemCategoryId);
         if (foundCategory) {
           categoryName = foundCategory.name || foundCategory.name_en || null;
+          console.log('[handleAddToCart] Strategy 3 result:', categoryName);
         }
       } catch (error) {
         console.error('Failed to fetch categories for category name lookup:', error);
       }
     }
+
+    console.log('[handleAddToCart] Final categoryName:', categoryName);
 
     // Ensure item has required properties
     // Use order-type-specific price: three-tier pricing (pickup, delivery, dine-in)
@@ -507,6 +519,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     } else {
       setCartItems(prev => [...prev, cartItem]);
     }
+  };
+
+  // Quick add handler for non-customizable items (skips modal, adds directly to cart)
+  const handleQuickAdd = async (item: any, quantity: number) => {
+    await handleAddToCart(item, quantity, [], '');
   };
 
   const handleCheckout = async () => {
@@ -582,11 +599,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const discountAmount = subtotal * (discountPercentage / 100);
     const totalAfterDiscount = subtotal - discountAmount;
 
-    // Debug: Log cart items with notes before passing to onOrderComplete
-    console.log('[MenuModal.handlePaymentComplete] cartItems with notes:', cartItems.map(item => ({
+    // Debug: Log cart items with notes, categoryName, and customizations before passing to onOrderComplete
+    console.log('[MenuModal.handlePaymentComplete] cartItems details:', cartItems.map(item => ({
       name: item.name,
-      notes: item.notes,
-      hasNotes: !!item.notes
+      categoryName: item.categoryName,
+      customizationsCount: item.customizations?.length || 0,
+      customizations: item.customizations,
+      notes: item.notes
     })));
 
     // Log address state for debugging
@@ -697,7 +716,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           </div>
         )}
 
-        <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0 h-full">
+        <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0">
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
             <MenuCategoryTabs
@@ -713,11 +732,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               selectedSubcategory={selectedSubcategory}
               orderType={orderType}
               onItemSelect={setSelectedMenuItem}
+              onQuickAdd={handleQuickAdd}
             />
           </div>
 
-          {/* Right Panel - Cart - Full height of modal */}
-          <div className="flex-shrink-0 h-full overflow-hidden flex">
+          {/* Right Panel - Cart - Flex layout for proper height inheritance */}
+          <div className="w-72 md:w-80 flex-shrink-0 flex flex-col min-h-0 overflow-hidden">
             <MenuCart
               cartItems={cartItems}
               onCheckout={handleCheckout}

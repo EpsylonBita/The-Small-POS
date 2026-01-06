@@ -510,6 +510,10 @@ export function registerOrderHandlers({
         customer_name: orderData.customerName,
         items: orderData.items,
         total_amount: orderData.totalAmount || 0, // Fallback to 0 if null/undefined
+        subtotal: orderData.subtotal || orderData.totalAmount || 0,
+        discount_amount: orderData.discountAmount || orderData.discount_amount || 0,
+        discount_percentage: orderData.discountPercentage || orderData.discount_percentage || 0,
+        delivery_fee: orderData.deliveryFee || orderData.delivery_fee || 0,
         status: orderData.status,
         order_type: orderData.orderType,
         customer_phone: orderData.customerPhone,
@@ -528,6 +532,15 @@ export function registerOrderHandlers({
         payment_method: orderData.paymentMethod,
         payment_transaction_id: orderData.paymentTransactionId,
       };
+
+      // Debug: Log discount info
+      console.log('[order:create] Discount info:', {
+        discountAmount: dbOrderData.discount_amount,
+        discountPercentage: dbOrderData.discount_percentage,
+        subtotal: dbOrderData.subtotal,
+        total: dbOrderData.total_amount,
+        deliveryFee: dbOrderData.delivery_fee
+      });
 
       const createdOrder = await withTimeout(
         dbManager.insertOrder(dbOrderData),

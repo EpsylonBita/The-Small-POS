@@ -47,6 +47,8 @@
     "hide": "Απόκρυψη",
     "show": "Εμφάνιση",
     "continue": "Συνέχεια",
+    "minutes": "λεπτά",
+    "presets": "Προεπιλογές",
     "status": {
       "active": "Ενεργό",
       "inactive": "Ανενεργό",
@@ -1964,7 +1966,11 @@
       "continue": "Συνέχεια",
       "continueWithAddress": "Συνέχεια με {{address}}",
       "confirmDeleteAddress": "Διαγραφή αυτής της διεύθυνσης;",
-      "deleteAddressFailed": "Αποτυχία διαγραφής διεύθυνσης"
+      "deleteAddressFailed": "Αποτυχία διαγραφής διεύθυνσης",
+      "banned": "ΑΠΟΚΛΕΙΣΜΕΝΟΣ",
+      "bannedCustomer": "Αποκλεισμένος Πελάτης",
+      "banReason": "Λόγος",
+      "bannedOn": "Αποκλείστηκε στις"
     },
     "orderDetails": {
       "title": "Λεπτομέρειες Παραγγελίας - #{{orderId}}",
@@ -2536,7 +2542,19 @@
       "enterToTest": "Εισάγετε ID Τερματικού και Κλειδί API για δοκιμή",
       "connected": "Συνδέθηκε στο Admin API ✓",
       "connectionFailed": "Η σύνδεση απέτυχε: {{msg}}",
-      "networkError": "Σφάλμα δικτύου"
+      "networkError": "Σφάλμα δικτύου",
+      "security": "Ασφάλεια",
+      "sessionTimeout": "Χρονικό Όριο Συνεδρίας",
+      "sessionTimeoutHelp": "Αυτόματη αποσύνδεση μετά από αδράνεια",
+      "sessionTimeoutStatus": "Αυτόματη αποσύνδεση μετά από {{minutes}} λεπτά",
+      "sessionTimeoutOff": "Χρονικό όριο απενεργοποιημένο",
+      "sessionTimeoutEnabled": "Χρονικό όριο συνεδρίας ενεργοποιήθηκε",
+      "sessionTimeoutDisabled": "Χρονικό όριο συνεδρίας απενεργοποιήθηκε",
+      "sessionTimeoutError": "Αποτυχία ενημέρωσης ρυθμίσεων",
+      "sessionTimeoutSaved": "Χρονικό όριο ορίστηκε σε {{minutes}} λεπτά",
+      "sessionTimeoutInvalid": "Το χρονικό όριο πρέπει να είναι 1-480 λεπτά",
+      "timeoutDuration": "Διάρκεια Χρονικού Ορίου",
+      "timeoutRange": "1-480 λεπτά"
     },
     "orderDetails": {
       "title": "Λεπτομέρειες Παραγγελίας",
@@ -2784,7 +2802,9 @@
     "conflictResolved": "Η σύγκρουση επιλύθηκε επιτυχώς",
     "conflictFailed": "Αποτυχία επίλυσης σύγκρουσης",
     "noDeliveryOrdersSelected": "Επιλέξτε παραγγελίες παράδοσης για να αναθέσετε οδηγό",
-    "noCancelledOrdersSelected": "Δεν υπάρχουν ακυρωμένες παραγγελίες"
+    "noCancelledOrdersSelected": "Δεν υπάρχουν ακυρωμένες παραγγελίες",
+    "bulkDeliveryDisabled": "Δεν μπορείτε να επιλέξετε πολλούς διαφορετικούς τύπους παραγγελιών",
+    "bulkPickupDisabled": "Δεν μπορείτε να επιλέξετε πολλούς διαφορετικούς τύπους παραγγελιών"
   },
   "bulkActions": {
     "driver": "Οδηγός",
@@ -3473,7 +3493,8 @@
       "ringer": "Κουδούνι:",
       "postCode": "Τ.Κ.:",
       "city": "Πόλη:",
-      "notes": "Σημειώσεις:"
+      "notes": "Σημειώσεις:",
+      "driver": "Οδηγός:"
     },
     "orderTypes": {
       "dineIn": "Εντός Καταστήματος",
@@ -3491,6 +3512,7 @@
       "subtotal": "Υποσύνολο:",
       "tax": "ΦΠΑ:",
       "deliveryFee": "Κόστος Διανομής:",
+      "discount": "Έκπτωση",
       "tip": "Φιλοδώρημα:",
       "total": "ΣΥΝΟΛΟ:"
     },

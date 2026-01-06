@@ -35,7 +35,9 @@ export class CustomerDataService extends BaseService {
         updated_by TEXT,
         last_synced_at TEXT,
         deleted_at TEXT,
-        is_banned INTEGER DEFAULT 0
+        is_banned INTEGER DEFAULT 0,
+        ban_reason TEXT,
+        banned_at TEXT
       )
     `).run();
 
@@ -62,6 +64,24 @@ export class CustomerDataService extends BaseService {
     } catch (error: any) {
       if (!error.message?.includes('duplicate column name')) {
         console.warn('Error adding postal_code column:', error);
+      }
+    }
+
+    // Add ban_reason column if it doesn't exist (for existing databases)
+    try {
+      this.db.prepare(`ALTER TABLE customers ADD COLUMN ban_reason TEXT`).run();
+    } catch (error: any) {
+      if (!error.message?.includes('duplicate column name')) {
+        console.warn('Error adding ban_reason column:', error);
+      }
+    }
+
+    // Add banned_at column if it doesn't exist (for existing databases)
+    try {
+      this.db.prepare(`ALTER TABLE customers ADD COLUMN banned_at TEXT`).run();
+    } catch (error: any) {
+      if (!error.message?.includes('duplicate column name')) {
+        console.warn('Error adding banned_at column:', error);
       }
     }
 
@@ -136,8 +156,8 @@ export class CustomerDataService extends BaseService {
         INSERT OR REPLACE INTO customers (
           id, name, full_name, phone, email, address, postal_code, loyalty_points,
           total_orders, last_order_date, created_at, updated_at,
-          version, updated_by, last_synced_at, is_banned
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          version, updated_by, last_synced_at, is_banned, ban_reason, banned_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         customer.id,
         customer.name || customer.full_name,
@@ -154,7 +174,9 @@ export class CustomerDataService extends BaseService {
         customer.version || 1,
         customer.updated_by || null,
         new Date().toISOString(),
-        (customer as any).is_banned ? 1 : 0
+        customer.is_banned ? 1 : 0,
+        customer.ban_reason || null,
+        customer.banned_at || null
       );
 
       // Upsert addresses if provided
@@ -382,7 +404,9 @@ export class CustomerDataService extends BaseService {
       version: row.version,
       updated_by: row.updated_by,
       last_synced_at: row.last_synced_at,
-      is_banned: Boolean(row.is_banned)
+      is_banned: Boolean(row.is_banned),
+      ban_reason: row.ban_reason || null,
+      banned_at: row.banned_at || null
     };
   }
 }

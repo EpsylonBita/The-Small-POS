@@ -49,6 +49,8 @@
     "hide": "Hide",
     "show": "Show",
     "continue": "Continue",
+    "minutes": "min",
+    "presets": "Presets",
     "status": {
       "active": "Active",
       "inactive": "Inactive",
@@ -1966,7 +1968,11 @@
       "continue": "Continue",
       "continueWithAddress": "Continue with {{address}}",
       "confirmDeleteAddress": "Delete this address?",
-      "deleteAddressFailed": "Failed to delete address"
+      "deleteAddressFailed": "Failed to delete address",
+      "banned": "BANNED",
+      "bannedCustomer": "Banned Customer",
+      "banReason": "Reason",
+      "bannedOn": "Banned on"
     },
     "orderDetails": {
       "title": "Order Details - #{{orderId}}",
@@ -2527,7 +2533,19 @@
       "enterToTest": "Enter Terminal ID and API Key to test",
       "connected": "Connected to Admin API ✓",
       "connectionFailed": "Connection failed: {{msg}}",
-      "networkError": "Network error"
+      "networkError": "Network error",
+      "security": "Security",
+      "sessionTimeout": "Session Timeout",
+      "sessionTimeoutHelp": "Auto-logout after inactivity",
+      "sessionTimeoutStatus": "Auto-logout after {{minutes}} min",
+      "sessionTimeoutOff": "Session timeout disabled",
+      "sessionTimeoutEnabled": "Session timeout enabled",
+      "sessionTimeoutDisabled": "Session timeout disabled",
+      "sessionTimeoutError": "Failed to update settings",
+      "sessionTimeoutSaved": "Session timeout set to {{minutes}} minutes",
+      "sessionTimeoutInvalid": "Timeout must be 1-480 minutes",
+      "timeoutDuration": "Timeout Duration",
+      "timeoutRange": "1-480 minutes"
     },
     "orderDetails": {
       "title": "Order Details",
@@ -2740,6 +2758,9 @@
     "reservationComingSoon": "Reservation feature coming soon"
   },
   "orderDashboard": {
+    "delivery": "Delivery",
+    "pickup": "Pickup",
+    "dineIn": "Dine-in",
     "approveOrderFailed": "Failed to approve order",
     "declineOrderFailed": "Failed to decline order",
     "driverAssigned": "Driver assigned to {{count}} order(s)",
@@ -2770,7 +2791,11 @@
     "orderItemsUpdated": "Order items updated for {{count}} order(s)",
     "orderItemsFailed": "Failed to update order items",
     "conflictResolved": "Conflict resolved successfully",
-    "conflictFailed": "Failed to resolve conflict"
+    "conflictFailed": "Failed to resolve conflict",
+    "bulkDeliveryDisabled": "Cannot select in bulk different order types",
+    "bulkPickupDisabled": "Cannot select in bulk different order types",
+    "noDeliveryOrdersSelected": "Select delivery orders to assign a driver",
+    "noCancelledOrdersSelected": "No cancelled orders selected"
   },
   "bulkActions": {
     "driver": "Driver",
@@ -3232,7 +3257,8 @@
       "ringer": "Ringer:",
       "postCode": "Post Code:",
       "city": "City:",
-      "notes": "Notes:"
+      "notes": "Notes:",
+      "driver": "Driver:"
     },
     "orderTypes": {
       "dineIn": "Dine-In",
@@ -3250,6 +3276,7 @@
       "subtotal": "Subtotal:",
       "tax": "Tax:",
       "deliveryFee": "Delivery Fee:",
+      "discount": "Discount",
       "tip": "Tip:",
       "total": "TOTAL:"
     },

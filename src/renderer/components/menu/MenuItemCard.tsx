@@ -42,12 +42,12 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
   const [showQuantitySelector, setShowQuantitySelector] = useState(false);
 
   // For customizable items, always open the modal
-  // For non-customizable items, show quick add with quantity selector
+  // For non-customizable items, add directly to cart with quantity 1
   const handleCardClick = () => {
     if (item.is_customizable) {
       onSelect();
     } else if (onQuickAdd) {
-      setShowQuantitySelector(true);
+      onQuickAdd(item, 1); // Add directly to cart - quantity can be adjusted in cart
     } else {
       onSelect();
     }

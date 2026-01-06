@@ -323,12 +323,16 @@ export function registerPrintHandlers() {
       // Debug: Log the full item structure to see what fields are available
       if (order.items && order.items.length > 0) {
         console.log(`[payment:print-receipt] First item structure:`, JSON.stringify(order.items[0], null, 2));
-        // Debug: Log notes field specifically for all items
+        // Debug: Log customizations and categoryName for ALL items
         order.items.forEach((item: any, idx: number) => {
-          console.log(`[payment:print-receipt] Item ${idx} notes:`, {
-            notes: item.notes,
-            special_instructions: item.special_instructions,
-            hasNotes: !!(item.notes || item.special_instructions)
+          console.log(`[payment:print-receipt] Item ${idx} details:`, {
+            name: item.name,
+            categoryName: item.categoryName,
+            category_name: item.category_name,
+            customizationsType: typeof item.customizations,
+            customizationsIsArray: Array.isArray(item.customizations),
+            customizationsLength: Array.isArray(item.customizations) ? item.customizations.length : 'N/A',
+            customizationsRaw: JSON.stringify(item.customizations)
           });
         });
       }
@@ -346,27 +350,37 @@ export function registerPrintHandlers() {
             ? JSON.parse(item.customizations)
             : item.customizations;
 
-          // Process customizations object
-          Object.values(customizations || {}).forEach((custom: any) => {
+          console.log(`[payment:print-receipt] Processing customizations for ${item.name}:`, {
+            type: typeof customizations,
+            isArray: Array.isArray(customizations),
+            length: Array.isArray(customizations) ? customizations.length : Object.keys(customizations || {}).length
+          });
+
+          // Process customizations (array or object)
+          const customizationValues = Array.isArray(customizations) ? customizations : Object.values(customizations || {});
+          customizationValues.forEach((custom: any) => {
             if (custom && typeof custom === 'object') {
               const quantity = custom.quantity || 1;
-              const name = custom.name || custom.ingredient?.name || 'Unknown';
+              const name = custom.name || custom.ingredient?.name || custom.optionName || 'Unknown';
               const isLittle = custom.isLittle || custom.is_little;
-              // Get price from ingredient (three-tier pricing)
+              const isWithout = custom.isWithout || custom.is_without;
+              console.log(`[payment:print-receipt] Customization:`, { name, quantity, isLittle, isWithout });
+
+              // Get price from ingredient (three-tier pricing) - only for "with" items
               const getIngredientPrice = () => {
+                if (isWithout) return 0; // No price for "without" items
                 if (order.order_type === 'delivery') return custom.ingredient?.delivery_price ?? custom.ingredient?.price;
                 if (order.order_type === 'dine-in') return custom.ingredient?.dine_in_price ?? custom.ingredient?.pickup_price ?? custom.ingredient?.price;
                 return custom.ingredient?.pickup_price ?? custom.ingredient?.price;
               };
               const price = getIngredientPrice();
 
-              let modName = name;
-              if (isLittle) modName += ' (little)';
-
               modifiers.push({
-                name: modName,
-                quantity: quantity > 1 ? quantity : undefined,
-                price: price || undefined
+                name: name,
+                quantity: isWithout ? undefined : (quantity > 1 ? quantity : undefined),
+                price: isWithout ? undefined : (price || undefined),
+                isWithout: isWithout || false,
+                isLittle: isLittle || false
               });
             }
           });
@@ -389,12 +403,14 @@ export function registerPrintHandlers() {
         };
       }));
 
-      // Debug: Log printItems to verify specialInstructions are set
+      // Debug: Log printItems to verify modifiers and categoryName
       console.log(`[payment:print-receipt] PrintItems created:`, printItems.map((pi, idx) => ({
         idx,
         name: pi.name,
-        specialInstructions: pi.specialInstructions,
-        hasSpecialInstructions: !!pi.specialInstructions
+        categoryName: pi.categoryName,
+        modifiersCount: pi.modifiers?.length || 0,
+        modifiers: pi.modifiers ? JSON.stringify(pi.modifiers) : 'none',
+        specialInstructions: pi.specialInstructions
       })));
 
       // Map order type to receipt format
@@ -407,6 +423,11 @@ export function registerPrintHandlers() {
       // First try to use the values stored in the order itself
       let ringerName: string | undefined = (order as any).name_on_ringer || undefined;
       let deliveryNotes: string | undefined = (order as any).delivery_notes || undefined;
+      // Separate address fields for detailed receipt display
+      let streetAddress: string | undefined = undefined;
+      let postalCode: string | undefined = undefined;
+      let city: string | undefined = undefined;
+      let floorNumber: string | undefined = undefined;
 
       console.log(`[payment:print-receipt] Initial values from order:`, {
         ringerName,
@@ -417,7 +438,7 @@ export function registerPrintHandlers() {
       });
 
       // If not available in order, try to fetch from customer/address (fallback for older orders)
-      if (orderType === 'delivery' && order.customer_phone && supabaseClient && (!ringerName || !deliveryNotes)) {
+      if (orderType === 'delivery' && order.customer_phone && supabaseClient) {
         console.log(`[payment:print-receipt] Fetching from Supabase (ringerName: ${ringerName}, deliveryNotes: ${deliveryNotes})`);
         try {
           // First get the customer with ringer_name
@@ -434,15 +455,15 @@ export function registerPrintHandlers() {
             console.log(`[payment:print-receipt] Found ringer name from customer: ${ringerName}`);
           }
 
-          // Then try to find the matching address to get notes
-          if (customer?.id && order.delivery_address && !deliveryNotes) {
+          // Then try to find the matching address to get notes and separate address fields
+          if (customer?.id && order.delivery_address) {
             // Try to match by street address
             const deliveryStreet = order.delivery_address.split(',')[0]?.trim();
             console.log(`[payment:print-receipt] Looking for address with street: ${deliveryStreet}`);
             if (deliveryStreet) {
               const { data: addresses, error: addressError } = await supabaseClient
                 .from('customer_addresses')
-                .select('notes, name_on_ringer')
+                .select('street_address, city, postal_code, floor_number, notes, name_on_ringer')
                 .eq('customer_id', customer.id)
                 .ilike('street_address', `%${deliveryStreet}%`)
                 .limit(1);
@@ -451,6 +472,13 @@ export function registerPrintHandlers() {
 
               if (addresses && addresses.length > 0) {
                 const addr = addresses[0];
+                // Get separate address fields
+                streetAddress = addr.street_address || undefined;
+                city = addr.city || undefined;
+                postalCode = addr.postal_code || undefined;
+                floorNumber = addr.floor_number || undefined;
+                console.log(`[payment:print-receipt] Found address details:`, { streetAddress, city, postalCode, floorNumber });
+
                 if (!deliveryNotes && addr.notes) {
                   deliveryNotes = addr.notes;
                   console.log(`[payment:print-receipt] Found delivery notes from address: ${deliveryNotes}`);
@@ -476,6 +504,10 @@ export function registerPrintHandlers() {
       }
 
       // Build receipt data
+      // Get discount amount and percentage from order (stored as discount_amount/discount_percentage in DB)
+      const discountAmount = (order as any).discount_amount || (order as any).discountAmount || 0;
+      const discountPercentage = (order as any).discount_percentage || (order as any).discountPercentage || 0;
+
       const receiptData: ReceiptData = {
         orderNumber: order.order_number || order.id.substring(0, 8),
         orderType: orderType,
@@ -485,15 +517,24 @@ export function registerPrintHandlers() {
         tax: (order as any).tax || 0,
         tip: (order as any).tip || 0,
         deliveryFee: order.delivery_fee || 0,
+        discount: discountAmount > 0 ? discountAmount : undefined,
+        discountPercentage: discountPercentage > 0 ? discountPercentage : undefined,
         total: order.total_amount || 0,
         paymentMethod: order.payment_method || 'cash',
         customerName: order.customer_name || undefined,
         customerPhone: order.customer_phone || undefined,
         deliveryAddress: order.delivery_address || undefined,
+        streetAddress: streetAddress,
+        postalCode: postalCode,
+        city: city,
+        floorNumber: floorNumber,
         deliveryNotes: deliveryNotes,
         ringerName: ringerName,
-        tableName: order.table_number || undefined
+        tableName: order.table_number || undefined,
+        driverName: (order as any).driver_name || undefined
       };
+
+      console.log(`[payment:print-receipt] Discount info:`, { discountAmount, discountPercentage, subtotal: order.subtotal, total: order.total_amount });
 
       console.log(`[payment:print-receipt] Receipt data prepared:`, {
         orderNumber: receiptData.orderNumber,
@@ -541,7 +582,8 @@ export function registerPrintHandlers() {
         receiptTemplate: receiptTemplate
       });
 
-      const receiptBuffer = generator.generateReceipt(receiptData);
+      // Use async generation to avoid blocking main thread during bitmap rendering
+      const receiptBuffer = await generator.generateReceiptAsync(receiptData);
       console.log(`[payment:print-receipt] Receipt buffer generated:`, receiptBuffer.length, 'bytes');
 
       // Submit print job

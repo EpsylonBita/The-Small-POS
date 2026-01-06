@@ -58,9 +58,13 @@ export interface Customer {
   total_orders?: number; // Computed field
   last_order_date?: string; // Computed field
   is_banned?: boolean; // Ban status
+  ban_reason?: string; // Reason for banning the customer
+  banned_at?: string; // Timestamp when customer was banned
   // Ringer name - name displayed on doorbell for delivery
   name_on_ringer?: string;
   ringer_name?: string; // Alias for name_on_ringer (Supabase field name)
+  // Branch association
+  branch_id?: string;
   // Sync metadata
   version?: number;
   updated_by?: string;

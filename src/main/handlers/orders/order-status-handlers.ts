@@ -168,15 +168,15 @@ export function registerOrderStatusHandlers(): void {
           console.warn('[IPC order:update-status] Error while recording driver earning (ignored):', e);
         }
 
-        console.log('[IPC order:update-status] ✅ Update successful, triggering fast sync', { orderId, status: coercedStatus });
+        console.log('[IPC order:update-status] ✅ Update successful, triggering immediate order sync', { orderId, status: coercedStatus });
 
-        // Fast sync
+        // Immediate sync of this specific order (bypasses queue for guaranteed status update)
         if (syncService) {
           try {
-            await syncService.forceSyncFastLocal(3000);
-            console.log('[IPC order:update-status] ✅ Fast sync completed', { orderId, status: coercedStatus });
+            await syncService.pushSingleOrderNow(orderId, 5000);
+            console.log('[IPC order:update-status] ✅ Order sync completed', { orderId, status: coercedStatus });
           } catch (e) {
-            console.warn('[IPC order:update-status] ⚠️ Fast local sync after status update failed:', e);
+            console.warn('[IPC order:update-status] ⚠️ Order sync after status update failed:', e);
           }
         }
 

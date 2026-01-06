@@ -228,6 +228,8 @@ export class CustomerService {
         loyalty_points,
         total_orders,
         is_banned,
+        ban_reason,
+        banned_at,
         created_at,
         updated_at,
         version,
@@ -298,6 +300,8 @@ export class CustomerService {
       total_orders: data.total_orders || 0,
       last_order_date: data.last_order_date,
       is_banned: Boolean(data.is_banned),
+      ban_reason: data.ban_reason || null, // Reason for banning the customer
+      banned_at: data.banned_at || null, // Timestamp when customer was banned
       // Ringer name - map from ringer_name or name_on_ringer
       name_on_ringer: data.ringer_name || data.name_on_ringer,
       ringer_name: data.ringer_name || data.name_on_ringer,
@@ -433,6 +437,8 @@ export class CustomerService {
           loyalty_points,
           total_orders,
           is_banned,
+          ban_reason,
+          banned_at,
           created_at,
           updated_at,
           version,

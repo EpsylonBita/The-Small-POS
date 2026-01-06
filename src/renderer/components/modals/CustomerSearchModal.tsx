@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search } from 'lucide-react';
+import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getApiUrl, environment } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -30,6 +30,9 @@ interface Customer {
   name_on_ringer?: string;
   version?: number;
   addresses?: CustomerAddress[];
+  is_banned?: boolean;
+  ban_reason?: string;
+  banned_at?: string;
 }
 
 interface CustomerSearchModalProps {
@@ -195,6 +198,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           name_on_ringer: c.name_on_ringer,
           version: c.version,
           addresses: c.addresses,
+          is_banned: c.is_banned,
+          ban_reason: c.ban_reason,
+          banned_at: c.banned_at,
         }));
         setError(null);
         setCustomers(customersList);
@@ -213,6 +219,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           name_on_ringer: result.customer.name_on_ringer,
           version: result.customer.version,
           addresses: result.customer.addresses,
+          is_banned: result.customer.is_banned,
+          ban_reason: result.customer.ban_reason,
+          banned_at: result.customer.banned_at,
         };
 
         // Clear error when customer is found
@@ -486,6 +495,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             name_on_ringer: result.customer.name_on_ringer,
             version: result.customer.version,
             addresses: result.customer.addresses,
+            is_banned: result.customer.is_banned,
+            ban_reason: result.customer.ban_reason,
+            banned_at: result.customer.banned_at,
           };
           setCustomer(customerObj);
           setCustomers([]);
@@ -562,14 +574,28 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             {customers.map((c) => (
               <div
                 key={c.id}
-                className="liquid-glass-modal-card cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800/30 transition-all mb-3 relative group"
+                className={`liquid-glass-modal-card cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800/30 transition-all mb-3 relative group ${c.is_banned ? 'border-red-500/50 bg-red-500/5' : ''}`}
                 onClick={() => handleSelectFromList(c)}
               >
                 <div className="flex items-center gap-3">
-                  <User className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <User className={`w-4 h-4 ${c.is_banned ? 'text-red-500' : 'text-blue-600 dark:text-blue-400'}`} />
                   <div className="flex-1 min-w-0">
-                    <p className="font-medium liquid-glass-modal-text truncate">{c.name}</p>
+                    <div className="flex items-center gap-2">
+                      <p className={`font-medium truncate ${c.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>{c.name}</p>
+                      {c.is_banned && (
+                        <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-500 rounded-full flex items-center gap-1">
+                          <Ban className="w-3 h-3" />
+                          {t('modals.customerSearch.banned', 'BANNED')}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm liquid-glass-modal-text-muted">📞 {c.phone}</p>
+                    {c.is_banned && c.ban_reason && (
+                      <p className="text-xs text-red-400 mt-1 flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        {c.ban_reason}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -579,13 +605,44 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       )}
 
       {customer && (
-        <div className="mb-6 liquid-glass-modal-card">
+        <div className={`mb-6 liquid-glass-modal-card ${customer.is_banned ? 'border-red-500/50' : ''}`}>
+          {/* Banned Customer Warning Banner */}
+          {customer.is_banned && (
+            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl">
+              <div className="flex items-center gap-2 text-red-500 mb-1">
+                <Ban className="w-5 h-5" />
+                <span className="font-semibold text-sm uppercase tracking-wide">
+                  {t('modals.customerSearch.bannedCustomer', 'Banned Customer')}
+                </span>
+              </div>
+              {customer.ban_reason && (
+                <p className="text-sm text-red-400 flex items-start gap-2 mt-2">
+                  <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>{t('modals.customerSearch.banReason', 'Reason')}: {customer.ban_reason}</span>
+                </p>
+              )}
+              {customer.banned_at && (
+                <p className="text-xs text-red-400/70 mt-1 ml-6">
+                  {t('modals.customerSearch.bannedOn', 'Banned on')}: {new Date(customer.banned_at).toLocaleDateString()}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="flex items-start gap-3">
-            <User className="w-5 h-5 text-green-600 dark:text-green-400 mt-1" />
+            <User className={`w-5 h-5 mt-1 ${customer.is_banned ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`} />
             <div className="flex-1">
-              <h3 className="font-medium liquid-glass-modal-text mb-1">
-                {customer.name}
-              </h3>
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className={`font-medium ${customer.is_banned ? 'text-red-500' : 'liquid-glass-modal-text'}`}>
+                  {customer.name}
+                </h3>
+                {customer.is_banned && (
+                  <span className="px-2 py-0.5 text-xs font-semibold bg-red-500/20 text-red-500 rounded-full flex items-center gap-1">
+                    <Ban className="w-3 h-3" />
+                    {t('modals.customerSearch.banned', 'BANNED')}
+                  </span>
+                )}
+              </div>
               <p className="text-sm liquid-glass-modal-text-muted mb-1">
                 📞 {customer.phone}
               </p>
