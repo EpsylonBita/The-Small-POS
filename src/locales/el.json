@@ -2057,7 +2057,7 @@
       "cashReconciliation": "💰 Συμφωνία Μετρητών",
       "reviewAndConfirm": "Ελέγξτε και επιβεβαιώστε το ταμείο μετρητών σας",
       "openingCashLabel": "Αρχικά Μετρητά",
-      "cashOrdersLabel": "+ Παραγγελίες Μετρητών",
+      "cashOrdersLabel": "+ Παραλαβή/Επιτόπια Μετρητά",
       "canceledOrdersLabel": "- Ακυρωμένες Παραγγελίες",
       "expensesLabel": "- Έξοδα",
       "staffPaymentsLabel": "- Πληρωμές Προσωπικού",
@@ -2113,7 +2113,59 @@
       "ordersCount": "Παραγγελίες",
       "tableDetails": "Λεπτομέρειες Τραπεζιού",
       "tableNumber": "Τραπέζι",
-      "tableConsumption": "Κατανάλωση Τραπεζιού"
+      "tableConsumption": "Κατανάλωση Τραπεζιού",
+      "driverPaymentNote": "Η πληρωμή οδηγού θα καταγραφεί όταν επιστρέψετε τα μετρητά στον ταμία",
+      "waiterPaymentNote": "Η πληρωμή θα καταγραφεί όταν επιστρέψετε τα μετρητά στον ταμία",
+      "paymentDeductedNote": "Η πληρωμή έχει ήδη αφαιρεθεί από το ποσό επιστροφής",
+      "payment": "Πληρωμή",
+      "paymentHistory": "Ιστορικό Πληρωμών",
+      "todayTotal": "Σύνολο Σήμερα: €{{amount}}",
+      "paymentTypes": {
+        "wage": "Μισθός",
+        "tip": "Φιλοδώρημα",
+        "bonus": "Μπόνους",
+        "advance": "Προκαταβολή",
+        "other": "Άλλο"
+      },
+      "paidBy": "Πληρώθηκε από {{name}} στις {{time}}",
+      "expected": "Αναμενόμενο",
+      "paymentNotesPlaceholder": "Προσθήκη σημειώσεων (προαιρετικό)",
+      "confirmLargePayment": "Επιβεβαίωση Μεγάλης Πληρωμής",
+      "largePaymentWarning": "Πρόκειται να καταγράψετε πληρωμή {{amount}}, που υπερβαίνει το όριο {{threshold}}. Επιβεβαιώστε ότι είναι σωστό.",
+      "confirmPayment": "Επιβεβαίωση Πληρωμής",
+      "varianceLabel": "Διακύμανση Μετρητών",
+      "variancePositive": "Πλεόνασμα μετρητών στο ταμείο.",
+      "varianceNegative": "Έλλειμμα μετρητών στο ταμείο.",
+      "varianceBalanced": "Τέλεια! Το ταμείο είναι ισοσκελισμένο.",
+      "varianceBreakdown": "Ανάλυση Μετρητών",
+      "cashRefundsLabel": "- Επιστροφές Μετρητών",
+      "cashDropsLabel": "- Καταθέσεις Μετρητών",
+      "driverCashGivenLabel": "- Μετρητά σε Οδηγούς",
+      "driverCashReturnedLabel": "+ Επιστροφές από Οδηγούς",
+      "inheritedDriverReturnsLabel": "+ Κληρονομημένες Επιστροφές Οδηγών",
+      "informationalOnly": "μόνο πληροφοριακά",
+      "varianceExplanation": "Επεξήγηση",
+      "shiftClosedSuccess": "Η βάρδια έκλεισε επιτυχώς!",
+      "confirmZeroTitle": "Επιβεβαίωση Μηδενικών Τελικών Μετρητών",
+      "confirmZeroMessage": "Είστε σίγουροι ότι θέλετε να κλείσετε τη βάρδια με 0,00€ τελικά μετρητά;",
+      "driverPaymentNote": "Η πληρωμή οδηγού θα καταγραφεί όταν επιστρέψετε τα μετρητά στο ταμείο",
+      "waiterPaymentNote": "Η πληρωμή θα καταγραφεί όταν επιστρέψετε τα μετρητά στο ταμείο",
+      "kitchenPaymentNote": "Η πληρωμή θα καταγραφεί από τον ταμία κατά την αποχώρησή σας",
+      "payment": "Πληρωμή",
+      "transferredDriversCount": "μεταφερμένοι οδηγοί",
+      "informationOnlyTitle": "Μόνο Πληροφοριακά",
+      "notDeducted": "δεν αφαιρείται από το αναμενόμενο",
+      "staffPaymentsMade": "Πληρωμές Προσωπικού",
+      "staffPaymentsReturnedViaCheckouts": "Οι πληρωμές προσωπικού επιστρέφονται μέσω αποχωρήσεων",
+      "recordStaffPayments": "Καταγραφή Πληρωμών Προσωπικού",
+      "addPayment": "Προσθήκη Πληρωμής",
+      "staffPaymentsTitle": "Πληρωμές Προσωπικού",
+      "totalStaffPayments": "Σύνολο Πληρωμών Προσωπικού",
+      "driverStarting": "Αρχικό",
+      "driverEarnings": "Κέρδη",
+      "driverReturns": "Επιστρέφει",
+      "driverTakes": "Παίρνει",
+      "driverRole": "Οδηγός"
     },
     "zReport": {
       "title": "Αναφορά Z - {{date}}",
@@ -2351,6 +2403,7 @@
     "zReport": {
       "title": "Αναφορά Z - {{date}}",
       "selectDate": "Επιλογή ημερομηνίας αναφοράς",
+      "periodSince": "Περίοδος από: {{date}} {{time}}",
       "loadFailed": "Αποτυχία φόρτωσης Αναφοράς Z",
       "loading": "Φόρτωση αναφοράς…",
       "tabs": {
@@ -3604,7 +3657,12 @@
       "expected": "Αναμενόμενο",
       "closing": "Κλείσιμο",
       "cashTotal": "Σύνολο Μετρητών",
-      "cardTotal": "Σύνολο Κάρτας"
+      "cardTotal": "Σύνολο Κάρτας",
+      "formula": {
+        "cashDrawer": "Αναμενόμενο = Άνοιγμα + Πωλήσεις - Επιστροφές - Έξοδα - Drops - Δοθέντα + Επιστραφέντα",
+        "driver": "Επιστροφή = Αρχικά + Εισπραχθέντα - Έξοδα - Πληρωμή",
+        "staffPayments": "Πληρωμές προσωπικού καταγράφονται μόνο από τον ταμία"
+      }
     },
     "cashierCheckout": {
       "title": "ΑΝΑΦΟΡΑ ΤΑΜΙΑ",
@@ -3612,10 +3670,12 @@
       "ordersBreakdown": "ΑΝΑΛΥΣΗ ΠΑΡΑΓΓΕΛΙΩΝ",
       "pickupDineIn": "ΠΑΡΑΛΑΒΗ/ΕΝΤΟΣ",
       "delivery": "ΔΙΑΝΟΜΗ",
-      "staffPayments": "ΒΑΡΔΙΕΣ & ΠΛΗΡΩΜΕΣ ΠΡΟΣΩΠΙΚΟΥ",
-      "expenses": "ΕΞΟΔΑ",
+      "staffPayments": "Πληρωμές Προσωπικού",
+      "expenses": "Έξοδα",
       "transferredDrivers": "ΜΕΤΑΦΕΡΟΜΕΝΟΙ ΟΔΗΓΟΙ",
       "transferredNote": "Ενεργοί οδηγοί από προηγούμενο ταμία",
+      "inheritedDrivers": "ΚΛΗΡΟΝΟΜΗΜΕΝΟΙ ΟΔΗΓΟΙ",
+      "inheritedNote": "Οδηγοί από προηγούμενη βάρδια ταμία",
       "cashDrawer": "ΣΥΝΟΨΗ ΤΑΜΕΙΟΥ",
       "variance": "ΔΙΑΦΟΡΑ",
       "overage": "ΠΛΕΟΝΑΣΜΑ",
@@ -3637,6 +3697,7 @@
       "totalStaffPayments": "Συνολικές Πληρωμές Προσωπικού",
       "totalExpenses": "Συνολικά Έξοδα",
       "totalTransferred": "Σύνολο Μεταφερόμενων",
+      "totalInherited": "Σύνολο Κληρονομημένων",
       "openingAmount": "Αρχικό Ποσό",
       "cashSales": "Πωλήσεις Μετρητών",
       "cashRefunds": "Επιστροφές Μετρητών",
@@ -3644,10 +3705,16 @@
       "driverCashGiven": "Μετρητά σε Οδηγό",
       "driverCashReturned": "Επιστροφή Μετρητών Οδηγού",
       "expectedAmount": "ΑΝΑΜΕΝΟΜΕΝΟ ΠΟΣΟ",
+      "expectedInDrawer": "ΑΝΑΜΕΝΟΜΕΝΟ ΣΤΟ ΤΑΜΕΙΟ",
       "closingAmount": "ΠΟΣΟ ΚΛΕΙΣΙΜΑΤΟΣ",
       "notes": "ΣΗΜΕΙΩΣΕΙΣ",
       "payment": "Πληρωμή",
-      "driversTransferred": "οδηγός/οί μεταφέρθηκαν στον επόμενο ταμία"
+      "driversTransferred": "οδηγός/οί μεταφέρθηκαν στον επόμενο ταμία",
+      "informationOnly": "ΜΟΝΟ ΓΙΑ ΕΝΗΜΕΡΩΣΗ",
+      "startingAmount": "Αρχικό Ποσό",
+      "cashCollected": "Μετρητά που Εισπράχθηκαν",
+      "cardAmount": "Ποσό Κάρτας",
+      "expectedReturn": "Αναμενόμενη Επιστροφή"
     },
     "driverCheckout": {
       "title": "ΑΠΟΧΩΡΗΣΗ ΟΔΗΓΟΥ",
@@ -3752,6 +3819,23 @@
       "total": "ΣΥΝΟΛΟ",
       "mixed": "Μικτή (Μετρητά + Κάρτα)",
       "collectCash": "ΕΙΣΠΡΑΞΗ ΜΕΤΡΗΤΩΝ ΑΠΟ ΠΕΛΑΤΗ"
+    },
+    "formula": {
+      "label": "Τύπος:",
+      "waiter": "Αρχικά + Εισπραχθέντα - Έξοδα = Επιστροφή",
+      "waiterV1": "Αρχικά + Εισπραχθέντα - Έξοδα - Πληρωμή = Επιστροφή",
+      "driver": "Αρχικά + Εισπραχθέντα - Έξοδα = Επιστροφή",
+      "cashier": "Άνοιγμα + Πωλήσεις - Επιστροφές - Έξοδα - Drops - Δοθέντα + Επιστραφέντα + Κληρονομ. = Αναμενόμενο",
+      "note": {
+        "staffPayments": "Πληρωμές προσωπικού μόνο για ενημέρωση (ΔΕΝ αφαιρούνται από αναμενόμενο)",
+        "staffPaymentsInfo": "Πληρωμές προσωπικού μόνο για ενημέρωση",
+        "staffPaymentsReturned": "Το προσωπικό λαμβάνει αυτό το ποσό πίσω",
+        "transferredDrivers": "Επιστροφές κληρονομημένων οδηγών περιλαμβάνονται",
+        "orderTimes": "Ώρες παραγγελιών για επαλήθευση παράδοσης",
+        "simplifiedAddresses": "Απλοποιημένες διευθύνσεις για αναγνωσιμότητα",
+        "kitchenPayment": "Η πληρωμή καταγράφεται κατά το checkout του ταμία",
+        "paymentAtCashier": "Η πληρωμή διαχειρίζεται στο checkout του ταμία"
+      }
     }
   }
 }

@@ -47,6 +47,13 @@ export interface StaffShift {
    * transferred_to_cashier_shift_id is set to the new cashier's shift ID.
    */
   is_transfer_pending?: boolean;
+  /**
+   * Calculation version for the shift formula.
+   * Version 1 (legacy): Staff payments deducted from cashier expected, payment_amount included in driver/waiter return
+   * Version 2 (current): Staff payments informational only, payment_amount NOT included in driver/waiter return
+   * NULL or undefined defaults to version 1 for backward compatibility.
+   */
+  calculation_version?: number;
   created_at: string;
   updated_at: string;
 }

@@ -172,6 +172,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             className="liquid-glass-modal-input font-semibold"
             aria-label={t('modals.zReport.selectDate')}
           />
+          {/* Period indicator - shows when the current period started */}
+          {zReport && (zReport as any).periodStart && (
+            <div className="mt-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
+              {t('modals.zReport.periodSince', {
+                date: new Date((zReport as any).periodStart).toLocaleDateString(),
+                time: new Date((zReport as any).periodStart).toLocaleTimeString()
+              })}
+            </div>
+          )}
         </div>
 
         {/* Tabs */}
@@ -329,8 +338,23 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                       </tbody>
                     </table>
                   </div>
+                  {/* Driver Cash Formula Explanation */}
+                  <div className="mt-3 pt-2 border-t border-yellow-500/20">
+                    <p className="text-xs text-yellow-700/80 dark:text-yellow-300/70 text-center">
+                      <span className="font-semibold">{t('receipt.formula.label')}</span>{' '}
+                      {t('receipt.zreport.formula.driver')}
+                    </p>
+                  </div>
                 </div>
               )}
+
+              {/* Cash Drawer Formula Explanation */}
+              <div className="mt-4 pt-3 border-t border-yellow-500/20">
+                <p className="text-xs text-yellow-700/80 dark:text-yellow-300/70 text-center">
+                  <span className="font-semibold">{t('receipt.formula.label')}</span>{' '}
+                  {t('receipt.zreport.formula.cashDrawer')}
+                </p>
+              </div>
             </div>
 
             {/* EXPENSES - Glass with dark text */}
@@ -349,6 +373,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.pendingCount')}</div>
                   <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">{expenses.pendingCount ?? 0}</div>
                 </div>
+              </div>
+              {/* Staff Payments Note */}
+              <div className="mt-3 pt-2 border-t border-rose-500/20">
+                <p className="text-xs text-rose-700/70 dark:text-rose-300/60 text-center">
+                  {t('receipt.zreport.formula.staffPayments')}
+                </p>
               </div>
             </div>
 

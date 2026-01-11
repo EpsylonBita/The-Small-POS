@@ -60,7 +60,7 @@ export const paymentConfig: PaymentConfig = {
   mode: environment.PAYMENT_MODE,
   testCardsEnabled: environment.PAYMENT_TEST_CARDS_ENABLED,
   testCards: getTestCards(),
-  processingDelay: environment.NODE_ENV === 'development' ? 1000 : 2000, // Faster in dev
+  processingDelay: environment.NODE_ENV === 'development' ? 100 : 500, // Minimal delay for UX feedback
   gateway: {
     // Production gateway configuration would go here
     apiKey: process.env.PAYMENT_GATEWAY_API_KEY,

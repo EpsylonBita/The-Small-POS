@@ -14,6 +14,7 @@ import { MenuPageSkeleton } from '../components/skeletons';
 import { ErrorDisplay } from '../components/error';
 import { POSError } from '../../shared/utils/error-handler';
 import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
+import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
 
 interface SelectedIngredient {
@@ -220,6 +221,8 @@ const MenuPage: React.FC = () => {
   // POS real-time sync (overrides preloaded when branchId available)
   const { getEffectiveMenuItem, lastUpdate } = useRealTimeMenuSync({ branchId })
 
+  // Dynamic featured items based on weekly sales (top 20 best sellers)
+  const { topSellerIds } = useFeaturedItems(branchId);
 
   // Filter menu items by selected category and subcategory (UUID-based filtering)
   const filteredItems = React.useMemo(() => {
@@ -230,7 +233,13 @@ const MenuPage: React.FC = () => {
     if (selectedCategory === "all") {
       items = menuItems;
     } else if (selectedCategory === "featured") {
-      items = menuItems.filter((item) => item.is_featured);
+      // Dynamic: Use weekly top sellers if available (based on last 7 days of sales)
+      if (topSellerIds.size > 0) {
+        items = menuItems.filter((item) => topSellerIds.has(item.id));
+      } else {
+        // Fallback: Use static is_featured flag for new stores with no sales data
+        items = menuItems.filter((item) => item.is_featured);
+      }
     } else {
       items = menuItems.filter((item) => item.category_id === selectedCategory);
     }
@@ -246,7 +255,7 @@ const MenuPage: React.FC = () => {
     }
 
     return items;
-  }, [menuItems, selectedCategory, selectedSubcategory]);
+  }, [menuItems, selectedCategory, selectedSubcategory, topSellerIds]);
   // Build MenuGrid items with branch override visuals applied (price + metadata)
   // Uses shared PricingService for order-type-based pricing (Requirements 9.5, 9.6, 9.7)
   const gridItems = React.useMemo(() => {

@@ -48,6 +48,16 @@ export function registerReportHandlers() {
         }, 'report:get-top-items');
     });
 
+    // Weekly top items for Featured/Selected category (last 7 days)
+    ipcMain.handle('report:get-weekly-top-items', async (_e, { branchId, limit }) => {
+        return handleIPCError(async () => {
+            const dbManager = serviceRegistry.requireService('dbManager');
+            const db = dbManager.getDatabaseService();
+            if (!db.reports) throw new IPCError('Reports service not initialized', 'SERVICE_UNAVAILABLE');
+            return await db.reports.getWeeklyTopItems(branchId, limit || 20);
+        }, 'report:get-weekly-top-items');
+    });
+
     // Generate Z report
     ipcMain.handle('report:generate-z-report', async (_e, { branchId, date }) => {
         return handleIPCError(async () => {

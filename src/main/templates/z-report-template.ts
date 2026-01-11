@@ -211,6 +211,9 @@ export function generateZReportReceiptBuffer(
   lines.push({ text: '  ' + t('receipt.zreport.cashDrops', language), style: 'normal', align: 'left', rightText: formatCurrency(cd.totalCashDrops || 0, currency) });
   lines.push({ text: '  ' + t('receipt.zreport.unreconciled', language), style: 'normal', align: 'left', rightText: String(cd.unreconciledCount || 0) });
   lines.push({ text: '', style: 'small', align: 'left' });
+  // Cash drawer formula explanation
+  lines.push({ text: t('receipt.zreport.formula.cashDrawer', language), style: 'small', align: 'center' });
+  lines.push({ text: '', style: 'small', align: 'left' });
 
   // ═══════════════════════════════════════════════════════════════
   // EXPENSES
@@ -234,6 +237,9 @@ export function generateZReportReceiptBuffer(
   lines.push({ text: '  ' + t('receipt.zreport.cashCollected', language), style: 'normal', align: 'left', rightText: formatCurrency(de.cashCollectedTotal || 0, currency) });
   lines.push({ text: '  ' + t('receipt.zreport.cardAmount', language), style: 'normal', align: 'left', rightText: formatCurrency(de.cardAmountTotal || 0, currency) });
   lines.push({ text: '  ' + t('receipt.zreport.cashToReturn', language), style: 'normal', align: 'left', rightText: formatCurrency(de.cashToReturnTotal || 0, currency) });
+  lines.push({ text: '', style: 'small', align: 'left' });
+  // Driver cash flow formula explanation
+  lines.push({ text: t('receipt.zreport.formula.driver', language), style: 'small', align: 'center' });
   lines.push({ text: '', style: 'small', align: 'left' });
 
   // ═══════════════════════════════════════════════════════════════
@@ -306,6 +312,9 @@ export function generateZReportReceiptBuffer(
 
     const totalPayments = staffAnalytics.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     lines.push({ text: t('receipt.zreport.total', language) + ' ' + t('receipt.zreport.staffPayments', language), style: 'bold', align: 'left', rightText: formatCurrency(totalPayments, currency) });
+    lines.push({ text: '', style: 'small', align: 'left' });
+    // Staff payments note
+    lines.push({ text: t('receipt.zreport.formula.staffPayments', language), style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
   }
 
@@ -472,6 +481,8 @@ export function generateZReportReceipt(
   lines.push(pad('  Variance', 20) + pad(num(cd.totalVariance), 12));
   lines.push(pad('  Cash Drops', 20) + pad(num(cd.totalCashDrops), 12));
   lines.push(pad('  Unreconciled', 20) + pad(String(cd.unreconciledCount || 0), 12));
+  lines.push('  Formula: Expected = Opening + Sales - Refunds');
+  lines.push('  - Expenses - Drops - Given + Returned');
   divider();
 
   // Expenses
@@ -492,6 +503,8 @@ export function generateZReportReceipt(
   lines.push(pad('  Cash Collected', 20) + pad(num(de.cashCollectedTotal), 12));
   lines.push(pad('  Card Amount', 20) + pad(num(de.cardAmountTotal), 12));
   lines.push(pad('  Cash to Return', 20) + pad(num(de.cashToReturnTotal), 12));
+  lines.push('  Formula: Starting + Collected - Expenses');
+  lines.push('  - Payment = Cash to Return');
   divider();
 
   // Staff reports
@@ -545,6 +558,7 @@ export function generateZReportReceipt(
     });
     const totalPayments = staffAnalytics.reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0);
     lines.push(pad('Total Staff Payments', 20) + pad(num(totalPayments), 12));
+    lines.push('Staff payments recorded by cashier only');
     divider();
   }
 

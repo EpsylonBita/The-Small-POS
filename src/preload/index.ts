@@ -409,6 +409,7 @@ const electronAPI = {
         'report:get-today-statistics',
         'report:get-sales-trend',
         'report:get-top-items',
+        'report:get-weekly-top-items',
         'report:generate-z-report',
         'report:get-daily-staff-performance',
         'report:submit-z-report',
@@ -974,6 +975,10 @@ const electronAPI = {
 
   getTopItems: (params: { branchId: string; date?: string; limit?: number }) => {
     return ipcRenderer.invoke('report:get-top-items', params);
+  },
+
+  getWeeklyTopItems: (params: { branchId: string; limit?: number }) => {
+    return ipcRenderer.invoke('report:get-weekly-top-items', params);
   },
 
   generateZReport: (params: { branchId: string; date?: string }) => {

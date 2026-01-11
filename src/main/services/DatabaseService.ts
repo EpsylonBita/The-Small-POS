@@ -98,6 +98,9 @@ export class DatabaseService {
       this.reports = new ReportService(this.db);
       this.customerCache = new CustomerCacheService(this.db);
       this.customers = new CustomerDataService(this.db);
+
+      // Wire up cross-service dependencies
+      this.reports.setSettingsService(this.settings);
     }, RETRY.MAX_RETRY_ATTEMPTS, RETRY.RETRY_DELAY_MS);
   }
 
@@ -824,6 +827,21 @@ export class DatabaseService {
       console.warn('[DatabaseService] Could not check/add payment_amount column:', err);
     }
 
+    // Add calculation_version column to staff_shifts if it doesn't exist
+    // Version 1 = legacy formula (potentially buggy), Version 2 = corrected formula
+    try {
+      const columns = this.db.prepare("PRAGMA table_info(staff_shifts)").all() as any[];
+      const hasCalculationVersion = columns.some((col: any) => col.name === 'calculation_version');
+      if (!hasCalculationVersion) {
+        console.log('[DatabaseService] Adding calculation_version column to staff_shifts table');
+        this.db.exec('ALTER TABLE staff_shifts ADD COLUMN calculation_version INTEGER DEFAULT 2');
+        // Set version 1 for existing closed shifts (preserve original calculations)
+        this.db.exec(`UPDATE staff_shifts SET calculation_version = 1 WHERE status = 'closed'`);
+      }
+    } catch (err) {
+      console.warn('[DatabaseService] Could not check/add calculation_version column:', err);
+    }
+
     // Migration: Remove foreign key constraint from staff_shifts table
     // SQLite doesn't support dropping foreign keys, so we need to recreate the table
     try {
@@ -843,6 +861,7 @@ export class DatabaseService {
         this.db.exec('DROP TABLE IF EXISTS staff_shifts_new');
 
         // Create new table without foreign key
+        // IMPORTANT: Must include payment_amount and calculation_version columns
         this.db.exec(`
           CREATE TABLE staff_shifts_new (
             id TEXT PRIMARY KEY,
@@ -864,6 +883,8 @@ export class DatabaseService {
             total_sales_amount REAL DEFAULT 0,
             total_cash_sales REAL DEFAULT 0,
             total_card_sales REAL DEFAULT 0,
+            payment_amount REAL DEFAULT 0,
+            calculation_version INTEGER DEFAULT 2,
             notes TEXT,
             closed_by TEXT,
             transferred_to_cashier_shift_id TEXT,
@@ -875,11 +896,13 @@ export class DatabaseService {
         `);
 
         // Build dynamic column list based on what exists in old table
+        // IMPORTANT: Must include payment_amount and calculation_version for v2 checkout formulas
         const newColumns = [
           'id', 'staff_id', 'staff_name', 'branch_id', 'terminal_id', 'role_type',
           'check_in_time', 'check_out_time', 'scheduled_start', 'scheduled_end',
           'opening_cash_amount', 'closing_cash_amount', 'expected_cash_amount', 'cash_variance',
           'status', 'total_orders_count', 'total_sales_amount', 'total_cash_sales', 'total_card_sales',
+          'payment_amount', 'calculation_version',
           'notes', 'closed_by', 'transferred_to_cashier_shift_id', 'is_transfer_pending', 'is_day_start',
           'created_at', 'updated_at'
         ];
@@ -892,6 +915,10 @@ export class DatabaseService {
             return '0';
           } else if (col === 'staff_name') {
             return 'NULL';
+          } else if (col === 'payment_amount') {
+            return '0'; // Default payment_amount to 0 if migrating from old table
+          } else if (col === 'calculation_version') {
+            return '1'; // Default to v1 for existing migrated data (legacy formula)
           } else {
             return col; // Will fail if truly required and missing
           }

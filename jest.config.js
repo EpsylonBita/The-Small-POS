@@ -9,4 +9,6 @@ module.exports = {
         '^@/(.*)$': '<rootDir>/src/$1',
     },
     moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+    // Use shared setup file for property tests to configure fast-check globally
+    setupFilesAfterEnv: ['<rootDir>/src/tests/setup.ts'],
 };

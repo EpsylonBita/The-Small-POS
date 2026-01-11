@@ -12,8 +12,8 @@ import { ipcMain } from 'electron';
 import { PrintService } from '../../services/PrintService';
 import { getPrinterManagerInstance } from '../printer-manager-handlers';
 import { serviceRegistry } from '../../service-registry';
-import { ReceiptGenerator } from '../../printer/services/escpos/ReceiptGenerator';
 import { EscPosBuilder } from '../../printer/services/escpos/EscPosBuilder';
+// Note: ReceiptGenerator removed - PrinterManager.generatePrintData() handles receipt generation
 import { ReceiptData, PrintOrderItem, PaperSize, PrintJobType, ReceiptTemplate } from '../../printer/types';
 import { createClient } from '@supabase/supabase-js';
 import { getSupabaseConfig } from '../../../shared/supabase-config';
@@ -437,63 +437,32 @@ export function registerPrintHandlers() {
         deliveryAddress: order.delivery_address
       });
 
-      // If not available in order, try to fetch from customer/address (fallback for older orders)
-      if (orderType === 'delivery' && order.customer_phone && supabaseClient) {
-        console.log(`[payment:print-receipt] Fetching from Supabase (ringerName: ${ringerName}, deliveryNotes: ${deliveryNotes})`);
-        try {
-          // First get the customer with ringer_name
-          const { data: customer, error: customerError } = await supabaseClient
-            .from('customers')
-            .select('id, ringer_name, name_on_ringer')
-            .eq('phone', order.customer_phone)
-            .single();
-
-          console.log(`[payment:print-receipt] Customer query result:`, { customer, customerError });
-
-          if (!ringerName && (customer?.ringer_name || customer?.name_on_ringer)) {
-            ringerName = customer.ringer_name || customer.name_on_ringer;
-            console.log(`[payment:print-receipt] Found ringer name from customer: ${ringerName}`);
-          }
-
-          // Then try to find the matching address to get notes and separate address fields
-          if (customer?.id && order.delivery_address) {
-            // Try to match by street address
-            const deliveryStreet = order.delivery_address.split(',')[0]?.trim();
-            console.log(`[payment:print-receipt] Looking for address with street: ${deliveryStreet}`);
-            if (deliveryStreet) {
-              const { data: addresses, error: addressError } = await supabaseClient
-                .from('customer_addresses')
-                .select('street_address, city, postal_code, floor_number, notes, name_on_ringer')
-                .eq('customer_id', customer.id)
-                .ilike('street_address', `%${deliveryStreet}%`)
-                .limit(1);
-
-              console.log(`[payment:print-receipt] Address query result:`, { addresses, addressError });
-
-              if (addresses && addresses.length > 0) {
-                const addr = addresses[0];
-                // Get separate address fields
-                streetAddress = addr.street_address || undefined;
-                city = addr.city || undefined;
-                postalCode = addr.postal_code || undefined;
-                floorNumber = addr.floor_number || undefined;
-                console.log(`[payment:print-receipt] Found address details:`, { streetAddress, city, postalCode, floorNumber });
-
-                if (!deliveryNotes && addr.notes) {
-                  deliveryNotes = addr.notes;
-                  console.log(`[payment:print-receipt] Found delivery notes from address: ${deliveryNotes}`);
-                }
-                // Address-level name_on_ringer takes precedence over customer-level
-                if (!ringerName && addr.name_on_ringer) {
-                  ringerName = addr.name_on_ringer;
-                  console.log(`[payment:print-receipt] Found address ringer name: ${ringerName}`);
-                }
-              }
-            }
-          }
-        } catch (err) {
-          console.warn('[payment:print-receipt] Could not fetch customer/address details:', err);
+      // Use order data directly - all delivery fields should be populated at order creation time
+      // Skip Supabase network lookups for performance (saves 3-5 seconds)
+      if (orderType === 'delivery') {
+        // Extract address fields from order if available
+        const orderAny = order as any;
+        if (!streetAddress && orderAny.delivery_address) {
+          streetAddress = orderAny.delivery_address;
         }
+        if (!city && orderAny.delivery_city) {
+          city = orderAny.delivery_city;
+        }
+        if (!postalCode && orderAny.delivery_postal_code) {
+          postalCode = orderAny.delivery_postal_code;
+        }
+        if (!floorNumber && orderAny.delivery_floor) {
+          floorNumber = orderAny.delivery_floor;
+        }
+        if (!deliveryNotes && orderAny.delivery_notes) {
+          deliveryNotes = orderAny.delivery_notes;
+        }
+        if (!ringerName && orderAny.name_on_ringer) {
+          ringerName = orderAny.name_on_ringer;
+        }
+        console.log(`[payment:print-receipt] Using order delivery data:`, {
+          streetAddress, city, postalCode, floorNumber, deliveryNotes, ringerName
+        });
       }
 
       if (ringerName) {
@@ -571,22 +540,10 @@ export function registerPrintHandlers() {
         receiptTemplate: receiptPrinter.receiptTemplate
       }));
 
-      // Generate receipt buffer
-      const generator = new ReceiptGenerator({
-        paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
-        storeName: 'The Small',
-        currency: currency as string,
-        language: language,
-        characterSet: characterSet as any,
-        greekRenderMode: greekRenderMode,
-        receiptTemplate: receiptTemplate
-      });
-
-      // Use async generation to avoid blocking main thread during bitmap rendering
-      const receiptBuffer = await generator.generateReceiptAsync(receiptData);
-      console.log(`[payment:print-receipt] Receipt buffer generated:`, receiptBuffer.length, 'bytes');
-
-      // Submit print job
+      // Submit print job to queue (PrinterManager will generate receipt async)
+      // NOTE: Removed duplicate receipt generation - PrinterManager.generatePrintData()
+      // already generates the receipt buffer from receiptData. This prevents UI freeze
+      // by not generating the receipt twice.
       const jobResult = await printerManager.submitPrintJob({
         id: `receipt-${orderId}-${Date.now()}`,
         type: PrintJobType.RECEIPT,
@@ -595,7 +552,7 @@ export function registerPrintHandlers() {
         createdAt: new Date()
       });
 
-      console.log(`[payment:print-receipt] Print job submitted:`, jobResult);
+      console.log(`[payment:print-receipt] Print job queued:`, jobResult);
 
       return { success: jobResult.success, error: jobResult.error };
     } catch (error) {

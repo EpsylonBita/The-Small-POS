@@ -2,8 +2,10 @@ import React, { useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatCurrency } from '../../utils/format';
 import AutoSizer from 'react-virtualized-auto-sizer';
-import * as ReactWindow from 'react-window';
-const Grid: any = (ReactWindow as any).FixedSizeGrid;
+// react-window 2.x has broken TypeScript declarations
+// Using require to bypass TypeScript module resolution
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { Grid } = require('react-window');
 import { OptimizedImg } from '../ui/OptimizedImg';
 
 

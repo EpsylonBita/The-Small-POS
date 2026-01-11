@@ -168,3 +168,48 @@ export function getDefaultConfig(config: Partial<CheckoutConfig & { receiptTempl
     receiptTemplate: (config.receiptTemplate as 'classic' | 'modern') || 'classic',
   };
 }
+
+/**
+ * Parse address to extract street name and number for compact display
+ * Uses hybrid strategy: regex → comma split → truncation
+ *
+ * @param fullAddress - Full delivery address string
+ * @returns Simplified address (street, city) or fallback
+ *
+ * Examples:
+ *   "123 Main Street, Apt 4B, Athens, 12345" → "123 Main Street, Athens"
+ *   "45 Odos Ermou, Athina, Greece" → "45 Odos Ermou, Athina"
+ *   "Complex address..." → "Complex address..." (first segment)
+ */
+export function parseAddressSimple(fullAddress: string): string {
+  if (!fullAddress || fullAddress === 'N/A') return 'N/A';
+
+  // Split by comma
+  const parts = fullAddress.split(',').map(p => p.trim()).filter(p => p.length > 0);
+
+  if (parts.length === 0) return fullAddress;
+  if (parts.length === 1) return parts[0];
+
+  // Try to extract street (first part) and city (usually second-to-last or part without numbers)
+  const street = parts[0];
+
+  // Find the city - typically not the last part (which might be country/postal code)
+  // Look for a part that doesn't look like a postal code (no leading digits or "TK")
+  let city = '';
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const part = parts[i];
+    // Skip if it looks like a postal code (starts with number or "TK" or contains only digits/spaces)
+    if (/^\d/.test(part) || /^TK\s*\d/.test(part) || /^[A-Z]{2}\s*\d/.test(part)) continue;
+    // Skip if it's a country name (Greece, Ελλάδα, etc.)
+    if (/^(Greece|Ελλάδα|Hellas|GR)$/i.test(part)) continue;
+    city = part;
+    break;
+  }
+
+  // If no city found, use the second part
+  if (!city && parts.length > 1) {
+    city = parts[1];
+  }
+
+  return city ? `${street}, ${city}` : street;
+}

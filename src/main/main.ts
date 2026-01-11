@@ -19,7 +19,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { serviceRegistry } from './service-registry';
 import {
   initializeDatabase,
@@ -38,7 +38,7 @@ import {
 import { registerAllMainHandlers, registerAllDomainHandlers } from './handlers';
 import { initializeAutoUpdater } from './auto-updater';
 import { createApplicationMenu } from './app-menu';
-import { verifyASARIntegrity } from './lib/asar-integrity';
+// ASAR integrity now handled by Electron 39's built-in fuses (enableEmbeddedAsarIntegrityValidation)
 
 // Configure Google API key for geolocation BEFORE app is ready
 try {
@@ -54,20 +54,9 @@ try {
 // App ready handler
 app.whenReady().then(async () => {
   try {
-    // SECURITY: Verify ASAR integrity before proceeding
-    // Detects post-installation tampering
-    const integrityCheck = verifyASARIntegrity();
-    if (!integrityCheck.valid && integrityCheck.isASAR) {
-      console.error('[Security] ASAR integrity check failed!');
-      dialog.showErrorBox(
-        'Security Error',
-        'Application integrity check failed. The application may have been tampered with.\n\n' +
-        'Please reinstall from official source.\n\n' +
-        'Error: ' + (integrityCheck.error || 'Unknown')
-      );
-      app.quit();
-      return;
-    }
+    // SECURITY: ASAR integrity verification is now handled automatically by Electron 39's
+    // built-in fuses (enableEmbeddedAsarIntegrityValidation + onlyLoadAppFromAsar).
+    // If integrity check fails, the app will refuse to load before reaching this point.
 
     // Register all main IPC handlers (clipboard, window, geo, etc.)
     registerAllMainHandlers();
@@ -161,7 +150,7 @@ process.on('pos-control-command', (data: { type: 'shutdown' | 'restart' | 'enabl
 
 // Prevent new window creation
 app.on('web-contents-created', (event, contents) => {
-  contents.setWindowOpenHandler(({ url }) => {
+  contents.setWindowOpenHandler(({ url }: { url: string }) => {
     // Prevent opening new windows
     return { action: 'deny' };
   });

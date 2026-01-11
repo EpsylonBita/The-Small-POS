@@ -77,6 +77,13 @@ export interface StaffShift {
    * This is the primary transfer state indicator, stored directly in the database.
    */
   is_transfer_pending?: boolean;
+  /**
+   * Calculation version for the shift formula.
+   * Version 1 (legacy): Staff payments deducted from cashier expected, payment_amount included in driver/waiter return
+   * Version 2 (current): Staff payments informational only, payment_amount NOT included in driver/waiter return
+   * NULL defaults to version 1 for backward compatibility.
+   */
+  calculation_version?: number;
   created_at: string;
   updated_at: string;
 }
@@ -421,7 +428,7 @@ export class StaffService extends BaseService {
           WHERE branch_id = ?
             AND terminal_id = ?
             AND role_type = 'cashier'
-            AND date(check_in_time) = date(?)
+            AND date(check_in_time, 'localtime') = date(?, 'localtime')
         `).get(params.branchId, params.terminalId, now) as any;
         if (Number(existingCashierToday?.c || 0) === 0) {
           isDayStart = 1;
@@ -432,19 +439,21 @@ export class StaffService extends BaseService {
       const isLocalOnly = !this.isValidUuid(shiftId) || !this.isValidUuid(params.staffId) || params.staffId === 'local-simple-pin';
 
       // Insert into staff_shifts
+      // calculation_version = 2 for new shifts (corrected formula)
       const shiftStmt = this.db.prepare(`
         INSERT INTO staff_shifts (
           id, staff_id, staff_name, branch_id, terminal_id, role_type,
           check_in_time, opening_cash_amount, status,
           total_orders_count, total_sales_amount, total_cash_sales, total_card_sales,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          calculation_version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       shiftStmt.run(
         shiftId, params.staffId, params.staffName || null, params.branchId, params.terminalId, params.roleType,
         now, openingCash, 'active',
         0, 0, 0, 0,
+        2, // calculation_version = 2 (corrected formula)
         now, now
       );
 
@@ -620,7 +629,8 @@ export class StaffService extends BaseService {
           check_in_time: now,
           opening_cash_amount: openingCash,
           status: 'active',
-          is_day_start: isDayStart === 1
+          is_day_start: isDayStart === 1,
+          calculation_version: 2  // Version 2 = corrected formula
         });
       }
 
@@ -640,14 +650,22 @@ export class StaffService extends BaseService {
         return { success: false, error: 'Shift not found' };
       }
 
+      // Get calculation version (default to 1 for legacy shifts)
+      // Version 1 (legacy): Staff payments deducted from cashier expected, payment_amount included in driver/waiter return
+      // Version 2 (current): Staff payments informational only, payment_amount NOT included in driver/waiter return
+      const calculationVersion = shift.calculation_version ?? 1;
+      console.log('[closeShift] Using calculation_version:', calculationVersion);
+
       // Calculate expected cash amount
       const openingAmount = shift.opening_cash_amount || 0;
 
-      // Get total cash sales - use status-based filtering for consistency
+      // Get total cash sales - EXCLUDE delivery orders (those are tracked via driver returns)
+      // Delivery cash is counted in driverCashReturned, not here (prevents double-counting)
       const cashSalesStmt = this.db.prepare(`
         SELECT COALESCE(SUM(total_amount), 0) as total
         FROM orders
         WHERE staff_shift_id = ? AND payment_method = 'cash' AND status IN ('delivered', 'completed')
+          AND LOWER(COALESCE(order_type, '')) != 'delivery'
       `);
       const cashSales = (cashSalesStmt.get(params.shiftId) as any)?.total || 0;
 
@@ -744,8 +762,6 @@ export class StaffService extends BaseService {
       if (shift.role_type === 'driver') {
         // Driver-specific variance calculation:
         // The driver's closingCash parameter represents cash RETURNED to the cashier, not cash on hand.
-        // expectedDriverReturn = cashCollected - startingAmount - driverExpenses - paymentAmount
-        // This aligns with the UI's formula and the cashier drawer's driver_cash_returned calculation.
         const driverEarningsStmt = this.db.prepare(`
           SELECT COALESCE(SUM(cash_collected), 0) as cash_collected
           FROM driver_earnings
@@ -762,14 +778,101 @@ export class StaffService extends BaseService {
         `);
         const driverExpenses = (driverExpensesStmt.get(params.shiftId) as any)?.total || 0;
 
-        // Driver formula: expected return = startingAmount + cashCollected - expenses - wage
-        // The driver returns the starting cash PLUS collected cash MINUS expenses and wage
-        const expectedDriverReturn = openingAmount + cashCollected - driverExpenses - paymentAmount;
+        // Driver formula differs by calculation version:
+        // V1 (legacy): expected return = startingAmount + cashCollected - expenses - paymentAmount
+        // V2 (current): expected return = startingAmount + cashCollected - expenses (payment handled at cashier)
+        let expectedDriverReturn: number;
+        if (calculationVersion >= 2) {
+          // V2: Payment is NOT deducted from driver's expected return
+          // Driver returns all cash, payment is handled separately at cashier checkout
+          expectedDriverReturn = openingAmount + cashCollected - driverExpenses;
+          console.log('[closeShift] Driver v2 formula: starting + collected - expenses =', expectedDriverReturn);
+        } else {
+          // V1 (legacy): Payment IS deducted from driver's expected return
+          expectedDriverReturn = openingAmount + cashCollected - driverExpenses - paymentAmount;
+          console.log('[closeShift] Driver v1 formula: starting + collected - expenses - payment =', expectedDriverReturn);
+        }
         expected = expectedDriverReturn;
         variance = params.closingCash - expectedDriverReturn;
+      } else if (shift.role_type === 'server') {
+        // Server/Waiter-specific variance calculation (similar to driver)
+        // Get cash collected from waiter tables
+        const waiterTables = getWaiterShiftData(this.db, params.shiftId);
+        const cashCollected = waiterTables.reduce((sum: number, t: { cash_amount?: number }) => sum + (t.cash_amount || 0), 0);
+
+        // Get waiter-specific expenses
+        const waiterExpensesStmt = this.db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as total
+          FROM shift_expenses
+          WHERE staff_shift_id = ? AND status = 'approved'
+        `);
+        const waiterExpenses = (waiterExpensesStmt.get(params.shiftId) as any)?.total || 0;
+
+        // Waiter formula differs by calculation version:
+        // V1 (legacy): expected return = startingAmount + cashCollected - expenses - paymentAmount
+        // V2 (current): expected return = startingAmount + cashCollected - expenses (payment handled at cashier)
+        let expectedWaiterReturn: number;
+        if (calculationVersion >= 2) {
+          // V2: Payment is NOT deducted from waiter's expected return
+          expectedWaiterReturn = openingAmount + cashCollected - waiterExpenses;
+          console.log('[closeShift] Waiter v2 formula: starting + collected - expenses =', expectedWaiterReturn);
+        } else {
+          // V1 (legacy): Payment IS deducted from waiter's expected return
+          expectedWaiterReturn = openingAmount + cashCollected - waiterExpenses - paymentAmount;
+          console.log('[closeShift] Waiter v1 formula: starting + collected - expenses - payment =', expectedWaiterReturn);
+        }
+        expected = expectedWaiterReturn;
+        variance = params.closingCash - expectedWaiterReturn;
       } else {
         // Cashier/Manager formula (now with adjusted driverCashGiven that excludes transferred drivers)
-        expected = openingAmount + cashSales - cashRefunds - expenses - cashDrops - driverCashGiven + driverCashReturned - staffPayments;
+
+        // Calculate expected returns from inherited transferred drivers
+        // These are drivers who were transferred TO this cashier shift and haven't checked out yet
+        let inheritedDriverExpectedReturns = 0;
+        const inheritedDriversStmt = this.db.prepare(`
+          SELECT
+            ss.id as shift_id,
+            ss.opening_cash_amount as starting_amount,
+            ss.payment_amount as payment_amount,
+            ss.calculation_version as calculation_version,
+            (SELECT COALESCE(SUM(cash_collected), 0) FROM driver_earnings WHERE staff_shift_id = ss.id) as cash_collected,
+            (SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ss.id AND status = 'approved') as expenses
+          FROM staff_shifts ss
+          WHERE ss.transferred_to_cashier_shift_id = ?
+            AND ss.status = 'active'
+            AND ss.role_type = 'driver'
+        `);
+        const inheritedDrivers = inheritedDriversStmt.all(params.shiftId) as any[];
+
+        if (inheritedDrivers.length > 0) {
+          for (const driver of inheritedDrivers) {
+            // Calculate expected return using the formula based on the driver's calculation version
+            const driverVersion = driver.calculation_version ?? 1;
+            let driverExpectedReturn: number;
+            if (driverVersion >= 2) {
+              // V2: Payment is NOT deducted from driver's expected return
+              driverExpectedReturn = (driver.starting_amount || 0) + (driver.cash_collected || 0) - (driver.expenses || 0);
+            } else {
+              // V1 (legacy): Payment IS deducted from driver's expected return
+              driverExpectedReturn = (driver.starting_amount || 0) + (driver.cash_collected || 0) - (driver.expenses || 0) - (driver.payment_amount || 0);
+            }
+            inheritedDriverExpectedReturns += driverExpectedReturn;
+          }
+          console.log(`[StaffService] Including ${inheritedDrivers.length} inherited driver(s) expected returns: ${inheritedDriverExpectedReturns}`);
+        }
+
+        // Cashier formula differs by calculation version:
+        // V1 (legacy): expected = opening + sales - refunds - expenses - drops - driverGiven + driverReturned + inherited - staffPayments
+        // V2 (current): expected = opening + sales - refunds - expenses - drops - driverGiven + driverReturned + inherited (staffPayments informational only)
+        if (calculationVersion >= 2) {
+          // V2: Staff payments are informational only, NOT deducted from expected
+          expected = openingAmount + cashSales - cashRefunds - expenses - cashDrops - driverCashGiven + driverCashReturned + inheritedDriverExpectedReturns;
+          console.log('[closeShift] Cashier v2 formula: opening + sales - refunds - expenses - drops - driverGiven + driverReturned + inherited =', expected);
+        } else {
+          // V1 (legacy): Staff payments ARE deducted from expected
+          expected = openingAmount + cashSales - cashRefunds - expenses - cashDrops - driverCashGiven + driverCashReturned + inheritedDriverExpectedReturns - staffPayments;
+          console.log('[closeShift] Cashier v1 formula: opening + sales - refunds - expenses - drops - driverGiven + driverReturned + inherited - staffPayments =', expected);
+        }
         variance = params.closingCash - expected;
       }
       const updateShiftStmt = this.db.prepare(`
@@ -794,21 +897,55 @@ export class StaffService extends BaseService {
             closing_amount = ?,
             expected_amount = ?,
             variance_amount = ?,
+            total_cash_sales = ?,
             closed_at = ?,
             updated_at = ?
           WHERE staff_shift_id = ?
         `);
 
-        updateDrawerStmt.run(params.closingCash, expected, variance, now, now, params.shiftId);
+        updateDrawerStmt.run(params.closingCash, expected, variance, cashSales, now, now, params.shiftId);
 
         // Add cash drawer update to sync queue
         this.addToSyncQueue('cash_drawer_sessions', drawer.id || params.shiftId, 'update', {
           closing_amount: params.closingCash,
           expected_amount: expected,
           variance_amount: variance,
+          total_cash_sales: cashSales,
           closed_at: now,
           updated_at: now
         });
+
+        // Record cashier's own payment as a staff_payment entry for tracking
+        if (paymentAmount > 0) {
+          const cashierPaymentId = crypto.randomUUID();
+          const insertCashierPaymentStmt = this.db.prepare(`
+            INSERT INTO staff_payments (
+              id, paid_to_staff_id, staff_shift_id, paid_by_cashier_shift_id,
+              amount, payment_type, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          insertCashierPaymentStmt.run(
+            cashierPaymentId,
+            shift.staff_id,
+            params.shiftId,
+            params.shiftId,
+            paymentAmount,
+            'wage',
+            'Cashier checkout payment',
+            now,
+            now
+          );
+          this.addToSyncQueue('staff_payments', cashierPaymentId, 'insert', {
+            paid_to_staff_id: shift.staff_id,
+            staff_shift_id: params.shiftId,
+            paid_by_cashier_shift_id: params.shiftId,
+            amount: paymentAmount,
+            payment_type: 'wage',
+            notes: 'Cashier checkout payment',
+            created_at: now,
+            updated_at: now
+          });
+        }
       }
 
       // If driver, update related cashier drawer with the expected return amount
@@ -833,34 +970,40 @@ export class StaffService extends BaseService {
         const cashierDrawer = activeCashierDrawerStmt.get(shift.branch_id, shift.terminal_id) as any;
 
         if (cashierDrawer) {
-          // Use expectedReturn (derived from formula: startingAmount + cashCollected - expenses - paymentAmount)
-          // for updating the cashier drawer's driver_cash_returned field.
+          // Use expectedReturn (derived from formula) for updating the cashier drawer's driver_cash_returned field.
           // This value may be negative if driver owes money (shortage).
           // closingCash is kept for the driver shift's own variance calculation but decoupled from cashier drawer.
           const newDriverCashReturned = (cashierDrawer.driver_cash_returned || 0) + expectedReturn;
 
-          // Record driver payment (wage) ONLY in total_staff_payments, NOT in total_expenses
-          // This prevents double-counting when later phases introduce dedicated staff_payments handling
-          const newTotalStaffPayments = (cashierDrawer.total_staff_payments || 0) + paymentAmount;
+          // Record driver payment (wage) in total_staff_payments ONLY for V2 calculation.
+          // V1: Payment is already deducted from expectedReturn (driver returns less cash).
+          //     Adding to staffPayments would cause double-deduction in cashier v1 formula:
+          //     expected = ... + driverReturned - staffPayments (payment subtracted twice)
+          // V2: Payment is NOT deducted from expectedReturn (driver returns full cash).
+          //     We track it in staffPayments for informational purposes only.
+          //     Cashier v2 formula does NOT subtract staffPayments from expected.
+          const staffPaymentToAdd = calculationVersion >= 2 ? paymentAmount : 0;
+          const newTotalStaffPayments = (cashierDrawer.total_staff_payments || 0) + staffPaymentToAdd;
 
-          // When driver returns cash, reduce driver_cash_given by their starting amount
-          // because that money has been returned (it's included in expectedReturn)
-          // This prevents double-counting in the cashier's expected calculation
-          const currentDriverCashGiven = (cashierDrawer as any).driver_cash_given || 0;
-          const newDriverCashGiven = currentDriverCashGiven - openingAmount;
+          // NOTE: driver_cash_given should NOT be reduced when driver returns cash.
+          // The formula: expected = opening + cashSales - driverCashGiven + driverCashReturned - staffPayments
+          // correctly handles this because:
+          // - driverCashGiven tracks total cash given to drivers (stays unchanged)
+          // - driverCashReturned tracks total cash received from drivers (including their starting amount)
+          // - staffPayments tracks total staff payments (wages)
+          // This way the cash flow is accurate without double-counting.
 
           const updateCashierDrawerStmt = this.db.prepare(`
             UPDATE cash_drawer_sessions
-            SET driver_cash_returned = ?, total_staff_payments = ?, driver_cash_given = ?, updated_at = ?
+            SET driver_cash_returned = ?, total_staff_payments = ?, updated_at = ?
             WHERE id = ?
           `);
-          updateCashierDrawerStmt.run(newDriverCashReturned, newTotalStaffPayments, newDriverCashGiven, now, cashierDrawer.id);
+          updateCashierDrawerStmt.run(newDriverCashReturned, newTotalStaffPayments, now, cashierDrawer.id);
 
           // Add drawer update to sync queue
           this.addToSyncQueue('cash_drawer_sessions', cashierDrawer.id, 'update', {
             driver_cash_returned: newDriverCashReturned,
             total_staff_payments: newTotalStaffPayments,
-            driver_cash_given: newDriverCashGiven,
             updated_at: now
           });
         }
@@ -875,7 +1018,8 @@ export class StaffService extends BaseService {
         payment_amount: paymentAmount,
         status: 'closed',
         closed_by: params.closedBy,
-        is_day_start: !!shift.is_day_start
+        is_day_start: !!shift.is_day_start,
+        calculation_version: calculationVersion
       });
 
       return { success: true, variance, message: 'Shift closed successfully' };
@@ -1394,14 +1538,14 @@ export class StaffService extends BaseService {
 
       const queryParams: any[] = [params.staffId];
 
-      // Add date filtering if provided
+      // Add date filtering if provided (use localtime for consistent timezone handling)
       if (params.dateFrom) {
-        query += ` AND date(sp.created_at) >= ?`;
+        query += ` AND date(sp.created_at, 'localtime') >= ?`;
         queryParams.push(params.dateFrom);
       }
 
       if (params.dateTo) {
-        query += ` AND date(sp.created_at) <= ?`;
+        query += ` AND date(sp.created_at, 'localtime') <= ?`;
         queryParams.push(params.dateTo);
       }
 
@@ -1426,7 +1570,7 @@ export class StaffService extends BaseService {
         SELECT COALESCE(SUM(amount), 0) as total
         FROM staff_payments
         WHERE paid_to_staff_id = ?
-          AND date(created_at) = ?
+          AND date(created_at, 'localtime') = ?
       `);
 
       const result = stmt.get(staffId, date) as { total: number };
@@ -1479,22 +1623,27 @@ export class StaffService extends BaseService {
     console.log('[getShiftSummary] Expenses:', { shiftId, expenseCount: expenses.length, totalExpenses, expenses });
 
     // Staff payments (details) - now from staff_payments table instead of shift_expenses
+    // Get staff info from their shift (paid_to is the staff_shift_id) or fallback to staff table
     const staffPaymentsStmt = this.db.prepare(`
       SELECT
         sp.id,
         sp.paid_to_staff_id as staff_id,
+        sp.staff_shift_id as recipient_shift_id,
         sp.amount,
         sp.notes as description,
         sp.created_at,
         sp.payment_type,
-        (s.first_name || ' ' || s.last_name) as staff_name,
-        ss.role_type,
-        ss.check_in_time,
-        ss.check_out_time
+        COALESCE(
+          NULLIF(TRIM(s.first_name || ' ' || s.last_name), ''),
+          recipient_shift.staff_name,
+          'Staff'
+        ) as staff_name,
+        COALESCE(recipient_shift.role_type, 'staff') as role_type,
+        recipient_shift.check_in_time,
+        recipient_shift.check_out_time
       FROM staff_payments sp
       LEFT JOIN staff s ON sp.paid_to_staff_id = s.id
-      LEFT JOIN staff_shifts ss ON ss.staff_id = sp.paid_to_staff_id
-        AND DATE(ss.check_in_time) = DATE(sp.created_at)
+      LEFT JOIN staff_shifts recipient_shift ON recipient_shift.id = sp.staff_shift_id
       WHERE sp.paid_by_cashier_shift_id = ?
       ORDER BY sp.created_at DESC
     `);
@@ -1688,6 +1837,12 @@ export class StaffService extends BaseService {
           o.payment_status,
           o.status,
           o.status as order_status,
+          -- Use updated_at for delivery_time as it reflects when the order was delivered/completed
+          -- For pending/preparing orders, fall back to created_at
+          CASE
+            WHEN o.status IN ('delivered', 'completed') THEN o.updated_at
+            ELSE o.created_at
+          END as delivery_time,
           ss.staff_id as driver_id,
           (s.first_name || ' ' || s.last_name) as driver_name,
           ss.opening_cash_amount as starting_amount,
@@ -1775,6 +1930,8 @@ export class StaffService extends BaseService {
       transferred_to_cashier_shift_id: row.transferred_to_cashier_shift_id || undefined,
       // Boolean from database column: true if driver is awaiting transfer to next cashier
       is_transfer_pending: Boolean(row.is_transfer_pending),
+      // Calculation version: 1 = legacy, 2 = corrected (NULL defaults to 1 for backward compat)
+      calculation_version: row.calculation_version ?? 1,
       created_at: row.created_at,
       updated_at: row.updated_at
     };

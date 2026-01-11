@@ -238,7 +238,7 @@ export class PrintService {
     // Resize keeping aspect ratio
     const resized = img.resize({ width: targetWidth, quality: 'best' });
     const { width, height } = resized.getSize();
-    const bmp = resized.getBitmap(); // BGRA
+    const bmp = resized.toBitmap(); // BGRA
 
     // Convert to grayscale + dithering
     const gray: number[] = new Array(width * height);

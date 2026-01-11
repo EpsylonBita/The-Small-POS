@@ -254,8 +254,10 @@ export class RealtimeOrderHandler {
 
   private subscribeOrdersChannel() {
     // Clean any existing
-    if (this.ordersChannel) {
-      try { this.client.removeChannel(this.ordersChannel) } catch { /* noop */ }
+    const oldChannel = this.ordersChannel
+    if (oldChannel) {
+      try { this.client.removeChannel(oldChannel) } catch { /* noop */ }
+      this.channels = this.channels.filter(c => c !== oldChannel)
       this.ordersChannel = null
     }
 
@@ -294,8 +296,10 @@ export class RealtimeOrderHandler {
    */
   private subscribeOrdersDeleteChannel() {
     // Clean any existing
-    if (this.ordersDeleteChannel) {
-      try { this.client.removeChannel(this.ordersDeleteChannel) } catch { /* noop */ }
+    const oldChannel = this.ordersDeleteChannel
+    if (oldChannel) {
+      try { this.client.removeChannel(oldChannel) } catch { /* noop */ }
+      this.channels = this.channels.filter(c => c !== oldChannel)
       this.ordersDeleteChannel = null
     }
 
@@ -329,11 +333,12 @@ export class RealtimeOrderHandler {
       )
       .subscribe((status: string) => {
         if (status === 'SUBSCRIBED') {
-          console.log('[RealtimeOrderHandler] Orders DELETE channel subscribed ✓')
+          this.retryAttempts = 0
+          this.clearResubscribe()
+          console.log('[RealtimeOrderHandler] Orders DELETE channel subscribed')
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           console.warn('[RealtimeOrderHandler] Orders DELETE channel error:', status)
-          // Re-subscribe after delay
-          setTimeout(() => this.subscribeOrdersDeleteChannel(), 5000)
+          this.scheduleResubscribe('delete')
         }
       })
 
@@ -342,8 +347,11 @@ export class RealtimeOrderHandler {
   }
 
   private subscribeItemsChannel() {
-    if (this.itemsChannel) {
-      try { this.client.removeChannel(this.itemsChannel) } catch { /* noop */ }
+    // Clean any existing
+    const oldChannel = this.itemsChannel
+    if (oldChannel) {
+      try { this.client.removeChannel(oldChannel) } catch { /* noop */ }
+      this.channels = this.channels.filter(c => c !== oldChannel)
       this.itemsChannel = null
     }
 
@@ -373,13 +381,15 @@ export class RealtimeOrderHandler {
     this.channels.push(ch)
   }
 
-  private scheduleResubscribe(kind: 'orders'|'items') {
+  private scheduleResubscribe(kind: 'orders'|'items'|'delete') {
     this.clearResubscribe()
     const delay = Math.min(this.maxBackoffMs, 1000 * Math.pow(2, this.retryAttempts))
     this.retryAttempts++
     console.warn(`[RealtimeOrderHandler] ${kind} channel issue. Resubscribing in ${delay}ms (attempt ${this.retryAttempts})`)
     this.resubscribeTimer = setTimeout(() => {
-      if (kind === 'orders') this.subscribeOrdersChannel(); else this.subscribeItemsChannel();
+      if (kind === 'orders') this.subscribeOrdersChannel()
+      else if (kind === 'items') this.subscribeItemsChannel()
+      else if (kind === 'delete') this.subscribeOrdersDeleteChannel()
     }, delay)
   }
 
@@ -425,10 +435,38 @@ export class RealtimeOrderHandler {
     })
 
     // For DELETE events, we need the old record's ID
+    // IMPORTANT: Orders created AFTER the last Z-Report should NOT be deleted,
+    // to preserve them for the current session until Z-Report is executed
     if (eventType === 'DELETE') {
       const deleteOrderId = payload.old?.id
       if (deleteOrderId) {
         console.log(`📡 [RealtimeOrderHandler] Processing DELETE for order ${deleteOrderId}`)
+
+        // Check if this order was created after the last Z-Report - if so, preserve it
+        try {
+          const dbService = this.dbManager.getDatabaseService()
+          const settingsService = dbService.settings
+          const lastZReportTimestamp = settingsService?.getSetting<string>('system', 'last_z_report_timestamp')
+
+          if (lastZReportTimestamp) {
+            const orderCreatedAt = payload.old?.created_at
+            if (orderCreatedAt) {
+              const orderTime = new Date(orderCreatedAt).getTime()
+              const zReportTime = new Date(lastZReportTimestamp).getTime()
+              if (orderTime >= zReportTime) {
+                console.log(`📡 [RealtimeOrderHandler] Ignoring DELETE for order ${deleteOrderId} - created after Z-Report (preserving for current session)`)
+                return // Don't delete orders from current session
+              }
+            }
+          } else {
+            // No Z-Report yet - preserve all orders
+            console.log(`📡 [RealtimeOrderHandler] Ignoring DELETE for order ${deleteOrderId} - no Z-Report yet (preserving all orders)`)
+            return
+          }
+        } catch (err) {
+          console.warn('[RealtimeOrderHandler] Error checking Z-Report timestamp, proceeding with delete:', err)
+        }
+
         try {
           const orderService = this.dbManager.getDatabaseService().orders
           const deleted = orderService.deleteOrder(deleteOrderId)
@@ -436,7 +474,7 @@ export class RealtimeOrderHandler {
         } catch (error) {
           console.error(`[RealtimeOrderHandler] Failed to delete order ${deleteOrderId}:`, error)
         }
-        
+
         // Emit delete event to renderer
         this.emitToRenderer('order-deleted', {
           eventType: 'DELETE',

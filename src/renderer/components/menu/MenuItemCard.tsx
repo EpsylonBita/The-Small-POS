@@ -81,10 +81,14 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
   return (
     <div
       onClick={handleCardClick}
-      className={`p-2 sm:p-3 rounded-xl border cursor-pointer transition-all duration-200 hover:scale-[1.02] sm:hover:scale-[1.05] active:scale-95 aspect-square flex flex-col touch-feedback min-h-[100px] sm:min-h-[120px] relative ${
-        resolvedTheme === 'dark'
-          ? 'bg-gray-700/30 border-gray-600/30 hover:bg-gray-700/50 hover:border-gray-500/50 active:bg-gray-600/50'
-          : 'bg-white/30 border-gray-200/30 hover:bg-white/50 hover:border-gray-300/50 active:bg-gray-100/50'
+      className={`p-3 sm:p-4 rounded-xl border cursor-pointer transition-all duration-200 hover:scale-[1.02] sm:hover:scale-[1.05] active:scale-95 aspect-square flex flex-col touch-feedback min-h-[140px] sm:min-h-[160px] relative ${
+        item.is_customizable
+          ? resolvedTheme === 'dark'
+            ? 'bg-orange-500/15 border-orange-500/30 hover:bg-orange-500/25 hover:border-orange-500/50 active:bg-orange-500/35'
+            : 'bg-orange-100/50 border-orange-300/50 hover:bg-orange-200/60 hover:border-orange-400/60 active:bg-orange-200/70'
+          : resolvedTheme === 'dark'
+            ? 'bg-gray-700/30 border-gray-600/30 hover:bg-gray-700/50 hover:border-gray-500/50 active:bg-gray-600/50'
+            : 'bg-white/30 border-gray-200/30 hover:bg-white/50 hover:border-gray-300/50 active:bg-gray-100/50'
       }`}
       role="button"
       tabIndex={0}
@@ -159,15 +163,15 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
 
       {/* Customizable Label - Orange Text Only */}
       {item.is_customizable && (
-        <div className="mb-1">
-          <span className="text-xs sm:text-sm font-semibold text-orange-500 antialiased">
+        <div className="mb-1.5">
+          <span className="text-sm sm:text-base font-semibold text-orange-500 antialiased">
             {t('menu.item.customizable')}
           </span>
         </div>
       )}
 
       {/* Item Name - Larger and Clearer */}
-      <h3 className={`text-base sm:text-lg font-bold mb-1 line-clamp-2 leading-tight antialiased ${
+      <h3 className={`text-lg sm:text-xl font-bold mb-1.5 line-clamp-2 leading-tight antialiased ${
         resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
       }`}>
         {item.name}
@@ -175,7 +179,7 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
 
       {/* Item Description - Gray text */}
       {item.description && (
-        <p className={`text-xs sm:text-sm leading-snug line-clamp-2 mb-1 antialiased ${
+        <p className={`text-sm sm:text-base leading-snug line-clamp-2 mb-1.5 antialiased ${
           resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
         }`}>
           {item.description}
@@ -187,12 +191,12 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({ item, orderType = 'd
 
       {/* Price Section - Clear and Readable */}
       <div className="flex flex-col">
-        <span className={`text-base sm:text-lg font-bold antialiased ${
+        <span className={`text-lg sm:text-xl font-bold antialiased ${
           resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
         }`}>
           {item.is_customizable ? t('menu.item.from') : ''}€{item.price.toFixed(2)}
         </span>
-        <span className={`text-xs sm:text-sm antialiased ${
+        <span className={`text-sm sm:text-base antialiased ${
           resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
         }`}>
           {orderType === 'pickup' ? t('menu.item.pickup') : t('menu.item.delivery')}

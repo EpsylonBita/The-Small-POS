@@ -325,10 +325,10 @@ export class WindowManager {
         });
 
         // Add console message handler for debugging - log ALL messages in production
-        this.mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-            // Log all console messages to help debug
-            const levelNames = ['verbose', 'info', 'warning', 'error'];
-            console.log(`[Renderer:${levelNames[level] || level}] ${message}`);
+        // Using Event object pattern (Electron 39+) instead of deprecated positional arguments
+        this.mainWindow.webContents.on('console-message', (event) => {
+            // event.level is a string in Electron 39+: 'verbose' | 'info' | 'warning' | 'error'
+            console.log(`[Renderer:${event.level}] ${event.message}`);
         });
 
         // Load the app

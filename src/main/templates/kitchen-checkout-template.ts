@@ -163,12 +163,16 @@ export function generateKitchenCheckoutReceiptBuffer(
   // ═══════════════════════════════════════════════════════════════
   addMajorSectionHeader(lines, t('receipt.kitchenCheckout.payment', language), isModern);
   lines.push({ text: t('receipt.kitchenCheckout.paymentAmount', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(shift.payment_amount || 0, currency) });
-  
+
   if (isModern) {
     lines.push({ text: '', style: 'small', align: 'left' });
   } else {
     lines.push({ text: '════════════════════════════════════════════', style: 'small', align: 'center' });
   }
+  lines.push({ text: '', style: 'small', align: 'left' });
+
+  // Payment recording note
+  lines.push({ text: t('receipt.formula.note.kitchenPayment', language), style: 'small', align: 'center' });
   lines.push({ text: '', style: 'small', align: 'left' });
 
   // ═══════════════════════════════════════════════════════════════
@@ -259,7 +263,12 @@ export function generateKitchenCheckoutReceipt(
   receipt += leftRight('Payment Amount:', formatCurrency(shift.payment_amount || 0)) + '\n';
   receipt += line('=') + '\n';
   receipt += '\n';
-  
+
+  // Payment recording note
+  receipt += center('Payment recorded by cashier during') + '\n';
+  receipt += center('their checkout') + '\n';
+  receipt += '\n';
+
   // Signature
   receipt += '\n';
   receipt += line() + '\n';

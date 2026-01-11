@@ -10,11 +10,10 @@
 import * as fc from 'fast-check';
 import { CustomerSyncService } from '../shared/services/CustomerSyncService';
 
-// Configure fast-check for minimum 100 iterations
-fc.configureGlobal({
-  numRuns: 100,
-  verbose: true,
-});
+// Note: fast-check is configured globally via the shared setup file (src/tests/setup.ts)
+// which imports propertyTestConfig.ts. Settings are env-driven:
+// - FAST_CHECK_NUM_RUNS: number of iterations (default: 100)
+// - FAST_CHECK_VERBOSE: verbose output (default: true)
 
 /**
  * Generate a valid UUID v4

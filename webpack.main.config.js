@@ -24,6 +24,9 @@ module.exports = (env, argv) => {
     },
     resolve: {
       extensions: ['.ts', '.js'],
+      extensionAlias: {
+        '.js': ['.ts', '.js'],  // Allow .js imports to resolve to .ts files (for node16 module resolution)
+      },
       alias: {
         '@': path.resolve(__dirname, 'src'),
         '@main': path.resolve(__dirname, 'src/main'),
@@ -48,10 +51,10 @@ module.exports = (env, argv) => {
       new webpack.DefinePlugin({
         'global': 'globalThis',
         'process.env.NODE_ENV': JSON.stringify(mode),
-        // SECURITY: Supabase credentials removed from webpack bundle
-        // They are now stored securely in OS keychain and retrieved at runtime
-        // via src/main/lib/secure-credentials.ts
-        // This prevents credential extraction from ASAR archive
+        // Supabase credentials - required for main process IPC handlers
+        // The anon key is safe to bundle as it's meant for client-side use with RLS
+        'process.env.SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL),
+        'process.env.SUPABASE_ANON_KEY': JSON.stringify(process.env.SUPABASE_ANON_KEY),
         'process.env.ADMIN_DASHBOARD_URL': JSON.stringify(process.env.ADMIN_DASHBOARD_URL),
         'process.env.TERMINAL_ID': JSON.stringify(process.env.TERMINAL_ID),
       })
@@ -60,20 +63,29 @@ module.exports = (env, argv) => {
       __dirname: false,
       __filename: false
     },
-    externals: {
-      'better-sqlite3': 'commonjs better-sqlite3',
+    externals: [
+      // Let webpack's target: 'electron-main' handle electron automatically
+      // Built-in electron modules must NOT resolve from node_modules
+      function({ request }, callback) {
+        if (request === 'electron') {
+          // Return as commonjs2 to preserve native require behavior
+          return callback(null, 'commonjs2 electron');
+        }
+        callback();
+      },
+      {
+        'better-sqlite3': 'commonjs better-sqlite3',
       // Database encryption dependencies (optional - for production)
       '@journeyapps/sqlcipher': 'commonjs @journeyapps/sqlcipher',
       'node-machine-id': 'commonjs node-machine-id',
-      // Secure credentials
-      'keytar': 'commonjs keytar',
       'bufferutil': 'commonjs bufferutil',
       'utf-8-validate': 'commonjs utf-8-validate',
       // Native printer modules - optional dependencies
       'bluetooth-serial-port': 'commonjs bluetooth-serial-port',
       'usb': 'commonjs usb',
       'serialport': 'commonjs serialport'
-    },
+      }
+    ],
     optimization: {
       minimize: isProduction, // Minimize in production
       usedExports: true,      // Mark unused exports for tree-shaking

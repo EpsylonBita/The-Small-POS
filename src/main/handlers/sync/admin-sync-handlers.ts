@@ -252,21 +252,45 @@ export function registerCoreSyncHandlers(): void {
   });
 
   // Sync deleted orders - check which local orders no longer exist on the server and delete them
+  // IMPORTANT: Only cleans up orders from BEFORE the last Z-Report to preserve current session orders
   ipcMain.handle('sync:cleanup-deleted-orders', async () => {
     try {
       const { getSupabaseClient } = require('../../../shared/supabase-config');
       const supabase = getSupabaseClient();
-      
+
       if (!supabase) {
         return { success: false, error: 'Supabase client not available' };
       }
 
+      // Get the last Z-Report timestamp to preserve orders that haven't been Z-Reported yet
+      const lastZReportTimestamp = db.settings.getSetting('system', 'last_z_report_timestamp', null) as string | null;
+      if (!lastZReportTimestamp) {
+        console.log('[sync:cleanup-deleted-orders] No Z-Report timestamp found, skipping cleanup to preserve all orders');
+        return { success: true, deleted: 0, message: 'No Z-Report yet, preserving all orders' };
+      }
+
+      const zReportTime = new Date(lastZReportTimestamp).getTime();
+
       // Get all local orders with supabase_id
       const allOrders = db.orders.getAllOrders();
-      const localOrders = allOrders.filter(o => o.supabase_id);
+
+      // Only consider orders created BEFORE the last Z-Report for cleanup
+      // Orders after the Z-Report are preserved until the next Z-Report is executed
+      const ordersBeforeZReport = allOrders.filter(o => {
+        const orderCreatedAt = o.created_at;
+        if (!orderCreatedAt) return false;
+        const orderTime = new Date(orderCreatedAt).getTime();
+        return orderTime < zReportTime;
+      });
+
+      const localOrders = ordersBeforeZReport.filter(o => o.supabase_id);
+      const preservedCount = allOrders.length - ordersBeforeZReport.length;
+      if (preservedCount > 0) {
+        console.log(`[sync:cleanup-deleted-orders] Preserving ${preservedCount} orders created after Z-Report`);
+      }
 
       if (localOrders.length === 0) {
-        return { success: true, deleted: 0, message: 'No synced orders to check' };
+        return { success: true, deleted: 0, message: 'No synced orders to check (excluding current session)' };
       }
 
       // Check which orders still exist on the server (batch query)
@@ -282,10 +306,10 @@ export function registerCoreSyncHandlers(): void {
       }
 
       const serverOrderIds = new Set((serverOrders || []).map((o: any) => o.id));
-      
+
       // Find orders that exist locally but not on server
       const deletedOrders = localOrders.filter(o => !serverOrderIds.has(o.supabase_id));
-      
+
       // Delete them locally
       let deletedCount = 0;
       for (const order of deletedOrders) {
@@ -298,8 +322,8 @@ export function registerCoreSyncHandlers(): void {
         }
       }
 
-      console.log(`[sync:cleanup-deleted-orders] Cleaned up ${deletedCount} orphaned orders`);
-      return { success: true, deleted: deletedCount, checked: localOrders.length };
+      console.log(`[sync:cleanup-deleted-orders] Cleaned up ${deletedCount} orphaned orders (preserved ${preservedCount} current session orders)`);
+      return { success: true, deleted: deletedCount, checked: localOrders.length, preserved: preservedCount };
     } catch (err) {
       console.error('sync:cleanup-deleted-orders error', err);
       return { success: false, error: (err as any).message };

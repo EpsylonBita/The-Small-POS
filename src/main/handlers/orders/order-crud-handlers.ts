@@ -917,7 +917,7 @@ export function registerOrderCrudHandlers(): void {
         setTimeout(async () => {
           try {
             // Import print handler dynamically to avoid circular dependencies
-            const { getPrinterManagerInstance } = await import('../printer-manager-handlers');
+            const { getPrinterManagerInstance } = await import('../printer-manager-handlers.js');
             const printerManager = getPrinterManagerInstance();
 
             if (!printerManager) {
@@ -961,9 +961,8 @@ export function registerOrderCrudHandlers(): void {
               console.log('[Auto-Print] First item structure:', JSON.stringify(order.items[0], null, 2));
             }
 
-            // Import print types and generator
-            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
-            const { PaperSize, PrintJobType } = await import('../../printer/types/index');
+            // Import print types (ReceiptGenerator not needed - PrinterManager handles generation)
+            const { PrintJobType } = await import('../../printer/types/index.js');
 
             // Create Supabase client for name resolution fallback
             const supabaseClientForPrint = createSupabaseClientForNameResolution();
@@ -1058,30 +1057,9 @@ export function registerOrderCrudHandlers(): void {
 
             console.log(`[Auto-Print] Receipt data prepared for ${receiptData.orderNumber}, ${receiptData.items.length} items`);
 
-            // Get language and currency settings
-            const settingsService = serviceRegistry.settingsService;
-            const language = settingsService ? settingsService.getLanguage() : 'en';
-            const currency = settingsService
-              ? (settingsService.getSetting('restaurant', 'currency', '€') || settingsService.getSetting('terminal', 'currency', '€') || '€')
-              : '€';
-
-            // Get Greek render mode from printer config
-            const greekRenderMode = receiptPrinter.greekRenderMode || 'text';
-
-            // Generate receipt buffer
-            const generator = new ReceiptGenerator({
-              paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
-              storeName: 'The Small',
-              currency: currency as string,
-              language: language,
-              greekRenderMode: greekRenderMode
-            });
-
-            // Use async generation to avoid blocking main thread during bitmap rendering
-            const receiptBuffer = await generator.generateReceiptAsync(receiptData);
-            console.log('[Auto-Print] Receipt buffer generated:', receiptBuffer.length, 'bytes');
-
-            // Submit print job
+            // Submit print job to queue (PrinterManager will generate receipt async)
+            // NOTE: Removed duplicate receipt generation - PrinterManager.generatePrintData()
+            // already generates the receipt buffer from receiptData.
             const jobResult = await printerManager.submitPrintJob({
               id: `receipt-${createdOrder.id}-${Date.now()}`,
               type: PrintJobType.RECEIPT,
@@ -1090,7 +1068,7 @@ export function registerOrderCrudHandlers(): void {
               createdAt: new Date()
             });
 
-            console.log('[Auto-Print] Print job submitted:', jobResult);
+            console.log('[Auto-Print] Print job queued:', jobResult);
 
             if (jobResult.success) {
               console.log('✅ [Auto-Print] Receipt printed successfully for order:', createdOrder.id);

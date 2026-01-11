@@ -88,12 +88,52 @@ export class OrderSyncService {
     /**
      * Reconcile local orders with Supabase - remove orders that were deleted remotely.
      * This handles the case where DELETE events were missed (e.g., before realtime subscription was active).
+     *
+     * IMPORTANT: Orders created AFTER the last Z-Report are NEVER reconciled/deleted.
+     * This ensures delivered/completed/cancelled orders remain in the POS until the Z-Report is executed.
      */
     public async reconcileDeletedOrders(): Promise<void> {
         try {
-            const localOrders = await this.dbManager.getAllOrders();
-            if (localOrders.length === 0) {
+            const allLocalOrders = await this.dbManager.getAllOrders();
+            if (allLocalOrders.length === 0) {
                 console.log('[OrderSyncService] No local orders to reconcile');
+                return;
+            }
+
+            // Get the last Z-Report timestamp to preserve orders that haven't been Z-Reported yet
+            let lastZReportTimestamp: string | null = null;
+            try {
+                const dbSvc = this.dbManager.getDatabaseService();
+                lastZReportTimestamp = dbSvc.settings.getSetting('system', 'last_z_report_timestamp', null) as string | null;
+            } catch {
+                // Settings not available, proceed without filter
+            }
+
+            // Filter: only reconcile orders created BEFORE the last Z-Report
+            // Orders after the Z-Report are preserved until the next Z-Report is executed
+            let localOrders = allLocalOrders;
+            if (lastZReportTimestamp) {
+                const zReportTime = new Date(lastZReportTimestamp).getTime();
+                localOrders = allLocalOrders.filter(order => {
+                    const orderCreatedAt = (order as any).created_at;
+                    if (!orderCreatedAt) return false; // No created_at, don't reconcile
+                    const orderTime = new Date(orderCreatedAt).getTime();
+                    // Only include orders created BEFORE the Z-Report for reconciliation
+                    return orderTime < zReportTime;
+                });
+                const preservedCount = allLocalOrders.length - localOrders.length;
+                if (preservedCount > 0) {
+                    console.log(`[OrderSyncService] Preserving ${preservedCount} orders created after Z-Report (${lastZReportTimestamp})`);
+                }
+            } else {
+                // No Z-Report has been executed yet - don't reconcile any orders
+                // This prevents losing orders before the first Z-Report
+                console.log('[OrderSyncService] No Z-Report timestamp found, skipping order reconciliation to preserve all orders');
+                return;
+            }
+
+            if (localOrders.length === 0) {
+                console.log('[OrderSyncService] No orders older than Z-Report to reconcile');
                 return;
             }
 

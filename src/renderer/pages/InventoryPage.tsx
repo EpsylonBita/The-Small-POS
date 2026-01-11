@@ -295,7 +295,7 @@ const InventoryPage: React.FC = () => {
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             className={`p-6 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-2xl w-full max-w-md`}
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
             <h3 className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
             <p className="mb-2">{isGreek ? selectedItem.name_el : selectedItem.name_en}</p>

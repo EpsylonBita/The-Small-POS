@@ -175,4 +175,14 @@ CREATE INDEX IF NOT EXISTS idx_subcategories_cache_category ON subcategories_cac
 -- - Added subcategories_cache table for offline item name resolution
 -- - Used by print handlers to resolve item names when orders lack embedded names
 -- - Synced from Supabase subcategories table during admin dashboard sync
+--
+-- Version 5.0 (2026-01-08 - Checkout Calculation Fixes)
+-- - Added calculation_version column to staff_shifts table
+-- - Version 1: Legacy formula (potentially buggy with double-counting)
+-- - Version 2: Corrected formula (staff payments informational only)
+-- - New shifts default to version 2, old shifts default to version 1 (NULL)
+-- - Formula reference:
+--   * Driver/Waiter: startingAmount + cashCollected - expenses - payment = return
+--   * Cashier v2: opening + sales - refunds - expenses - drops - driverGiven + driverReturned + inheritedDrivers = expected
+--   * Staff payments NOT deducted from cashier expected amount (informational only)
 

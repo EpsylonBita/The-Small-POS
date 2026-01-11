@@ -1216,33 +1216,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
 
       if (result.success) {
         toast.success(t('orderDashboard.orderCreated'));
-        // Refresh orders to get the new order
-        await silentRefresh();
+        // Refresh orders in background - don't block UI
+        silentRefresh().catch(err => console.debug('[OrderDashboard] Background refresh error:', err));
 
-        // Auto-print receipt/ticket for new orders
+        // Auto-print receipt/ticket for new orders (fire-and-forget - don't block UI)
         if (result.orderId) {
           console.log('[OrderDashboard] Starting auto-print for order:', result.orderId);
-          try {
-            const api: any = (window as any).electronAPI;
-            console.log('[OrderDashboard] electronAPI available:', !!api, 'printReceipt:', !!api?.printReceipt);
+          const api: any = (window as any).electronAPI;
+          console.log('[OrderDashboard] electronAPI available:', !!api, 'printReceipt:', !!api?.printReceipt);
 
-            if (api?.printReceipt) {
-              // Small delay to ensure order is saved to local DB
-              await new Promise(resolve => setTimeout(resolve, 500));
-              console.log('[OrderDashboard] Calling printReceipt for order:', result.orderId);
-              const printResult = await api.printReceipt(result.orderId);
-              console.log('[OrderDashboard] Receipt print result:', printResult);
-            } else if (api?.printOrder) {
-              await new Promise(resolve => setTimeout(resolve, 500));
-              console.log('[OrderDashboard] Calling printOrder for order:', result.orderId);
-              await api.printOrder(result.orderId);
-              console.log('[OrderDashboard] Order ticket printed for order:', result.orderId);
-            } else {
-              console.warn('[OrderDashboard] No print API available');
-            }
-          } catch (printError) {
-            console.error('[OrderDashboard] Auto-print error:', printError);
-            // Don't show error toast - printing is optional
+          if (api?.printReceipt) {
+            // Fire-and-forget printing - order is already saved by createOrder
+            console.log('[OrderDashboard] Calling printReceipt for order:', result.orderId);
+            api.printReceipt(result.orderId)
+              .then((printResult: any) => console.log('[OrderDashboard] Receipt print result:', printResult))
+              .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
+          } else if (api?.printOrder) {
+            console.log('[OrderDashboard] Calling printOrder for order:', result.orderId);
+            api.printOrder(result.orderId)
+              .then(() => console.log('[OrderDashboard] Order ticket printed for order:', result.orderId))
+              .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
+          } else {
+            console.warn('[OrderDashboard] No print API available');
           }
         } else {
           console.warn('[OrderDashboard] No orderId in result, skipping auto-print');

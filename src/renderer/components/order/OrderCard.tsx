@@ -171,6 +171,22 @@ export const OrderCard = memo<OrderCardProps>(({
   const customerPhoneNormalized = order.customer_phone || order.customerPhone || '';
   const deliveryAddressNormalized = order.delivery_address || order.address || (order as any).deliveryAddress || '';
   const [resolvedAddress, setResolvedAddress] = useState<string>('');
+
+  // Format address for display - only show street/road and number, not city, postal code, or floor
+  const formatAddressForDisplay = (fullAddress: string): string => {
+    if (!fullAddress) return '';
+
+    // Remove floor info if present (e.g., "Floor: 0" or "Όροφος: 2")
+    let addressWithoutFloor = fullAddress.replace(/,?\s*(?:Floor|Όροφος)\s*:?\s*\d+/gi, '');
+
+    // Split by comma and take only the first part (street address)
+    const parts = addressWithoutFloor.split(',').map(p => p.trim()).filter(Boolean);
+
+    if (parts.length === 0) return fullAddress;
+
+    // First part is typically the street address (e.g., "Iliados 10")
+    return parts[0];
+  };
   const requestedRef = useRef(false);
   const totalNormalized = typeof order.totalAmount === 'number' ? order.totalAmount : (typeof order.total_amount === 'number' ? order.total_amount : 0);
 
@@ -198,7 +214,9 @@ export const OrderCard = memo<OrderCardProps>(({
     });
   }
 
-  const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow;
+  // Don't show red glow animation for delivered/completed/cancelled orders
+  const isCancelled = orderStatusNormalized === 'cancelled';
+  const deliveryOlderThan40 = orderTypeNormalized === 'delivery' && isRedGlow && !isDeliveredOrCompleted && !isCancelled;
 
   // Fallback: resolve address via customer lookup when missing
   // Checks both customer_addresses table and legacy customers.address field
@@ -291,13 +309,14 @@ export const OrderCard = memo<OrderCardProps>(({
             {/* For delivery orders: Show address prominently (bold, bigger), then name & phone on same line below */}
             {orderTypeNormalized === 'delivery' ? (
               <>
-                {/* Delivery address - bold, bigger text, centered */}
+                {/* Delivery address - bold, bigger text, centered (street only, no city/postal) */}
                 <div className={`text-base sm:text-lg font-bold truncate ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                  {deliveryAddressNormalized || resolvedAddress || (
-                    customerPhoneNormalized && !resolvedAddress
+                  {(deliveryAddressNormalized || resolvedAddress)
+                    ? formatAddressForDisplay(deliveryAddressNormalized || resolvedAddress)
+                    : (customerPhoneNormalized && !resolvedAddress
                       ? <span className="italic font-normal">{t('orderCard.loadingAddress') || 'Loading address...'}</span>
                       : <span className="italic font-normal text-gray-400">{t('orderCard.addressNotAvailable') || 'Address not available'}</span>
-                  )}
+                    )}
                 </div>
                 {/* Customer name & phone - same line, smaller text */}
                 {(customerNameNormalized || customerPhoneNormalized) && (

@@ -24,13 +24,17 @@ module.exports = (env, argv) => {
       publicPath: isProduction ? './' : '/'
     },
   resolve: {
-    extensions: ['.tsx', '.ts', '.js', '.jsx'],
+    extensions: ['.tsx', '.ts', '.js', '.jsx', '.mjs'],
     alias: {
       '@': path.resolve(__dirname, 'src'),
       '@renderer': path.resolve(__dirname, 'src/renderer'),
-      '@shared': path.resolve(__dirname, 'src/shared')
+      '@shared': path.resolve(__dirname, 'src/shared'),
+      // Fix for motion-utils ESM import (process/browser -> process/browser.js)
+      'process/browser': require.resolve('process/browser.js')
     },
     mainFields: ['es2015', 'module', 'main'],
+    // Disable fully specified imports for ESM modules (fixes motion-utils)
+    fullySpecified: false,
     fallback: {
       "path": require.resolve("path-browserify"),
       "os": require.resolve("os-browserify/browser"),
@@ -50,6 +54,15 @@ module.exports = (env, argv) => {
   },
   module: {
     rules: [
+      // Handle ESM modules in node_modules (like motion-utils)
+      {
+        test: /\.m?js$/,
+        include: /node_modules/,
+        resolve: {
+          fullySpecified: false
+        },
+        type: 'javascript/auto'
+      },
       {
         test: /\.(ts|tsx)$/,
         use: {
@@ -106,7 +119,12 @@ module.exports = (env, argv) => {
       Buffer: ['buffer', 'Buffer'],
       process: 'process/browser',
       global: 'globalThis'
-    })
+    }),
+    // Fix for motion-utils ESM: redirect 'process/browser' to actual file
+    new webpack.NormalModuleReplacementPlugin(
+      /^process\/browser$/,
+      require.resolve('process/browser.js')
+    )
   ],
   optimization: {
     splitChunks: {

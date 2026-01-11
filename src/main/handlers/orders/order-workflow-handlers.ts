@@ -177,147 +177,158 @@ export function registerOrderWorkflowHandlers(): void {
         console.warn('[order:assign-driver] Failed to queue driver_id sync:', e);
       }
 
-      // Print full customer receipt with driver name
-      try {
-        console.log('[order:assign-driver] 🖨️ Printing customer receipt with driver name...');
+      // Print full customer receipt with driver name (fire-and-forget to prevent UI freeze)
+      // Capture variables needed for async printing
+      const printOrderId = order.id;
+      const printOrderNumber = order.order_number;
+      const printOrderItems = Array.isArray((order as any).items) ? (order as any).items : [];
+      const printOrderType = order.order_type;
+      const printOrder = { ...order }; // Shallow copy to avoid reference issues
+      const printDriverName = driverName;
+      const printSettingsService = settingsService;
 
-        // Import print handler dynamically to avoid circular dependencies
-        const { getPrinterManagerInstance } = await import('../printer-manager-handlers');
-        const printerManager = getPrinterManagerInstance();
+      // Fire-and-forget: Don't await receipt printing to prevent UI blocking
+      setImmediate(async () => {
+        try {
+          console.log('[order:assign-driver] 🖨️ Printing customer receipt with driver name (async)...');
 
-        if (!printerManager) {
-          console.warn('[order:assign-driver] PrinterManager not available, skipping receipt print');
-        } else {
+          // Import print handler dynamically to avoid circular dependencies
+          const { getPrinterManagerInstance } = await import('../printer-manager-handlers.js');
+          const printerManager = getPrinterManagerInstance();
+
+          if (!printerManager) {
+            console.warn('[order:assign-driver] PrinterManager not available, skipping receipt print');
+            return;
+          }
+
           // Get the first enabled receipt printer
           const printers = await printerManager.getPrinters();
           const receiptPrinter = printers.find((p: any) => p.role === 'receipt' && p.enabled) || printers.find((p: any) => p.enabled);
 
           if (!receiptPrinter) {
             console.warn('[order:assign-driver] No enabled printers configured, skipping receipt print');
-          } else {
-            // Get order items from the order object (items are embedded in local orders)
-            const orderItems = Array.isArray((order as any).items) ? (order as any).items : [];
-
-            // Import print types and generator
-            const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator');
-            const { PaperSize, PrintJobType } = await import('../../printer/types/index');
-
-            // Transform order items to PrintOrderItem format
-            const printItems: any[] = orderItems.map((item: any) => {
-              const modifiers: any[] = [];
-
-              // Handle customizations
-              if (item.customizations) {
-                const customizations = typeof item.customizations === 'string'
-                  ? JSON.parse(item.customizations)
-                  : item.customizations;
-
-                const customizationValues = Array.isArray(customizations) ? customizations : Object.values(customizations || {});
-                customizationValues.forEach((custom: any) => {
-                  if (custom && typeof custom === 'object') {
-                    const quantity = custom.quantity || 1;
-                    const name = custom.name || custom.ingredient?.name || 'Unknown';
-                    const isLittle = custom.isLittle || custom.is_little;
-                    const isWithout = custom.isWithout || custom.is_without;
-                    const price = isWithout ? 0 : (custom.ingredient?.price || custom.price || 0);
-
-                    modifiers.push({
-                      name: name,
-                      quantity: isWithout ? undefined : (quantity > 1 ? quantity : undefined),
-                      price: isWithout ? undefined : (price || undefined),
-                      isWithout: isWithout || false,
-                      isLittle: isLittle || false
-                    });
-                  }
-                });
-              }
-
-              return {
-                name: item.name || item.menu_item_name || 'Item',
-                quantity: item.quantity || 1,
-                unitPrice: item.unit_price || item.price || 0,
-                total: item.total_price || (item.price * item.quantity) || 0,
-                modifiers: modifiers.length > 0 ? modifiers : undefined,
-                specialInstructions: item.notes || item.special_instructions || undefined,
-                categoryName: item.categoryName || item.category_name || undefined
-              };
-            });
-
-            // Map order type to receipt format
-            let orderType: 'dine-in' | 'pickup' | 'delivery' = 'pickup';
-            if (order.order_type === 'dine-in' || order.order_type === 'delivery') {
-              orderType = order.order_type;
-            }
-
-            // Build receipt data with driver name
-            const discountAmount = (order as any).discount_amount || 0;
-            const discountPercentage = (order as any).discount_percentage || 0;
-
-            const receiptData: any = {
-              orderNumber: order.order_number || order.id.substring(0, 8),
-              orderType: orderType,
-              timestamp: new Date(order.created_at || new Date()),
-              items: printItems,
-              subtotal: order.subtotal || 0,
-              tax: (order as any).tax || 0,
-              tip: (order as any).tip || 0,
-              deliveryFee: order.delivery_fee || 0,
-              discount: discountAmount > 0 ? discountAmount : undefined,
-              discountPercentage: discountPercentage > 0 ? discountPercentage : undefined,
-              total: order.total_amount || 0,
-              paymentMethod: order.payment_method || 'cash',
-              customerName: order.customer_name || undefined,
-              customerPhone: order.customer_phone || undefined,
-              deliveryAddress: order.delivery_address || undefined,
-              deliveryNotes: (order as any).delivery_notes || undefined,
-              ringerName: (order as any).name_on_ringer || undefined,
-              tableName: order.table_number || undefined,
-              driverName: driverName // Include the assigned driver name
-            };
-
-            console.log(`[order:assign-driver] Receipt data prepared for ${receiptData.orderNumber} with driver: ${driverName}`);
-
-            // Get language and currency settings
-            const language = settingsService ? settingsService.getLanguage() : 'en';
-            const currency = settingsService
-              ? (settingsService.getSetting('restaurant', 'currency', '€') || settingsService.getSetting('terminal', 'currency', '€') || '€')
-              : '€';
-
-            // Get Greek render mode from printer config
-            const greekRenderMode = receiptPrinter.greekRenderMode || 'text';
-
-            // Generate receipt buffer
-            const generator = new ReceiptGenerator({
-              paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
-              storeName: 'The Small',
-              currency: currency as string,
-              language: language,
-              greekRenderMode: greekRenderMode
-            });
-
-            // Use async generation to avoid blocking main thread during bitmap rendering
-            const receiptBuffer = await generator.generateReceiptAsync(receiptData);
-            console.log('[order:assign-driver] Receipt buffer generated:', receiptBuffer.length, 'bytes');
-
-            // Submit print job
-            const jobResult = await printerManager.submitPrintJob({
-              id: `driver-assign-${order.id}-${Date.now()}`,
-              type: PrintJobType.RECEIPT,
-              data: receiptData,
-              priority: 2,
-              createdAt: new Date()
-            });
-
-            if (jobResult.success) {
-              console.log('[order:assign-driver] ✅ Customer receipt with driver name printed successfully');
-            } else {
-              console.warn('[order:assign-driver] Failed to print receipt:', jobResult.error);
-            }
+            return;
           }
+
+          // Import print types and generator
+          const { ReceiptGenerator } = await import('../../printer/services/escpos/ReceiptGenerator.js');
+          const { PaperSize, PrintJobType } = await import('../../printer/types/index.js');
+
+          // Transform order items to PrintOrderItem format
+          const printItems: any[] = printOrderItems.map((item: any) => {
+            const modifiers: any[] = [];
+
+            // Handle customizations
+            if (item.customizations) {
+              const customizations = typeof item.customizations === 'string'
+                ? JSON.parse(item.customizations)
+                : item.customizations;
+
+              const customizationValues = Array.isArray(customizations) ? customizations : Object.values(customizations || {});
+              customizationValues.forEach((custom: any) => {
+                if (custom && typeof custom === 'object') {
+                  const quantity = custom.quantity || 1;
+                  const name = custom.name || custom.ingredient?.name || 'Unknown';
+                  const isLittle = custom.isLittle || custom.is_little;
+                  const isWithout = custom.isWithout || custom.is_without;
+                  const price = isWithout ? 0 : (custom.ingredient?.price || custom.price || 0);
+
+                  modifiers.push({
+                    name: name,
+                    quantity: isWithout ? undefined : (quantity > 1 ? quantity : undefined),
+                    price: isWithout ? undefined : (price || undefined),
+                    isWithout: isWithout || false,
+                    isLittle: isLittle || false
+                  });
+                }
+              });
+            }
+
+            return {
+              name: item.name || item.menu_item_name || 'Item',
+              quantity: item.quantity || 1,
+              unitPrice: item.unit_price || item.price || 0,
+              total: item.total_price || (item.price * item.quantity) || 0,
+              modifiers: modifiers.length > 0 ? modifiers : undefined,
+              specialInstructions: item.notes || item.special_instructions || undefined,
+              categoryName: item.categoryName || item.category_name || undefined
+            };
+          });
+
+          // Map order type to receipt format
+          let orderType: 'dine-in' | 'pickup' | 'delivery' = 'pickup';
+          if (printOrderType === 'dine-in' || printOrderType === 'delivery') {
+            orderType = printOrderType;
+          }
+
+          // Build receipt data with driver name
+          const discountAmount = (printOrder as any).discount_amount || 0;
+          const discountPercentage = (printOrder as any).discount_percentage || 0;
+
+          const receiptData: any = {
+            orderNumber: printOrderNumber || printOrderId.substring(0, 8),
+            orderType: orderType,
+            timestamp: new Date(printOrder.created_at || new Date()),
+            items: printItems,
+            subtotal: printOrder.subtotal || 0,
+            tax: (printOrder as any).tax || 0,
+            tip: (printOrder as any).tip || 0,
+            deliveryFee: printOrder.delivery_fee || 0,
+            discount: discountAmount > 0 ? discountAmount : undefined,
+            discountPercentage: discountPercentage > 0 ? discountPercentage : undefined,
+            total: printOrder.total_amount || 0,
+            paymentMethod: printOrder.payment_method || 'cash',
+            customerName: printOrder.customer_name || undefined,
+            customerPhone: printOrder.customer_phone || undefined,
+            deliveryAddress: printOrder.delivery_address || undefined,
+            deliveryNotes: (printOrder as any).delivery_notes || undefined,
+            ringerName: (printOrder as any).name_on_ringer || undefined,
+            tableName: printOrder.table_number || undefined,
+            driverName: printDriverName // Include the assigned driver name
+          };
+
+          console.log(`[order:assign-driver] Receipt data prepared for ${receiptData.orderNumber} with driver: ${printDriverName}`);
+
+          // Get language and currency settings
+          const language = printSettingsService ? printSettingsService.getLanguage() : 'en';
+          const currency = printSettingsService
+            ? (printSettingsService.getSetting('restaurant', 'currency', '€') || printSettingsService.getSetting('terminal', 'currency', '€') || '€')
+            : '€';
+
+          // Get Greek render mode from printer config
+          const greekRenderMode = receiptPrinter.greekRenderMode || 'text';
+
+          // Generate receipt buffer
+          const generator = new ReceiptGenerator({
+            paperSize: receiptPrinter.paperSize || PaperSize.MM_80,
+            storeName: 'The Small',
+            currency: currency as string,
+            language: language,
+            greekRenderMode: greekRenderMode
+          });
+
+          // Use async generation to avoid blocking main thread during bitmap rendering
+          const receiptBuffer = await generator.generateReceiptAsync(receiptData);
+          console.log('[order:assign-driver] Receipt buffer generated:', receiptBuffer.length, 'bytes');
+
+          // Submit print job
+          const jobResult = await printerManager.submitPrintJob({
+            id: `driver-assign-${printOrderId}-${Date.now()}`,
+            type: PrintJobType.RECEIPT,
+            data: receiptData,
+            priority: 2,
+            createdAt: new Date()
+          });
+
+          if (jobResult.success) {
+            console.log('[order:assign-driver] ✅ Customer receipt with driver name printed successfully (async)');
+          } else {
+            console.warn('[order:assign-driver] Failed to print receipt:', jobResult.error);
+          }
+        } catch (e) {
+          console.error('[order:assign-driver] Async receipt print failed:', e);
         }
-      } catch (e) {
-        console.warn('[order:assign-driver] Error printing receipt (ignored):', e);
-      }
+      });
 
       // Emit event
       if (mainWindow && !mainWindow.isDestroyed()) {

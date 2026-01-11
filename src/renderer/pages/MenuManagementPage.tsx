@@ -28,6 +28,7 @@ interface Ingredient {
 
 interface Category {
   id: string;
+  name: string;      // Primary name field
   name_en: string;
   name_el: string;
   is_active: boolean;
@@ -291,7 +292,10 @@ export const MenuManagementPage: React.FC = () => {
           <div className="flex items-center justify-between">
             <div>
               <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                {language === 'el' ? category.name_el : category.name_en}
+                {(language === 'el'
+                  ? (category.name_el || category.name_en || category.name)
+                  : (category.name_en || category.name_el || category.name)
+                ) || 'Unnamed'}
               </h3>
             </div>
             <button
@@ -369,7 +373,10 @@ export const MenuManagementPage: React.FC = () => {
                   />
                 )}
                 <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                  {language === 'el' ? ingredient.name_el : ingredient.name_en}
+                  {(language === 'el'
+                    ? (ingredient.name_el || ingredient.name_en || ingredient.name)
+                    : (ingredient.name_en || ingredient.name_el || ingredient.name)
+                  ) || 'Unnamed'}
                 </h3>
               </div>
               {ingredient.price && (

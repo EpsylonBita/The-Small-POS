@@ -44,7 +44,12 @@ class WaiterCheckoutTemplate extends BaseReceiptTemplate {
     const startingAmount = shift.opening_cash_amount || 0;
     const expenses = this.summary.expenses.reduce((sum, e) => sum + e.amount, 0);
     const paymentAmount = shift.payment_amount || 0;
-    const cashToReturn = totalCashCollected - startingAmount - expenses - paymentAmount;
+    // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+    // v1 (legacy): payment_amount is deducted from cash to return
+    const calculationVersion = (shift as any).calculation_version || 1;
+    const cashToReturn = calculationVersion >= 2
+      ? startingAmount + totalCashCollected - expenses
+      : startingAmount + totalCashCollected - expenses - paymentAmount;
 
     // Count canceled orders and payment types
     let canceledOrders = 0;
@@ -204,7 +209,12 @@ export function generateWaiterCheckoutReceiptBuffer(
   const startingAmount = shift.opening_cash_amount || 0;
   const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
   const paymentAmount = shift.payment_amount || 0;
-  const cashToReturn = totalCashCollected - startingAmount - totalExpenses - paymentAmount;
+  // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+  // v1 (legacy): payment_amount is deducted from cash to return
+  const calculationVersion = (shift as any).calculation_version || 1;
+  const cashToReturn = calculationVersion >= 2
+    ? startingAmount + totalCashCollected - totalExpenses
+    : startingAmount + totalCashCollected - totalExpenses - paymentAmount;
 
   // Count canceled orders and payment types
   let canceledOrders = 0;
@@ -320,12 +330,17 @@ export function generateWaiterCheckoutReceiptBuffer(
     : t('receipt.cashierCheckout.shortage', language) + ':';
   
   lines.push({ text: returnLabel, style: 'bold', align: 'left', rightText: formatCurrency(Math.abs(cashToReturn), currency) });
-  
+
   if (isModern) {
     lines.push({ text: '', style: 'small', align: 'left' });
   } else {
     lines.push({ text: '════════════════════════════════════════════', style: 'small', align: 'center' });
   }
+  lines.push({ text: '', style: 'small', align: 'left' });
+
+  // Formula explanation
+  lines.push({ text: t('receipt.formula.label', language), style: 'small', align: 'center' });
+  lines.push({ text: t('receipt.formula.waiter', language), style: 'small', align: 'center' });
   lines.push({ text: '', style: 'small', align: 'left' });
 
   if (cashToReturn < 0) {
@@ -376,7 +391,12 @@ export function generateWaiterCheckoutReceipt(
   const startingAmount = shift.opening_cash_amount || 0;
   const expenses = summary.expenses.reduce((sum: number, e: ShiftExpense) => sum + e.amount, 0);
   const paymentAmount = shift.payment_amount || 0;
-  const cashToReturn = totalCashCollected - startingAmount - expenses - paymentAmount;
+  // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+  // v1 (legacy): payment_amount is deducted from cash to return
+  const calculationVersion = (shift as any).calculation_version || 1;
+  const cashToReturn = calculationVersion >= 2
+    ? startingAmount + totalCashCollected - expenses
+    : startingAmount + totalCashCollected - expenses - paymentAmount;
 
   const formatDate = (date: Date) => date.toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' });
   const formatTime = (date: Date) => date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
@@ -488,6 +508,16 @@ export function generateWaiterCheckoutReceipt(
   const returnAmount = Math.abs(cashToReturn);
   receipt += leftRight(returnLabel, formatCurrency(returnAmount)) + '\n';
   receipt += line('=') + '\n';
+  receipt += '\n';
+
+  // Formula explanation
+  receipt += center('Formula:') + '\n';
+  if (calculationVersion >= 2) {
+    receipt += center('Starting + Collected - Expenses = Return') + '\n';
+  } else {
+    receipt += center('Starting + Collected - Expenses - Payment') + '\n';
+    receipt += center('= Cash to Return') + '\n';
+  }
   receipt += '\n';
 
   if (cashToReturn < 0) {

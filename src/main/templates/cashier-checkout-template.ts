@@ -74,7 +74,7 @@ class CashierCheckoutTemplate extends BaseReceiptTemplate {
 
     // Cash Drawer Summary
     if (cashDrawer) {
-      this.addCashDrawerSummary(cashDrawer, cashRefunds, transferredDrivers.length);
+      this.addCashDrawerSummary(cashDrawer, cashRefunds, transferredDrivers);
     }
     
     // Notes
@@ -205,9 +205,9 @@ class CashierCheckoutTemplate extends BaseReceiptTemplate {
   private addTransferredDrivers(drivers: TransferredDriverInfo[]): void {
     this.builder
       .thickLine()
-      .centeredBold(this.t('receipt.cashierCheckout.transferredDrivers'))
+      .centeredBold(this.t('receipt.cashierCheckout.inheritedDrivers'))
       .alignCenter()
-      .textLine(`(${this.t('receipt.cashierCheckout.transferredNote')})`)
+      .textLine(`(${this.t('receipt.cashierCheckout.inheritedNote')})`)
       .alignLeft()
       .thickLine()
       .emptyLine();
@@ -221,70 +221,92 @@ class CashierCheckoutTemplate extends BaseReceiptTemplate {
         .textLine(name)
         .bold(false)
         .indentedTwoColumn(`${this.t('receipt.cashierCheckout.checkIn')}:`, checkIn)
-        .indentedTwoColumn('Starting Amount:', this.formatCurrency(driver.starting_amount))
-        .indentedTwoColumn('Cash Collected:', this.formatCurrency(driver.cash_collected || 0))
-        .indentedTwoColumn('Card Amount:', this.formatCurrency(driver.card_amount || 0))
-        .indentedTwoColumn('Expenses:', this.formatCurrency(driver.expenses))
-        .indentedTwoColumn('Net Cash Amount:', this.formatCurrency(driver.net_cash_amount))
+        .indentedTwoColumn(this.t('receipt.cashierCheckout.startingAmount') + ':', this.formatCurrency(driver.starting_amount))
+        .indentedTwoColumn(this.t('receipt.cashierCheckout.cashCollected') + ':', this.formatCurrency(driver.cash_collected || 0))
+        .indentedTwoColumn(this.t('receipt.cashierCheckout.cardAmount') + ':', this.formatCurrency(driver.card_amount || 0))
+        .indentedTwoColumn(this.t('receipt.cashierCheckout.expenses') + ':', this.formatCurrency(driver.expenses))
+        .indentedTwoColumn(this.t('receipt.cashierCheckout.expectedReturn') + ':', this.formatCurrency(driver.net_cash_amount))
         .emptyLine();
     });
 
     const totalTransferred = drivers.reduce((sum, d) => sum + d.net_cash_amount, 0);
     this.builder
       .dashedLine()
-      .leftRightBold(`${this.t('receipt.cashierCheckout.totalTransferred')}:`, this.formatCurrency(totalTransferred))
-      .emptyLine()
-      .warningMessage(this.t('receipt.cashierCheckout.notIncluded'));
+      .leftRightBold(`${this.t('receipt.cashierCheckout.totalInherited')}:`, this.formatCurrency(totalTransferred))
+      .emptyLine();
   }
 
   private addCashDrawerSummary(
-    cashDrawer: NonNullable<ShiftSummary['cashDrawer']>, 
+    cashDrawer: NonNullable<ShiftSummary['cashDrawer']>,
     cashRefunds: number,
-    transferredCount: number
+    transferredDrivers: TransferredDriverInfo[]
   ): void {
+    const totalInheritedReturns = transferredDrivers.reduce((sum, d) => sum + d.net_cash_amount, 0);
+
     this.builder
       .thickLine()
       .centeredBold(this.t('receipt.cashierCheckout.cashDrawer'))
       .thickLine();
 
-    if (transferredCount > 0) {
-      this.builder
-        .alignCenter()
-        .textLine(`Note: ${transferredCount} ${this.t('receipt.cashierCheckout.driversTransferred')}`)
-        .alignLeft()
-        .dashedLine();
+    // Cash drawer calculation breakdown
+    this.builder
+      .twoColumnRow(`${this.t('receipt.cashierCheckout.openingAmount')}:`, `+${this.formatCurrency(cashDrawer.opening_amount)}`)
+      .twoColumnRow(`+ ${this.t('receipt.cashierCheckout.cashSales')}:`, this.formatCurrency(cashDrawer.total_cash_sales))
+      .twoColumnRow(`- ${this.t('receipt.cashierCheckout.cashRefunds')}:`, this.formatCurrency(cashRefunds))
+      .twoColumnRow(`- ${this.t('receipt.cashierCheckout.expenses')}:`, this.formatCurrency(cashDrawer.total_expenses))
+      .twoColumnRow(`- ${this.t('receipt.cashierCheckout.cashDrops')}:`, this.formatCurrency(cashDrawer.cash_drops))
+      .twoColumnRow(`- ${this.t('receipt.cashierCheckout.driverCashGiven')}:`, this.formatCurrency(cashDrawer.driver_cash_given))
+      .twoColumnRow(`+ ${this.t('receipt.cashierCheckout.driverCashReturned')}:`, this.formatCurrency(cashDrawer.driver_cash_returned));
+
+    // Add inherited drivers line if there are any
+    if (transferredDrivers.length > 0) {
+      this.builder.twoColumnRow(`+ ${this.t('receipt.cashierCheckout.inheritedDrivers')}:`, this.formatCurrency(totalInheritedReturns));
     }
 
     this.builder
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.openingAmount')}:`, this.formatCurrency(cashDrawer.opening_amount))
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.cashSales')}:`, this.formatCurrency(cashDrawer.total_cash_sales))
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.cashRefunds')}:`, this.formatCurrency(cashRefunds))
-      .twoColumnRow('Expenses:', this.formatCurrency(cashDrawer.total_expenses))
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.cashDrops')}:`, this.formatCurrency(cashDrawer.cash_drops))
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.driverCashGiven')}:`, this.formatCurrency(cashDrawer.driver_cash_given))
-      .twoColumnRow(`${this.t('receipt.cashierCheckout.driverCashReturned')}:`, this.formatCurrency(cashDrawer.driver_cash_returned))
-      .twoColumnRow('Staff Payments:', this.formatCurrency(cashDrawer.total_staff_payments))
       .dashedLine()
-      .leftRightBold(this.t('receipt.cashierCheckout.expectedAmount') + ':', this.formatCurrency(cashDrawer.expected_amount || 0))
+      .leftRightBold(this.t('receipt.cashierCheckout.expectedInDrawer') + ':', this.formatCurrency(cashDrawer.expected_amount || 0))
+      .emptyLine();
+
+    // Information Only section for Staff Payments
+    this.builder
+      .subsectionHeader(this.t('receipt.cashierCheckout.informationOnly'))
+      .twoColumnRow(`${this.t('receipt.cashierCheckout.staffPayments')}:`, this.formatCurrency(cashDrawer.total_staff_payments))
+      .alignCenter()
+      .textLine(`(${this.t('receipt.formula.note.staffPaymentsReturned')})`)
+      .alignLeft()
+      .dashedLine();
+
+    // Closing amount and variance
+    this.builder
       .leftRightBold(this.t('receipt.cashierCheckout.closingAmount') + ':', this.formatCurrency(cashDrawer.closing_amount || 0))
       .dashedLine();
 
     const variance = cashDrawer.variance_amount || 0;
-    const varianceLabel = variance >= 0 
-      ? this.t('receipt.cashierCheckout.overage') + ':' 
+    const varianceLabel = variance >= 0
+      ? this.t('receipt.cashierCheckout.overage') + ':'
       : this.t('receipt.cashierCheckout.shortage') + ':';
-    
+
     this.builder
       .leftRightBold(varianceLabel, this.formatCurrency(Math.abs(variance)))
       .thickLine()
       .emptyLine();
 
     if (Math.abs(variance) > 0) {
-      const message = variance >= 0 
+      const message = variance >= 0
         ? this.t('receipt.cashierCheckout.overageDetected')
         : this.t('receipt.cashierCheckout.shortageDetected');
       this.builder.warningMessage(message);
     }
+
+    // Formula explanation
+    this.builder
+      .dashedLine()
+      .centeredBold(this.t('receipt.formula.label'))
+      .alignCenter()
+      .textLine(this.t('receipt.formula.cashier'))
+      .alignLeft()
+      .emptyLine();
   }
 }
 
@@ -424,11 +446,13 @@ export function generateCashierCheckoutReceiptBuffer(
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // TRANSFERRED DRIVERS
+  // INHERITED DRIVERS
   // ═══════════════════════════════════════════════════════════════
+  const totalInheritedReturns = transferredDrivers.reduce((sum, d) => sum + d.net_cash_amount, 0);
+
   if (transferredDrivers.length > 0) {
-    addMajorSectionHeader(lines, t('receipt.cashierCheckout.transferredDrivers', language), isModern);
-    lines.push({ text: '(' + t('receipt.cashierCheckout.transferredNote', language) + ')', style: 'small', align: 'center' });
+    addMajorSectionHeader(lines, t('receipt.cashierCheckout.inheritedDrivers', language), isModern);
+    lines.push({ text: '(' + t('receipt.cashierCheckout.inheritedNote', language) + ')', style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
 
     transferredDrivers.forEach((driver) => {
@@ -437,19 +461,16 @@ export function generateCashierCheckoutReceiptBuffer(
 
       lines.push({ text: name, style: 'bold', align: 'left' });
       lines.push({ text: '  ' + t('receipt.cashierCheckout.checkIn', language) + ':', style: 'normal', align: 'left', rightText: checkIn });
-      lines.push({ text: '  Starting Amount:', style: 'normal', align: 'left', rightText: formatCurrency(driver.starting_amount, currency) });
-      lines.push({ text: '  Cash Collected:', style: 'normal', align: 'left', rightText: formatCurrency(driver.cash_collected || 0, currency) });
-      lines.push({ text: '  Card Amount:', style: 'normal', align: 'left', rightText: formatCurrency(driver.card_amount || 0, currency) });
-      lines.push({ text: '  Expenses:', style: 'normal', align: 'left', rightText: formatCurrency(driver.expenses, currency) });
-      lines.push({ text: '  Net Cash Amount:', style: 'normal', align: 'left', rightText: formatCurrency(driver.net_cash_amount, currency) });
+      lines.push({ text: '  ' + t('receipt.cashierCheckout.startingAmount', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(driver.starting_amount, currency) });
+      lines.push({ text: '  ' + t('receipt.cashierCheckout.cashCollected', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(driver.cash_collected || 0, currency) });
+      lines.push({ text: '  ' + t('receipt.cashierCheckout.cardAmount', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(driver.card_amount || 0, currency) });
+      lines.push({ text: '  ' + t('receipt.cashierCheckout.expenses', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(driver.expenses, currency) });
+      lines.push({ text: '  ' + t('receipt.cashierCheckout.expectedReturn', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(driver.net_cash_amount, currency) });
       lines.push({ text: '', style: 'small', align: 'left' });
     });
 
-    const totalTransferred = transferredDrivers.reduce((sum, d) => sum + d.net_cash_amount, 0);
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
-    lines.push({ text: t('receipt.cashierCheckout.totalTransferred', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(totalTransferred, currency) });
-    lines.push({ text: '', style: 'small', align: 'left' });
-    lines.push({ text: '*** ' + t('receipt.cashierCheckout.notIncluded', language) + ' ***', style: 'small', align: 'center' });
+    lines.push({ text: t('receipt.cashierCheckout.totalInherited', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(totalInheritedReturns, currency) });
     lines.push({ text: '', style: 'small', align: 'left' });
   }
 
@@ -459,31 +480,41 @@ export function generateCashierCheckoutReceiptBuffer(
   if (cashDrawer) {
     addMajorSectionHeader(lines, t('receipt.cashierCheckout.cashDrawer', language), isModern);
 
+    // Cash drawer calculation breakdown with +/- signs
+    lines.push({ text: t('receipt.cashierCheckout.openingAmount', language) + ':', style: 'normal', align: 'left', rightText: '+' + formatCurrency(cashDrawer.opening_amount, currency) });
+    lines.push({ text: '+ ' + t('receipt.cashierCheckout.cashSales', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_cash_sales, currency) });
+    lines.push({ text: '- ' + t('receipt.cashierCheckout.cashRefunds', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashRefunds, currency) });
+    lines.push({ text: '- ' + t('receipt.cashierCheckout.expenses', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_expenses, currency) });
+    lines.push({ text: '- ' + t('receipt.cashierCheckout.cashDrops', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.cash_drops, currency) });
+    lines.push({ text: '- ' + t('receipt.cashierCheckout.driverCashGiven', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.driver_cash_given, currency) });
+    lines.push({ text: '+ ' + t('receipt.cashierCheckout.driverCashReturned', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.driver_cash_returned, currency) });
+
+    // Add inherited drivers line if there are any
     if (transferredDrivers.length > 0) {
-      lines.push({ text: 'Note: ' + transferredDrivers.length + ' ' + t('receipt.cashierCheckout.driversTransferred', language), style: 'small', align: 'center' });
-      lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
+      lines.push({ text: '+ ' + t('receipt.cashierCheckout.inheritedDrivers', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(totalInheritedReturns, currency) });
     }
 
-    lines.push({ text: t('receipt.cashierCheckout.openingAmount', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.opening_amount, currency) });
-    lines.push({ text: t('receipt.cashierCheckout.cashSales', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_cash_sales, currency) });
-    lines.push({ text: t('receipt.cashierCheckout.cashRefunds', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashRefunds, currency) });
-    lines.push({ text: 'Expenses:', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_expenses, currency) });
-    lines.push({ text: t('receipt.cashierCheckout.cashDrops', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.cash_drops, currency) });
-    lines.push({ text: t('receipt.cashierCheckout.driverCashGiven', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.driver_cash_given, currency) });
-    lines.push({ text: t('receipt.cashierCheckout.driverCashReturned', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.driver_cash_returned, currency) });
-    lines.push({ text: 'Staff Payments:', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_staff_payments, currency) });
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
-    lines.push({ text: t('receipt.cashierCheckout.expectedAmount', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(cashDrawer.expected_amount || 0, currency) });
+    lines.push({ text: t('receipt.cashierCheckout.expectedInDrawer', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(cashDrawer.expected_amount || 0, currency) });
+    lines.push({ text: '', style: 'small', align: 'left' });
+
+    // Information Only section for Staff Payments
+    addSectionHeader(lines, t('receipt.cashierCheckout.informationOnly', language), isModern);
+    lines.push({ text: t('receipt.cashierCheckout.staffPayments', language) + ':', style: 'normal', align: 'left', rightText: formatCurrency(cashDrawer.total_staff_payments, currency) });
+    lines.push({ text: '(' + t('receipt.formula.note.staffPaymentsReturned', language) + ')', style: 'small', align: 'center' });
+    lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
+
+    // Closing amount and variance
     lines.push({ text: t('receipt.cashierCheckout.closingAmount', language) + ':', style: 'bold', align: 'left', rightText: formatCurrency(cashDrawer.closing_amount || 0, currency) });
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
 
     const variance = cashDrawer.variance_amount || 0;
-    const varianceLabel = variance >= 0 
+    const varianceLabel = variance >= 0
       ? t('receipt.cashierCheckout.overage', language) + ':'
       : t('receipt.cashierCheckout.shortage', language) + ':';
-    
+
     lines.push({ text: varianceLabel, style: 'bold', align: 'left', rightText: formatCurrency(Math.abs(variance), currency) });
-    
+
     if (isModern) {
       lines.push({ text: '', style: 'small', align: 'left' });
     } else {
@@ -492,12 +523,18 @@ export function generateCashierCheckoutReceiptBuffer(
     lines.push({ text: '', style: 'small', align: 'left' });
 
     if (Math.abs(variance) > 0) {
-      const message = variance >= 0 
+      const message = variance >= 0
         ? '*** ' + t('receipt.cashierCheckout.overageDetected', language) + ' ***'
         : '*** ' + t('receipt.cashierCheckout.shortageDetected', language) + ' ***';
       lines.push({ text: message, style: 'bold', align: 'center' });
       lines.push({ text: '', style: 'small', align: 'left' });
     }
+
+    // Formula explanation
+    lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
+    lines.push({ text: t('receipt.formula.label', language), style: 'bold', align: 'center' });
+    lines.push({ text: t('receipt.formula.cashier', language), style: 'small', align: 'center' });
+    lines.push({ text: '', style: 'small', align: 'left' });
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -636,12 +673,14 @@ export function generateCashierCheckoutReceipt(
     receipt += '\n';
   }
 
-  // Transferred Drivers
+  // Inherited Drivers
   const transferredDrivers = summary.transferredDrivers || [];
+  const totalInheritedReturns = transferredDrivers.reduce((sum: number, d: TransferredDriverInfo) => sum + d.net_cash_amount, 0);
+
   if (transferredDrivers.length > 0) {
     receipt += line('=') + '\n';
-    receipt += 'TRANSFERRED DRIVERS\n';
-    receipt += center('(Active drivers from previous cashier)') + '\n';
+    receipt += 'INHERITED DRIVERS\n';
+    receipt += center('(Drivers from previous cashier shift)') + '\n';
     receipt += line('=') + '\n';
     receipt += '\n';
     transferredDrivers.forEach((driver: TransferredDriverInfo) => {
@@ -653,15 +692,11 @@ export function generateCashierCheckoutReceipt(
       receipt += leftRight('  Cash Collected:', formatCurrency(driver.cash_collected || 0)) + '\n';
       receipt += leftRight('  Card Amount:', formatCurrency(driver.card_amount || 0)) + '\n';
       receipt += leftRight('  Expenses:', formatCurrency(driver.expenses)) + '\n';
-      receipt += leftRight('  Net Cash Amount:', formatCurrency(driver.net_cash_amount)) + '\n';
+      receipt += leftRight('  Expected Return:', formatCurrency(driver.net_cash_amount)) + '\n';
       receipt += '\n';
     });
-    const totalTransferredCash = transferredDrivers.reduce((sum: number, d: TransferredDriverInfo) => sum + d.net_cash_amount, 0);
     receipt += line() + '\n';
-    receipt += leftRight('Total Transferred:', formatCurrency(totalTransferredCash)) + '\n';
-    receipt += '\n';
-    receipt += center('*** NOT INCLUDED IN EXPECTED ***') + '\n';
-    receipt += center('*** AMOUNT CALCULATION ***') + '\n';
+    receipt += leftRight('Total Inherited:', formatCurrency(totalInheritedReturns)) + '\n';
     receipt += '\n';
   }
 
@@ -670,21 +705,30 @@ export function generateCashierCheckoutReceipt(
     receipt += line('=') + '\n';
     receipt += 'CASH DRAWER SUMMARY\n';
     receipt += line('=') + '\n';
+    // Cash drawer calculation breakdown with +/- signs
+    receipt += leftRight('Opening Amount:', '+' + formatCurrency(cashDrawer.opening_amount)) + '\n';
+    receipt += leftRight('+ Pickup/Dine-In Cash:', formatCurrency(cashDrawer.total_cash_sales)) + '\n';
+    receipt += leftRight('- Cash Refunds:', formatCurrency(cashRefunds)) + '\n';
+    receipt += leftRight('- Expenses:', formatCurrency(cashDrawer.total_expenses)) + '\n';
+    receipt += leftRight('- Cash Drops:', formatCurrency(cashDrawer.cash_drops)) + '\n';
+    receipt += leftRight('- Driver Cash Given:', formatCurrency(cashDrawer.driver_cash_given)) + '\n';
+    receipt += leftRight('+ Driver Cash Returned:', formatCurrency(cashDrawer.driver_cash_returned)) + '\n';
     if (transferredDrivers.length > 0) {
-      receipt += center(`Note: ${transferredDrivers.length} driver(s) transferred`) + '\n';
-      receipt += center('to next cashier') + '\n';
-      receipt += line() + '\n';
+      receipt += leftRight('+ Inherited Drivers:', formatCurrency(totalInheritedReturns)) + '\n';
     }
-    receipt += leftRight('Opening Amount:', formatCurrency(cashDrawer.opening_amount)) + '\n';
-    receipt += leftRight('Cash Sales:', formatCurrency(cashDrawer.total_cash_sales)) + '\n';
-    receipt += leftRight('Cash Refunds:', formatCurrency(cashRefunds)) + '\n';
-    receipt += leftRight('Expenses:', formatCurrency(cashDrawer.total_expenses)) + '\n';
-    receipt += leftRight('Cash Drops:', formatCurrency(cashDrawer.cash_drops)) + '\n';
-    receipt += leftRight('Driver Cash Given:', formatCurrency(cashDrawer.driver_cash_given)) + '\n';
-    receipt += leftRight('Driver Cash Returned:', formatCurrency(cashDrawer.driver_cash_returned)) + '\n';
-    receipt += leftRight('Staff Payments:', formatCurrency(cashDrawer.total_staff_payments)) + '\n';
     receipt += line() + '\n';
-    receipt += leftRight('EXPECTED AMOUNT:', formatCurrency(cashDrawer.expected_amount || 0)) + '\n';
+    receipt += leftRight('EXPECTED IN DRAWER:', formatCurrency(cashDrawer.expected_amount || 0)) + '\n';
+    receipt += '\n';
+
+    // Information Only section
+    receipt += line() + '\n';
+    receipt += 'INFORMATION ONLY\n';
+    receipt += line() + '\n';
+    receipt += leftRight('Staff Payments:', formatCurrency(cashDrawer.total_staff_payments)) + '\n';
+    receipt += center('(Staff receives this amount back)') + '\n';
+    receipt += line() + '\n';
+
+    // Closing amount and variance
     receipt += leftRight('CLOSING AMOUNT:', formatCurrency(cashDrawer.closing_amount || 0)) + '\n';
     receipt += line() + '\n';
     const variance = (cashDrawer.variance_amount || 0);
@@ -696,8 +740,16 @@ export function generateCashierCheckoutReceipt(
       receipt += center(variance >= 0 ? '*** OVERAGE DETECTED ***' : '*** SHORTAGE DETECTED ***') + '\n';
       receipt += '\n';
     }
+
+    // Formula explanation
+    receipt += line() + '\n';
+    receipt += center('Formula:') + '\n';
+    receipt += center('Opening + Sales - Refunds - Expenses') + '\n';
+    receipt += center('- Drops - Given + Returned + Inherited') + '\n';
+    receipt += center('= Expected') + '\n';
+    receipt += '\n';
   }
-  
+
   // Notes
   if (shift.notes) {
     receipt += 'NOTES:\n';

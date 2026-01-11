@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import toast from 'react-hot-toast';
 import { getApiUrl, environment } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
 import { inputBase } from '../../styles/designSystem';
 
@@ -65,6 +67,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Set customer from initialCustomer prop when modal opens
   useEffect(() => {
@@ -347,18 +351,60 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     }
   };
 
-  const handleDeleteCustomer = async () => {
+  // Show delete confirmation dialog
+  const handleDeleteCustomer = () => {
+    if (!customer) return;
+    setShowDeleteConfirm(true);
+  };
+
+  // Perform actual deletion after confirmation
+  const performDeleteCustomer = async () => {
     if (!customer) return;
 
-    const confirmed = window.confirm(t('modals.customerSearch.confirmDelete'));
-    if (!confirmed) return;
-
+    setIsDeleting(true);
     try {
-      const response = await fetch(getApiUrl(`customers/${customer.id}`), {
+      // Get POS credentials for authentication
+      const ls = typeof window !== 'undefined' ? window.localStorage : null;
+      const electron = typeof window !== 'undefined' ? window.electron : undefined;
+
+      let posKey = '';
+      let termId = '';
+
+      // Get credentials from electron or localStorage
+      try {
+        if (electron?.ipcRenderer) {
+          const [mainTerminalId, mainApiKey] = await Promise.all([
+            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
+            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
+          ]);
+          termId = (mainTerminalId || '').toString().trim();
+          posKey = (mainApiKey || '').toString().trim();
+        }
+      } catch {
+        // Fallback to localStorage
+      }
+
+      // Fallback to localStorage if electron didn't provide values
+      if (!posKey && ls) {
+        posKey = (ls.getItem('pos_api_key') || '').trim();
+      }
+      if (!termId && ls) {
+        termId = (ls.getItem('terminal_id') || '').trim();
+      }
+
+      // Build headers with POS authentication
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (posKey) {
+        headers['x-pos-api-key'] = String(posKey);
+      }
+      if (termId) {
+        headers['x-terminal-id'] = String(termId);
+      }
+
+      const response = await fetch(getApiUrl(`pos/customers/${customer.id}`), {
         method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
+        credentials: 'omit', // Don't send cookies for POS endpoint
       });
 
       const result = await response.json();
@@ -368,14 +414,18 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         setCustomer(null);
         setCustomers([]);
         setSearchQuery('');
-        // Show success message (optional)
-        alert(t('modals.customerSearch.deleteSuccess'));
+        setShowDeleteConfirm(false);
+        // Show styled success toast
+        toast.success(t('modals.customerSearch.deleteSuccess'));
       } else {
         throw new Error(result.error || 'Failed to delete customer');
       }
     } catch (err) {
       console.error('Error deleting customer:', err);
-      alert(t('modals.customerSearch.deleteFailed'));
+      // Show styled error toast
+      toast.error(t('modals.customerSearch.deleteFailed'));
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -705,30 +755,74 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                             <button
                               onClick={async (e) => {
                                 e.stopPropagation();
-                                if (!window.confirm(t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?'))) return;
-                                try {
-                                  const response = await fetch(getApiUrl(`customers/${customer.id}/addresses/${addr.id}`), {
-                                    method: 'DELETE',
-                                    headers: { 'Content-Type': 'application/json' },
-                                  });
-                                  const result = await response.json().catch(() => ({}));
-                                  if (response.ok && result.success !== false) {
-                                    setCustomer(prev => prev ? {
-                                      ...prev,
-                                      addresses: prev.addresses?.filter(a => a.id !== addr.id)
-                                    } : null);
-                                    // If deleted address was selected, select another
-                                    if (isSelected) {
-                                      const remaining = customer.addresses?.filter(a => a.id !== addr.id);
-                                      setSelectedAddressId(remaining?.[0]?.id || null);
-                                    }
-                                  } else {
-                                    alert(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
-                                  }
-                                } catch (err) {
-                                  console.error('Error deleting address:', err);
-                                  alert(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
-                                }
+                                // Use toast confirmation for address deletion
+                                toast((toastInstance) => (
+                                  <div className="flex flex-col gap-3">
+                                    <p className="text-sm font-medium">{t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?')}</p>
+                                    <div className="flex gap-2">
+                                      <button
+                                        onClick={async () => {
+                                          toast.dismiss(toastInstance.id);
+                                          try {
+                                            // Get POS credentials
+                                            const ls = typeof window !== 'undefined' ? window.localStorage : null;
+                                            const electron = typeof window !== 'undefined' ? window.electron : undefined;
+                                            let posKey = '';
+                                            let termId = '';
+                                            try {
+                                              if (electron?.ipcRenderer) {
+                                                const [mainTerminalId, mainApiKey] = await Promise.all([
+                                                  electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
+                                                  electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
+                                                ]);
+                                                termId = (mainTerminalId || '').toString().trim();
+                                                posKey = (mainApiKey || '').toString().trim();
+                                              }
+                                            } catch { /* fallback */ }
+                                            if (!posKey && ls) posKey = (ls.getItem('pos_api_key') || '').trim();
+                                            if (!termId && ls) termId = (ls.getItem('terminal_id') || '').trim();
+
+                                            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                                            if (posKey) headers['x-pos-api-key'] = String(posKey);
+                                            if (termId) headers['x-terminal-id'] = String(termId);
+
+                                            const response = await fetch(getApiUrl(`pos/customers/${customer.id}/addresses/${addr.id}`), {
+                                              method: 'DELETE',
+                                              headers,
+                                              credentials: 'omit',
+                                            });
+                                            const result = await response.json().catch(() => ({}));
+                                            if (response.ok && result.success !== false) {
+                                              setCustomer(prev => prev ? {
+                                                ...prev,
+                                                addresses: prev.addresses?.filter(a => a.id !== addr.id)
+                                              } : null);
+                                              if (isSelected) {
+                                                const remaining = customer.addresses?.filter(a => a.id !== addr.id);
+                                                setSelectedAddressId(remaining?.[0]?.id || null);
+                                              }
+                                              toast.success(t('modals.customerSearch.deleteAddressSuccess', 'Address deleted'));
+                                            } else {
+                                              toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                            }
+                                          } catch (err) {
+                                            console.error('Error deleting address:', err);
+                                            toast.error(t('modals.customerSearch.deleteAddressFailed', 'Failed to delete address'));
+                                          }
+                                        }}
+                                        className="px-3 py-1.5 text-xs font-medium bg-red-500 text-white rounded-md hover:bg-red-600 transition-colors"
+                                      >
+                                        {t('common.delete', 'Delete')}
+                                      </button>
+                                      <button
+                                        onClick={() => toast.dismiss(toastInstance.id)}
+                                        className="px-3 py-1.5 text-xs font-medium bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors"
+                                      >
+                                        {t('common.cancel', 'Cancel')}
+                                      </button>
+                                    </div>
+                                  </div>
+                                ), { duration: 10000 });
                               }}
                               className="p-1.5 text-red-500 hover:bg-red-500/20 rounded-md transition-colors"
                               title={t('common.delete', 'Delete')}
@@ -866,6 +960,19 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           </button>
         </div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={showDeleteConfirm}
+        onClose={() => setShowDeleteConfirm(false)}
+        onConfirm={performDeleteCustomer}
+        title={t('modals.customerSearch.deleteCustomerTitle', 'Delete Customer')}
+        message={t('modals.customerSearch.confirmDelete')}
+        variant="error"
+        confirmText={t('common.delete', 'Delete')}
+        cancelText={t('common.cancel', 'Cancel')}
+        isLoading={isDeleting}
+      />
     </LiquidGlassModal>
   );
 };

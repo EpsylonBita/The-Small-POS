@@ -318,14 +318,17 @@ export class AuthService {
         return null;
       }
 
-      // Check if session has expired
-      const loginTime = new Date(activeSession.login_time).getTime();
-      const now = Date.now();
+      // Check if session has expired (only if session timeout is enabled)
+      const { enabled } = this.getSessionTimeoutSettings();
+      if (enabled) {
+        const loginTime = new Date(activeSession.login_time).getTime();
+        const now = Date.now();
 
-      if (now - loginTime > this.SESSION_DURATION) {
-        await this.logout();
-        this.notifyRenderer('session-timeout', { reason: 'time-limit' });
-        return null;
+        if (now - loginTime > this.SESSION_DURATION) {
+          await this.logout();
+          this.notifyRenderer('session-timeout', { reason: 'time-limit' });
+          return null;
+        }
       }
 
       return {
@@ -387,6 +390,12 @@ export class AuthService {
 
   private setSessionTimeout(): void {
     this.clearSessionTimeout();
+
+    // Check if session timeout is enabled before setting the timer
+    const { enabled } = this.getSessionTimeoutSettings();
+    if (!enabled) {
+      return; // Session timeout disabled, don't set the timer
+    }
 
     this.sessionTimeout = setTimeout(async () => {
       await this.logout();
@@ -529,17 +538,22 @@ export class AuthService {
       const existingSession = await this.dbManager.getActiveSession();
 
       if (existingSession) {
-        // Check if the session is still valid
-        const loginTime = new Date(existingSession.login_time).getTime();
-        const now = Date.now();
+        const { enabled } = this.getSessionTimeoutSettings();
 
-        if (now - loginTime > this.SESSION_DURATION) {
-          // Session expired, clean it up
-          await this.dbManager.endSession(existingSession.id);
-        } else {
-          // Session is still valid, restore it
-          this.setSessionTimeout();
+        if (enabled) {
+          // Check if the session is still valid (only when timeout is enabled)
+          const loginTime = new Date(existingSession.login_time).getTime();
+          const now = Date.now();
+
+          if (now - loginTime > this.SESSION_DURATION) {
+            // Session expired, clean it up
+            await this.dbManager.endSession(existingSession.id);
+          } else {
+            // Session is still valid, restore timeout timer
+            this.setSessionTimeout();
+          }
         }
+        // If timeout disabled, session remains valid indefinitely
       }
 
       // Auth service initialized

@@ -2053,7 +2053,7 @@
       "cashReconciliation": "💰 Cash Reconciliation",
       "reviewAndConfirm": "Review and confirm your cash drawer",
       "openingCashLabel": "Opening Cash",
-      "cashOrdersLabel": "+ Cash Orders",
+      "cashOrdersLabel": "+ Pickup/Dine-In Cash",
       "canceledOrdersLabel": "- Canceled Orders",
       "expensesLabel": "- Expenses",
       "staffPaymentsLabel": "- Staff Payments",
@@ -2130,8 +2130,33 @@
       "varianceNegative": "Missing money from drawer.",
       "varianceBalanced": "Perfect! The drawer is balanced.",
       "varianceBreakdown": "Cash Breakdown",
+      "cashRefundsLabel": "- Cash Refunds",
+      "cashDropsLabel": "- Cash Drops",
+      "driverCashGivenLabel": "- Driver Cash Given",
+      "driverCashReturnedLabel": "+ Driver Cash Returned",
+      "inheritedDriverReturnsLabel": "+ Inherited Driver Returns",
+      "informationalOnly": "info only",
       "varianceExplanation": "Explanation",
-      "shiftClosedSuccess": "Shift closed successfully!"
+      "shiftClosedSuccess": "Shift closed successfully!",
+      "driverPaymentNote": "Driver payment will be recorded when you return cash to the cashier",
+      "waiterPaymentNote": "Payment will be recorded when you return cash to the cashier",
+      "paymentDeductedNote": "Payment already deducted from amount to return",
+      "kitchenPaymentNote": "Payment will be recorded by the cashier when you check out",
+      "payment": "Payment",
+      "transferredDriversCount": "drivers transferred",
+      "informationOnlyTitle": "Information Only",
+      "notDeducted": "not deducted from expected",
+      "staffPaymentsMade": "Staff Payments Made",
+      "staffPaymentsReturnedViaCheckouts": "Staff payments are returned via staff checkouts",
+      "recordStaffPayments": "Record Staff Payments",
+      "addPayment": "Add Payment",
+      "staffPaymentsTitle": "Staff Payments",
+      "totalStaffPayments": "Total Staff Payments",
+      "driverStarting": "Starting",
+      "driverEarnings": "Earnings",
+      "driverReturns": "Returns",
+      "driverTakes": "Takes",
+      "driverRole": "Driver"
     },
     "zReport": {
       "title": "Z Report - {{date}}",
@@ -2324,6 +2349,7 @@
     "zReport": {
       "title": "Z Report - {{date}}",
       "selectDate": "Select report date",
+      "periodSince": "Period since: {{date}} {{time}}",
       "loadFailed": "Failed to load Z Report",
       "loading": "Loading report…",
       "tabs": {
@@ -3368,7 +3394,12 @@
       "expected": "Expected",
       "closing": "Closing",
       "cashTotal": "Cash Total",
-      "cardTotal": "Card Total"
+      "cardTotal": "Card Total",
+      "formula": {
+        "cashDrawer": "Expected = Opening + Sales - Refunds - Expenses - Drops - Given + Returned",
+        "driver": "Return = Starting + Collected - Expenses - Payment",
+        "staffPayments": "Staff payments recorded by cashier only"
+      }
     },
     "cashierCheckout": {
       "title": "CASHIER CHECKOUT REPORT",
@@ -3376,10 +3407,12 @@
       "ordersBreakdown": "ORDERS BREAKDOWN",
       "pickupDineIn": "PICKUP/DINE-IN",
       "delivery": "DELIVERY",
-      "staffPayments": "STAFF SHIFTS & PAYMENTS",
-      "expenses": "EXPENSES",
+      "staffPayments": "Staff Payments",
+      "expenses": "Expenses",
       "transferredDrivers": "TRANSFERRED DRIVERS",
       "transferredNote": "Active drivers from previous cashier",
+      "inheritedDrivers": "INHERITED DRIVERS",
+      "inheritedNote": "Drivers from previous cashier shift",
       "cashDrawer": "CASH DRAWER SUMMARY",
       "variance": "VARIANCE",
       "overage": "OVERAGE",
@@ -3401,6 +3434,7 @@
       "totalStaffPayments": "Total Staff Payments",
       "totalExpenses": "Total Expenses",
       "totalTransferred": "Total Transferred",
+      "totalInherited": "Total Inherited",
       "openingAmount": "Opening Amount",
       "cashSales": "Cash Sales",
       "cashRefunds": "Cash Refunds",
@@ -3408,10 +3442,16 @@
       "driverCashGiven": "Driver Cash Given",
       "driverCashReturned": "Driver Cash Returned",
       "expectedAmount": "EXPECTED AMOUNT",
+      "expectedInDrawer": "EXPECTED IN DRAWER",
       "closingAmount": "CLOSING AMOUNT",
       "notes": "NOTES",
       "payment": "Payment",
-      "driversTransferred": "driver(s) transferred to next cashier"
+      "driversTransferred": "driver(s) transferred to next cashier",
+      "informationOnly": "INFORMATION ONLY",
+      "startingAmount": "Starting Amount",
+      "cashCollected": "Cash Collected",
+      "cardAmount": "Card Amount",
+      "expectedReturn": "Expected Return"
     },
     "driverCheckout": {
       "title": "DRIVER CHECKOUT",
@@ -3516,6 +3556,23 @@
       "total": "TOTAL",
       "mixed": "Mixed (Cash + Card)",
       "collectCash": "COLLECT CASH FROM CUSTOMER"
+    },
+    "formula": {
+      "label": "Formula:",
+      "waiter": "Starting + Collected - Expenses = Return",
+      "waiterV1": "Starting + Collected - Expenses - Payment = Return",
+      "driver": "Starting + Collected - Expenses = Return",
+      "cashier": "Opening + Sales - Refunds - Expenses - Drops - Given + Returned + Inherited = Expected",
+      "note": {
+        "staffPayments": "Staff payments shown for information only (NOT deducted from expected)",
+        "staffPaymentsInfo": "Staff payments are informational only",
+        "staffPaymentsReturned": "Staff receives this amount back",
+        "transferredDrivers": "Inherited driver returns included in expected",
+        "orderTimes": "Order times shown for delivery verification",
+        "simplifiedAddresses": "Addresses simplified for readability",
+        "kitchenPayment": "Payment recorded at cashier checkout",
+        "paymentAtCashier": "Payment handled at cashier checkout"
+      }
     }
   },
   "updates": {

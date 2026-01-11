@@ -13,7 +13,8 @@ import { TextLine } from '../printer/services/escpos/GreekBitmapRenderer';
 import {
   t, formatCurrency, formatDate, formatTime,
   addSectionHeader, addMajorSectionHeader, addSignatureLines,
-  generateBitmapBuffer, getDefaultConfig, CheckoutConfig
+  generateBitmapBuffer, getDefaultConfig, CheckoutConfig,
+  parseAddressSimple
 } from './checkout-bitmap-utils';
 
 /**
@@ -49,7 +50,12 @@ class DriverCheckoutTemplate extends BaseReceiptTemplate {
     const startingAmount = shift.opening_cash_amount || 0;
     const expenses = this.summary.expenses.reduce((sum, e) => sum + e.amount, 0);
     const paymentAmount = shift.payment_amount || 0;
-    const cashToReturn = startingAmount + totalCashCollected - paymentAmount - expenses;
+    // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+    // v1 (legacy): payment_amount is deducted from cash to return
+    const calculationVersion = (shift as any).calculation_version || 1;
+    const cashToReturn = calculationVersion >= 2
+      ? startingAmount + totalCashCollected - expenses
+      : startingAmount + totalCashCollected - paymentAmount - expenses;
 
     // Header
     this.builder.receiptTitle(this.t('receipt.driverCheckout.title'));
@@ -139,15 +145,11 @@ class DriverCheckoutTemplate extends BaseReceiptTemplate {
   }
 
   private addOrderDetails(deliveries: NonNullable<ShiftSummary['driverDeliveries']>): void {
-    this.builder
-      .subsectionHeader(this.t('receipt.driverCheckout.orderDetails'))
-      .textLine(`${this.t('receipt.driverCheckout.orderNo').padEnd(5)}| ${this.t('receipt.driverCheckout.address').padEnd(19)}| ${this.t('receipt.driverCheckout.amount').padStart(7)} | ${this.t('receipt.driverCheckout.status')}`)
-      .dashedLine();
+    this.builder.subsectionHeader(this.t('receipt.driverCheckout.orderDetails'));
 
     deliveries.forEach((delivery, index) => {
       const orderNum = delivery.order_number || `#${index + 1}`;
-      const address = (delivery.delivery_address || 'N/A').substring(0, 18);
-      const amount = this.formatCurrency(delivery.total_amount).padStart(7);
+      const amount = this.formatCurrency(delivery.total_amount);
 
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
       const normalizedStatus = rawStatus.toLowerCase();
@@ -159,10 +161,36 @@ class DriverCheckoutTemplate extends BaseReceiptTemplate {
       if (paymentMethod === 'cash') paymentSymbol = '💵';
       else if (paymentMethod === 'mixed') paymentSymbol = '💵+💳';
 
-      this.builder.textLine(`${orderNum.padEnd(5)}| ${address.padEnd(19)}| ${amount} | ${statusSymbol}${paymentSymbol}`);
+      // Format delivery time using locale-aware formatting
+      const deliveryTime = (delivery as any).delivery_time;
+      const timeStr = deliveryTime
+        ? this.formatTime(new Date(deliveryTime))
+        : '';
+
+      // Order header line: Order# | Status | Payment | Time | Amount
+      this.builder.textLine(`${orderNum} ${statusSymbol}${paymentSymbol} ${timeStr}`.padEnd(30) + amount.padStart(10));
+
+      // Simplified address (street, city) for receipt readability
+      const address = parseAddressSimple(delivery.delivery_address || '');
+      this.builder.textLine(`  ${address}`);
+
+      this.builder.emptyLine();
     });
 
     this.builder.dashedLine().emptyLine();
+  }
+
+  private wrapText(text: string, maxWidth: number): string[] {
+    const lines: string[] = [];
+    let remaining = text;
+    while (remaining.length > maxWidth) {
+      let breakPoint = remaining.lastIndexOf(' ', maxWidth);
+      if (breakPoint === -1) breakPoint = maxWidth;
+      lines.push(remaining.substring(0, breakPoint).trim());
+      remaining = remaining.substring(breakPoint).trim();
+    }
+    if (remaining) lines.push(remaining);
+    return lines;
   }
 }
 
@@ -201,7 +229,12 @@ export function generateDriverCheckoutReceiptBuffer(
   const startingAmount = shift.opening_cash_amount || 0;
   const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
   const paymentAmount = shift.payment_amount || 0;
-  const cashToReturn = startingAmount + totalCashCollected - paymentAmount - totalExpenses;
+  // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+  // v1 (legacy): payment_amount is deducted from cash to return
+  const calculationVersion = (shift as any).calculation_version || 1;
+  const cashToReturn = calculationVersion >= 2
+    ? startingAmount + totalCashCollected - totalExpenses
+    : startingAmount + totalCashCollected - paymentAmount - totalExpenses;
 
   const canceledOrders = driverDeliveries.filter((d: any) => 
     d.status === 'cancelled' || d.status === 'canceled'
@@ -265,10 +298,9 @@ export function generateDriverCheckoutReceiptBuffer(
   // ═══════════════════════════════════════════════════════════════
   if (driverDeliveries.length > 0) {
     addSectionHeader(lines, t('receipt.driverCheckout.orderDetails', language), isModern);
-    
+
     driverDeliveries.forEach((delivery, index) => {
       const orderNum = delivery.order_number || '#' + (index + 1);
-      const address = (delivery.delivery_address || 'N/A').substring(0, 20);
       const amount = formatCurrency(delivery.total_amount, currency);
 
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
@@ -279,10 +311,25 @@ export function generateDriverCheckoutReceiptBuffer(
       const paymentMethod = (delivery.payment_method || '').toLowerCase();
       const paymentSymbol = paymentMethod === 'cash' ? 'Cash' : 'Card';
 
-      lines.push({ text: orderNum + ' ' + statusSymbol + ' ' + paymentSymbol, style: 'bold', align: 'left', rightText: amount });
+      // Format delivery time
+      const deliveryTime = (delivery as any).delivery_time;
+      const timeStr = deliveryTime
+        ? new Date(deliveryTime).toLocaleTimeString(language === 'el' ? 'el-GR' : 'en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: language !== 'el'
+          })
+        : '';
+
+      // Order header: Order# | Status | Payment | Time | Amount
+      lines.push({ text: `${orderNum} ${statusSymbol} ${paymentSymbol} ${timeStr}`, style: 'bold', align: 'left', rightText: amount });
+
+      // Simplified address (street, city) for receipt readability
+      const address = parseAddressSimple(delivery.delivery_address || '');
       lines.push({ text: '  ' + address, style: 'small', align: 'left' });
+      lines.push({ text: '', style: 'small', align: 'left' });
     });
-    
+
     lines.push({ text: '────────────────────────────────────────────', style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
   }
@@ -302,12 +349,22 @@ export function generateDriverCheckoutReceiptBuffer(
     : t('receipt.cashierCheckout.shortage', language) + ':';
   
   lines.push({ text: returnLabel, style: 'bold', align: 'left', rightText: formatCurrency(Math.abs(cashToReturn), currency) });
-  
+
   if (isModern) {
     lines.push({ text: '', style: 'small', align: 'left' });
   } else {
     lines.push({ text: '════════════════════════════════════════════', style: 'small', align: 'center' });
   }
+  lines.push({ text: '', style: 'small', align: 'left' });
+
+  // Formula explanation
+  lines.push({ text: t('receipt.formula.label', language), style: 'small', align: 'center' });
+  lines.push({ text: t('receipt.formula.driver', language), style: 'small', align: 'center' });
+  lines.push({ text: '', style: 'small', align: 'left' });
+
+  // Notes about order details
+  lines.push({ text: t('receipt.formula.note.orderTimes', language), style: 'small', align: 'center' });
+  lines.push({ text: t('receipt.formula.note.simplifiedAddresses', language), style: 'small', align: 'center' });
   lines.push({ text: '', style: 'small', align: 'left' });
 
   if (cashToReturn < 0) {
@@ -339,15 +396,16 @@ export function generateDriverCheckoutReceiptBuffer(
  * Generate Driver Checkout receipt as plain text string (legacy compatibility)
  */
 export function generateDriverCheckoutReceipt(
-  summary: ShiftSummary, 
-  terminalName?: string, 
-  paperWidth: number = 48
+  summary: ShiftSummary,
+  terminalName?: string,
+  paperWidth: number = 48,
+  language: 'en' | 'el' = 'en'
 ): string {
   const { shift, driverDeliveries = [] } = summary;
-  
+
   const checkInDate = new Date(shift.check_in_time);
   const checkOutDate = shift.check_out_time ? new Date(shift.check_out_time) : new Date();
-  
+
   // Calculate totals
   const totalOrders = driverDeliveries.length;
   const totalCashOrders = driverDeliveries.filter((d: NonNullable<ShiftSummary['driverDeliveries']>[number]) => d.payment_method === 'cash').length;
@@ -363,10 +421,17 @@ export function generateDriverCheckoutReceipt(
   const startingAmount = shift.opening_cash_amount || 0;
   const expenses = summary.expenses.reduce((sum: number, e: ShiftExpense) => sum + e.amount, 0);
   const paymentAmount = shift.payment_amount || 0;
-  const cashToReturn = startingAmount + totalCashCollected - paymentAmount - expenses;
-  
-  const formatDate = (date: Date) => date.toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' });
-  const formatTime = (date: Date) => date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  // v2+: payment_amount is NOT deducted (cashier handles payment separately)
+  // v1 (legacy): payment_amount is deducted from cash to return
+  const calculationVersion = (shift as any).calculation_version || 1;
+  const cashToReturn = calculationVersion >= 2
+    ? startingAmount + totalCashCollected - expenses
+    : startingAmount + totalCashCollected - paymentAmount - expenses;
+
+  const locale = language === 'el' ? 'el-GR' : 'en-US';
+  const use24Hour = language === 'el';
+  const formatDateLocal = (date: Date) => date.toLocaleDateString(locale, { year: 'numeric', month: '2-digit', day: '2-digit' });
+  const formatTimeLocal = (date: Date) => date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hour12: !use24Hour });
   const formatCurrency = (amount: number) => `€${amount.toFixed(2)}`;
   const line = (char: string = '-', length: number = paperWidth) => char.repeat(length);
   const center = (text: string, width: number = paperWidth) => {
@@ -388,8 +453,8 @@ export function generateDriverCheckoutReceipt(
   receipt += '\n';
   
   if (terminalName) receipt += center(terminalName) + '\n';
-  receipt += center(formatDate(checkOutDate)) + '\n';
-  receipt += center(formatTime(checkOutDate)) + '\n';
+  receipt += center(formatDateLocal(checkOutDate)) + '\n';
+  receipt += center(formatTimeLocal(checkOutDate)) + '\n';
   receipt += '\n';
   receipt += line() + '\n';
   receipt += '\n';
@@ -399,8 +464,8 @@ export function generateDriverCheckoutReceipt(
   receipt += line() + '\n';
   receipt += leftRight('Name:', shift.staff_id) + '\n';
   receipt += leftRight('Shift ID:', shift.id.substring(0, 8)) + '\n';
-  receipt += leftRight('Check-In:', formatTime(checkInDate)) + '\n';
-  receipt += leftRight('Check-Out:', formatTime(checkOutDate)) + '\n';
+  receipt += leftRight('Check-In:', formatTimeLocal(checkInDate)) + '\n';
+  receipt += leftRight('Check-Out:', formatTimeLocal(checkOutDate)) + '\n';
   receipt += '\n';
   
   // Delivery Summary
@@ -421,12 +486,9 @@ export function generateDriverCheckoutReceipt(
   if (driverDeliveries.length > 0) {
     receipt += 'ORDER DETAILS\n';
     receipt += line() + '\n';
-    receipt += 'No.  | Address            | Amount  | Status\n';
-    receipt += line() + '\n';
     driverDeliveries.forEach((delivery: NonNullable<ShiftSummary['driverDeliveries']>[number], index: number) => {
       const orderNum = delivery.order_number || `#${index + 1}`;
-      const address = (delivery.delivery_address || 'N/A').substring(0, 18);
-      const amount = formatCurrency(delivery.total_amount).padStart(7);
+      const amount = formatCurrency(delivery.total_amount);
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
       const normalizedStatus = rawStatus.toLowerCase();
       const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
@@ -437,7 +499,20 @@ export function generateDriverCheckoutReceipt(
       else if (paymentMethod === 'card') paymentSymbol = '💳';
       else if (paymentMethod === 'mixed') paymentSymbol = '💵+💳';
       else paymentSymbol = '💳';
-      receipt += `${orderNum.padEnd(5)}| ${address.padEnd(19)}| ${amount} | ${statusSymbol}${paymentSymbol}\n`;
+
+      // Format delivery time using locale-aware formatting
+      const deliveryTime = (delivery as any).delivery_time;
+      const timeStr = deliveryTime
+        ? formatTimeLocal(new Date(deliveryTime))
+        : '';
+
+      // Order header line with time
+      receipt += leftRight(`${orderNum} ${statusSymbol}${paymentSymbol} ${timeStr}`, amount) + '\n';
+
+      // Simplified address (street, city) for receipt readability
+      const address = parseAddressSimple(delivery.delivery_address || '');
+      receipt += `  ${address}\n`;
+      receipt += '\n';
     });
     receipt += line() + '\n';
     receipt += '\n';
@@ -458,12 +533,25 @@ export function generateDriverCheckoutReceipt(
   receipt += leftRight(returnLabel, formatCurrency(returnAmount)) + '\n';
   receipt += line('=') + '\n';
   receipt += '\n';
-  
+
+  // Formula explanation
+  receipt += center('Formula:') + '\n';
+  if (calculationVersion >= 2) {
+    receipt += center('Starting + Collected - Expenses = Return') + '\n';
+  } else {
+    receipt += center('Starting + Collected - Expenses - Payment') + '\n';
+    receipt += center('= Cash to Return') + '\n';
+  }
+  receipt += '\n';
+  receipt += center('Order times shown for delivery verification') + '\n';
+  receipt += center('Addresses simplified for readability') + '\n';
+  receipt += '\n';
+
   if (cashToReturn < 0) {
     receipt += center('*** SHORTAGE - WILL BE DEDUCTED ***') + '\n';
     receipt += '\n';
   }
-  
+
   // Signature
   receipt += '\n';
   receipt += line() + '\n';
