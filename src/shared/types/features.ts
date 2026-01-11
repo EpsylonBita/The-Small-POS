@@ -1,30 +1,26 @@
 /**
  * Feature Types for POS System
- * 
- * Stub definitions for feature flags and plan mapping.
+ *
+ * Re-exports canonical FeatureFlag type from shared for type safety.
+ * POS-specific feature configurations are kept locally.
  */
 
-export type FeatureFlag = string;
+// Re-export canonical FeatureFlag type from shared
+export type { FeatureFlag } from '../../../../shared/types/features';
+
+// Re-export plan mapping constants from shared
+export {
+  FEATURE_PLAN_MAP,
+  getRequiredPlanForFeature,
+  ALL_FEATURES,
+  STARTER_FEATURES as SHARED_STARTER_FEATURES,
+  PROFESSIONAL_FEATURES,
+  ENTERPRISE_FEATURES,
+} from '../../../../shared/types/features';
 
 /**
- * Map of features to required plans
- */
-export const FEATURE_PLAN_MAP: Record<string, string> = {
-  // Core features available on all plans
-  'pos': 'Starter',
-  'orders': 'Starter',
-  'menu': 'Starter',
-  // Professional features
-  'analytics': 'Professional',
-  'inventory': 'Professional',
-  'staff': 'Professional',
-  // Enterprise features
-  'multi-branch': 'Enterprise',
-  'api-access': 'Enterprise',
-};
-
-/**
- * Features available on Starter plan
+ * POS-specific features available on Starter plan
+ * This is a simplified list for POS navigation/UI purposes
  */
 export const STARTER_FEATURES: string[] = [
   'pos',

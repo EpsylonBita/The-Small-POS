@@ -1,41 +1,30 @@
 /**
- * Order Status Types (POS-local stub)
+ * Order Status Types for POS System
+ *
+ * Re-exports canonical types from shared for consistency.
+ * POS-specific mapping functions are kept locally since they have
+ * slightly different behavior (e.g., mapStatusFromSupabase).
  */
 
-export type OrderStatus = 
-  | 'pending'
-  | 'confirmed'
-  | 'preparing'
-  | 'ready'
-  | 'delivered'
-  | 'cancelled'
-  | 'completed';
+// Re-export canonical types from shared
+export type { OrderStatus, SupabaseOrderStatus } from '../../../../shared/types/order-status';
 
-// Supabase database constraint only allows these statuses
-export type SupabaseOrderStatus =
-  | 'pending'
-  | 'confirmed'
-  | 'preparing'
-  | 'ready'
-  | 'completed'
-  | 'cancelled';
+// Re-export constants from shared
+export {
+  ORDER_STATUSES,
+  ORDER_STATUS_MAP,
+  isValidOrderStatus,
+  SUPABASE_ALLOWED_STATUSES,
+} from '../../../../shared/types/order-status';
 
-export const ORDER_STATUSES: OrderStatus[] = [
-  'pending',
-  'confirmed',
-  'preparing',
-  'ready',
-  'delivered',
-  'cancelled',
-  'completed',
-];
+// Import shared mapping functions for internal use
+import {
+  mapStatusForPOS as sharedMapStatusForPOS,
+  mapStatusForSupabase as sharedMapStatusForSupabase,
+  coerceIncomingStatus as sharedCoerceIncomingStatus,
+} from '../../../../shared/types/order-status';
 
-/**
- * Check if a status is valid
- */
-export function isValidOrderStatus(status: string): status is OrderStatus {
-  return ORDER_STATUSES.includes(status as OrderStatus);
-}
+import type { OrderStatus, SupabaseOrderStatus } from '../../../../shared/types/order-status';
 
 /**
  * Map POS status to Supabase status
@@ -78,7 +67,7 @@ export function mapStatusForPOS(status: string): OrderStatus {
     cancelled: 'cancelled',
     completed: 'completed',
   };
-  
+
   return statusMap[status] || 'pending';
 }
 
@@ -86,8 +75,7 @@ export function mapStatusForPOS(status: string): OrderStatus {
  * Coerce incoming status to valid OrderStatus
  */
 export function coerceIncomingStatus(status: string): OrderStatus {
-  if (isValidOrderStatus(status)) {
-    return status;
-  }
+  const valid = sharedCoerceIncomingStatus(status);
+  if (valid) return valid;
   return mapStatusForPOS(status);
 }

@@ -11,6 +11,8 @@ import { PaymentService } from './PaymentService';
 import { ReportService } from './ReportService';
 import { CustomerCacheService } from './CustomerCacheService';
 import { CustomerDataService } from './CustomerDataService';
+import { DataIntegrityService } from './DataIntegrityService';
+import { OrphanedRecordCleanup } from './OrphanedRecordCleanup';
 
 // Import error handling utilities
 import { ErrorFactory, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
@@ -32,6 +34,8 @@ export class DatabaseService {
   public reports: ReportService;
   public customerCache: CustomerCacheService;
   public customers: CustomerDataService;
+  public dataIntegrity: DataIntegrityService;
+  public orphanedRecordCleanup: OrphanedRecordCleanup;
 
   constructor() {
     // Store database in user data directory
@@ -47,6 +51,8 @@ export class DatabaseService {
     this.reports = null as unknown as ReportService;
     this.customerCache = null as unknown as CustomerCacheService;
     this.customers = null as unknown as CustomerDataService;
+    this.dataIntegrity = null as unknown as DataIntegrityService;
+    this.orphanedRecordCleanup = null as unknown as OrphanedRecordCleanup;
   }
 
   async initialize(): Promise<void> {
@@ -77,17 +83,30 @@ export class DatabaseService {
     await withRetry(async () => {
       this.db = new Database(this.dbPath);
 
-      // Disable foreign keys - staff data is managed in Supabase, not locally
-      // This prevents foreign key constraint failures when staff_id doesn't exist in local staff table
-      this.db.pragma('foreign_keys = OFF');
-
-      // Enable WAL mode for better concurrency
+      // Enable WAL mode for better concurrency (must be set before foreign_keys)
       this.db.pragma('journal_mode = WAL');
       this.db.pragma('synchronous = NORMAL');
       this.db.pragma('cache_size = 1000');
       this.db.pragma('temp_store = memory');
 
+      // Create tables first (with FKs disabled to handle existing data)
+      this.db.pragma('foreign_keys = OFF');
       await this.createTables();
+
+      // Initialize cleanup service and clean orphaned records before enabling FKs
+      this.orphanedRecordCleanup = new OrphanedRecordCleanup(this.db);
+      console.log('[DatabaseService] Running pre-FK cleanup...');
+      const cleanupResult = this.orphanedRecordCleanup.runCleanup();
+      if (cleanupResult.recordsCleaned > 0) {
+        console.log(`[DatabaseService] Cleaned ${cleanupResult.recordsCleaned} orphaned records`);
+      }
+
+      // Enable foreign keys for data integrity on local table references
+      // Note: FKs only apply to local-to-local table relationships
+      // Supabase-managed references (staff_id, driver_id, customer_id) don't have FKs
+      // See: docs/database/sqlite-foreign-keys-strategy.md
+      this.db.pragma('foreign_keys = ON');
+      console.log('[DatabaseService] Foreign keys enabled');
 
       // Initialize domain services
       this.orders = new OrderService(this.db);
@@ -98,6 +117,7 @@ export class DatabaseService {
       this.reports = new ReportService(this.db);
       this.customerCache = new CustomerCacheService(this.db);
       this.customers = new CustomerDataService(this.db);
+      this.dataIntegrity = new DataIntegrityService(this.db);
 
       // Wire up cross-service dependencies
       this.reports.setSettingsService(this.settings);
@@ -413,6 +433,7 @@ export class DatabaseService {
     `);
 
     // Payment transactions table
+    // FK: order_id -> orders(id) with CASCADE DELETE for data integrity
     createTableSafe('payment_transactions', `
       CREATE TABLE IF NOT EXISTS payment_transactions (
         id TEXT PRIMARY KEY,
@@ -427,11 +448,12 @@ export class DatabaseService {
         metadata TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY (order_id) REFERENCES orders (id)
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
       )
     `);
 
     // Payment receipts table
+    // FK: transaction_id -> payment_transactions(id) with CASCADE DELETE
     createTableSafe('payment_receipts', `
       CREATE TABLE IF NOT EXISTS payment_receipts (
         id TEXT PRIMARY KEY,
@@ -449,11 +471,12 @@ export class DatabaseService {
         emailed BOOLEAN DEFAULT FALSE,
         email_address TEXT,
         created_at TEXT NOT NULL,
-        FOREIGN KEY (transaction_id) REFERENCES payment_transactions (id)
+        FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id) ON DELETE CASCADE
       )
     `);
 
     // Payment refunds table
+    // FK: transaction_id -> payment_transactions(id) with CASCADE DELETE
     createTableSafe('payment_refunds', `
       CREATE TABLE IF NOT EXISTS payment_refunds (
         id TEXT PRIMARY KEY,
@@ -464,7 +487,7 @@ export class DatabaseService {
         gateway_refund_id TEXT,
         processed_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        FOREIGN KEY (transaction_id) REFERENCES payment_transactions (id)
+        FOREIGN KEY (transaction_id) REFERENCES payment_transactions(id) ON DELETE CASCADE
       )
     `);
 
@@ -483,6 +506,8 @@ export class DatabaseService {
     `);
 
     // Staff sessions table
+    // Note: staff_id references Supabase staff table - NO FK constraint
+    // Staff data is synced from cloud, may not exist locally at insert time
     createTableSafe('staff_sessions', `
       CREATE TABLE IF NOT EXISTS staff_sessions (
         id TEXT PRIMARY KEY,
@@ -521,7 +546,10 @@ export class DatabaseService {
     `);
 
     // Staff shifts table
-    // Note: No foreign key on staff_id because staff data is managed in Supabase, not locally
+    // Note: staff_id references Supabase staff table - NO FK constraint
+    // Staff data is synced from cloud, may not exist locally at insert time
+    // This is a hybrid table: staff_id is Supabase-managed, but other tables
+    // reference this table locally (driver_earnings, shift_expenses, etc.)
     createTableSafe('staff_shifts', `
       CREATE TABLE IF NOT EXISTS staff_shifts (
         id TEXT PRIMARY KEY,
@@ -647,6 +675,8 @@ export class DatabaseService {
     `);
 
     // Cash drawer sessions table
+    // FK: staff_shift_id -> staff_shifts(id) with SET NULL on delete
+    // Note: cashier_id references Supabase staff - NO FK
     createTableSafe('cash_drawer_sessions', `
       CREATE TABLE IF NOT EXISTS cash_drawer_sessions (
         id TEXT PRIMARY KEY,
@@ -674,13 +704,15 @@ export class DatabaseService {
         reconciliation_notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id),
+        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id) ON DELETE CASCADE,
         CHECK(closed_at IS NULL OR closed_at >= opened_at),
         CHECK(reconciled = 0 OR(reconciled_at IS NOT NULL AND reconciled_by IS NOT NULL))
       )
     `);
 
     // Shift expenses table
+    // FK: staff_shift_id -> staff_shifts(id) with CASCADE DELETE
+    // Note: staff_id references Supabase staff - NO FK
     createTableSafe('shift_expenses', `
       CREATE TABLE IF NOT EXISTS shift_expenses(
         id TEXT PRIMARY KEY,
@@ -697,13 +729,16 @@ export class DatabaseService {
         rejection_reason TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id),
+        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id) ON DELETE CASCADE,
         CHECK(status != 'approved' OR(approved_by IS NOT NULL AND approved_at IS NOT NULL)),
         CHECK(status != 'rejected' OR rejection_reason IS NOT NULL)
       )
       `);
 
     // Driver earnings table
+    // FK: staff_shift_id -> staff_shifts(id) with SET NULL (nullable)
+    // FK: order_id -> orders(id) with CASCADE DELETE
+    // Note: driver_id references Supabase staff - NO FK
     createTableSafe('driver_earnings', `
       CREATE TABLE IF NOT EXISTS driver_earnings(
         id TEXT PRIMARY KEY,
@@ -724,8 +759,8 @@ export class DatabaseService {
         settlement_batch_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id),
-        FOREIGN KEY(order_id) REFERENCES orders(id),
+        FOREIGN KEY(staff_shift_id) REFERENCES staff_shifts(id) ON DELETE SET NULL,
+        FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE,
         CHECK(total_earning = delivery_fee + tip_amount),
         CHECK(settled = 0 OR settled_at IS NOT NULL)
       )
@@ -948,7 +983,9 @@ export class DatabaseService {
     }
 
     // Staff payments table for tracking wage payments made during cashier shifts
-    // Note: staff_shift_id is nullable - links to recipient's shift if available, NULL for off-shift payouts
+    // FK: staff_shift_id -> staff_shifts(id) with SET NULL (nullable - links to recipient's shift if available)
+    // FK: paid_by_cashier_shift_id -> staff_shifts(id) with CASCADE DELETE
+    // Note: paid_to_staff_id references Supabase staff - NO FK
     createTableSafe('staff_payments', `
       CREATE TABLE IF NOT EXISTS staff_payments (
         id TEXT PRIMARY KEY,
@@ -960,8 +997,8 @@ export class DatabaseService {
         notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        FOREIGN KEY (staff_shift_id) REFERENCES staff_shifts(id),
-        FOREIGN KEY (paid_by_cashier_shift_id) REFERENCES staff_shifts(id)
+        FOREIGN KEY (staff_shift_id) REFERENCES staff_shifts(id) ON DELETE SET NULL,
+        FOREIGN KEY (paid_by_cashier_shift_id) REFERENCES staff_shifts(id) ON DELETE CASCADE
       )
     `);
 

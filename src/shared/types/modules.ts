@@ -1,34 +1,58 @@
 /**
  * Module Types for POS System
- * 
- * Complete type definitions for module management in the POS system.
+ *
+ * Re-exports canonical types from shared for type safety.
+ * POS-specific types are defined locally where they differ from shared.
  */
 
-export type ModuleId = string;
+// Re-export canonical types from shared
+export type {
+  ModuleId as SharedModuleId,
+  ModuleCategory,
+  ModuleMetadata as SharedModuleMetadata,
+  EnabledModule as SharedEnabledModule,
+  ModuleResolutionResult as SharedModuleResolutionResult,
+  ModuleResolutionOptions,
+} from '../../../../shared/types/modules';
 
-export type ModuleCategory = 'core' | 'vertical' | 'addon';
+// Re-export BusinessType from shared (via organization)
+export type { BusinessType } from './organization';
 
-export type BusinessType = 'restaurant' | 'hotel' | 'retail' | 'cafe' | 'bar' | 'bakery' | 'food_truck' | 'fast_food' | 'salon' | 'bar_cafe' | 'chain' | 'franchise';
+// Re-export FeatureFlag from shared (via features)
+export type { FeatureFlag } from './features';
 
-export type FeatureFlag = string;
+/**
+ * POS-specific ModuleId that extends the shared union with string.
+ * This allows POS to accept any module IDs from sync endpoints that may
+ * not yet be defined in the shared ModuleId union (e.g., new modules added
+ * via admin dashboard before shared types are updated).
+ */
+export type POSModuleId = import('../../../../shared/types/modules').ModuleId | string;
 
+// Also export as ModuleId for backward compatibility
+export type ModuleId = POSModuleId;
+
+/**
+ * Simplified ModuleMetadata for POS system use.
+ * Extends the shared type pattern but is optimized for POS needs.
+ */
 export interface ModuleMetadata {
-  id: ModuleId;
+  id: POSModuleId;
   name: string;
   description: string;
-  category: ModuleCategory;
+  category: import('../../../../shared/types/modules').ModuleCategory;
   isCore: boolean;
   showInNavigation: boolean;
   sortOrder: number;
   requiredFeatures: string[];
-  compatibleBusinessTypes: string[] | BusinessType[];
+  compatibleBusinessTypes: string[];
   route?: string;
   icon?: string;
   posEnabled?: boolean;
 }
 
 /**
- * Enabled module with access status
+ * Enabled module with access status for POS
  */
 export interface EnabledModule {
   module: ModuleMetadata;
@@ -37,7 +61,7 @@ export interface EnabledModule {
   requiredPlan?: string;
   isPurchased?: boolean;
   isPosEnabled?: boolean;
-  missingFeatures?: FeatureFlag[];
+  missingFeatures?: string[];
 }
 
 /**
@@ -49,7 +73,7 @@ export interface POSModuleInfo {
   name: string;
   display_name: string;
   description: string;
-  category: ModuleCategory | string;
+  category: import('../../../../shared/types/modules').ModuleCategory | string;
   is_core: boolean;
   is_enabled: boolean;
   is_locked: boolean;
@@ -81,21 +105,12 @@ export interface POSModulesEnabledResponse {
 }
 
 /**
- * Module resolution result
+ * Module resolution result for POS
  */
 export interface ModuleResolutionResult {
   enabledModules: EnabledModule[];
   lockedModules: EnabledModule[];
-  businessType: BusinessType;
+  businessType: import('./organization').BusinessType;
   currentPlan: string;
   totalModulesForVertical: number;
-}
-
-/**
- * Module resolution options
- */
-export interface ModuleResolutionOptions {
-  includeLocked?: boolean;
-  category?: ModuleCategory;
-  navigationOnly?: boolean;
 }
