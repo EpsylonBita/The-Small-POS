@@ -2,15 +2,57 @@
  * Screen Capture Handlers Module
  *
  * Handles screen capture IPC for live remote viewing.
+ * SECURITY: All screen capture goes through consent dialog in window-manager.ts
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, desktopCapturer, dialog } from 'electron';
 import { serviceRegistry } from '../service-registry';
 
 /**
  * Register screen capture IPC handlers
  */
 export function registerScreenCaptureHandlers(): void {
+  // SECURITY: Screen capture source enumeration with user consent
+  // This replaces direct desktopCapturer access from preload
+  ipcMain.handle('screen-capture:get-sources', async (_event, options: { types: ('screen' | 'window')[] }) => {
+    try {
+      // SECURITY: Show consent dialog before allowing screen enumeration
+      const { response } = await dialog.showMessageBox({
+        type: 'question',
+        title: 'Screen Capture Request',
+        message: 'An application is requesting access to screen information.',
+        detail: 'This may be used for screen sharing or recording. Do you want to allow this?',
+        buttons: ['Allow', 'Deny'],
+        defaultId: 1, // Default to Deny for security
+        cancelId: 1,
+      });
+
+      if (response !== 0) {
+        console.log('[ScreenCapture] User denied screen source enumeration');
+        return { success: false, error: 'User denied access', sources: [] };
+      }
+
+      console.log('[ScreenCapture] User consented - enumerating screen sources');
+      const sources = await desktopCapturer.getSources(options);
+      return {
+        success: true,
+        sources: sources.map(source => ({
+          id: source.id,
+          name: source.name,
+          display_id: source.display_id,
+          thumbnail: source.thumbnail.toDataURL(),
+        })),
+      };
+    } catch (error) {
+      console.error('[ScreenCapture] Error getting sources:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        sources: [],
+      };
+    }
+  });
+
   // Screen Capture IPC handlers for live remote viewing
   ipcMain.handle('screen-capture:get-status', async () => {
     try {

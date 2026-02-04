@@ -12,6 +12,8 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { menuService } from '../../services/MenuService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
+import { Pencil } from 'lucide-react';
+import { formatCurrency } from '../../utils/format';
 
 interface MenuModalProps {
   isOpen: boolean;
@@ -676,7 +678,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         {/* Edit Mode Banner */}
         {editMode && (
           <div className="bg-amber-500/20 border border-amber-500/30 rounded-lg p-3 mb-4 flex items-center gap-2">
-            <span className="text-amber-600 dark:text-amber-400">✏️</span>
+            <Pencil className="w-4 h-4 text-amber-500" />
             <span className="text-sm text-amber-700 dark:text-amber-300">
               {t('modals.menu.editModeMessage') || 'You are editing an existing order. Add, remove, or modify items as needed.'}
             </span>
@@ -702,7 +704,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                       {t('modals.menu.zone')}: {effectiveDeliveryZoneInfo.zone.name}
                     </span>
                     <span className="inline-flex items-center">
-                      {t('modals.menu.fee')}: €{effectiveDeliveryZoneInfo.zone.deliveryFee.toFixed(2)}
+                      {t('modals.menu.fee')}: {formatCurrency(effectiveDeliveryZoneInfo.zone.deliveryFee)}
                     </span>
                     {effectiveDeliveryZoneInfo.zone.estimatedTime && (
                       <span className="inline-flex items-center">

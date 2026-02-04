@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'react-hot-toast'
 import { getApiUrl, API_TIMEOUT_MS, environment } from '../../config/environment'
+import { posApiGet } from '../utils/api-helpers'
 import { menuService } from '../services/MenuService'
 import useTerminalSettings from './useTerminalSettings'
 
@@ -11,10 +12,15 @@ interface PollState {
   checks: number
 }
 
-function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs: number = API_TIMEOUT_MS) {
+function posApiGetWithTimeout<T>(
+  endpoint: string,
+  options: RequestInit = {},
+  timeoutMs: number = API_TIMEOUT_MS
+) {
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeoutMs)
-  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(id))
+  return posApiGet<T>(endpoint, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id))
 }
 
 export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?: boolean }) {
@@ -95,9 +101,10 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
         credsApiLen: creds.apiKey?.length || 0
       })
 
-      const resp = await fetchWithTimeout(getApiUrl(`/pos/menu-sync?${params.toString()}`), { method: 'GET', headers })
-      if (!resp.ok) {
-        const msg = `${resp.status} ${resp.statusText}`
+      const endpoint = `/pos/menu-sync?${params.toString()}`
+      const result = await posApiGetWithTimeout(endpoint, { headers })
+      if (!result.success) {
+        const msg = result.error || 'Unknown error'
         throw new Error(`menu-sync failed: ${msg}`)
       }
       // We don’t currently use the payload; we refresh caches from Supabase directly
@@ -148,7 +155,8 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
       const params = new URLSearchParams()
       if (since) params.set('since', since)
       if (terminalId) params.set('terminal_id', terminalId)
-      const url = getApiUrl(`/pos/menu-version${params.toString() ? `?${params.toString()}` : ''}`)
+      const endpoint = `/pos/menu-version${params.toString() ? `?${params.toString()}` : ''}`
+      const url = getApiUrl(endpoint)
 
       // Lightweight debug (first 2 attempts)
       try {
@@ -168,25 +176,19 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
         }
       } catch {}
 
-      const resp = await fetchWithTimeout(url, { method: 'GET', headers })
-      if (!resp.ok) {
-        let serverMsg = ''
-        try {
-          serverMsg = await resp.text()
-          try { serverMsg = JSON.parse(serverMsg)?.error || serverMsg } catch {}
-        } catch {}
-        const msg = `${resp.status} ${resp.statusText}${serverMsg ? ` - ${serverMsg}` : ''}`
+      const result = await posApiGetWithTimeout<{ latest_updated_at?: string }>(endpoint, { headers })
+      if (!result.success) {
+        const msg = result.error || 'Unknown error'
 
         // Opportunistic fallback: if unauthorized once, try a full sync to self-heal
-        if (resp.status === 401 && !fallbackUsedRef.current) {
+        if (result.status === 401 && !fallbackUsedRef.current) {
           fallbackUsedRef.current = true
           console.warn('[useMenuVersionPolling] 401 from menu-version, triggering full menu-sync once...')
           await triggerMenuSync(state.lastSeen)
         }
         throw new Error(`menu-version failed: ${msg}`)
       }
-      const json = await resp.json()
-      const latest: string | null = json?.latest_updated_at || null
+      const latest: string | null = result.data?.latest_updated_at || null
 
       if (latest && latest !== state.lastSeen) {
         await triggerMenuSync(latest)
@@ -201,10 +203,23 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
   // Interval loop
   useEffect(() => {
     if (!enabled) return
-    // Immediate check on enable
-    checkOnce()
-    const id = setInterval(checkOnce, intervalMs)
-    return () => clearInterval(id)
+
+    // STARTUP DELAY: Wait before first poll to allow main process heartbeat to complete
+    // This prevents 401 errors when the terminal hasn't been registered yet
+    // The heartbeat creates/updates the terminal record with api_key_hash
+    let intervalId: ReturnType<typeof setInterval> | null = null
+
+    const startupTimer = setTimeout(() => {
+      // First poll after delay
+      checkOnce()
+      // Then set up regular interval
+      intervalId = setInterval(checkOnce, intervalMs)
+    }, 5000) // 5 second delay on startup to allow heartbeat to complete
+
+    return () => {
+      clearTimeout(startupTimer)
+      if (intervalId) clearInterval(intervalId)
+    }
   }, [enabled, intervalMs, checkOnce])
 
   return { ...state, checkNow: checkOnce }

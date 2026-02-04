@@ -16,6 +16,14 @@ import {
   TransportEvent,
 } from './PrinterTransport';
 import { PrinterErrorCode } from '../types';
+import {
+  validatePortName,
+  validateBaudRate,
+  validateDataBits,
+  validateStopBits,
+  validateParity,
+  sanitizeForPowerShellSingleQuote,
+} from './validation';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -64,17 +72,33 @@ export class DirectSerialTransport extends BasePrinterTransport {
 
   constructor(portName: string, options?: DirectSerialTransportOptions) {
     super(options);
-    this.portName = portName;
-    this.serialOptions = { 
+
+    // SECURITY: Validate port name to prevent command injection
+    validatePortName(portName);
+    this.portName = portName.trim().toUpperCase();
+
+    // Validate and set serial options
+    const baudRate = options?.baudRate ?? 9600;
+    const dataBits = options?.dataBits ?? 8;
+    const stopBits = options?.stopBits ?? 1;
+    const parity = options?.parity ?? 'none';
+
+    // SECURITY: Validate all numeric/enum options
+    validateBaudRate(baudRate);
+    validateDataBits(dataBits);
+    validateStopBits(stopBits);
+    validateParity(parity);
+
+    this.serialOptions = {
       connectionTimeout: options?.connectionTimeout ?? 5000,
       maxRetries: options?.maxRetries ?? 3,
       retryBaseDelay: options?.retryBaseDelay ?? 1000,
       autoReconnect: options?.autoReconnect ?? false,
       reconnectTimeout: options?.reconnectTimeout ?? 30000,
-      baudRate: options?.baudRate ?? 9600,
-      dataBits: options?.dataBits ?? 8,
-      stopBits: options?.stopBits ?? 1,
-      parity: options?.parity ?? 'none',
+      baudRate,
+      dataBits,
+      stopBits,
+      parity,
     };
     this.tempDir = path.join(os.tmpdir(), 'pos-serial-' + Date.now());
   }
@@ -91,9 +115,11 @@ export class DirectSerialTransport extends BasePrinterTransport {
    */
   protected async doConnect(): Promise<void> {
     try {
-      // Configure the COM port using mode command
-      const modeCmd = `mode ${this.portName} baud=${this.serialOptions.baudRate} parity=${this.serialOptions.parity?.[0] || 'n'} data=${this.serialOptions.dataBits} stop=${this.serialOptions.stopBits}`;
-      
+      // SECURITY: Port name was validated in constructor, use validated values
+      // Mode command only uses validated numeric/enum values
+      const parityChar = this.serialOptions.parity?.[0] || 'n';
+      const modeCmd = `mode ${this.portName} baud=${this.serialOptions.baudRate} parity=${parityChar} data=${this.serialOptions.dataBits} stop=${this.serialOptions.stopBits}`;
+
       console.log(`[DirectSerialTransport] Configuring port: ${modeCmd}`);
       await execAsync(modeCmd);
 
@@ -144,9 +170,14 @@ export class DirectSerialTransport extends BasePrinterTransport {
 
       console.log(`[DirectSerialTransport] Sending ${data.length} bytes to ${this.portName}`);
 
+      // SECURITY: Use sanitized values in PowerShell script
+      // Port name is validated (COM1-COM999), sanitize for extra safety
+      const safePortName = sanitizeForPowerShellSingleQuote(this.portName);
+      const safeTempFile = tempFile.replace(/\\/g, '\\\\').replace(/'/g, "''");
+
       // Use PowerShell to write directly to COM port
       const psScript = `
-$port = [System.IO.Ports.SerialPort]::new('${this.portName}', ${this.serialOptions.baudRate})
+$port = [System.IO.Ports.SerialPort]::new('${safePortName}', ${this.serialOptions.baudRate})
 $port.DataBits = ${this.serialOptions.dataBits}
 $port.StopBits = [System.IO.Ports.StopBits]::One
 $port.Parity = [System.IO.Ports.Parity]::None
@@ -155,7 +186,7 @@ $port.WriteTimeout = 5000
 
 try {
     $port.Open()
-    $bytes = [System.IO.File]::ReadAllBytes('${tempFile.replace(/\\/g, '\\\\')}')
+    $bytes = [System.IO.File]::ReadAllBytes('${safeTempFile}')
     $port.Write($bytes, 0, $bytes.Length)
     $port.Close()
     Write-Host "Sent $($bytes.Length) bytes successfully"
@@ -220,8 +251,16 @@ export async function sendRawToComPort(
   data: Buffer,
   baudRate: number = 9600
 ): Promise<{ success: boolean; error?: string }> {
+  // SECURITY: Validate inputs
+  try {
+    validatePortName(portName);
+    validateBaudRate(baudRate);
+  } catch (validationError: any) {
+    return { success: false, error: validationError.message };
+  }
+
   const tempDir = path.join(os.tmpdir(), 'pos-serial-test');
-  
+
   try {
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -230,8 +269,12 @@ export async function sendRawToComPort(
     const tempFile = path.join(tempDir, `test-${Date.now()}.bin`);
     fs.writeFileSync(tempFile, data);
 
+    // SECURITY: Sanitize values for PowerShell
+    const safePortName = sanitizeForPowerShellSingleQuote(portName.trim().toUpperCase());
+    const safeTempFile = tempFile.replace(/\\/g, '\\\\').replace(/'/g, "''");
+
     const psScript = `
-$port = [System.IO.Ports.SerialPort]::new('${portName}', ${baudRate})
+$port = [System.IO.Ports.SerialPort]::new('${safePortName}', ${baudRate})
 $port.DataBits = 8
 $port.StopBits = [System.IO.Ports.StopBits]::One
 $port.Parity = [System.IO.Ports.Parity]::None
@@ -240,7 +283,7 @@ $port.WriteTimeout = 5000
 
 try {
     $port.Open()
-    $bytes = [System.IO.File]::ReadAllBytes('${tempFile.replace(/\\/g, '\\\\')}')
+    $bytes = [System.IO.File]::ReadAllBytes('${safeTempFile}')
     $port.Write($bytes, 0, $bytes.Length)
     $port.Close()
     Write-Host "SUCCESS"

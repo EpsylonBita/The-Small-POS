@@ -16,21 +16,37 @@
     "noEmit": false,
     "jsx": "react-jsx",
     "outDir": "./dist/renderer",
+    "types": ["react", "react-dom"],
+    "typeRoots": ["./node_modules/@types"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
       "@renderer/*": ["src/renderer/*"],
-      "@shared/*": ["src/shared/*"]
+      "@shared/*": ["../shared/*", "src/shared/*"],
+      "@shared/types/*": ["../shared/types/*", "src/shared/types/*"],
+      "@shared/services/*": ["../shared/services/*", "src/shared/services/*"],
+      "@supabase/supabase-js": ["node_modules/@supabase/supabase-js"],
+      "@supabase/supabase-js/*": ["node_modules/@supabase/supabase-js/*"]
     }
   },
   "include": [
     "src/renderer/**/*.ts",
     "src/renderer/**/*.tsx",
     "src/renderer/**/*.d.ts",
-    "src/shared/**/*"
+    "src/shared/**/*",
+    "../shared/types/**/*",
+    "../shared/services/upsellUrlService.ts",
+    "../shared/services/moduleRegistry.ts",
+    "../shared/services/ModuleService.ts",
+    "../shared/config/**/*",
+    "../shared/utils/**/*",
+    "../shared/hooks/**/*"
   ],
   "exclude": [
     "node_modules",
-    "src/main/**/*"
+    "src/main/**/*",
+    "../shared/**/*.test.ts",
+    "../shared/**/*.spec.ts",
+    "../shared/**/*.property.test.ts"
   ]
 }

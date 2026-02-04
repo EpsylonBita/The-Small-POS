@@ -7,6 +7,7 @@ import AutoSizer from 'react-virtualized-auto-sizer';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { Grid } = require('react-window');
 import { OptimizedImg } from '../ui/OptimizedImg';
+import { Settings, Utensils, Clock } from 'lucide-react';
 
 
 interface MenuItem {
@@ -178,7 +179,7 @@ export const MenuGrid: React.FC<MenuGridProps> = React.memo(({
 
       {items.length === 0 && (
         <div className="flex flex-col items-center justify-center py-12 space-y-4">
-          <div className="text-6xl opacity-50">🍽️</div>
+          <Utensils className="w-12 h-12 opacity-50" />
           <div className="text-gray-500 text-lg font-medium">
             {selectedCategory ? 'No items in this category' : 'No items found'}
           </div>
@@ -214,7 +215,7 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
             className="w-full h-full object-cover rounded-lg transition-transform duration-200 hover:scale-110"
           />
         ) : (
-          <div className="text-gray-400 text-4xl animate-pulse">🍽️</div>
+          <Utensils className="w-10 h-10 text-gray-400 animate-pulse" />
         )}
       </div>
 
@@ -245,8 +246,9 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
               </span>
             )}
           </div>
-          <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
-            ⏱️ {item.preparationTime} min
+          <span className="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded-full inline-flex items-center gap-1">
+            <Clock className="w-3 h-3" />
+            {item.preparationTime} min
           </span>
         </div>
 
@@ -254,7 +256,10 @@ const MenuItemCard: React.FC<MenuItemCardProps> = React.memo(({ item, onClick, o
         {(item.is_customizable || (item.customizations && item.customizations.length > 0)) && (
           <div className="mt-2">
             <span className="text-xs bg-blue-100 text-blue-800 px-3 py-1 rounded-full border border-blue-200 animate-pulse">
-              ⚙️ Customizable
+              <span className="inline-flex items-center gap-1">
+                <Settings className="w-3 h-3" aria-hidden="true" />
+                {t('menu.customizable', { defaultValue: 'Customizable' })}
+              </span>
             </span>
           </div>
         )}

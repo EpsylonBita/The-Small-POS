@@ -20,6 +20,8 @@ const errorHandler = ErrorHandler.getInstance();
  */
 function getAdminApiBaseUrl(): string {
   const settingsService = serviceRegistry.get('settingsService');
+  const terminalAdminDashboardUrl = (settingsService?.getSetting?.('terminal', 'admin_dashboard_url', '') as string) || '';
+  if (terminalAdminDashboardUrl) return terminalAdminDashboardUrl;
   const terminalAdminUrl = (settingsService?.getSetting?.('terminal', 'admin_url', '') as string) || '';
   if (terminalAdminUrl) return terminalAdminUrl;
   const envAdminUrl = (process.env['ADMIN_API_BASE_URL'] || '').trim();
@@ -271,7 +273,7 @@ export function registerOrderWorkflowHandlers(): void {
             timestamp: new Date(printOrder.created_at || new Date()),
             items: printItems,
             subtotal: printOrder.subtotal || 0,
-            tax: (printOrder as any).tax || 0,
+            tax: (printOrder as any).tax_amount ?? (printOrder as any).tax ?? 0,
             tip: (printOrder as any).tip || 0,
             deliveryFee: printOrder.delivery_fee || 0,
             discount: discountAmount > 0 ? discountAmount : undefined,
@@ -348,7 +350,7 @@ export function registerOrderWorkflowHandlers(): void {
     }
   });
 
-  // Notify platform that order is ready
+  // Notify plugin that order is ready
   ipcMain.handle('order:notify-platform-ready', async (_event, orderId: string) => {
     try {
       const dbManager = serviceRegistry.requireService('dbManager');
@@ -377,13 +379,13 @@ export function registerOrderWorkflowHandlers(): void {
         return { success: false, error: 'Order not found' };
       }
 
-      // Extract platform fields
-      const platformField = order.platform || null;
-      const externalPlatformOrderIdField = order.external_platform_order_id || null;
+      // Extract plugin fields
+      const pluginField = order.plugin || order.platform || null;
+      const externalPluginOrderIdField = order.external_plugin_order_id || order.external_platform_order_id || null;
       const orderNumber = order.order_number || `ORD-${order.id.slice(-6)}`;
 
-      if (!platformField || !externalPlatformOrderIdField) {
-        return { success: false, error: 'Not a platform order or missing external order ID' };
+      if (!pluginField || !externalPluginOrderIdField) {
+        return { success: false, error: 'Not a plugin order or missing external order ID' };
       }
 
       // Get admin API URL
@@ -395,10 +397,10 @@ export function registerOrderWorkflowHandlers(): void {
 
       const { terminalId, apiKey } = getTerminalCredentials();
 
-      console.log(`[order:notify-platform-ready] Notifying ${platformField} that order ${externalPlatformOrderIdField} is ready`);
+      console.log(`[order:notify-platform-ready] Notifying ${pluginField} that order ${externalPluginOrderIdField} is ready`);
 
       // Fire-and-forget call to platform sync API
-      fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+      fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -407,15 +409,15 @@ export function registerOrderWorkflowHandlers(): void {
         },
         body: JSON.stringify({
           action: 'ready',
-          platform: platformField,
+          plugin: pluginField,
           posOrderId: order.id,
           orderNumber,
-          externalPlatformOrderId: externalPlatformOrderIdField,
+          externalPluginOrderId: externalPluginOrderIdField,
         }),
       })
         .then((res) => {
           if (res.ok) {
-            console.log(`[order:notify-platform-ready] Platform sync successful for ${platformField} order ${externalPlatformOrderIdField}`);
+            console.log(`[order:notify-platform-ready] Plugin sync successful for ${pluginField} order ${externalPluginOrderIdField}`);
           } else {
             console.warn(`[order:notify-platform-ready] Platform sync failed with status ${res.status}`);
           }
@@ -424,7 +426,7 @@ export function registerOrderWorkflowHandlers(): void {
           console.error('[order:notify-platform-ready] Platform sync error:', err);
         });
 
-      return { success: true, data: { orderId, platform: platformField, externalOrderId: externalPlatformOrderIdField } };
+      return { success: true, data: { orderId, plugin: pluginField, externalOrderId: externalPluginOrderIdField } };
     } catch (error) {
       console.error('Failed to notify platform ready:', error);
       return { success: false, error: 'Failed to notify platform' };

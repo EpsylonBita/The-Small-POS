@@ -24,7 +24,9 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
+import { formatCurrency } from '../utils/format';
 import CustomerOrderHistoryModal from '../components/modals/CustomerOrderHistoryModal';
+import { getOrderStatusBadgeClasses } from '../utils/orderStatus';
 
 interface OrderItem {
   id: string;
@@ -78,7 +80,7 @@ interface FetchOrdersOptions {
 }
 
 const OrdersPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
 
   const [loading, setLoading] = useState(true);
@@ -104,7 +106,7 @@ const OrdersPage: React.FC = () => {
   const pageSize = 20;
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchOrders = useCallback(async () => {
     if (!window.electron?.ipcRenderer) {
@@ -165,17 +167,7 @@ const OrdersPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [fetchOrders]);
 
-  const getStatusBadge = (status: string) => {
-    const colors: Record<string, string> = {
-      pending: 'bg-yellow-500/10 text-yellow-600 border border-yellow-500/20',
-      confirmed: 'bg-blue-500/10 text-blue-600 border border-blue-500/20',
-      preparing: 'bg-purple-500/10 text-purple-600 border border-purple-500/20',
-      ready: 'bg-green-500/10 text-green-600 border border-green-500/20',
-      completed: 'bg-gray-500/10 text-gray-600 border border-gray-500/20',
-      cancelled: 'bg-red-500/10 text-red-600 border border-red-500/20',
-    };
-    return colors[status] || colors.pending;
-  };
+  const getStatusBadge = (status: string) => getOrderStatusBadgeClasses(status);
 
   const getOrderTypeIcon = (type: string) => {
     switch (type) {
@@ -381,7 +373,7 @@ const OrdersPage: React.FC = () => {
 
                   <div className="text-right">
                     <div className="text-2xl font-bold mb-1">
-                      {currency.format(order.total_amount)}
+                      {formatMoney(order.total_amount)}
                     </div>
                     <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                       {new Date(order.created_at).toLocaleString()}

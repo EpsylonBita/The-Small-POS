@@ -10,20 +10,29 @@ interface MenuItem {
   name: string;
   category_id: string;
   is_available: boolean;
-  price: number;
+  base_price: number;
   image_url?: string;
   flavor_type?: 'savory' | 'sweet';
 }
 
 interface Ingredient {
   id: string;
-  name_en: string;
-  name_el: string;
-  name?: string;
+  name: string;
   category_id?: string;
-  is_active: boolean;
+  is_available: boolean;
   price?: number;
   item_color?: string;
+}
+
+interface Combo {
+  id: string;
+  name_en: string;
+  name_el?: string;
+  base_price: number;
+  pickup_price?: number;
+  delivery_price?: number;
+  is_active: boolean;
+  is_featured?: boolean;
 }
 
 interface Category {
@@ -38,7 +47,7 @@ export const MenuManagementPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const language = i18n.language;
-  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients'>('subcategories');
+  const [activeTab, setActiveTab] = useState<'categories' | 'subcategories' | 'ingredients' | 'combos'>('subcategories');
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -46,6 +55,7 @@ export const MenuManagementPage: React.FC = () => {
   const [categories, setCategories] = useState<Category[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [combos, setCombos] = useState<Combo[]>([]);
 
   // Load data on mount and tab change
   useEffect(() => {
@@ -78,6 +88,8 @@ export const MenuManagementPage: React.FC = () => {
         await loadMenuItems();
       } else if (activeTab === 'ingredients') {
         await loadIngredients();
+      } else if (activeTab === 'combos') {
+        await loadCombos();
       }
     } catch (error) {
       console.error('Error loading data:', error);
@@ -117,6 +129,17 @@ export const MenuManagementPage: React.FC = () => {
     } catch (error) {
       console.error('Error loading ingredients:', error);
       toast.error('Failed to load ingredients');
+    }
+  };
+
+  const loadCombos = async () => {
+    if (!window.electronAPI) return;
+    try {
+      const result = await window.electronAPI.ipcRenderer.invoke('menu:get-combos');
+      setCombos(result || []);
+    } catch (error) {
+      console.error('Error loading combos:', error);
+      toast.error('Failed to load offers');
     }
   };
 
@@ -165,14 +188,14 @@ export const MenuManagementPage: React.FC = () => {
   const toggleIngredientAvailability = async (id: string, currentStatus: boolean) => {
     const original = ingredients;
     // Optimistic update
-    setIngredients(prev => prev.map(ing => ing.id === id ? { ...ing, is_active: !currentStatus } : ing));
+    setIngredients(prev => prev.map(ing => ing.id === id ? { ...ing, is_available: !currentStatus } : ing));
 
     try {
       if (!window.electronAPI) throw new Error('Electron API not available');
-      
+
       await window.electronAPI.ipcRenderer.invoke('menu:update-ingredient', {
         id,
-        is_active: !currentStatus
+        is_available: !currentStatus
       });
 
       toast.success('Ingredient updated successfully');
@@ -183,20 +206,47 @@ export const MenuManagementPage: React.FC = () => {
     }
   };
 
+  const toggleComboAvailability = async (id: string, currentStatus: boolean) => {
+    const original = combos;
+    // Optimistic update
+    setCombos(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
+
+    try {
+      if (!window.electronAPI) throw new Error('Electron API not available');
+
+      await window.electronAPI.ipcRenderer.invoke('menu:update-combo', {
+        id,
+        is_active: !currentStatus
+      });
+
+      toast.success('Offer updated successfully');
+    } catch (error) {
+      console.error('Error updating combo:', error);
+      toast.error('Failed to update offer');
+      setCombos(original);
+    }
+  };
+
   // Filter data based on search term
+  const searchLower = searchTerm.toLowerCase();
+
   const filteredCategories = categories.filter(cat =>
-    cat.name_en.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    cat.name_el.toLowerCase().includes(searchTerm.toLowerCase())
+    (cat.name_en || '').toLowerCase().includes(searchLower) ||
+    (cat.name_el || '').toLowerCase().includes(searchLower) ||
+    (cat.name || '').toLowerCase().includes(searchLower)
   );
 
   const filteredMenuItems = menuItems.filter(item =>
-    item.name.toLowerCase().includes(searchTerm.toLowerCase())
+    (item.name || '').toLowerCase().includes(searchLower)
   );
 
   const filteredIngredients = ingredients.filter(ing =>
-    (ing.name_en?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-     ing.name_el?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-     ing.name?.toLowerCase().includes(searchTerm.toLowerCase()))
+    (ing.name || '').toLowerCase().includes(searchLower)
+  );
+
+  const filteredCombos = combos.filter(combo =>
+    (combo.name_en || '').toLowerCase().includes(searchLower) ||
+    (combo.name_el || '').toLowerCase().includes(searchLower)
   );
 
   const renderTabs = () => (
@@ -242,6 +292,20 @@ export const MenuManagementPage: React.FC = () => {
         }`}
       >
         Ingredients
+      </button>
+      <button
+        onClick={() => setActiveTab('combos')}
+        className={`px-4 py-2 rounded-lg transition-all ${
+          activeTab === 'combos'
+            ? resolvedTheme === 'dark'
+              ? 'bg-blue-500/30 text-blue-200 border border-blue-500/50'
+              : 'bg-blue-500 text-white'
+            : resolvedTheme === 'dark'
+              ? 'bg-gray-800/50 text-gray-300 hover:bg-gray-700/50'
+              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+        }`}
+      >
+        Offers
       </button>
     </div>
   );
@@ -332,7 +396,7 @@ export const MenuManagementPage: React.FC = () => {
                 {item.name}
               </h3>
               <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
-                €{item.price.toFixed(2)}
+                €{(item.base_price || 0).toFixed(2)}
               </p>
             </div>
             <button
@@ -361,7 +425,7 @@ export const MenuManagementPage: React.FC = () => {
             resolvedTheme === 'dark'
               ? 'bg-gray-800/50 border-gray-700'
               : 'bg-white border-gray-200'
-          } ${!ingredient.is_active ? 'opacity-60 grayscale' : ''}`}
+          } ${!ingredient.is_available ? 'opacity-60 grayscale' : ''}`}
         >
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
@@ -373,28 +437,67 @@ export const MenuManagementPage: React.FC = () => {
                   />
                 )}
                 <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
-                  {(language === 'el'
-                    ? (ingredient.name_el || ingredient.name_en || ingredient.name)
-                    : (ingredient.name_en || ingredient.name_el || ingredient.name)
-                  ) || 'Unnamed'}
+                  {ingredient.name || 'Unnamed'}
                 </h3>
               </div>
-              {ingredient.price && (
+              {ingredient.price != null && ingredient.price > 0 && (
                 <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                   €{ingredient.price.toFixed(2)}
                 </p>
               )}
             </div>
             <button
-              onClick={() => toggleIngredientAvailability(ingredient.id, ingredient.is_active)}
+              onClick={() => toggleIngredientAvailability(ingredient.id, ingredient.is_available)}
               className={`p-2 rounded-lg transition-all ${
-                ingredient.is_active
+                ingredient.is_available
                   ? 'text-green-500 hover:bg-green-500/10'
                   : 'text-red-500 hover:bg-red-500/10'
               }`}
-              title={ingredient.is_active ? 'Disable' : 'Enable'}
+              title={ingredient.is_available ? 'Disable' : 'Enable'}
             >
-              {ingredient.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
+              {ingredient.is_available ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const renderCombos = () => (
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {filteredCombos.map((combo) => (
+        <div
+          key={combo.id}
+          className={`p-4 rounded-xl border ${
+            resolvedTheme === 'dark'
+              ? 'bg-gray-800/50 border-gray-700'
+              : 'bg-white border-gray-200'
+          } ${!combo.is_active ? 'opacity-60 grayscale' : ''}`}
+        >
+          <div className="flex items-start justify-between mb-2">
+            <div className="flex-1">
+              <h3 className={`font-semibold ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
+                {(language === 'el' ? (combo.name_el || combo.name_en) : combo.name_en) || 'Unnamed'}
+              </h3>
+              <p className={`text-sm ${resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
+                €{(combo.base_price || 0).toFixed(2)}
+              </p>
+              {combo.is_featured && (
+                <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full">
+                  Featured
+                </span>
+              )}
+            </div>
+            <button
+              onClick={() => toggleComboAvailability(combo.id, combo.is_active)}
+              className={`p-2 rounded-lg transition-all ${
+                combo.is_active
+                  ? 'text-green-500 hover:bg-green-500/10'
+                  : 'text-red-500 hover:bg-red-500/10'
+              }`}
+              title={combo.is_active ? 'Disable' : 'Enable'}
+            >
+              {combo.is_active ? <Eye className="w-5 h-5" /> : <EyeOff className="w-5 h-5" />}
             </button>
           </div>
         </div>
@@ -425,6 +528,7 @@ export const MenuManagementPage: React.FC = () => {
           {activeTab === 'categories' && renderCategories()}
           {activeTab === 'subcategories' && renderMenuItems()}
           {activeTab === 'ingredients' && renderIngredients()}
+          {activeTab === 'combos' && renderCombos()}
         </>
       )}
     </div>

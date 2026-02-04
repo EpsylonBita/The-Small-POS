@@ -13,6 +13,7 @@ import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAppointments } from '../../../hooks/useAppointments';
+import { formatDate, formatTime } from '../../../utils/format';
 import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, RefreshCw, CheckCircle, Play, XCircle, X, Plus } from 'lucide-react';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
 import { supabase } from '../../../lib/supabase';
@@ -676,7 +677,7 @@ export const AppointmentsView: React.FC = memo(() => {
                       <div className="flex items-center gap-4 mt-1 text-sm">
                         <span className="flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {new Date(apt.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          {formatTime(apt.startTime, { hour: '2-digit', minute: '2-digit' })}
                         </span>
                         <span className="flex items-center gap-1">
                           <Scissors className="w-3 h-3" />
@@ -1045,7 +1046,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
               <button type="button" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))} className={`p-1 rounded ${isDark ? 'hover:bg-gray-600' : 'hover:bg-gray-200'}`}>
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <span className="font-medium">{calendarDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
+              <span className="font-medium">{formatDate(calendarDate, { month: 'long', year: 'numeric' })}</span>
               <button type="button" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))} className={`p-1 rounded ${isDark ? 'hover:bg-gray-600' : 'hover:bg-gray-200'}`}>
                 <ChevronRight className="w-5 h-5" />
               </button>
@@ -1130,7 +1131,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
           {formData.startTime && selectedService && selectedDay && (
             <div className={`p-3 rounded-lg ${isDark ? 'bg-gradient-to-r from-green-900/30 to-blue-900/30' : 'bg-gradient-to-r from-green-50 to-blue-50'}`}>
               <div className="flex items-center justify-between text-sm">
-                <span>{selectedDay.toLocaleDateString()}</span>
+                <span>{formatDate(selectedDay)}</span>
                 <span className="font-medium text-green-600">{formData.startTime}</span>
                 <span>→</span>
                 <span className="font-medium text-blue-600">
@@ -1138,7 +1139,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     const [h, m] = formData.startTime.split(':').map(Number);
                     const end = new Date(selectedDay);
                     end.setHours(h, m + selectedService.duration, 0, 0);
-                    return end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    return formatTime(end, { hour: '2-digit', minute: '2-digit' });
                   })()}
                 </span>
                 <span className="text-gray-500">({selectedService.duration}min)</span>

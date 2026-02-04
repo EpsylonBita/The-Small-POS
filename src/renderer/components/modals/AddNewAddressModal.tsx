@@ -4,6 +4,21 @@ import { MapPin, Home, User, Phone, Mail } from 'lucide-react';
 import { getApiUrl } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 
+// Helper to get POS auth headers
+const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
+  const ls = typeof window !== 'undefined' ? window.localStorage : null;
+  const posKey = (ls?.getItem('pos_api_key') || '').trim() || (ls?.getItem('POS_API_KEY') || '').trim();
+  let termId = '';
+  try {
+    const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
+    termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '');
+  } catch {}
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (posKey) headers['x-pos-api-key'] = String(posKey);
+  if (termId) headers['x-terminal-id'] = String(termId);
+  return headers;
+};
+
 interface Customer {
   id: string;
   phone: string;
@@ -162,12 +177,11 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
 
     setIsLoading(true);
     try {
-      // First, save the new address to the database
-      const addAddressResponse = await fetch(getApiUrl(`customers/${customer.id}/addresses`), {
+      // First, save the new address to the database using POS endpoint
+      const headers = await getPosAuthHeaders();
+      const addAddressResponse = await fetch(getApiUrl(`pos/customers/${customer.id}/addresses`), {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           address: formData.address.trim(),
           postal_code: formData.postalCode.trim() || undefined,
@@ -242,7 +256,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                 <p className="font-medium liquid-glass-modal-text">{customer.name}</p>
                 <p className="text-sm liquid-glass-modal-text-muted">📞 {customer.phone}</p>
                 {customer.email && (
-                  <p className="text-sm liquid-glass-modal-text-muted">✉️ {customer.email}</p>
+                  <p className="text-sm liquid-glass-modal-text-muted flex items-center gap-2">
+                    <Mail className="w-4 h-4" aria-hidden="true" />
+                    <span>{customer.email}</span>
+                  </p>
                 )}
               </div>
             </div>

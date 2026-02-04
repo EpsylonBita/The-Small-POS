@@ -61,21 +61,13 @@ export class AutoUpdaterService extends EventEmitter {
 
     // SECURITY: Code signature verification
     // electron-updater verifies SHA512 checksums from latest.yml by default.
-    // For unsigned builds, we rely on this checksum verification.
-    // To enable full code signing, set up a Windows code signing certificate
-    // and remove this override.
-    // TODO: Implement proper code signing for production releases
-    if (!process.env.CODE_SIGNING_ENABLED) {
-      this.logger.log('[AutoUpdater] Running in checksum-only verification mode (unsigned build)');
-      // electron-updater still verifies checksums even without code signing
-      // This override is only needed for certain edge cases
-      (autoUpdater as any).verifyUpdateCodeSignature = () => {
-        this.logger.log('[AutoUpdater] Code signature verification skipped - using checksum verification');
-        return Promise.resolve(null);
-      };
-    } else {
-      this.logger.log('[AutoUpdater] Code signing enabled - full verification active');
-    }
+    // IMPORTANT: Do NOT bypass signature verification in production!
+    // For development builds without code signing, the default checksum verification is sufficient.
+    // For production, configure a code signing certificate.
+    //
+    // REMOVED: The signature bypass code has been removed for security.
+    // electron-updater will now always perform its default verification.
+    this.logger.log('[AutoUpdater] Code signature verification enabled (default behavior)');
 
     // Event listeners
     autoUpdater.on('checking-for-update', () => {

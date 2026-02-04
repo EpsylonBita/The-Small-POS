@@ -202,6 +202,9 @@ export class DatabaseService {
       const hasForwardedAt = columns.some((col: any) => col.name === 'forwarded_at');
       const hasDeliveryNotes = columns.some((col: any) => col.name === 'delivery_notes');
       const hasNameOnRinger = columns.some((col: any) => col.name === 'name_on_ringer');
+      const hasTaxAmount = columns.some((col: any) => col.name === 'tax_amount');
+      const hasBranchId = columns.some((col: any) => col.name === 'branch_id');
+      const hasCancellationReason = columns.some((col: any) => col.name === 'cancellation_reason');
 
       if (!hasRoutingPath) {
         console.log('Adding routing_path column to orders table...');
@@ -223,6 +226,18 @@ export class DatabaseService {
         console.log('Adding name_on_ringer column to orders table...');
         this.db.exec(`ALTER TABLE orders ADD COLUMN name_on_ringer TEXT`);
       }
+      if (!hasTaxAmount) {
+        console.log('Adding tax_amount column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN tax_amount REAL`);
+      }
+      if (!hasBranchId) {
+        console.log('Adding branch_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN branch_id TEXT`);
+      }
+      if (!hasCancellationReason) {
+        console.log('Adding cancellation_reason column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN cancellation_reason TEXT`);
+      }
 
       const hasDeliveryFloor = columns.some((col: any) => col.name === 'delivery_floor');
       const hasDeliveryCity = columns.some((col: any) => col.name === 'delivery_city');
@@ -239,6 +254,33 @@ export class DatabaseService {
       if (!hasDeliveryPostalCode) {
         console.log('Adding delivery_postal_code column to orders table...');
         this.db.exec(`ALTER TABLE orders ADD COLUMN delivery_postal_code TEXT`);
+      }
+
+      const hasPlugin = columns.some((col: any) => col.name === 'plugin');
+      const hasExternalPluginOrderId = columns.some((col: any) => col.name === 'external_plugin_order_id');
+      const hasPluginCommissionPct = columns.some((col: any) => col.name === 'plugin_commission_pct');
+      const hasNetEarnings = columns.some((col: any) => col.name === 'net_earnings');
+      const hasTerminalId = columns.some((col: any) => col.name === 'terminal_id');
+
+      if (!hasPlugin) {
+        console.log('Adding plugin column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN plugin TEXT`);
+      }
+      if (!hasExternalPluginOrderId) {
+        console.log('Adding external_plugin_order_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN external_plugin_order_id TEXT`);
+      }
+      if (!hasPluginCommissionPct) {
+        console.log('Adding plugin_commission_pct column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN plugin_commission_pct REAL`);
+      }
+      if (!hasNetEarnings) {
+        console.log('Adding net_earnings column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN net_earnings REAL`);
+      }
+      if (!hasTerminalId) {
+        console.log('Adding terminal_id column to orders table...');
+        this.db.exec(`ALTER TABLE orders ADD COLUMN terminal_id TEXT`);
       }
 
       // Add driver and staff related columns
@@ -389,8 +431,10 @@ export class DatabaseService {
         id TEXT PRIMARY KEY,
         order_number TEXT UNIQUE NOT NULL,
         status TEXT NOT NULL,
+        cancellation_reason TEXT,
         items TEXT NOT NULL,
         total_amount REAL NOT NULL,
+        tax_amount REAL,
         customer_name TEXT,
         customer_phone TEXT,
         customer_email TEXT,
@@ -408,6 +452,12 @@ export class DatabaseService {
         estimated_time INTEGER,
         supabase_id TEXT,
         sync_status TEXT DEFAULT 'pending',
+        plugin TEXT,
+        external_plugin_order_id TEXT,
+        plugin_commission_pct REAL,
+        net_earnings REAL,
+        terminal_id TEXT,
+        branch_id TEXT,
         payment_status TEXT DEFAULT 'pending',
         payment_method TEXT,
         payment_transaction_id TEXT,
@@ -1037,6 +1087,31 @@ export class DatabaseService {
       // Column might already exist
     }
     try {
+      this.db!.exec('ALTER TABLE orders ADD COLUMN plugin TEXT');
+    } catch (e) {
+      // Column might already exist
+    }
+    try {
+      this.db!.exec('ALTER TABLE orders ADD COLUMN external_plugin_order_id TEXT');
+    } catch (e) {
+      // Column might already exist
+    }
+    try {
+      this.db!.exec('ALTER TABLE orders ADD COLUMN plugin_commission_pct REAL');
+    } catch (e) {
+      // Column might already exist
+    }
+    try {
+      this.db!.exec('ALTER TABLE orders ADD COLUMN net_earnings REAL');
+    } catch (e) {
+      // Column might already exist
+    }
+    try {
+      this.db!.exec('ALTER TABLE orders ADD COLUMN terminal_id TEXT');
+    } catch (e) {
+      // Column might already exist
+    }
+    try {
       this.db!.exec('ALTER TABLE orders ADD COLUMN discount_percentage REAL DEFAULT 0');
     } catch (e) {
       // Column might already exist
@@ -1333,6 +1408,41 @@ export class DatabaseService {
     const result = stmt.run(cutoffDate.toISOString());
     console.log(`[DatabaseService] Cleared ${result.changes} old subcategories cache entries`);
     return result.changes;
+  }
+
+  /**
+   * Delete subcategories from cache by IDs (for cache eviction during incremental sync)
+   * Used when menu items are deactivated or deleted in the admin dashboard
+   */
+  deleteSubcategoriesFromCache(ids: string[]): number {
+    if (!this.db || ids.length === 0) return 0;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const stmt = this.db.prepare(`DELETE FROM subcategories_cache WHERE id IN (${placeholders})`);
+    const result = stmt.run(...ids);
+    console.log(`[DatabaseService] Deleted ${result.changes} subcategories from cache (eviction)`);
+    return result.changes;
+  }
+
+  /**
+   * Process branch-specific price/availability overrides
+   * Note: subcategories_cache only stores names for display (id, name, name_en, name_el, category_id, updated_at).
+   * Pricing is handled by full menu data, not the name cache.
+   * This method just logs the count and returns it - actual override application is done by renderer.
+   */
+  applyBranchOverrides(overrides: Array<{
+    subcategory_id: string;
+    price_override?: number | null;
+    availability_override?: boolean | null;
+    updated_at: string;
+  }>): number {
+    if (!this.db || overrides.length === 0) return 0;
+
+    // Desktop POS subcategories_cache only stores names for display
+    // Pricing/availability overrides are delegated to the renderer via IPC events
+    // The renderer will apply these to its in-memory menu state
+    console.log(`[DatabaseService] Branch overrides received (${overrides.length}) - delegating to renderer`);
+    return overrides.length;
   }
 
   /**

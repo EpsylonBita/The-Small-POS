@@ -16,6 +16,7 @@ import { POSError } from '../../shared/utils/error-handler';
 import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
 import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
+import { Utensils } from 'lucide-react';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -545,7 +546,7 @@ const MenuPage: React.FC = () => {
             {menuItems.length === 0 ? (
               <div className="flex items-center justify-center h-64">
                 <div className="text-center">
-                  <div className="text-gray-400 text-6xl mb-4">🍽️</div>
+                  <Utensils className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                   <h3 className={`text-xl font-semibold mb-2 ${resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
                     {t('menu.emptyState.title')}
                   </h3>

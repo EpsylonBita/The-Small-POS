@@ -17,7 +17,7 @@ import { AddCustomerModal } from './modals/AddCustomerModal';
 import { MenuModal } from './modals/MenuModal';
 import { OrderApprovalPanel } from './order/OrderApprovalPanel';
 import { OrderConflictBanner } from './OrderConflictBanner';
-import { POSGlassModal } from './ui/pos-glass-components';
+import { LiquidGlassModal } from './ui/pos-glass-components';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
 import type { CreateReservationDto } from './tables';
 import { reservationsService } from '../services/ReservationsService';
@@ -31,19 +31,21 @@ import toast from 'react-hot-toast';
 import { OrderDashboardSkeleton } from './skeletons';
 import { ErrorDisplay } from './error';
 import type { Order } from '../types/orders';
-import type { RestaurantTable } from '../types/tables';
+import type { RestaurantTable, TableStatus } from '../types/tables';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 
 interface OrderDashboardProps {
   className?: string;
+  orderFilter?: (order: Order) => boolean;
 }
 
-export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => {
+export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', orderFilter }) => {
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const {
     orders,
+    pendingExternalOrders,
     filter,
     setFilter,
     isLoading,
@@ -60,6 +62,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     resolveConflict,
     createOrder
   } = useOrderStore();
+
+  const scopedPendingExternalOrders = React.useMemo(() => (
+    orderFilter ? pendingExternalOrders.filter(orderFilter) : pendingExternalOrders
+  ), [pendingExternalOrders, orderFilter]);
 
   // Module-based feature flags
   const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
@@ -162,6 +168,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
   // Refs for click-outside detection to auto-close bulk actions bar
   const bulkActionsBarRef = useRef<HTMLDivElement>(null);
   const orderGridRef = useRef<HTMLDivElement>(null);
+  const alertIntervalRef = useRef<number | null>(null);
+  const alertingOrderIdRef = useRef<string | null>(null);
 
   // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
   const isMenuModalOpenRef = React.useRef(false);
@@ -237,12 +245,90 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     return () => clearInterval(intervalId);
   }, [silentRefresh, isShiftActive]);
 
+  // Auto-open approval panel for external pending orders (queue)
+  const playExternalOrderAlert = useCallback(() => {
+    try {
+      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = 880;
+      gain.gain.value = 0.18;
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      if (ctx.state === 'suspended') {
+        void ctx.resume();
+      }
+      oscillator.start();
+      setTimeout(() => {
+        oscillator.stop();
+        ctx.close();
+      }, 450);
+    } catch (error) {
+      console.warn('[OrderDashboard] Failed to play order alert sound:', error);
+    }
+  }, []);
+
+  const startAlertLoop = useCallback((orderId: string) => {
+    if (alertIntervalRef.current) {
+      clearInterval(alertIntervalRef.current);
+    }
+    alertingOrderIdRef.current = orderId;
+    playExternalOrderAlert();
+    alertIntervalRef.current = window.setInterval(playExternalOrderAlert, 2500);
+  }, [playExternalOrderAlert]);
+
+  const stopAlertLoop = useCallback(() => {
+    if (alertIntervalRef.current) {
+      clearInterval(alertIntervalRef.current);
+      alertIntervalRef.current = null;
+    }
+    alertingOrderIdRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!scopedPendingExternalOrders || scopedPendingExternalOrders.length === 0) {
+      stopAlertLoop();
+      return;
+    }
+
+    const nextOrder = scopedPendingExternalOrders[0];
+    if (!nextOrder) return;
+
+    if (!showApprovalPanel || (isViewOnlyMode && selectedOrderForApproval?.id !== nextOrder.id)) {
+      setSelectedOrderForApproval(nextOrder);
+      setIsViewOnlyMode(false);
+      setShowApprovalPanel(true);
+    }
+  }, [scopedPendingExternalOrders, showApprovalPanel, isViewOnlyMode, selectedOrderForApproval, stopAlertLoop]);
+
+  useEffect(() => {
+    const activeOrderId = showApprovalPanel && !isViewOnlyMode ? selectedOrderForApproval?.id : null;
+    if (!activeOrderId) {
+      stopAlertLoop();
+      return;
+    }
+
+    if (alertingOrderIdRef.current !== activeOrderId) {
+      startAlertLoop(activeOrderId);
+      return;
+    }
+
+    if (!alertIntervalRef.current) {
+      alertIntervalRef.current = window.setInterval(playExternalOrderAlert, 2500);
+    }
+  }, [showApprovalPanel, isViewOnlyMode, selectedOrderForApproval, playExternalOrderAlert, startAlertLoop, stopAlertLoop]);
+
   // Update computed values when dependencies change
   useEffect(() => {
     if (!orders) return;
 
+    const baseOrders = orderFilter ? orders.filter(orderFilter) : orders;
+
     // Filter orders based on active tab and global filters
-    let filtered = orders;
+    let filtered = baseOrders;
 
     // Apply global filters first
     if (filter.status && filter.status !== 'all') {
@@ -267,6 +353,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       case 'orders':
         filtered = filtered.filter(order =>
           order.status === 'pending' ||
+          order.status === 'confirmed' ||
           order.status === 'preparing' ||
           order.status === 'ready'
         );
@@ -289,9 +376,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       tables: 0, // Will be updated separately from tables data
     };
 
-    orders.forEach(order => {
+    baseOrders.forEach(order => {
       switch (order.status) {
         case 'pending':
+        case 'confirmed':
         case 'preparing':
         case 'ready':
           counts.orders++;
@@ -309,7 +397,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
     });
 
     setOrderCounts(counts);
-  }, [orders, filter, activeTab]);
+  }, [orders, filter, activeTab, orderFilter]);
 
   // Handle tab change
   const handleTabChange = useCallback((tab: TabId) => {
@@ -377,6 +465,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       await loadOrders();
       setShowApprovalPanel(false);
       setSelectedOrderForApproval(null);
+      setIsViewOnlyMode(true);
     } catch (error) {
       toast.error(t('orderDashboard.approveOrderFailed'));
     }
@@ -389,6 +478,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       await loadOrders();
       setShowApprovalPanel(false);
       setSelectedOrderForApproval(null);
+      setIsViewOnlyMode(true);
     } catch (error) {
       toast.error(t('orderDashboard.declineOrderFailed'));
     }
@@ -1727,11 +1817,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
           ) : (
             <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-3">
               {tables.map((table) => {
-                const statusColors = {
+                const statusColors: Record<TableStatus, string> = {
                   available: 'border-green-500 bg-green-500/10 text-green-500',
                   occupied: 'border-blue-500 bg-blue-500/10 text-blue-500',
                   reserved: 'border-yellow-500 bg-yellow-500/10 text-yellow-500',
                   cleaning: 'border-gray-500 bg-gray-500/10 text-gray-500',
+                  maintenance: 'border-orange-500 bg-orange-500/10 text-orange-500',
+                  unavailable: 'border-slate-500 bg-slate-500/10 text-slate-500',
                 };
                 return (
                   <button
@@ -1754,6 +1846,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
         /* Orders Grid - shown for Orders/Delivered/Canceled tabs */
         <div ref={orderGridRef}>
           <OrderGrid
+            orders={filteredOrders}
             selectedOrders={selectedOrders}
             onToggleOrderSelection={handleToggleOrderSelection}
             onOrderDoubleClick={handleOrderDoubleClick}
@@ -1778,7 +1871,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
       </button>
 
       {/* Order Type Selection Modal - Glassmorphism style */}
-      <POSGlassModal
+      <LiquidGlassModal
         isOpen={showOrderTypeModal}
         onClose={() => setShowOrderTypeModal(false)}
         title={t('orderFlow.selectOrderType') || 'Select Order Type'}
@@ -1808,7 +1901,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
                         {t('orderFlow.deliveryOrder') || 'Delivery Order'}
                       </h3>
                       <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                        {t('orderFlow.deliveryDescription') || 'Παράδοση στο σπίτι'}
+                        {t('orderFlow.deliveryDescription', { defaultValue: 'Delivery to customer' })}
                       </p>
                     </div>
                   </div>
@@ -1831,7 +1924,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
                       {t('orderFlow.pickupOrder') || 'Pickup Order'}
                     </h3>
                     <p className="text-xs text-white/60 group-hover:text-white/80 transition-colors">
-                      {t('orderFlow.pickupDescription') || 'Παραλαβή από το κατάστημα'}
+                        {t('orderFlow.pickupDescription', { defaultValue: 'Pickup at store' })}
                     </p>
                   </div>
                 </div>
@@ -1863,7 +1956,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '' }) => 
             </div>
           )}
         </div>
-      </POSGlassModal>
+      </LiquidGlassModal>
 
       {/* Table Selector Modal (for table orders) */}
       <TableSelector

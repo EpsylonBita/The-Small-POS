@@ -4,10 +4,12 @@ import { useShift } from '../../contexts/shift-context';
 import { useFeatures } from '../../hooks/useFeatures';
 import type { ZReportData } from '../../types/reports';
 import { exportZReportToCSV, exportArrayToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
+import { formatDate, formatTime } from '../../utils/format';
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
+import { Banknote, CheckCircle, Circle, CreditCard, XCircle } from 'lucide-react';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -37,16 +39,28 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<'all' | 'cash' | 'card'>('all');
 
   // Helpers for symbols
-  const getStatusSymbol = (status: string) => {
-    if (status === 'completed' || status === 'delivered') return '✓';
-    if (status === 'cancelled') return '✗';
-    return '○';
+  const getStatusSymbol = (status: string): React.ReactNode => {
+    if (status === 'completed' || status === 'delivered') {
+      return <CheckCircle className="w-4 h-4 text-green-500" />;
+    }
+    if (status === 'cancelled') {
+      return <XCircle className="w-4 h-4 text-red-500" />;
+    }
+    return <Circle className="w-3 h-3 text-gray-400" />;
   };
 
-  const getPaymentSymbol = (method?: string) => {
-    if (method === 'cash') return '💵';
-    if (method === 'card') return '💳';
-    return '—';
+  const getPaymentSymbol = (method?: string): React.ReactNode => {
+    if (method === 'cash') return <Banknote className="w-4 h-4 text-green-500" />;
+    if (method === 'card') return <CreditCard className="w-4 h-4 text-blue-500" />;
+    if (method === 'mixed') {
+      return (
+        <span className="inline-flex items-center gap-1">
+          <Banknote className="w-4 h-4 text-green-500" />
+          <CreditCard className="w-4 h-4 text-blue-500" />
+        </span>
+      );
+    }
+    return <Circle className="w-3 h-3 text-gray-400" />;
   };
 
   const filterOrders = (orders: any[] | null | undefined): any[] => {
@@ -176,8 +190,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
           {zReport && (zReport as any).periodStart && (
             <div className="mt-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
               {t('modals.zReport.periodSince', {
-                date: new Date((zReport as any).periodStart).toLocaleDateString(),
-                time: new Date((zReport as any).periodStart).toLocaleTimeString()
+                date: formatDate((zReport as any).periodStart),
+                time: formatTime((zReport as any).periodStart)
               })}
             </div>
           )}
@@ -563,7 +577,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                                                 {getStatusSymbol(order.status || '')}
                                               </div>
                                               <div className="w-[15%] px-2 text-slate-500 dark:text-slate-400 text-xs font-medium">
-                                                {order.createdAt ? new Date(order.createdAt).toLocaleTimeString() : '—'}
+                                                {order.createdAt ? formatTime(order.createdAt) : '—'}
                                               </div>
                                             </div>
                                           );

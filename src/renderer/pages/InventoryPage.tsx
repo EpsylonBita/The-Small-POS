@@ -20,6 +20,7 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { getApiUrl } from '../../config/environment';
+import { formatCurrency } from '../utils/format';
 
 interface InventoryItem {
   id: string;
@@ -46,10 +47,12 @@ const InventoryPage: React.FC = () => {
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
   const [showAdjustModal, setShowAdjustModal] = useState(false);
   const [adjustmentQty, setAdjustmentQty] = useState(0);
+  const [adjustmentReason, setAdjustmentReason] = useState<'count' | 'received' | 'damaged' | 'expired' | 'theft' | 'other'>('count');
+  const [adjustmentNotes, setAdjustmentNotes] = useState('');
 
   const isDark = resolvedTheme === 'dark';
   const isGreek = i18n.language === 'el';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchInventory = useCallback(async () => {
     if (!staff?.organizationId) return;
@@ -114,13 +117,39 @@ const InventoryPage: React.FC = () => {
   };
 
   const handleAdjustStock = async () => {
-    if (!selectedItem) return;
-    // In real implementation, call API to adjust stock
-    toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
+    if (!selectedItem || adjustmentQty === 0) return;
+
+    try {
+      const electron = (window as any).electronAPI;
+      const result = await electron?.fetchFromApi?.(
+        `/api/pos/inventory`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            product_id: selectedItem.id,
+            adjustment: adjustmentQty,
+            reason: adjustmentReason,
+            notes: adjustmentNotes || undefined,
+          }),
+        }
+      );
+
+      if (result?.success) {
+        toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
+        fetchInventory(); // Refresh data
+      } else {
+        toast.error(result?.error || t('inventory.errors.adjustmentFailed', 'Failed to adjust stock'));
+      }
+    } catch (error) {
+      console.error('Failed to adjust stock:', error);
+      toast.error(t('inventory.errors.adjustmentFailed', 'Failed to adjust stock'));
+    }
+
     setShowAdjustModal(false);
     setSelectedItem(null);
     setAdjustmentQty(0);
-    fetchInventory();
+    setAdjustmentReason('count');
+    setAdjustmentNotes('');
   };
 
   return (
@@ -189,7 +218,7 @@ const InventoryPage: React.FC = () => {
             <div className="p-2 rounded-lg bg-cyan-500/20"><BarChart3 className="w-5 h-5 text-cyan-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
-              <p className="text-lg font-bold">{currency.format(stats.totalValue)}</p>
+              <p className="text-lg font-bold">{formatMoney(stats.totalValue)}</p>
             </div>
           </div>
         </motion.div>
@@ -264,7 +293,7 @@ const InventoryPage: React.FC = () => {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right text-gray-400">{item.min_stock_level}</td>
-                    <td className="px-4 py-3 text-right font-medium">{currency.format(item.stock_quantity * item.cost_per_unit)}</td>
+                    <td className="px-4 py-3 text-right font-medium">{formatMoney(item.stock_quantity * item.cost_per_unit)}</td>
                     <td className="px-4 py-3 text-center">
                       <button
                         onClick={() => { setSelectedItem(item); setShowAdjustModal(true); }}
@@ -302,7 +331,24 @@ const InventoryPage: React.FC = () => {
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'} mb-4`}>
               {t('inventory.currentStock', 'Current')}: {selectedItem.stock_quantity} {selectedItem.unit_of_measurement}
             </p>
-            <div className="flex items-center gap-4 mb-6">
+            <div className="mb-4">
+              <label className={`text-sm font-medium mb-2 block ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                {t('inventory.reason', 'Reason')}
+              </label>
+              <select
+                value={adjustmentReason}
+                onChange={(e) => setAdjustmentReason(e.target.value as typeof adjustmentReason)}
+                className={`w-full px-3 py-2 rounded-lg ${isDark ? 'bg-gray-700 text-white' : 'bg-gray-100 text-gray-900'}`}
+              >
+                <option value="count">{t('inventory.reasons.count', 'Stock Count')}</option>
+                <option value="received">{t('inventory.reasons.received', 'Received Delivery')}</option>
+                <option value="damaged">{t('inventory.reasons.damaged', 'Damaged')}</option>
+                <option value="expired">{t('inventory.reasons.expired', 'Expired')}</option>
+                <option value="theft">{t('inventory.reasons.theft', 'Theft/Loss')}</option>
+                <option value="other">{t('inventory.reasons.other', 'Other')}</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-4 mb-4">
               <button onClick={() => setAdjustmentQty(q => q - 1)} className="p-3 rounded-xl bg-red-500/20 text-red-500 hover:bg-red-500/30">
                 <Minus className="w-5 h-5" />
               </button>
@@ -316,11 +362,23 @@ const InventoryPage: React.FC = () => {
                 <Plus className="w-5 h-5" />
               </button>
             </div>
+            <div className="mb-4">
+              <label className={`text-sm font-medium mb-2 block ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                {t('inventory.notes', 'Notes')} ({t('common.optional', 'Optional')})
+              </label>
+              <textarea
+                value={adjustmentNotes}
+                onChange={(e) => setAdjustmentNotes(e.target.value)}
+                placeholder={t('inventory.notesPlaceholder', 'Add notes about this adjustment...')}
+                rows={2}
+                className={`w-full px-3 py-2 rounded-lg resize-none ${isDark ? 'bg-gray-700 text-white placeholder-gray-500' : 'bg-gray-100 text-gray-900 placeholder-gray-400'}`}
+              />
+            </div>
             <div className="flex gap-3">
-              <button onClick={() => setShowAdjustModal(false)} className={`flex-1 py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
+              <button onClick={() => { setShowAdjustModal(false); setAdjustmentReason('count'); setAdjustmentNotes(''); }} className={`flex-1 py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
                 {t('common.cancel', 'Cancel')}
               </button>
-              <button onClick={handleAdjustStock} className="flex-1 py-3 rounded-xl bg-cyan-500 text-white font-medium">
+              <button onClick={handleAdjustStock} disabled={adjustmentQty === 0} className="flex-1 py-3 rounded-xl bg-cyan-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed">
                 {t('common.save', 'Save')}
               </button>
             </div>

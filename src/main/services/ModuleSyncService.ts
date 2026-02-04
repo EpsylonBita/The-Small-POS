@@ -1,23 +1,59 @@
 /**
  * ModuleSyncService - Handles fetching and syncing modules from admin dashboard
- * 
+ *
  * This service is responsible for:
  * - Fetching enabled modules from the admin dashboard API
  * - Handling HTTP errors gracefully with fallback to cache
  * - Periodic sync to keep modules up-to-date
  * - Manual force sync capability
- * 
- * Requirements: 1.1, 3.1, 3.2, 4.1, 4.2, 4.3, 4.4
+ * - Real-time sync via Supabase Realtime subscriptions
+ * - Connection status monitoring and automatic reconnection
+ *
+ * Requirements: 1.1, 3.1, 3.2, 4.1, 4.2, 4.3, 4.4, 10.5
+ *
+ * @see tickets/e6d8aa4d-3abf-42ae-a33b-34d83daee1e1-Phase_3.2__Enhance_Real-Time_Module_Sync_with_Supabase_Realtime.md
  */
 
 import { BrowserWindow } from 'electron';
 import { DatabaseManager } from '../database';
+import { SupabaseClient, RealtimeChannel } from '@supabase/supabase-js';
+import { getSupabaseClient, isSupabaseConfigured } from '../../shared/supabase-config';
+import {
+  OfflineModuleQueue,
+  createBrowserOfflineQueue,
+  ModuleAction,
+  ModuleActionType,
+} from '../../../../shared/services/OfflineModuleQueue';
+import {
+  validateDependencies,
+  getDependencyStatus,
+} from '../../../../shared/utils/moduleDependencies';
+import { normalizeModuleId } from '../../../../shared/modules/registry';
 import type { POSModulesEnabledResponse } from '../../shared/types/modules';
+
+/**
+ * Realtime connection status
+ */
+export type RealtimeConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface ModuleSyncServiceConfig {
   adminDashboardUrl: string;
   syncIntervalMs?: number; // Default: 2 minutes (120000ms)
   fetchTimeoutMs?: number; // Default: 30 seconds (30000ms)
+  /** Maximum number of reconnection attempts (default: 5) */
+  maxReconnectAttempts?: number;
+  /** Base delay in milliseconds between reconnection attempts (default: 2000) */
+  reconnectDelayMs?: number;
+}
+
+/**
+ * Dependency issue tracked during sync
+ * Parity with: POSSystemMobile/src/services/ModuleSyncService.ts
+ */
+export interface DependencyIssue {
+  moduleId: string;
+  status: 'missing' | 'partial';
+  missingDeps: string[];
 }
 
 export interface ModuleSyncResult {
@@ -25,6 +61,8 @@ export interface ModuleSyncResult {
   modules: POSModulesEnabledResponse | null;
   error?: string;
   fromCache?: boolean;
+  /** Dependency issues found during validation (parity with mobile) */
+  dependencyIssues?: DependencyIssue[];
 }
 
 /**
@@ -37,12 +75,119 @@ export class ModuleSyncService {
   private periodicSyncInterval: NodeJS.Timeout | null = null;
   private isRunning: boolean = false;
 
+  // Supabase Realtime properties
+  private supabaseClient: SupabaseClient | null = null;
+  private realtimeChannel: RealtimeChannel | null = null;
+  private realtimeConnectionStatus: RealtimeConnectionStatus = 'disconnected';
+  private organizationId: string | null = null;
+  private reconnectAttempts: number = 0;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private reconnectStableTimeout: NodeJS.Timeout | null = null;
+  private readonly reconnectStableMs: number = 30000;
+  private channelToken: number = 0;
+  // Configurable reconnection constants
+  private readonly maxReconnectAttempts: number;
+  private readonly reconnectDelayMs: number;
+
+  // Offline queue - uses shared OfflineModuleQueue service
+  private offlineQueue: OfflineModuleQueue | null = null;
+  private isOnline: boolean = true;
+
   constructor(config: ModuleSyncServiceConfig) {
     this.config = {
       adminDashboardUrl: config.adminDashboardUrl.replace(/\/$/, ''),
       syncIntervalMs: config.syncIntervalMs ?? 120000, // 2 minutes
       fetchTimeoutMs: config.fetchTimeoutMs ?? 30000, // 30 seconds
+      maxReconnectAttempts: config.maxReconnectAttempts ?? 5,
+      reconnectDelayMs: config.reconnectDelayMs ?? 2000,
     };
+    // Set configurable reconnection values with defaults
+    this.maxReconnectAttempts = this.config.maxReconnectAttempts;
+    this.reconnectDelayMs = this.config.reconnectDelayMs;
+
+    // Initialize Supabase client
+    this.initializeSupabaseClient();
+
+    // Initialize offline queue with browser storage adapter
+    this.initializeOfflineQueue();
+  }
+
+  /**
+   * Initialize the shared offline queue for browser/Electron environment
+   */
+  private initializeOfflineQueue(): void {
+    try {
+      this.offlineQueue = createBrowserOfflineQueue();
+
+      // Set up the action processor
+      this.offlineQueue.setProcessor(async (action: ModuleAction) => {
+        console.log('[ModuleSyncService] Processing queued action:', action);
+        // Process action by syncing with server
+        await this.forceSync();
+      });
+
+      // Subscribe to queue events for logging
+      this.offlineQueue.on((event) => {
+        switch (event.type) {
+          case 'action-queued':
+            console.log('[ModuleSyncService] Action queued:', event.payload);
+            this.notifyRenderer('modules:action-queued', event.payload);
+            break;
+          case 'action-completed':
+            console.log('[ModuleSyncService] Action completed:', event.payload);
+            this.notifyRenderer('modules:action-completed', event.payload);
+            break;
+          case 'action-failed':
+            console.warn('[ModuleSyncService] Action failed:', event.payload);
+            this.notifyRenderer('modules:action-failed', event.payload);
+            break;
+          case 'queue-processing-start':
+            console.log('[ModuleSyncService] Processing offline queue:', event.payload);
+            break;
+          case 'queue-processing-complete':
+            console.log('[ModuleSyncService] Offline queue processing complete:', event.payload);
+            break;
+          case 'online-status-changed':
+            this.notifyRenderer('modules:network-status', event.payload);
+            break;
+        }
+      });
+
+      // Listen for online/offline events in Electron
+      if (typeof window !== 'undefined') {
+        window.addEventListener('online', () => {
+          this.isOnline = true;
+          this.offlineQueue?.setOnlineStatus(true);
+          console.log('[ModuleSyncService] Browser online');
+        });
+        window.addEventListener('offline', () => {
+          this.isOnline = false;
+          this.offlineQueue?.setOnlineStatus(false);
+          console.log('[ModuleSyncService] Browser offline');
+        });
+      }
+
+      console.log('[ModuleSyncService] Offline queue initialized');
+    } catch (error) {
+      console.error('[ModuleSyncService] Failed to initialize offline queue:', error);
+    }
+  }
+
+  /**
+   * Initialize the Supabase client for real-time subscriptions
+   */
+  private initializeSupabaseClient(): void {
+    try {
+      if (!isSupabaseConfigured()) {
+        console.warn('[ModuleSyncService] Supabase config incomplete, realtime disabled');
+        return;
+      }
+
+      this.supabaseClient = getSupabaseClient();
+      console.log('[ModuleSyncService] Supabase client initialized for realtime (shared)');
+    } catch (error) {
+      console.error('[ModuleSyncService] Failed to initialize Supabase client:', error);
+    }
   }
 
   /**
@@ -61,11 +206,11 @@ export class ModuleSyncService {
 
   /**
    * Fetch enabled modules from admin dashboard API
-   * 
+   *
    * @param terminalId - The terminal identifier
    * @param apiKey - The terminal's API key
    * @returns Promise<POSModulesEnabledResponse | null> - The API response or null on error
-   * 
+   *
    * Requirements: 1.1, 4.1, 4.2, 4.3, 4.4
    */
   async fetchEnabledModules(
@@ -293,9 +438,57 @@ export class ModuleSyncService {
       const response = await this.fetchEnabledModules(terminalId, apiKey);
 
       if (response) {
+        // Post-sync dependency validation
+        // Validate that all enabled modules have their required dependencies met
+        // Normalize module IDs to canonical form for consistent comparisons
+        const enabledModuleIds = response.modules?.map(m => normalizeModuleId(m.module_id) || m.module_id) || [];
+        const dependencyWarnings: Array<{ moduleId: string; status: 'missing' | 'partial'; missingDeps: string[] }> = [];
+
+        for (const moduleId of enabledModuleIds) {
+          const status = getDependencyStatus(moduleId, enabledModuleIds);
+          if (status === 'missing' || status === 'partial') {
+            const validation = validateDependencies(moduleId, enabledModuleIds, { includeRecommended: false });
+            const missingDeps = validation.missing_dependencies.map(d => d.module_id as string);
+            if (missingDeps.length > 0) {
+              dependencyWarnings.push({ moduleId, status, missingDeps });
+            }
+          }
+        }
+
+        // Log and notify about dependency issues
+        // Enhanced: Also emit high-priority error event for critical issues (parity with mobile)
+        if (dependencyWarnings.length > 0) {
+          console.warn('[ModuleSyncService] Post-sync dependency validation found issues:', dependencyWarnings);
+
+          // Count critical issues (required deps missing)
+          const criticalCount = dependencyWarnings.filter(w => w.status === 'missing').length;
+          const affectedModules = dependencyWarnings.map(w => w.moduleId);
+
+          this.notifyRenderer('modules:dependency-warnings', {
+            warnings: dependencyWarnings,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Emit high-priority error event for critical dependencies (parity with mobile)
+          if (criticalCount > 0) {
+            this.notifyRenderer('modules:dependency-error', {
+              warnings: dependencyWarnings,
+              criticalCount,
+              affectedModules,
+              timestamp: Date.now(),
+            });
+          }
+        }
+
+        // Subscribe to realtime changes once we have the organization ID
+        if (response.organization_id && !this.realtimeChannel) {
+          this.subscribeToRealtimeChanges(response.organization_id);
+        }
+
         return {
           success: true,
           modules: response,
+          dependencyIssues: dependencyWarnings.length > 0 ? dependencyWarnings : undefined,
         };
       }
 
@@ -338,12 +531,306 @@ export class ModuleSyncService {
     }
   }
 
+  // ===========================================================================
+  // SUPABASE REALTIME METHODS
+  // ===========================================================================
+
+  /**
+   * Subscribe to real-time module changes for an organization.
+   * This provides instant updates when modules are added, removed, or modified.
+   *
+   * @param orgId - The organization ID to subscribe to
+   */
+  subscribeToRealtimeChanges(orgId: string): void {
+    if (!this.supabaseClient) {
+      console.warn('[ModuleSyncService] Supabase client not initialized, cannot subscribe to realtime');
+      return;
+    }
+
+    // Store organization ID
+    this.organizationId = orgId;
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
+    // Clean up existing subscription
+    this.unsubscribeFromRealtime();
+
+    console.log(`[ModuleSyncService] Subscribing to realtime changes for org: ${orgId}`);
+    this.updateRealtimeStatus('connecting');
+
+    const channelName = `pos-org-modules-${orgId}`;
+    const token = ++this.channelToken;
+
+    const channel = this.supabaseClient
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'organization_modules',
+          filter: `organization_id=eq.${orgId}`,
+        },
+        async (payload) => {
+          console.log('[ModuleSyncService] Realtime module change detected:', payload.eventType);
+
+          // Notify renderer of realtime change
+          this.notifyRenderer('modules:realtime-change', {
+            eventType: payload.eventType,
+            organizationId: orgId,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Trigger a sync to get the updated modules
+          await this.forceSync();
+        }
+      )
+      .subscribe((status, err) => {
+        if (this.realtimeChannel !== channel || token !== this.channelToken) {
+          return;
+        }
+
+        const errorMessage = err?.message || '';
+        console.log('[ModuleSyncService] Realtime subscription status:', status, errorMessage || '');
+
+        switch (status) {
+          case 'SUBSCRIBED':
+            this.markConnectionStable();
+            this.updateRealtimeStatus('connected');
+            break;
+          case 'CLOSED':
+            this.clearStableConnectionTimer();
+            this.updateRealtimeStatus('disconnected');
+            this.attemptReconnect({ errorMessage });
+            break;
+          case 'CHANNEL_ERROR':
+            // Detect rate limiting for appropriate backoff
+            const isRateLimit = this.isRateLimitError(errorMessage);
+            this.clearStableConnectionTimer();
+            this.updateRealtimeStatus('error');
+            this.attemptReconnect({ isRateLimit, errorMessage });
+            break;
+          case 'TIMED_OUT':
+            this.clearStableConnectionTimer();
+            this.updateRealtimeStatus('disconnected');
+            this.attemptReconnect({ errorMessage });
+            break;
+        }
+      });
+
+    this.realtimeChannel = channel;
+  }
+
+  /**
+   * Unsubscribe from real-time module changes
+   */
+  unsubscribeFromRealtime(): void {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
+    this.clearStableConnectionTimer();
+
+    if (this.realtimeChannel && this.supabaseClient) {
+      this.supabaseClient.removeChannel(this.realtimeChannel);
+      this.realtimeChannel = null;
+    }
+
+    this.updateRealtimeStatus('disconnected');
+    console.log('[ModuleSyncService] Unsubscribed from realtime');
+  }
+
+  /**
+   * Check if an error message indicates rate limiting
+   * Parity with: POSSystemMobile/src/services/RealtimeSubscriptionManager.ts
+   */
+  private isRateLimitError(message: string): boolean {
+    const rateLimitPatterns = [
+      'rate limit',
+      'too many',
+      'throttle',
+      'quota exceeded',
+      '429',
+      'too many requests',
+    ];
+    const lowerMessage = message.toLowerCase();
+    return rateLimitPatterns.some(pattern => lowerMessage.includes(pattern));
+  }
+
+  /**
+   * Attempt to reconnect to real-time with exponential backoff
+   * Enhanced with rate limit awareness (parity with mobile)
+   */
+  private attemptReconnect(options?: { isRateLimit?: boolean; errorMessage?: string }): void {
+    if (!this.organizationId) {
+      return;
+    }
+
+    if (this.reconnectTimeout) {
+      return;
+    }
+
+    const isRateLimit = options?.isRateLimit ||
+      (options?.errorMessage && this.isRateLimitError(options.errorMessage));
+
+    // Allow more attempts for rate limits to eventually recover
+    const maxAttempts = isRateLimit
+      ? this.maxReconnectAttempts * 2
+      : this.maxReconnectAttempts;
+
+    if (this.reconnectAttempts >= maxAttempts) {
+      console.warn(`[ModuleSyncService] Max reconnect attempts (${maxAttempts}) reached`, { isRateLimit });
+      this.updateRealtimeStatus('error');
+      return;
+    }
+
+    // Use longer delays for rate limits (10x normal)
+    const baseDelay = isRateLimit
+      ? this.reconnectDelayMs * 10  // 20 seconds base for rate limits
+      : this.reconnectDelayMs;
+
+    // Use longer max delay for rate limits (5 minutes)
+    const maxDelay = isRateLimit ? 5 * 60 * 1000 : 60000;
+
+    const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
+
+    // Add jitter (±10%)
+    const jitter = delay * 0.1 * (Math.random() * 2 - 1);
+    const finalDelay = Math.round(delay + jitter);
+
+    console.log(`[ModuleSyncService] Attempting realtime reconnect in ${finalDelay}ms (attempt ${this.reconnectAttempts + 1}/${maxAttempts})`, { isRateLimit });
+
+    this.reconnectAttempts++;
+
+    this.reconnectTimeout = setTimeout(() => {
+      if (this.organizationId) {
+        this.subscribeToRealtimeChanges(this.organizationId);
+      }
+    }, finalDelay);
+  }
+
+  /**
+   * Reset reconnect attempts only after the connection has stayed up for a while.
+   */
+  private markConnectionStable(): void {
+    this.clearStableConnectionTimer();
+
+    this.reconnectStableTimeout = setTimeout(() => {
+      this.reconnectAttempts = 0;
+      this.reconnectStableTimeout = null;
+    }, this.reconnectStableMs);
+  }
+
+  private clearStableConnectionTimer(): void {
+    if (this.reconnectStableTimeout) {
+      clearTimeout(this.reconnectStableTimeout);
+      this.reconnectStableTimeout = null;
+    }
+  }
+
+  /**
+   * Update the realtime connection status and notify renderer
+   */
+  private updateRealtimeStatus(status: RealtimeConnectionStatus): void {
+    this.realtimeConnectionStatus = status;
+    this.notifyRenderer('modules:realtime-status', { status });
+  }
+
+  /**
+   * Get the current realtime connection status
+   */
+  getRealtimeConnectionStatus(): RealtimeConnectionStatus {
+    return this.realtimeConnectionStatus;
+  }
+
+  /**
+   * Check if realtime is connected
+   */
+  isRealtimeConnected(): boolean {
+    return this.realtimeConnectionStatus === 'connected';
+  }
+
+  // ===========================================================================
+  // OFFLINE QUEUE METHODS
+  // ===========================================================================
+
+  /**
+   * Queue an action for later processing when offline
+   */
+  async queueOfflineAction(
+    type: ModuleActionType,
+    moduleId: string,
+    organizationId: string
+  ): Promise<void> {
+    if (!this.offlineQueue) {
+      console.warn('[ModuleSyncService] Offline queue not initialized');
+      return;
+    }
+
+    await this.offlineQueue.queueAction({
+      type,
+      moduleId,
+      organizationId,
+    });
+
+    console.log('[ModuleSyncService] Action queued for offline:', { type, moduleId, organizationId });
+  }
+
+  /**
+   * Process queued offline actions
+   */
+  async processOfflineQueue(): Promise<void> {
+    if (!this.offlineQueue) {
+      return;
+    }
+
+    await this.offlineQueue.processQueue();
+  }
+
+  /**
+   * Get the current offline queue
+   */
+  getOfflineQueue(): ModuleAction[] {
+    return this.offlineQueue?.getQueue() ?? [];
+  }
+
+  /**
+   * Check if the device is currently online
+   */
+  getOnlineStatus(): boolean {
+    return this.offlineQueue?.getOnlineStatus() ?? this.isOnline;
+  }
+
+  /**
+   * Check if there are queued actions for a specific module
+   */
+  hasQueuedActionForModule(organizationId: string, moduleId: string): boolean {
+    return this.offlineQueue?.hasQueuedActionForModule(organizationId, moduleId) ?? false;
+  }
+
+  // ===========================================================================
+  // CLEANUP
+  // ===========================================================================
+
   /**
    * Cleanup resources
    */
   cleanup(): void {
     this.stopPeriodicSync();
+    this.unsubscribeFromRealtime();
+
+    // Dispose offline queue
+    if (this.offlineQueue) {
+      this.offlineQueue.dispose();
+      this.offlineQueue = null;
+    }
+
     this.mainWindow = null;
     this.databaseManager = null;
+    this.supabaseClient = null;
   }
 }

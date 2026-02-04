@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+import { RefreshCw } from 'lucide-react';
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { useFeatures } from '../hooks/useFeatures';
+import { formatDate } from '../utils/format';
 
 interface SyncStatus {
   isOnline: boolean;
@@ -23,178 +25,192 @@ interface SyncStatusIndicatorProps {
   showDetails?: boolean;
 }
 
+const defaultFinancialStats = {
+  driver_earnings: { pending: 0, failed: 0 },
+  staff_payments: { pending: 0, failed: 0 },
+  shift_expenses: { pending: 0, failed: 0 }
+};
+
+const getNavigatorOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+const coerceNumber = (value: any, fallback = 0) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+const normalizeHealth = (value: any): number => {
+  if (typeof value !== 'number' || Number.isNaN(value)) return 80;
+  if (value <= 1) return Math.round(value * 100);
+  if (value > 100) return 100;
+  return Math.round(value);
+};
+
+const toDateString = (value: any): string | null => {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const normalizeStatus = (status: any): SyncStatus => {
+  if (!status) {
+    return {
+      isOnline: getNavigatorOnline(),
+      lastSync: null,
+      pendingItems: 0,
+      syncInProgress: false,
+      error: null,
+      terminalHealth: 80,
+      settingsVersion: 0,
+      menuVersion: 0,
+      pendingPaymentItems: 0,
+      failedPaymentItems: 0,
+    };
+  }
+
+  return {
+    isOnline: typeof status.isOnline === 'boolean' ? status.isOnline : getNavigatorOnline(),
+    lastSync: toDateString(status.lastSync),
+    pendingItems: coerceNumber(status.pendingItems, 0),
+    syncInProgress: !!status.syncInProgress,
+    error: typeof status.error === 'string' ? status.error : null,
+    terminalHealth: normalizeHealth(status.terminalHealth),
+    settingsVersion: coerceNumber(status.settingsVersion, 0),
+    menuVersion: coerceNumber(status.menuVersion, 0),
+    pendingPaymentItems: coerceNumber(status.pendingPaymentItems, 0),
+    failedPaymentItems: coerceNumber(status.failedPaymentItems, 0),
+  };
+};
+
 export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   className = '',
   showDetails = false
 }) => {
   const { t } = useTranslation();
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
-    isOnline: navigator.onLine, // Use browser's online status as fallback
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => ({
+    isOnline: getNavigatorOnline(),
     lastSync: null,
     pendingItems: 0,
     syncInProgress: false,
     error: null,
-    terminalHealth: 0.8, // Default to good health in browser mode
+    terminalHealth: 80,
     settingsVersion: 0,
     menuVersion: 0,
     pendingPaymentItems: 0,
     failedPaymentItems: 0,
-  });
-  const [showDetailPanel, setShowDetailPanel] = useState(false);
+  }));
+  const [showDetailPanel, setShowDetailPanel] = useState(showDetails);
   const [showFinancialPanel, setShowFinancialPanel] = useState(false);
   const [justRefreshed, setJustRefreshed] = useState(false);
-  const [financialStats, setFinancialStats] = useState({
-    driver_earnings: { pending: 0, failed: 0 },
-    staff_payments: { pending: 0, failed: 0 },
-    shift_expenses: { pending: 0, failed: 0 }
-  });
+  const [financialStats, setFinancialStats] = useState(defaultFinancialStats);
 
   const {
     isMobileWaiter,
     parentTerminalId,
-    loading: featuresLoading
   } = useFeatures();
 
-  const normalizeStatus = (status: any): SyncStatus => {
-    if (!status) {
-      return {
-        isOnline: navigator.onLine,
-        lastSync: null,
-        pendingItems: 0,
-        syncInProgress: false,
-        error: null,
-        terminalHealth: 80,
-        settingsVersion: 0,
-        menuVersion: 0,
-        pendingPaymentItems: 0,
-        failedPaymentItems: 0,
-      };
-    }
+  useEffect(() => {
+    setShowDetailPanel(showDetails);
+  }, [showDetails]);
 
-    return {
-      isOnline: typeof status.isOnline === 'boolean' ? status.isOnline : navigator.onLine,
-      lastSync: status.lastSync ?? null,
-      pendingItems: typeof status.pendingItems === 'number' ? status.pendingItems : 0,
-      syncInProgress: !!status.syncInProgress,
-      error: status.error ?? null,
-      terminalHealth: typeof status.terminalHealth === 'number' ? status.terminalHealth : 80,
-      settingsVersion: typeof status.settingsVersion === 'number' ? status.settingsVersion : 0,
-      menuVersion: typeof status.menuVersion === 'number' ? status.menuVersion : 0,
-      pendingPaymentItems: typeof status.pendingPaymentItems === 'number' ? status.pendingPaymentItems : 0,
-      failedPaymentItems: typeof status.failedPaymentItems === 'number' ? status.failedPaymentItems : 0,
-    };
-  };
+  const loadFinancialStats = useCallback(async () => {
+    try {
+      if (window.electronAPI && typeof (window.electronAPI as any).getFinancialSyncStats === 'function') {
+        const stats = await (window.electronAPI as any).getFinancialSyncStats();
+        if (stats && typeof stats === 'object') {
+          setFinancialStats({
+            driver_earnings: {
+              pending: coerceNumber(stats.driver_earnings?.pending, 0),
+              failed: coerceNumber(stats.driver_earnings?.failed, 0),
+            },
+            staff_payments: {
+              pending: coerceNumber(stats.staff_payments?.pending, 0),
+              failed: coerceNumber(stats.staff_payments?.failed, 0),
+            },
+            shift_expenses: {
+              pending: coerceNumber(stats.shift_expenses?.pending, 0),
+              failed: coerceNumber(stats.shift_expenses?.failed, 0),
+            }
+          });
+        } else {
+          setFinancialStats(defaultFinancialStats);
+        }
+      } else {
+        console.warn('getFinancialSyncStats is not available');
+      }
+    } catch (err) {
+      console.error('Failed to load financial stats:', err);
+    }
+  }, []);
+
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
+        const status = await window.electronAPI.getSyncStatus();
+        setSyncStatus(normalizeStatus(status));
+      } else {
+        console.warn('getSyncStatus is not available');
+      }
+      await loadFinancialStats();
+    } catch (error) {
+      console.error('Failed to load sync status:', error);
+    }
+  }, [loadFinancialStats]);
 
   useEffect(() => {
-    console.log('SyncStatusIndicator: mount');
-
-    // Get initial sync status
-    const loadSyncStatus = async () => {
-      try {
-        if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
-          const status = await window.electronAPI.getSyncStatus();
-          console.log('SyncStatusIndicator: initial status', status);
-          setSyncStatus(normalizeStatus(status));
-        } else {
-          console.warn('getSyncStatus is not available');
-        }
-
-        if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
-          const stats = await (window as any).electronAPI.getFinancialSyncStats();
-          setFinancialStats(stats);
-        } else {
-          console.warn('getFinancialSyncStats is not available');
-        }
-      } catch (error) {
-        console.error('Failed to load sync status:', error);
-      }
-    };
-
     loadSyncStatus();
 
-    // Listen for sync status updates
     const handleSyncStatusUpdate = async (status: any) => {
-      console.log('SyncStatusIndicator: sync:status event', status);
       setSyncStatus(normalizeStatus(status));
-
-      // Also reload financial stats when sync status updates
-      try {
-        if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
-          const stats = await (window as any).electronAPI.getFinancialSyncStats();
-          setFinancialStats(stats);
-        }
-      } catch (err) {
-        console.error('Failed to reload financial stats on sync update:', err);
-      }
+      await loadFinancialStats();
     };
 
     const handleNetworkStatus = ({ isOnline }: { isOnline: boolean }) => {
-      console.log('SyncStatusIndicator: network:status event', isOnline);
       setSyncStatus(prev => ({ ...prev, isOnline }));
     };
 
-    if (window.electronAPI) {
-      window.electronAPI.onSyncStatus?.(handleSyncStatusUpdate);
-      window.electronAPI.onNetworkStatus?.(handleNetworkStatus);
-    }
+    window.electronAPI?.onSyncStatus?.(handleSyncStatusUpdate);
+    window.electronAPI?.onNetworkStatus?.(handleNetworkStatus);
 
-    // Listen for background menu refresh events from useMenuVersionPolling
     const handleMenuRefreshed = () => {
       setJustRefreshed(true);
       setTimeout(() => setJustRefreshed(false), 2000);
     };
     window.addEventListener('menu-sync:refreshed', handleMenuRefreshed as EventListener);
 
-    // Refresh status and financial stats every 30 seconds
     const interval = setInterval(async () => {
       await loadSyncStatus();
     }, 30000);
 
     return () => {
-      console.log('SyncStatusIndicator: unmount');
       clearInterval(interval);
-      if (window.electronAPI) {
-        window.electronAPI.removeSyncStatusListener?.();
-        window.electronAPI.removeNetworkStatusListener?.();
-      }
+      window.electronAPI?.removeSyncStatusListener?.(handleSyncStatusUpdate);
+      window.electronAPI?.removeNetworkStatusListener?.(handleNetworkStatus);
       window.removeEventListener('menu-sync:refreshed', handleMenuRefreshed as EventListener);
     };
-  }, []);
+  }, [loadSyncStatus, loadFinancialStats]);
 
-  const getStatusColor = () => {
-    if (!syncStatus.isOnline) return 'bg-red-500';
-    if (syncStatus.syncInProgress) return 'bg-yellow-500';
-    if (syncStatus.error || syncStatus.failedPaymentItems > 0 ||
-      financialStats.driver_earnings.failed > 0 ||
-      financialStats.staff_payments.failed > 0 ||
-      financialStats.shift_expenses.failed > 0) return 'bg-orange-500';
-    if (syncStatus.pendingItems > 0 || syncStatus.pendingPaymentItems > 0) return 'bg-blue-500';
-    return 'bg-green-500';
-  };
+  const hasErrors = !!syncStatus.error ||
+    syncStatus.failedPaymentItems > 0 ||
+    financialStats.driver_earnings.failed > 0 ||
+    financialStats.staff_payments.failed > 0 ||
+    financialStats.shift_expenses.failed > 0;
+
+  const hasPending = syncStatus.pendingItems > 0 || syncStatus.pendingPaymentItems > 0;
 
   const getStatusText = () => {
     if (!syncStatus.isOnline) return t('sync.status.offline');
     if (syncStatus.syncInProgress) return t('sync.status.syncing');
-    if (syncStatus.error || syncStatus.failedPaymentItems > 0 ||
-      financialStats.driver_earnings.failed > 0 ||
-      financialStats.staff_payments.failed > 0 ||
-      financialStats.shift_expenses.failed > 0) return t('sync.status.error');
-    if (syncStatus.pendingItems > 0 || syncStatus.pendingPaymentItems > 0) {
+    if (hasErrors) return t('sync.status.error');
+    if (hasPending) {
       const totalPending = syncStatus.pendingItems + syncStatus.pendingPaymentItems;
       return t('sync.status.pending', { count: totalPending });
     }
     return t('sync.status.synced');
   };
 
-  const getHealthColor = () => {
-    if (syncStatus.terminalHealth >= 0.8) return 'text-green-600';
-    if (syncStatus.terminalHealth >= 0.6) return 'text-yellow-600';
-    return 'text-red-600';
-  };
-
   const formatLastSync = () => {
     if (!syncStatus.lastSync) return t('sync.time.never');
     const date = new Date(syncStatus.lastSync);
+    if (Number.isNaN(date.getTime())) return t('sync.time.never');
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
@@ -203,7 +219,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     if (diffMins < 60) return t('sync.time.minutesAgo', { minutes: diffMins });
     const diffHours = Math.floor(diffMins / 60);
     if (diffHours < 24) return t('sync.time.hoursAgo', { hours: diffHours });
-    return date.toLocaleDateString();
+    return formatDate(date);
   };
 
   const handleForceSync = async () => {
@@ -213,26 +229,11 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
         await window.electronAPI.forceSync();
 
-        // Show success message
         toast.success(t('sync.messages.syncComplete') || 'Sync completed');
 
-        // Reload status and financial stats after sync
         setTimeout(async () => {
-          try {
-            if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
-              const status = await window.electronAPI.getSyncStatus();
-              setSyncStatus(normalizeStatus(status));
-            }
-
-            if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
-              const stats = await (window as any).electronAPI.getFinancialSyncStats();
-              console.log('Financial stats after sync:', stats);
-              setFinancialStats(stats);
-            }
-          } catch (err) {
-            console.error('Failed to reload sync status:', err);
-          }
-        }, 2000); // Increased timeout to give sync more time to complete
+          await loadSyncStatus();
+        }, 2000);
       } else {
         toast.error(t('sync.messages.forceSyncElectronOnly') || 'Sync is only available in Electron mode');
       }
@@ -243,7 +244,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   };
 
-  const isSynced = syncStatus.isOnline && !syncStatus.error && syncStatus.pendingItems === 0 && !syncStatus.syncInProgress;
+  const isSynced = syncStatus.isOnline && !syncStatus.syncInProgress && !hasErrors && !hasPending;
 
   return (
     <div className={`relative ${className}`}>
@@ -332,13 +333,12 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 {/* Terminal Type Info */}
                 <div className="flex items-center justify-between pt-3 border-t liquid-glass-modal-border">
                   <span className="text-sm font-bold text-black dark:text-white uppercase tracking-wide">
-                    {t('terminal.labels.terminalType', 'Terminal Type')}
+                    {t('terminal.labels.terminalType', { defaultValue: 'Terminal Type' })}
                   </span>
                   <span
-                    className={`text-sm font-extrabold ${isMobileWaiter ? 'text-blue-700 dark:text-blue-300' : 'text-green-700 dark:text-green-300'
-                      }`}
+                    className={`text-sm font-extrabold ${isMobileWaiter ? 'text-blue-700 dark:text-blue-300' : 'text-green-700 dark:text-green-300'}`}
                   >
-                    {isMobileWaiter ? t('terminal.type.mobile_waiter', 'Mobile POS') : t('terminal.type.main', 'Κεντρικό Τερματικό')}
+                    {isMobileWaiter ? t('terminal.type.mobile_waiter', { defaultValue: 'Mobile POS' }) : t('terminal.type.main', { defaultValue: 'Main Terminal' })}
                   </span>
                 </div>
 
@@ -402,21 +402,17 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     <button
                       onClick={async () => {
                         try {
-                          if ((window as any).electronAPI && typeof (window as any).electronAPI.getFinancialSyncStats === 'function') {
-                            const stats = await (window as any).electronAPI.getFinancialSyncStats();
-                            console.log('Manual refresh - Financial stats:', stats);
-                            setFinancialStats(stats);
-                            toast.success('Ανανεώθηκε');
-                          }
+                          await loadFinancialStats();
+                          toast.success(t('sync.actions.refreshed', { defaultValue: 'Refreshed' }));
                         } catch (err) {
                           console.error('Failed to refresh financial stats:', err);
-                          toast.error('Αποτυχία ανανέωσης');
+                          toast.error(t('sync.actions.refreshFailed', { defaultValue: 'Refresh failed' }));
                         }
                       }}
                       className="text-xs font-semibold text-green-500 hover:text-green-400 underline"
-                      title="Ανανέωση"
+                      title={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
                     >
-                      ↻
+                      <RefreshCw className="w-3 h-3" aria-hidden="true" />
                     </button>
                     <button
                       onClick={() => setShowFinancialPanel(true)}
@@ -484,7 +480,6 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </div>
               </div>
 
-
               {/* Order Routing Info */}
               <OrderSyncRouteIndicator />
 
@@ -537,11 +532,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         isOpen={showFinancialPanel}
         onClose={() => setShowFinancialPanel(false)}
         onRefresh={() => {
-          // Reload sync status when refresh happens in panel
-          if ((window as any).electronAPI?.getSyncStatus) window.electronAPI.getSyncStatus().then((s: any) => setSyncStatus(s as any));
-          if ((window as any).electronAPI?.getFinancialSyncStats) (window as any).electronAPI.getFinancialSyncStats().then((s: any) => setFinancialStats(s));
+          void loadSyncStatus();
         }}
       />
-    </div >
+    </div>
   );
 };

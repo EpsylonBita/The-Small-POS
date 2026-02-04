@@ -1,6 +1,6 @@
 {
   "name": "the-small-pos-system",
-  "version": "1.1.59",
+  "version": "1.1.62",
   "description": "Point of Sale system for The Small with offline capabilities",
   "main": "dist/main/main.js",
   "homepage": "./",
@@ -62,15 +62,13 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.10.0",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
     "@typescript-eslint/eslint-plugin": "^6.14.0",
     "@typescript-eslint/parser": "^6.14.0",
     "buffer": "^6.0.3",
     "compression-webpack-plugin": "^11.1.0",
     "concurrently": "^8.2.2",
     "crypto": "^1.0.1",
-    "crypto-browserify": "^3.12.1",
+    "crypto-browserify": "^3.3.0",
     "css-loader": "^6.8.1",
     "dotenv": "^17.2.3",
     "electron": "^39.0.0",
@@ -106,6 +104,8 @@
     "@point-of-sale/receipt-printer-encoder": "^3.0.3",
     "@supabase/supabase-js": "^2.50.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
     "@types/dompurify": "^3.0.5",
     "@types/react-virtualized-auto-sizer": "^1.0.4",
     "@types/react-window": "^1.8.8",
@@ -178,7 +178,7 @@
         "nsis"
       ],
       "icon": "public/icon.ico",
-      "verifyUpdateCodeSignature": false,
+      "verifyUpdateCodeSignature": true,
       "signAndEditExecutable": false
     },
     "nsis": {
@@ -229,7 +229,6 @@
       "--ignore-scripts"
     ]
   },
-  "optionalDependencies": {},
   "overrides": {
     "lucide-react": "$lucide-react"
   }

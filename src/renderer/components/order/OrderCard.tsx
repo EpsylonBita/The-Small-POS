@@ -4,8 +4,9 @@ import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import type { Order, OrderStatus } from '../../types/orders';
 import toast from 'react-hot-toast';
-import { PlatformIndicator, isExternalPlatform } from '../../utils/platform-icons';
+import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
 import { OrderRoutingBadge } from './OrderRoutingBadge';
+import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 
 interface OrderCardProps {
   order: Order | any;
@@ -31,26 +32,7 @@ export const OrderCard = memo<OrderCardProps>(({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
 
-  const getStatusBadgeColor = (status: string) => {
-    switch (status) {
-      case 'pending':
-        return 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 border-yellow-500/30';
-      case 'confirmed':
-        return 'bg-blue-500/20 text-blue-600 dark:text-blue-400 border-blue-500/30';
-      case 'preparing':
-        return 'bg-purple-500/20 text-purple-600 dark:text-purple-400 border-purple-500/30';
-      case 'ready':
-        return 'bg-green-500/20 text-green-600 dark:text-green-400 border-green-500/30';
-      case 'out_for_delivery':
-        return 'bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 border-cyan-500/30';
-      case 'completed':
-        return 'bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30';
-      case 'cancelled':
-        return 'bg-red-500/20 text-red-600 dark:text-red-400 border-red-500/30';
-      default:
-        return 'bg-gray-500/20 text-gray-600 dark:text-gray-400 border-gray-500/30';
-    }
-  };
+  const getStatusBadgeColor = (status: string) => getOrderStatusBadgeClasses(status);
 
   const isPendingAndOld = () => {
     if (order.status !== 'pending') return false;
@@ -190,9 +172,9 @@ export const OrderCard = memo<OrderCardProps>(({
   const requestedRef = useRef(false);
   const totalNormalized = typeof order.totalAmount === 'number' ? order.totalAmount : (typeof order.total_amount === 'number' ? order.total_amount : 0);
 
-  // Normalize platform field (could be 'platform' or 'order_platform')
-  const orderPlatform = order.platform || order.order_platform || '';
-  const isExternal = isExternalPlatform(orderPlatform);
+  // Normalize plugin field (could be plugin/order_plugin or legacy platform)
+  const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform || '';
+  const isExternal = isExternalPlatform(orderPlugin);
 
   // Normalize driver info for display
   const driverIdNormalized = order.driver_id || order.driverId || (order as any).driver_id || '';
@@ -282,14 +264,7 @@ export const OrderCard = memo<OrderCardProps>(({
       onClick={() => onSelect(order.id)}
       onDoubleClick={() => onDoubleClick?.(order.id)}
     >
-      {/* Platform Indicator - Top right corner for external platforms */}
-      {isExternal && (
-        <div className="absolute top-1.5 right-12 sm:right-14 z-10">
-          <PlatformIndicator platform={orderPlatform} />
-        </div>
-      )}
-
-      <div className="flex items-center justify-between gap-2 sm:gap-4">
+        <div className="flex items-center justify-between gap-2 sm:gap-4">
         {/* Left Section - Order Number & Time */}
         <div className="flex items-center gap-2 sm:gap-4 relative flex-shrink-0">
           <div className="flex flex-col gap-0.5 sm:gap-1">
@@ -310,14 +285,19 @@ export const OrderCard = memo<OrderCardProps>(({
             {orderTypeNormalized === 'delivery' ? (
               <>
                 {/* Delivery address - bold, bigger text, centered (street only, no city/postal) */}
-                <div className={`text-base sm:text-lg font-bold truncate ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                  {(deliveryAddressNormalized || resolvedAddress)
-                    ? formatAddressForDisplay(deliveryAddressNormalized || resolvedAddress)
-                    : (customerPhoneNormalized && !resolvedAddress
-                      ? <span className="italic font-normal">{t('orderCard.loadingAddress') || 'Loading address...'}</span>
-                      : <span className="italic font-normal text-gray-400">{t('orderCard.addressNotAvailable') || 'Address not available'}</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {isExternal && (
+                      <PluginIcon plugin={orderPlugin} size={20} className="shrink-0" showTooltip={false} />
                     )}
-                </div>
+                    <div className={`text-base sm:text-lg font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
+                      {(deliveryAddressNormalized || resolvedAddress)
+                        ? formatAddressForDisplay(deliveryAddressNormalized || resolvedAddress)
+                        : (customerPhoneNormalized && !resolvedAddress
+                          ? <span className="italic font-normal">{t('orderCard.loadingAddress') || 'Loading address...'}</span>
+                          : <span className="italic font-normal text-gray-400">{t('orderCard.addressNotAvailable') || 'Address not available'}</span>
+                        )}
+                    </div>
+                  </div>
                 {/* Customer name & phone - same line, smaller text */}
                 {(customerNameNormalized || customerPhoneNormalized) && (
                   <div className={`text-xs ${resolvedTheme === 'light' ? 'text-gray-600' : 'text-white/70'}`}>
@@ -346,9 +326,14 @@ export const OrderCard = memo<OrderCardProps>(({
             ) : (
               <>
                 {/* For non-delivery orders: Show customer name or order type */}
-                <div className={`text-sm sm:text-base font-bold truncate ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                  {customerNameNormalized || t(`orders.type.${orderTypeNormalized}`) || orderTypeNormalized || t('orderCard.customer') || 'Customer'}
-                </div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {isExternal && (
+                      <PluginIcon plugin={orderPlugin} size={18} className="shrink-0" showTooltip={false} />
+                    )}
+                    <div className={`text-sm sm:text-base font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
+                      {customerNameNormalized || t(`orders.type.${orderTypeNormalized}`) || orderTypeNormalized || t('orderCard.customer') || 'Customer'}
+                    </div>
+                  </div>
                 {/* Show phone number */}
                 {customerPhoneNormalized && (
                   <div className={`text-xs ${resolvedTheme === 'light' ? 'text-gray-600' : 'text-white/70'}`}>

@@ -319,6 +319,25 @@ export class DatabaseManager {
     return this.databaseService.clearOldSubcategoriesCache(olderThanDays);
   }
 
+  /**
+   * Delete subcategories from cache by IDs (for cache eviction during incremental sync)
+   */
+  deleteSubcategoriesFromCache(ids: string[]): number {
+    return this.databaseService.deleteSubcategoriesFromCache(ids);
+  }
+
+  /**
+   * Apply branch-specific price/availability overrides to cached subcategories
+   */
+  applyBranchOverrides(overrides: Array<{
+    subcategory_id: string;
+    price_override?: number | null;
+    availability_override?: boolean | null;
+    updated_at: string;
+  }>): number {
+    return this.databaseService.applyBranchOverrides(overrides);
+  }
+
   getAllCachedSubcategories(): Array<{ id: string; name: string; name_en?: string; name_el?: string; category_id?: string; updated_at: string }> {
     return this.databaseService.getAllCachedSubcategories();
   }

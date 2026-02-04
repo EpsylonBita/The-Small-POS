@@ -1,29 +1,20 @@
-import React, { memo, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { memo } from 'react';
+import TablesPage from '../../TablesPage';
 
 /**
  * TablesView - Restaurant Tables Page
  *
- * This view has been deprecated in favor of the integrated Tables tab
- * in the main Dashboard. This component now redirects to the dashboard
- * with the Tables tab active.
+ * Full-featured table management view with:
+ * - Grid and floor plan visualization
+ * - Real-time table status updates via Supabase
+ * - Status management (available → occupied → reserved → cleaning)
+ * - Table filtering by status, section, floor
+ * - Quick actions for orders and reservations
  *
- * The Tables functionality is now part of the OrderDashboard component
- * and is module-dependent (requires Tables module to be acquired).
+ * @since 2.3.0 - Now uses dedicated TablesPage component
  */
 export const TablesView: React.FC = memo(() => {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    // Redirect to dashboard - the Tables tab will be shown if Tables module is acquired
-    navigate('/', { replace: true });
-  }, [navigate]);
-
-  return (
-    <div className="h-full flex items-center justify-center">
-      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500" />
-    </div>
-  );
+  return <TablesPage />;
 });
 
 TablesView.displayName = 'TablesView';

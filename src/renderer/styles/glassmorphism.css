@@ -629,6 +629,115 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
+/* Liquid glass variant tints */
+.liquid-glass-modal-primary {
+  background: rgba(59, 130, 246, 0.16);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #1d4ed8;
+}
+
+.dark .liquid-glass-modal-primary {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: #93c5fd;
+}
+
+.liquid-glass-modal-secondary {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: var(--modal-c-content);
+}
+
+.dark .liquid-glass-modal-secondary {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: var(--modal-c-content);
+}
+
+.liquid-glass-modal-success {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #15803d;
+}
+
+.dark .liquid-glass-modal-success {
+  background: rgba(34, 197, 94, 0.2);
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #86efac;
+}
+
+.liquid-glass-modal-warning {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #b45309;
+}
+
+.dark .liquid-glass-modal-warning {
+  background: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+}
+
+.liquid-glass-modal-error {
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #b91c1c;
+}
+
+.dark .liquid-glass-modal-error {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #fca5a5;
+}
+
+.liquid-glass-modal-info {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.35);
+  color: #0369a1;
+}
+
+.dark .liquid-glass-modal-info {
+  background: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #7dd3fc;
+}
+
+.liquid-glass-modal-pending {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #1d4ed8;
+}
+
+.dark .liquid-glass-modal-pending {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: #93c5fd;
+}
+
+.liquid-glass-modal-preparing {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.35);
+  color: #6d28d9;
+}
+
+.dark .liquid-glass-modal-preparing {
+  background: rgba(168, 85, 247, 0.22);
+  border-color: rgba(168, 85, 247, 0.45);
+  color: #d8b4fe;
+}
+
+.liquid-glass-modal-ready {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #047857;
+}
+
+.dark .liquid-glass-modal-ready {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #6ee7b7;
+}
+
 .liquid-glass-modal-text {
   color: var(--modal-c-content);
   opacity: 1;
@@ -2159,26 +2268,36 @@ svg.pos-neon-logo {
 /* Glass card to mirror Admin login */
 .pos-login-card {
   position: relative;
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 1rem;
-  box-shadow: 0 10px 40px rgba(2, 6, 23, 0.35);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(48px) saturate(170%);
+  -webkit-backdrop-filter: blur(48px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.1),
+    0 8px 24px rgba(0, 0, 0, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  overflow: visible;
 }
 
 .dark .pos-login-card {
-  background: rgba(17, 24, 39, 0.55);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(48px) saturate(160%);
+  -webkit-backdrop-filter: blur(48px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.4),
+    0 8px 24px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .pos-login-glow {
   position: absolute;
   inset: -4px;
   border-radius: 1.1rem;
-  background: linear-gradient(90deg, rgba(37, 99, 235, 0.25), rgba(59, 130, 246, 0.15), rgba(37, 99, 235, 0.25));
-  filter: blur(12px);
-  opacity: 0.6;
+  background: radial-gradient(80% 80% at 50% 0%, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0));
+  filter: blur(16px);
+  opacity: 0.4;
   pointer-events: none;
   z-index: 0;
 }

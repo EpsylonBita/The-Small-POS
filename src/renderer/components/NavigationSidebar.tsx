@@ -44,6 +44,8 @@ import {
   ChefHat,
   UtensilsCrossed,
   Warehouse,
+  ScanBarcode,
+  Ticket,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
@@ -171,6 +173,10 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <ChefHat className={iconClass} strokeWidth={2} />;
       case 'Warehouse':
         return <Warehouse className={iconClass} strokeWidth={2} />;
+      case 'ScanBarcode':
+        return <ScanBarcode className={iconClass} strokeWidth={2} />;
+      case 'Ticket':
+        return <Ticket className={iconClass} strokeWidth={2} />;
       default:
         // Log unknown icons for debugging
         console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);
@@ -208,7 +214,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
       // Fast-food vertical - energetic colors
       drive_through: 'orange',
-      quick_pos: 'green',
+      kiosk: 'green',
       delivery_zones: 'purple',
 
       // Analytics & reporting - professional colors

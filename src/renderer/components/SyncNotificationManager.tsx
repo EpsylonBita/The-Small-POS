@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { AlertTriangle, X } from 'lucide-react';
 
 interface SyncNotificationManagerProps {
   onSettingsUpdate?: (settings: any) => void;
@@ -185,7 +186,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
               onClick={() => setShowNotificationPanel(false)}
               className="text-gray-400 hover:text-gray-600"
             >
-              ✕
+              <X className="w-4 h-4" />
             </button>
           </div>
 
@@ -260,7 +261,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
           <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
             <div className="flex items-center mb-4">
               <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center mr-4">
-                <span className="text-orange-600 text-xl">⚠️</span>
+                <AlertTriangle className="w-6 h-6 text-orange-600" />
               </div>
               <div>
                 <h3 className="text-lg font-medium text-gray-900">Restart Required</h3>

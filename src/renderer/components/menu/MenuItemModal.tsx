@@ -3,6 +3,8 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { menuService, MenuItem, Ingredient } from '../../services/MenuService';
+import { Ban, Check, Minus, ShoppingCart, X } from 'lucide-react';
+import { formatCurrency } from '../../utils/format';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -284,7 +286,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               )}
               <div className="flex items-center gap-3 mt-3 flex-wrap">
                 <span className="text-lg font-bold text-green-500">
-                  €{basePrice.toFixed(2)}
+                  {formatCurrency(basePrice)}
                 </span>
                 <span className="text-xs px-2 py-1 rounded-full liquid-glass-modal-badge">
                   {orderType === 'pickup' ? t('menu.item.pickup') : t('menu.item.delivery')} {t('menu.item.price')}
@@ -491,7 +493,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                         WebkitFontSmoothing: 'subpixel-antialiased'
                                       }}
                                     >
-                                      {isWithout && <span className="no-underline mr-1">🚫</span>}
+                                      {isWithout && <Ban className="w-3 h-3 inline-block mr-1 text-red-400" aria-hidden="true" />}
                                       {getIngredientName(ingredient)}
                                       {isLittle && isSelected && !isWithout && (
                                         <span className="ml-1 text-xs text-blue-400 font-medium">({t('menu.itemModal.little')})</span>
@@ -505,7 +507,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                           textShadow: resolvedTheme === 'dark' ? '0 0 2px rgba(74, 222, 128, 0.3)' : 'none'
                                         }}
                                       >
-                                        +€{getIngredientUnitPrice(ingredient).toFixed(2)}
+                                        +{formatCurrency(getIngredientUnitPrice(ingredient))}
                                       </span>
                                     )}
                                     {isWithout && (
@@ -531,7 +533,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                       }}
                                       title={t('common.actions.decrease')}
                                     >
-                                      <span style={{ color: resolvedTheme === 'dark' ? '#ffffff' : '#1e293b', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.2)' }}>−</span>
+                                      <Minus className={`w-4 h-4 ${resolvedTheme === 'dark' ? 'text-white' : 'text-slate-900'}`} />
                                     </button>
 
                                     {/* Quantity display */}
@@ -571,7 +573,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                                     className="absolute top-1/2 right-2 -translate-y-1/2 w-8 h-8 rounded-full bg-red-500/40 hover:bg-red-500/60 flex items-center justify-center transition-all"
                                     title={t('common.actions.remove')}
                                   >
-                                    <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '16px', textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>×</span>
+                                    <X className="w-4 h-4 text-white" />
                                   </button>
                                 ) : (
                                   /* Plus button when not selected - tap to add */
@@ -636,7 +638,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 onClick={() => setQuantity(Math.max(1, quantity - 1))}
                 className="liquid-glass-modal-button w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold"
               >
-                −
+                <Minus className="w-5 h-5" />
               </button>
               <span className="text-2xl font-bold liquid-glass-modal-text min-w-[3rem] text-center">
                 {quantity}
@@ -654,7 +656,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               {t('menu.itemModal.total')}:
             </span>
             <span className="text-3xl font-bold text-green-500">
-              €{totalPrice.toFixed(2)}
+              {formatCurrency(totalPrice)}
             </span>
           </div>
 
@@ -674,7 +676,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                         {ingredientPrice > 0 && (
                           <span className="ml-1 text-green-500 font-semibold">
                             {t('menu.itemModal.extraPrice', {
-                              price: new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(ingredientPrice)
+                              price: formatCurrency(ingredientPrice)
                             })}
                           </span>
                         )}
@@ -682,7 +684,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                     )}
                     {withoutItems.length > 0 && (
                       <div className="text-red-400">
-                        🚫 {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
+                        <span className="inline-flex items-center gap-1">
+                          <Ban className="w-3 h-3" />
+                          {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -698,10 +703,17 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                 : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
               }`}
           >
-            {isEditMode
-              ? `✓ ${t('menu.itemModal.updateItem') || 'Update Item'}`
-              : `🛒 ${t('menu.itemModal.addToCart')}`
-            }
+            {isEditMode ? (
+              <span className="inline-flex items-center gap-2">
+                <Check className="w-5 h-5" aria-hidden="true" />
+                {t('menu.itemModal.updateItem', { defaultValue: 'Update Item' })}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2">
+                <ShoppingCart className="w-5 h-5" aria-hidden="true" />
+                {t('menu.itemModal.addToCart', { defaultValue: 'Add to Cart' })}
+              </span>
+            )}
           </button>
         </div>
       </div>

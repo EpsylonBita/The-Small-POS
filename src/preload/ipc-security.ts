@@ -12,19 +12,22 @@ const DANGEROUS_CHANNELS_PRODUCTION = [
   'database:reset',                    // Nuke entire database
   'orders:clear-all',                  // Delete all orders (financial fraud)
   'sync:clear-all-orders',             // Delete all synced orders
-  'settings:factory-reset',            // System wipe
   'sync:clear-all',                    // Clear all sync data
   'sync:clear-failed',                 // Might be needed for troubleshooting
   'diagnostic:mark-all-unsynced-earnings', // Data manipulation
+  'printer:test-greek-direct',         // SECURITY: Dev-only test handler - potential command injection via printerNameArg
 ];
 
 // Channels that should require elevated permissions
+// Note: settings:factory-reset moved here from DANGEROUS_CHANNELS_PRODUCTION
+// to allow legitimate admin-triggered factory resets while still marking as sensitive
 const SENSITIVE_CHANNELS = [
   'sync:force',
   'sync:cleanup-deleted-orders',
   'order:delete',
   'customer:update-ban-status',
   'shift:close-all-active',
+  'settings:factory-reset',            // System wipe (admin-only operation)
 ];
 
 // Track if we've already logged the mode message (to avoid log spam)

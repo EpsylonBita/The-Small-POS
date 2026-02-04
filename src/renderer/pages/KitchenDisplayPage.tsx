@@ -22,13 +22,12 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { supabase } from '../../shared/supabase';
 
 interface KitchenOrder {
   id: string;
   order_number: string;
-  order_type: 'dine_in' | 'takeaway' | 'delivery';
-  status: 'pending' | 'preparing' | 'ready';
+  order_type: 'dine-in' | 'pickup' | 'takeaway' | 'delivery' | 'drive-through' | 'dine_in';
+  status: 'pending' | 'preparing';
   items: KitchenOrderItem[];
   created_at: string;
   table_number?: string;
@@ -58,59 +57,106 @@ const KitchenDisplayPage: React.FC = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const isDark = resolvedTheme === 'dark';
+
+  // Map API status values back to UI status values
+  const mapApiStatusToUi = (apiStatus: string): KitchenOrder['status'] | null => {
+    const statusMap: Record<string, KitchenOrder['status']> = {
+      pending: 'pending',
+      in_progress: 'preparing',
+    };
+    // Return null for completed tickets so they can be filtered out
+    if (apiStatus === 'completed') return null;
+    return statusMap[apiStatus] || 'pending';
+  };
+
+  // Format order type for display using i18n (handles both legacy and new formats)
+  const formatOrderType = (type: string): string => {
+    // Map to translation keys (use existing orderType namespace)
+    const keyMap: Record<string, string> = {
+      'dine-in': 'orderType.dineIn',
+      'dine_in': 'orderType.dineIn',  // legacy
+      'pickup': 'orderType.pickup',
+      'takeaway': 'orderType.takeaway',
+      'delivery': 'orderType.delivery',
+      'drive-through': 'orderType.driveThrough',
+    };
+    const key = keyMap[type];
+    return key ? t(key, type) : type;  // fallback to raw type if no translation
+  };
+
+  // Get badge color for order type
+  const getOrderTypeBadgeColor = (type: string): string => {
+    const colors: Record<string, string> = {
+      'dine-in': 'bg-blue-500/20 text-blue-500',
+      'dine_in': 'bg-blue-500/20 text-blue-500',
+      'pickup': 'bg-amber-500/20 text-amber-500',
+      'takeaway': 'bg-green-500/20 text-green-500',
+      'delivery': 'bg-purple-500/20 text-purple-500',
+      'drive-through': 'bg-cyan-500/20 text-cyan-500',
+    };
+    return colors[type] || 'bg-gray-500/20 text-gray-500';
+  };
 
   const fetchOrders = useCallback(async () => {
     if (!staff?.organizationId || !staff?.branchId) return;
     setLoading(true);
+    setError(null);
     try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select(`
-          id, order_number, order_type, status, created_at, notes,
-          table_id,
-          order_items(id, quantity, notes, menu_items(name_en, name_el))
-        `)
-        .eq('organization_id', staff.organizationId)
-        .eq('branch_id', staff.branchId)
-        .in('status', ['pending', 'preparing', 'ready'])
-        .order('created_at', { ascending: true })
-        .limit(50);
+      const electron = (window as any).electronAPI;
+      // Only fetch pending and preparing tickets - completed tickets clear from KDS
+      const statusParam = 'pending,preparing';
+      // Don't send station_id as it expects UUID - filter client-side instead
+      const result = await electron?.fetchFromApi?.(
+        `/api/pos/kds?status=${statusParam}`
+      );
 
-      if (error) throw error;
-
-      const kitchenOrders: KitchenOrder[] = (data || []).map((order: Record<string, unknown>) => ({
-        id: order['id'] as string,
-        order_number: order['order_number'] as string,
-        order_type: (order['order_type'] as KitchenOrder['order_type']) || 'takeaway',
-        status: order['status'] as KitchenOrder['status'],
-        created_at: order['created_at'] as string,
-        notes: order['notes'] as string | undefined,
-        table_number: order['table_id'] ? `Table ${order['table_id']}` : undefined,
-        priority: 'normal' as const,
-        items: ((order['order_items'] as Record<string, unknown>[]) || []).map((item: Record<string, unknown>) => ({
-          id: item['id'] as string,
-          name: ((item['menu_items'] as Record<string, unknown>)?.['name_en'] as string) || 'Unknown',
-          quantity: item['quantity'] as number,
-          station: 'hot' as const,
-          status: 'pending' as const,
-          notes: item['notes'] as string | undefined
-        }))
-      }));
-      setOrders(kitchenOrders);
-    } catch (error) {
-      console.error('Failed to fetch kitchen orders:', error);
-      // Mock data for demo
-      setOrders([
-        { id: '1', order_number: '001', order_type: 'dine_in', status: 'pending', created_at: new Date(Date.now() - 5 * 60000).toISOString(), table_number: 'Table 5', priority: 'normal', items: [{ id: '1', name: 'Crepe Nutella', quantity: 2, station: 'hot', status: 'pending' }, { id: '2', name: 'Crepe Banana', quantity: 1, station: 'hot', status: 'pending' }] },
-        { id: '2', order_number: '002', order_type: 'takeaway', status: 'preparing', created_at: new Date(Date.now() - 12 * 60000).toISOString(), priority: 'rush', items: [{ id: '3', name: 'Waffle Classic', quantity: 1, station: 'hot', status: 'preparing' }] },
-        { id: '3', order_number: '003', order_type: 'delivery', status: 'ready', created_at: new Date(Date.now() - 20 * 60000).toISOString(), priority: 'normal', items: [{ id: '4', name: 'Crepe Savory', quantity: 2, station: 'grill', status: 'ready' }] },
-      ]);
+      // Note: fetchFromApi wraps responses in { success, data, status }
+      if (result?.success && result?.data?.success && result?.data?.tickets) {
+        const kitchenOrders: KitchenOrder[] = result.data.tickets
+          .map((ticket: Record<string, unknown>) => {
+            const status = mapApiStatusToUi(ticket['status'] as string);
+            // Skip completed tickets (should not happen with new filter, but defensive)
+            if (status === null) return null;
+            return {
+              id: ticket['id'] as string,
+              order_number: ticket['order_number'] as string || ticket['ticket_number'] as string,
+              order_type: (ticket['order_type'] as KitchenOrder['order_type']) || 'takeaway',
+              status,
+              created_at: ticket['created_at'] as string,
+              notes: ticket['notes'] as string | undefined,
+              table_number: ticket['table_number'] as string | undefined,
+              priority: (ticket['priority'] as 'normal' | 'rush' | 'vip') || 'normal',
+              items: ((ticket['items'] as Record<string, unknown>[]) || []).map((item: Record<string, unknown>) => ({
+                id: item['id'] as string,
+                name: item['name'] as string || 'Unknown',
+                quantity: item['quantity'] as number || 1,
+                station: (item['station'] as 'grill' | 'cold' | 'hot' | 'dessert' | 'drinks') || 'hot',
+                status: (item['status'] as 'pending' | 'preparing' | 'ready') || 'pending',
+                notes: item['notes'] as string | undefined,
+                modifiers: item['modifiers'] as string[] | undefined
+              }))
+            };
+          })
+          .filter((order: KitchenOrder | null): order is KitchenOrder => order !== null);
+        // Filter by station client-side if needed
+        const filteredOrders = stationFilter === 'all'
+          ? kitchenOrders
+          : kitchenOrders.filter(order => order.items.some(item => item.station === stationFilter));
+        setOrders(filteredOrders);
+      } else {
+        throw new Error(result?.data?.error || result?.error || 'Failed to fetch kitchen orders');
+      }
+    } catch (err) {
+      console.error('Failed to fetch kitchen orders:', err);
+      setError(err instanceof Error ? err.message : t('kitchen.loadError', 'Unable to load orders'));
+      setOrders([]);
     } finally {
       setLoading(false);
     }
-  }, [staff?.organizationId, staff?.branchId]);
+  }, [staff?.organizationId, staff?.branchId, stationFilter, t]);
 
   useEffect(() => {
     fetchOrders();
@@ -142,14 +188,44 @@ const KitchenDisplayPage: React.FC = () => {
   const handleBumpOrder = async (orderId: string) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
-    const newStatus = order.status === 'pending' ? 'preparing' : order.status === 'preparing' ? 'ready' : 'completed';
+    // UI uses: pending -> preparing -> ready (clears from KDS)
+    // API maps: preparing -> in_progress, ready -> completed
+    // When status becomes 'ready', ticket disappears and order.status becomes 'ready'
+    const newStatus = order.status === 'pending' ? 'preparing' : 'ready';
+
+    // Optimistic update: remove from list if marking ready
+    if (newStatus === 'ready') {
+      setOrders(prev => prev.filter(o => o.id !== orderId));
+    } else {
+      setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status: newStatus as 'pending' | 'preparing' } : o));
+    }
+
     try {
-      await supabase.from('orders').update({ status: newStatus }).eq('id', orderId);
-      if (soundEnabled) new Audio('/sounds/bump.mp3').play().catch(() => {});
-      toast.success(t('kitchen.orderBumped', 'Order updated'));
-      fetchOrders();
+      const electron = (window as any).electronAPI;
+      const result = await electron?.fetchFromApi?.(
+        `/api/pos/kds/${orderId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ status: newStatus }),
+        }
+      );
+
+      // Note: fetchFromApi wraps responses in { success, data, status }
+      if (result?.success && result?.data?.success) {
+        if (soundEnabled) new Audio('/sounds/bump.mp3').play().catch(() => {});
+        toast.success(t('kitchen.orderBumped', 'Order updated'));
+        // Only refetch if not already removed (ready case already handled optimistically)
+        if (newStatus !== 'ready') {
+          fetchOrders();
+        }
+      } else {
+        throw new Error(result?.data?.error || result?.error || 'Failed to update order');
+      }
     } catch (error) {
+      console.error('Failed to bump order:', error);
       toast.error(t('kitchen.bumpError', 'Failed to update order'));
+      // Revert optimistic update on error
+      fetchOrders();
     }
   };
 
@@ -167,7 +243,7 @@ const KitchenDisplayPage: React.FC = () => {
   const stats = {
     pending: orders.filter(o => o.status === 'pending').length,
     preparing: orders.filter(o => o.status === 'preparing').length,
-    ready: orders.filter(o => o.status === 'ready').length,
+    total: orders.length,
     avgTime: orders.length > 0 ? Math.round(orders.reduce((sum, o) => sum + (Date.now() - new Date(o.created_at).getTime()) / 60000, 0) / orders.length) : 0
   };
 
@@ -184,8 +260,8 @@ const KitchenDisplayPage: React.FC = () => {
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <span className="text-xl font-bold">#{order.order_number}</span>
-            <span className={`px-2 py-1 rounded-full text-xs font-medium ${order.order_type === 'dine_in' ? 'bg-blue-500/20 text-blue-500' : order.order_type === 'delivery' ? 'bg-purple-500/20 text-purple-500' : 'bg-green-500/20 text-green-500'}`}>
-              {order.order_type === 'dine_in' ? t('kitchen.dineIn', 'Dine In') : order.order_type === 'delivery' ? t('kitchen.delivery', 'Delivery') : t('kitchen.takeaway', 'Takeaway')}
+            <span className={`px-2 py-1 rounded-full text-xs font-medium ${getOrderTypeBadgeColor(order.order_type)}`}>
+              {formatOrderType(order.order_type)}
             </span>
             {order.table_number && <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{order.table_number}</span>}
           </div>
@@ -213,14 +289,12 @@ const KitchenDisplayPage: React.FC = () => {
         )}
         <button
           onClick={() => handleBumpOrder(order.id)}
-          className={`w-full py-3 rounded-xl font-medium transition-all ${order.status === 'pending' ? 'bg-blue-500 hover:bg-blue-600' : order.status === 'preparing' ? 'bg-green-500 hover:bg-green-600' : 'bg-cyan-500 hover:bg-cyan-600'} text-white`}
+          className={`w-full py-3 rounded-xl font-medium transition-all ${order.status === 'pending' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'} text-white`}
         >
           {order.status === 'pending' ? (
             <><Play className="w-4 h-4 inline mr-2" />{t('kitchen.startPreparing', 'Start Preparing')}</>
-          ) : order.status === 'preparing' ? (
-            <><CheckCircle className="w-4 h-4 inline mr-2" />{t('kitchen.markReady', 'Mark Ready')}</>
           ) : (
-            <><CheckCircle className="w-4 h-4 inline mr-2" />{t('kitchen.complete', 'Complete')}</>
+            <><CheckCircle className="w-4 h-4 inline mr-2" />{t('kitchen.markReady', 'Mark Ready')}</>
           )}
         </button>
       </motion.div>
@@ -282,8 +356,8 @@ const KitchenDisplayPage: React.FC = () => {
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-green-500/20"><CheckCircle className="w-5 h-5 text-green-500" /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('kitchen.ready', 'Ready')}</p>
-              <p className="text-2xl font-bold">{stats.ready}</p>
+              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('kitchen.total', 'Total')}</p>
+              <p className="text-2xl font-bold">{stats.total}</p>
             </div>
           </div>
         </div>
@@ -324,6 +398,19 @@ const KitchenDisplayPage: React.FC = () => {
               <div className="h-12 bg-gray-600 rounded mt-4" />
             </div>
           ))}
+        </div>
+      ) : error ? (
+        <div className={`p-12 rounded-xl text-center ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <AlertTriangle className="w-16 h-16 mx-auto mb-4 text-red-500 opacity-75" />
+          <h3 className="text-xl font-semibold mb-2 text-red-500">{t('kitchen.loadError', 'Unable to Load Orders')}</h3>
+          <p className={`mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{error}</p>
+          <button
+            onClick={fetchOrders}
+            className="px-6 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white font-medium transition-colors"
+          >
+            <RefreshCw className="w-4 h-4 inline mr-2" />
+            {t('common.retry', 'Retry')}
+          </button>
         </div>
       ) : orders.length === 0 ? (
         <div className={`p-12 rounded-xl text-center ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>

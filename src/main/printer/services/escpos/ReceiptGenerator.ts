@@ -24,6 +24,19 @@ import mainI18n from '../../../lib/main-i18n';
 // ============================================================================
 
 /**
+ * Organization branding configuration from admin dashboard /profile settings
+ * Validates: Requirements 6.1, 6.3
+ */
+export interface OrganizationBranding {
+  name?: string;
+  address?: string;
+  city?: string;
+  postalCode?: string;
+  phone?: string;
+  logoUrl?: string | null;
+}
+
+/**
  * Configuration options for receipt generation
  */
 export interface ReceiptConfig {
@@ -38,6 +51,8 @@ export interface ReceiptConfig {
   characterSet?: CharacterSetType;
   greekRenderMode?: GreekRenderMode;
   receiptTemplate?: ReceiptTemplate;
+  /** Organization branding from admin dashboard /profile settings (Requirements 6.1, 6.3) */
+  organizationBranding?: OrganizationBranding;
 }
 
 /**
@@ -245,18 +260,41 @@ export class ReceiptGenerator {
 
     const lines: TextLine[] = [];
 
+    // Get organization branding from config (Requirements 6.1, 6.3)
+    // Organization branding takes precedence over legacy storeName/storeAddress/storePhone
+    const branding = this.config.organizationBranding;
+    const storeName = branding?.name || this.config.storeName;
+    const storeAddress = branding?.address || this.config.storeAddress;
+    const storeCity = branding?.city;
+    const storePostalCode = branding?.postalCode;
+    const storePhone = branding?.phone || this.config.storePhone;
+
     // ═══════════════════════════════════════════════════════════════
-    // HEADER - Store name
+    // HEADER - Organization branding (Requirements 6.1, 6.3, 6.5)
     // ═══════════════════════════════════════════════════════════════
     lines.push({ text: '', style: 'normal', align: 'left' });
-    if (this.config.storeName) {
-      lines.push({ text: this.config.storeName, style: 'title', align: 'center' });
+    
+    // Organization name in large text (Requirement 6.5 - text fallback when no logo)
+    if (storeName) {
+      lines.push({ text: storeName, style: 'title', align: 'center' });
     }
-    if (this.config.storeAddress) {
-      lines.push({ text: this.config.storeAddress, style: 'small', align: 'center' });
+    
+    // Organization address (Requirement 6.3)
+    if (storeAddress) {
+      lines.push({ text: storeAddress, style: 'small', align: 'center' });
     }
-    if (this.config.storePhone) {
-      lines.push({ text: this.config.storePhone, style: 'small', align: 'center' });
+    
+    // City and postal code on same line (Requirement 6.3)
+    if (storeCity || storePostalCode) {
+      const cityLine = [storePostalCode, storeCity].filter(Boolean).join(' ');
+      if (cityLine) {
+        lines.push({ text: cityLine, style: 'small', align: 'center' });
+      }
+    }
+    
+    // Phone (Requirement 6.3)
+    if (storePhone) {
+      lines.push({ text: this.t('receipt.header.tel') + ' ' + storePhone, style: 'small', align: 'center' });
     }
     lines.push({ text: '', style: 'small', align: 'left' });
 
@@ -488,16 +526,39 @@ export class ReceiptGenerator {
   private buildModernReceiptLines(data: ReceiptData): TextLine[] {
     const lines: TextLine[] = [];
 
-    // HEADER
+    // Get organization branding from config (Requirements 6.1, 6.3)
+    // Organization branding takes precedence over legacy storeName/storeAddress/storePhone
+    const branding = this.config.organizationBranding;
+    const storeName = branding?.name || this.config.storeName;
+    const storeAddress = branding?.address || this.config.storeAddress;
+    const storeCity = branding?.city;
+    const storePostalCode = branding?.postalCode;
+    const storePhone = branding?.phone || this.config.storePhone;
+
+    // HEADER - Organization branding (Requirements 6.1, 6.3, 6.5)
     lines.push({ text: '', style: 'normal', align: 'left' });
-    if (this.config.storeName) {
-      lines.push({ text: this.config.storeName, style: 'title', align: 'center' });
+    
+    // Organization name in large text (Requirement 6.5 - text fallback when no logo)
+    if (storeName) {
+      lines.push({ text: storeName, style: 'title', align: 'center' });
     }
-    if (this.config.storeAddress) {
-      lines.push({ text: this.config.storeAddress, style: 'small', align: 'center' });
+    
+    // Organization address (Requirement 6.3)
+    if (storeAddress) {
+      lines.push({ text: storeAddress, style: 'small', align: 'center' });
     }
-    if (this.config.storePhone) {
-      lines.push({ text: this.config.storePhone, style: 'small', align: 'center' });
+    
+    // City and postal code on same line (Requirement 6.3)
+    if (storeCity || storePostalCode) {
+      const cityLine = [storePostalCode, storeCity].filter(Boolean).join(' ');
+      if (cityLine) {
+        lines.push({ text: cityLine, style: 'small', align: 'center' });
+      }
+    }
+    
+    // Phone (Requirement 6.3)
+    if (storePhone) {
+      lines.push({ text: this.t('receipt.header.tel') + ' ' + storePhone, style: 'small', align: 'center' });
     }
     lines.push({ text: '', style: 'small', align: 'left' });
 
@@ -668,16 +729,39 @@ export class ReceiptGenerator {
   private buildClassicReceiptLines(data: ReceiptData): TextLine[] {
     const lines: TextLine[] = [];
 
-    // HEADER - Store name
+    // Get organization branding from config (Requirements 6.1, 6.3)
+    // Organization branding takes precedence over legacy storeName/storeAddress/storePhone
+    const branding = this.config.organizationBranding;
+    const storeName = branding?.name || this.config.storeName;
+    const storeAddress = branding?.address || this.config.storeAddress;
+    const storeCity = branding?.city;
+    const storePostalCode = branding?.postalCode;
+    const storePhone = branding?.phone || this.config.storePhone;
+
+    // HEADER - Organization branding (Requirements 6.1, 6.3, 6.5)
     lines.push({ text: '', style: 'normal', align: 'left' });
-    if (this.config.storeName) {
-      lines.push({ text: this.config.storeName, style: 'title', align: 'center' });
+    
+    // Organization name in large text (Requirement 6.5 - text fallback when no logo)
+    if (storeName) {
+      lines.push({ text: storeName, style: 'title', align: 'center' });
     }
-    if (this.config.storeAddress) {
-      lines.push({ text: this.config.storeAddress, style: 'small', align: 'center' });
+    
+    // Organization address (Requirement 6.3)
+    if (storeAddress) {
+      lines.push({ text: storeAddress, style: 'small', align: 'center' });
     }
-    if (this.config.storePhone) {
-      lines.push({ text: this.config.storePhone, style: 'small', align: 'center' });
+    
+    // City and postal code on same line (Requirement 6.3)
+    if (storeCity || storePostalCode) {
+      const cityLine = [storePostalCode, storeCity].filter(Boolean).join(' ');
+      if (cityLine) {
+        lines.push({ text: cityLine, style: 'small', align: 'center' });
+      }
+    }
+    
+    // Phone (Requirement 6.3)
+    if (storePhone) {
+      lines.push({ text: this.t('receipt.header.tel') + ' ' + storePhone, style: 'small', align: 'center' });
     }
     lines.push({ text: '════════════════════════════════════════════', style: 'small', align: 'center' });
     lines.push({ text: '', style: 'small', align: 'left' });
@@ -907,21 +991,57 @@ export class ReceiptGenerator {
   private addReceiptHeader(builder: EscPosBuilder, _data: ReceiptData): void {
     builder.alignCenter();
 
-    if (this.config.storeName) {
+    // Get organization branding from config (Requirements 6.1, 6.3)
+    // Organization branding takes precedence over legacy storeName/storeAddress/storePhone
+    const branding = this.config.organizationBranding;
+    const storeName = branding?.name || this.config.storeName;
+    const storeAddress = branding?.address || this.config.storeAddress;
+    const storeCity = branding?.city;
+    const storePostalCode = branding?.postalCode;
+    const storePhone = branding?.phone || this.config.storePhone;
+    const logoUrl = branding?.logoUrl;
+
+    // Logo printing with text fallback (Requirement 6.5)
+    // IF organization logo is not configured or fails, display organization name in large text
+    let logoPrinted = false;
+
+    if (logoUrl && this.config.showLogo !== false) {
+      // Attempt to print logo
+      // Note: Full logo printing requires bitmap conversion which is handled in bitmap mode
+      // For text mode, we fall back to text header
+      try {
+        console.log('[ReceiptGenerator] Logo URL configured but text mode does not support logo printing, using text fallback');
+      } catch (e) {
+        console.warn('[ReceiptGenerator] Logo printing failed, using text fallback:', e);
+      }
+    }
+
+    // Text fallback: Organization name in large text (Requirement 6.5)
+    if (!logoPrinted && storeName) {
       builder
         .doubleSize()
         .bold(true)
-        .textLine(this.config.storeName)
+        .textLine(storeName)
         .bold(false)
         .normalSize();
     }
 
-    if (this.config.storeAddress) {
-      builder.textLine(this.config.storeAddress);
+    // Organization info (Requirements 6.3)
+    // Display organization address, city, postal code, and phone from profile settings
+    if (storeAddress) {
+      builder.textLine(storeAddress);
     }
 
-    if (this.config.storePhone) {
-      builder.textLine(this.t('receipt.header.tel') + ' ' + this.config.storePhone);
+    // City and postal code on same line (Requirement 6.3)
+    if (storeCity || storePostalCode) {
+      const cityLine = [storePostalCode, storeCity].filter(Boolean).join(' ');
+      if (cityLine) {
+        builder.textLine(cityLine);
+      }
+    }
+
+    if (storePhone) {
+      builder.textLine(this.t('receipt.header.tel') + ' ' + storePhone);
     }
 
     builder.alignLeft().thickLine().emptyLine();

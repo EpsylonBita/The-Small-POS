@@ -6,6 +6,7 @@ import {
 } from '../../../shared/types/delivery-validation';
 import { DeliveryValidationService } from '../../../shared/services/DeliveryValidationService';
 import { useTranslation } from 'react-i18next';
+import { formatCurrency } from '../../utils/format';
 
 // UI State type for delivery validation
 interface DeliveryValidationUIState {
@@ -162,8 +163,11 @@ export function DeliveryValidationComponent({
           <div className="flex items-center gap-2 text-green-600">
             <CheckCircle className="w-4 h-4" />
             <span className="text-sm">
-              {t('delivery.zone.deliveryAvailable')} • {validationResult.zone?.name} •
-              {validationResult.zone?.deliveryFee}€ {t('delivery.fields.deliveryFee').toLowerCase()}
+              {t('delivery.zone.deliveryAvailable')}
+              {' | '}
+              {validationResult.zone?.name}
+              {' | '}
+              {t('delivery.fields.deliveryFee', { defaultValue: 'Delivery fee' })}: {formatCurrency(validationResult.zone?.deliveryFee ?? 0)}
             </span>
           </div>
         );
@@ -239,11 +243,11 @@ export function DeliveryValidationComponent({
               </div>
               <div>
                 <span className="text-gray-600 dark:text-gray-400">{t('delivery.zone.deliveryFeeLabel')}</span>
-                <span className="ml-2 font-medium">{uiState.validationResult.zone.deliveryFee}€</span>
+                <span className="ml-2 font-medium">{formatCurrency(uiState.validationResult.zone.deliveryFee)}</span>
               </div>
               <div>
                 <span className="text-gray-600 dark:text-gray-400">{t('delivery.zone.minimumOrderLabel')}</span>
-                <span className="ml-2 font-medium">{uiState.validationResult.zone.minimumOrderAmount}€</span>
+                <span className="ml-2 font-medium">{formatCurrency(uiState.validationResult.zone.minimumOrderAmount)}</span>
               </div>
               <div>
                 <span className="text-gray-600 dark:text-gray-400">{t('delivery.zone.estTimeLabel')}</span>
@@ -259,8 +263,11 @@ export function DeliveryValidationComponent({
             <div className="space-y-2">
               {!uiState.validationResult.validation.meetsMinimumOrder && (
                 <div className="text-sm text-orange-600 dark:text-orange-400">
-                  ⚠️ Order amount ({orderAmount}€) is below minimum ({uiState.validationResult.zone?.minimumOrderAmount}€).
-                  Add {uiState.validationResult.validation.shortfall}€ more to qualify for delivery.
+                  <span className="inline-flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4" aria-hidden="true" />
+                    Order amount ({formatCurrency(orderAmount)}) is below minimum ({formatCurrency(uiState.validationResult.zone?.minimumOrderAmount || 0)}).
+                  </span>
+                  <div className="mt-1">Add {formatCurrency(uiState.validationResult.validation.shortfall)} more to qualify for delivery.</div>
                 </div>
               )}
             </div>
@@ -278,7 +285,7 @@ export function DeliveryValidationComponent({
               </div>
               {uiState.validationResult.override.customDeliveryFee && (
                 <div className="mt-1 text-sm text-orange-700 dark:text-orange-300">
-                  Custom delivery fee: {uiState.validationResult.override.customDeliveryFee}€
+                  Custom delivery fee: {formatCurrency(uiState.validationResult.override.customDeliveryFee)}
                 </div>
               )}
             </div>
@@ -292,7 +299,7 @@ export function DeliveryValidationComponent({
               </div>
               {uiState.validationResult.alternatives.pickup && (
                 <div className="text-sm text-blue-600 dark:text-blue-400">
-                  ✓ Pickup available at our location
+                  <span className="inline-flex items-center gap-2"><CheckCircle className="w-4 h-4" aria-hidden="true" />Pickup available at our location</span>
                 </div>
               )}
               {uiState.validationResult.alternatives.nearestZone && (
@@ -331,7 +338,7 @@ export function DeliveryValidationComponent({
             </p>
             <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded p-3 mb-4">
               <div className="text-sm text-yellow-800 dark:text-yellow-400">
-                ⚠️ This action will be logged for review.
+                <span className="inline-flex items-center gap-2"><AlertTriangle className="w-4 h-4" aria-hidden="true" />This action will be logged for review.</span>
               </div>
             </div>
             <div className="flex gap-3">

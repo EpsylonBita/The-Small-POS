@@ -1,23 +1,31 @@
 /**
  * POS Implemented Modules Registry
- * 
+ *
  * This file defines which modules have actual implementations in the POS system.
  * Only modules in these registries should appear in navigation, even if other
  * modules are enabled in the admin dashboard.
- * 
+ *
  * @see Requirements 2.1, 2.2, 2.3, 1.4
+ * @see shared/modules/registry.ts for canonical module ID source of truth
  */
 
+import {
+  type CanonicalModuleId,
+  normalizeModuleId,
+} from '../../../../shared/modules';
+
 /**
- * Core modules that are always available regardless of organization settings.
- * These modules are essential for POS operation and should always be displayed.
- * 
- * @see Requirements 2.3, 1.4
+ * Navigation screen names used in the POS UI.
+ * These map to core POS screens:
+ * - 'dashboard' -> POS dashboard screen (standard, not a module)
+ *
+ * Note: Settings is NOT a module - it's handled by a dedicated gear icon button
+ * in NavigationSidebar that opens ConnectionSettingsModal.
  */
-export const CORE_MODULES: Set<string> = new Set([
-  'dashboard',
-  'settings',
-]);
+export const NAVIGATION_CORE_SCREENS = ['dashboard'] as const;
+export type NavigationCoreScreen = (typeof NAVIGATION_CORE_SCREENS)[number];
+
+const CORE_SCREEN_IDS: Set<string> = new Set(NAVIGATION_CORE_SCREENS);
 
 /**
  * Modules that have actual implementations in the POS system.
@@ -25,13 +33,9 @@ export const CORE_MODULES: Set<string> = new Set([
  * modules are enabled in the admin dashboard.
  */
 export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
-  // Core modules (always available)
-  'dashboard',
-  'settings',
-
   // Implemented modules
   'menu',
-  'users',        // Staff management
+  'users',        // Customer management (staff is under Branches/POS settings)
   'reports',
   'analytics',    // Business analytics dashboard
   'orders',       // Order management
@@ -60,7 +64,7 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
 
   // Fast-food vertical
   'drive_through',
-  'quick_pos',
+  'kiosk',
 
   // Retail vertical
   'product_catalog',
@@ -69,6 +73,9 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   'suppliers',      // Supplier management
   'inventory',      // Inventory tracking
   'kitchen_display', // Kitchen Display System (KDS)
+
+  // Integrations
+  'plugin_integrations', // Third-party plugin integrations (Wolt, Efood, etc.)
 ]);
 
 /**
@@ -77,8 +84,6 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
  */
 export const POS_COMING_SOON_MODULES: Set<string> = new Set([
   'branches',
-  'customer_web',
-  'customer_app',
 ]);
 
 /**
@@ -113,25 +118,25 @@ export function shouldShowInNavigation(moduleId: string): boolean {
 }
 
 /**
- * Check if a module is a core module.
- * Core modules are always available regardless of organization settings.
+ * Check if an ID maps to a core POS screen.
+ * Core screens are always available regardless of organization settings.
  * 
  * @param moduleId - The module identifier to check
  * @returns true if the module is a core module
  * @see Requirements 2.3, 1.4
  */
 export function isCoreModule(moduleId: string): boolean {
-  return CORE_MODULES.has(moduleId);
+  return CORE_SCREEN_IDS.has(moduleId);
 }
 
 /**
- * Get the list of core module IDs.
+ * Get the list of core screen IDs.
  * 
- * @returns Array of core module IDs
+ * @returns Array of core screen IDs
  * @see Requirements 2.3, 1.4
  */
 export function getCoreModuleIds(): string[] {
-  return Array.from(CORE_MODULES);
+  return Array.from(CORE_SCREEN_IDS);
 }
 
 /**
@@ -251,7 +256,7 @@ export function getRemovedModuleIds(
 /**
  * Filter out modules that are not in the allowed set.
  * Used to remove deactivated modules from navigation.
- * 
+ *
  * @param modules - Array of modules to filter
  * @param allowedIds - Set of module IDs that are allowed
  * @returns Filtered array containing only allowed modules
@@ -263,3 +268,35 @@ export function filterToAllowedModules<T extends IdentifiableModule>(
 ): T[] {
   return modules.filter(m => allowedIds.has(m.module_id));
 }
+
+// =============================================
+// CANONICAL MODULE ID UTILITIES
+// =============================================
+
+/**
+ * Normalize a module ID from the API to its canonical form.
+ * Use this when receiving module IDs from the admin API to ensure
+ * they match the expected format.
+ *
+ * @param moduleId - The module ID from API response
+ * @returns The canonical module ID, or the original if not recognized
+ * @see shared/modules/registry.ts
+ */
+export function normalizeApiModuleId(moduleId: string): string {
+  return normalizeModuleId(moduleId) ?? moduleId;
+}
+
+/**
+ * Check if a module ID is implemented after normalization.
+ * Handles legacy module ID variations (e.g., drive_through from older aliases).
+ *
+ * @param moduleId - The module ID to check (may be a legacy format)
+ * @returns true if the normalized module ID is implemented
+ */
+export function isModuleImplementedNormalized(moduleId: string): boolean {
+  const normalized = normalizeModuleId(moduleId);
+  return normalized !== null && POS_IMPLEMENTED_MODULES.has(normalized);
+}
+
+// Re-export for convenience
+export { normalizeModuleId, type CanonicalModuleId };

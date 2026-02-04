@@ -75,6 +75,9 @@ export const PRINTER_IPC_CHANNELS = {
   
   // Bluetooth status
   BLUETOOTH_STATUS: 'printer:bluetooth-status',
+
+  // Cash drawer
+  OPEN_CASH_DRAWER: 'printer:open-cash-drawer',
 } as const;
 
 /**
@@ -558,6 +561,33 @@ export function registerPrinterManagerHandlers(db?: Database.Database): void {
           success: false,
           available: false,
           error: error instanceof Error ? error.message : 'Failed to get Bluetooth status',
+        };
+      }
+    }
+  );
+
+  // =========================================================================
+  // Cash Drawer Handler
+  // =========================================================================
+
+  /**
+   * Open cash drawer connected to a receipt printer
+   * @param printerId - Optional printer ID (uses default if not specified)
+   * @param drawerNumber - Optional drawer number (1 or 2, default 1)
+   * @returns Success status
+   */
+  ipcMain.handle(
+    PRINTER_IPC_CHANNELS.OPEN_CASH_DRAWER,
+    async (_event, printerId?: string, drawerNumber?: 1 | 2) => {
+      try {
+        const manager = getPrinterManager();
+        await manager.openCashDrawer(printerId, drawerNumber);
+        return { success: true };
+      } catch (error) {
+        console.error('[printer:open-cash-drawer] Error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to open cash drawer',
         };
       }
     }

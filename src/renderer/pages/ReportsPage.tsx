@@ -16,6 +16,7 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import ZReportModal from '../components/modals/ZReportModal';
 import { toast } from 'react-hot-toast';
+import { formatCurrency, formatDate } from '../utils/format';
 import type {
   SalesTrendData,
   TopItemData,
@@ -35,7 +36,7 @@ import {
 
 
 const ReportsPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [selectedPeriod, setSelectedPeriod] = useState('today');
   const { staff } = useShift();
@@ -49,7 +50,8 @@ const ReportsPage: React.FC = () => {
   const [showZReport, setShowZReport] = useState<boolean>(false);
 
   // Locale-aware currency formatter
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
+  const currency = { format: (value: number) => formatCurrency(value) } as Intl.NumberFormat;
   const isDark = resolvedTheme === 'dark';
 
   useEffect(() => {
@@ -206,7 +208,7 @@ const ReportsPage: React.FC = () => {
             <button
               onClick={() => {
                 const data = salesData.map(d => ({
-                  [t('reports.table.date')]: new Date(d.date).toLocaleDateString(),
+                  [t('reports.table.date')]: formatDate(d.date),
                   [t('reports.table.orders')]: d.orders,
                   [t('reports.table.revenue')]: d.revenue,
                   [t('reports.table.avgOrder')]: d.avgOrderValue
@@ -245,7 +247,7 @@ const ReportsPage: React.FC = () => {
           <MetricCard
             icon={Euro}
             title={t('reports.sales.totalSales')}
-            value={currency.format(todayStats?.totalSales ?? 0)}
+            value={formatMoney(todayStats?.totalSales ?? 0)}
             subtitle={t('reports.trends.revenueChange')}
             color="bg-gradient-to-br from-green-500 to-green-600"
             delay={0.15}
@@ -253,7 +255,7 @@ const ReportsPage: React.FC = () => {
           <MetricCard
             icon={TrendingUp}
             title={t('reports.orders.avgOrderValue')}
-            value={currency.format(todayStats?.avgOrderValue ?? 0)}
+            value={formatMoney(todayStats?.avgOrderValue ?? 0)}
             subtitle={t('reports.trends.avgOrderChange')}
             color="bg-gradient-to-br from-purple-500 to-purple-600"
             delay={0.2}
@@ -330,7 +332,7 @@ const ReportsPage: React.FC = () => {
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {currency.format(paymentBreakdown?.cash.total ?? 0)}
+                {formatMoney(paymentBreakdown?.cash.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                 {paymentBreakdown?.cash.count ?? 0} {t('reports.payments.transactions')}
@@ -354,7 +356,7 @@ const ReportsPage: React.FC = () => {
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {currency.format(paymentBreakdown?.card.total ?? 0)}
+                {formatMoney(paymentBreakdown?.card.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                 {paymentBreakdown?.card.count ?? 0} {t('reports.payments.transactions')}
@@ -378,7 +380,7 @@ const ReportsPage: React.FC = () => {
                 </h3>
               </div>
               <p className={`text-3xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {currency.format(orderTypeBreakdown?.delivery.total ?? 0)}
+                {formatMoney(orderTypeBreakdown?.delivery.total ?? 0)}
               </p>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
                 {orderTypeBreakdown?.delivery.count ?? 0} {t('reports.payments.orders')}

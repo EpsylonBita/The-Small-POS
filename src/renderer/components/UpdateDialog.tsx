@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
 import type { UpdateInfo, ProgressInfo } from 'electron-updater';
 import { useI18n } from '../contexts/i18n-context';
+import { formatDate } from '../utils/format';
 
 /**
  * UpdateDialog Component
@@ -188,7 +189,7 @@ const AvailableState: React.FC<AvailableStateProps> = ({
           )}
           {updateInfo?.releaseDate && (
             <p className="text-sm text-gray-300">
-              {t('updates.available.released', { date: new Date(updateInfo.releaseDate).toLocaleDateString() })}
+              {t('updates.available.released', { date: formatDate(updateInfo.releaseDate) })}
             </p>
           )}
         </div>

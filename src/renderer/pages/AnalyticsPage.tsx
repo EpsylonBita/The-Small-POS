@@ -17,6 +17,7 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
+import { formatCurrency } from '../utils/format';
 
 interface AnalyticsData {
   totalRevenue: number;
@@ -33,7 +34,7 @@ interface AnalyticsData {
 }
 
 const AnalyticsPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
@@ -41,7 +42,7 @@ const AnalyticsPage: React.FC = () => {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchAnalytics = useCallback(async () => {
     if (!staff?.branchId) return;
@@ -53,33 +54,10 @@ const AnalyticsPage: React.FC = () => {
         `pos/analytics?branch_id=${staff.branchId}&time_range=${timeRange}`
       );
 
-      if (result.success && result.data?.analytics) {
-        setAnalytics(result.data.analytics);
-      } else {
-        console.warn('Analytics API returned no data, using fallback');
-        // Fallback mock data for demo
-        setAnalytics({
-          totalRevenue: 2450.80,
-          totalOrders: 87,
-          averageOrderValue: 28.17,
-          totalCustomers: 62,
-          revenueChange: 12.5,
-          ordersChange: 8.3,
-          peakHour: '13:00',
-          topCategory: 'Main Dishes',
-          dailyRevenue: [],
-          categoryBreakdown: [
-            { category: 'Main Dishes', revenue: 1200, percentage: 49 },
-            { category: 'Drinks', revenue: 650, percentage: 27 },
-            { category: 'Desserts', revenue: 400, percentage: 16 },
-            { category: 'Sides', revenue: 200, percentage: 8 },
-          ],
-          hourlyDistribution: Array.from({ length: 12 }, (_, i) => ({
-            hour: i + 9,
-            orders: Math.floor(Math.random() * 15) + 2
-          })),
-        });
+      if (!result.success || !result.data?.analytics) {
+        throw new Error(result.error || 'Analytics API returned no data');
       }
+      setAnalytics(result.data.analytics);
     } catch (error) {
       console.error('Failed to fetch analytics:', error);
       toast.error(t('analytics.errors.loadFailed', 'Failed to load analytics'));
@@ -171,7 +149,7 @@ const AnalyticsPage: React.FC = () => {
         <StatCard
           icon={Euro}
           label={t('analytics.totalRevenue', 'Total Revenue')}
-          value={currency.format(analytics?.totalRevenue || 0)}
+          value={formatMoney(analytics?.totalRevenue || 0)}
           change={analytics?.revenueChange}
           color="bg-green-500"
         />
@@ -185,7 +163,7 @@ const AnalyticsPage: React.FC = () => {
         <StatCard
           icon={Activity}
           label={t('analytics.avgOrder', 'Avg Order Value')}
-          value={currency.format(analytics?.averageOrderValue || 0)}
+          value={formatMoney(analytics?.averageOrderValue || 0)}
           color="bg-purple-500"
         />
         <StatCard
@@ -213,7 +191,7 @@ const AnalyticsPage: React.FC = () => {
               <div key={idx}>
                 <div className="flex justify-between text-sm mb-1">
                   <span>{cat.category}</span>
-                  <span className="font-medium">{currency.format(cat.revenue)} ({cat.percentage}%)</span>
+                  <span className="font-medium">{formatMoney(cat.revenue)} ({cat.percentage}%)</span>
                 </div>
                 <div className={`h-2 rounded-full ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
                   <div

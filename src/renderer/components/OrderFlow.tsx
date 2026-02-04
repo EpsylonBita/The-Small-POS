@@ -1,5 +1,5 @@
 import { memo, useState, useCallback, useEffect } from 'react';
-import { POSGlassModal } from './ui/pos-glass-components';
+import { LiquidGlassModal } from './ui/pos-glass-components';
 import { MenuModal } from './modals/MenuModal';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
@@ -22,6 +22,7 @@ import type { DeliveryBoundaryValidationResponse } from '../../shared/types/deli
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
+import { AlertTriangle } from 'lucide-react';
 
 
 interface OrderFlowProps {
@@ -273,14 +274,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       setShowZoneAlert(true);
       toast(t('orderFlow.zoneValidationRequired'), {
         duration: 3000,
-        icon: '⚠️',
+        icon: <AlertTriangle className="w-4 h-4 text-white" />,
         style: { background: '#f59e0b', color: 'white' }
       });
     } else {
       // No validation result (shouldn't happen), proceed with warning
       toast(t('orderFlow.noValidationResult'), {
         duration: 3000,
-        icon: '⚠️',
+        icon: <AlertTriangle className="w-4 h-4 text-white" />,
         style: { background: '#f59e0b', color: 'white' }
       });
       setIsMenuModalOpen(true);
@@ -512,7 +513,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       if (!isShiftActive) {
         toast(t('orderFlow.noActiveShift'), {
           duration: 3000,
-          icon: '⚠️',
+          icon: <AlertTriangle className="w-4 h-4 text-white" />,
           style: { background: '#f59e0b', color: 'white' }
         });
       }
@@ -670,7 +671,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       )}
 
       {/* Order Type Selection Modal */}
-      <POSGlassModal
+      <LiquidGlassModal
         isOpen={isOrderTypeModalOpen}
         onClose={() => setIsOrderTypeModalOpen(false)}
         title={t('orderFlow.selectOrderType')}
@@ -763,7 +764,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             </div>
           )}
         </div>
-      </POSGlassModal>
+      </LiquidGlassModal>
 
       {/* Customer Search Modal */}
       <CustomerSearchModal
@@ -794,7 +795,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       {/* Zone Validation Alert - Displayed when delivery zone validation requires attention */}
       {showZoneAlert && deliveryZoneInfo && selectedAddress && (
-        <POSGlassModal
+        <LiquidGlassModal
           isOpen={showZoneAlert}
           onClose={() => setShowZoneAlert(false)}
           title={t('orderFlow.deliveryZoneValidation')}
@@ -814,7 +815,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             onChangeAddress={handleChangeAddress}
             onSwitchToPickup={handleSwitchToPickup}
           />
-        </POSGlassModal>
+        </LiquidGlassModal>
       )}
 
       {/* Table Selector Modal (for table orders) */}

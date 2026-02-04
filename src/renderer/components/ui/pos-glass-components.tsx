@@ -450,12 +450,32 @@ interface LiquidGlassModalProps {
   children: React.ReactNode;
 
   /**
+   * Custom header content. When provided, replaces the default title header.
+   */
+  header?: React.ReactNode;
+
+  /**
+   * Optional footer content rendered below the scrollable body.
+   */
+  footer?: React.ReactNode;
+
+  /**
    * Additional CSS classes applied to the modal shell
    * Useful for custom sizing, positioning, or styling
    * @optional
    * @example className="max-h-[90vh] overflow-y-auto"
    */
   className?: string;
+
+  /**
+   * Additional CSS classes applied to the modal content wrapper
+   */
+  contentClassName?: string;
+
+  /**
+   * Accessible label when no title is provided
+   */
+  ariaLabel?: string;
 
   /**
    * Modal size variant
@@ -510,10 +530,14 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   onClose,
   title,
   children,
+  header,
+  footer,
   className = '',
+  contentClassName = '',
   size = 'md',
   closeOnBackdrop = true,
-  closeOnEscape = true
+  closeOnEscape = true,
+  ariaLabel
 }) => {
   const { t } = useI18n()
   const containerRef = React.useRef<HTMLDivElement>(null)
@@ -676,6 +700,8 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
     full: 'max-w-[96vw] max-h-[92vh]' // Slightly larger
   }
 
+  const showDefaultHeader = !header && !!title;
+
   return (
     <>
       {/* Backdrop */}
@@ -693,13 +719,14 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         className={cn('liquid-glass-modal-shell flex flex-col', sizeClasses[size], isClosing && 'leaving', className)}
         role="dialog"
         aria-modal="true"
-        aria-labelledby={title ? 'liquid-glass-modal-title' : undefined}
+        aria-labelledby={showDefaultHeader ? 'liquid-glass-modal-title' : undefined}
+        aria-label={!showDefaultHeader ? (ariaLabel || title) : undefined}
         tabIndex={-1}
         onAnimationEnd={handleAnimationEnd}
       >
         {/* Title section - fixed at top */}
         {/* Title section - fixed at top */}
-        {title && (
+        {showDefaultHeader && (
           <div className="liquid-glass-modal-header">
             <h2
               id="liquid-glass-modal-title"
@@ -718,12 +745,19 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
             </button>
           </div>
         )}
+        {header && header}
 
         {/* Content wrapper with scroll - prevent horizontal overflow from button hover effects */}
-        <div className={cn("liquid-glass-modal-content scrollbar-hide overflow-x-hidden", !title && "pt-8")}>
+        <div className={cn("liquid-glass-modal-content scrollbar-hide overflow-x-hidden", !title && !header && "pt-8", contentClassName)}>
           {/* Children content */}
           {children}
         </div>
+
+        {footer && (
+          <div className="flex-shrink-0">
+            {footer}
+          </div>
+        )}
       </div>
     </>
   )

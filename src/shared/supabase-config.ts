@@ -30,11 +30,14 @@ export function getSupabaseConfig(platform: string = 'desktop') {
                      process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
 
   const envServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  const isElectron = typeof process !== 'undefined' && !!(process as any).versions?.electron;
+  const allowServiceRoleDesktop = process.env['ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP'] === 'true';
+  const exposeServiceRoleKey = !!envServiceKey && (!isElectron || allowServiceRoleDesktop);
 
   return {
     url: envUrl || '',
     anonKey: envAnonKey || '',
-    serviceRoleKey: envServiceKey,
+    serviceRoleKey: exposeServiceRoleKey ? envServiceKey : undefined,
     options: DESKTOP_OPTIONS,
   };
 }

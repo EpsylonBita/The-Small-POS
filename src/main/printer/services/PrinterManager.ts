@@ -891,6 +891,16 @@ export class PrinterManager
     let language: 'en' | 'el' = 'en';
     let currency = '€';
     
+    // Organization branding from admin dashboard /profile settings (Requirements 6.1, 6.3)
+    let organizationBranding: {
+      name?: string;
+      address?: string;
+      city?: string;
+      postalCode?: string;
+      phone?: string;
+      logoUrl?: string | null;
+    } | undefined;
+    
     try {
       // Language is stored in 'terminal' category
       const langRow = this.db.prepare(
@@ -921,8 +931,40 @@ export class PrinterManager
           currency = currRow.setting_value || '€';
         }
       }
+      
+      // Get organization branding from 'restaurant' category (Requirements 6.1, 6.3)
+      // These settings are synced from admin dashboard /profile branding settings
+      const orgSettings: Record<string, string | null> = {};
+      const orgKeys = ['organization_name', 'organization_address', 'organization_city', 
+                       'organization_postal_code', 'organization_phone', 'organization_logo_url'];
+      
+      for (const key of orgKeys) {
+        const row = this.db.prepare(
+          `SELECT setting_value FROM local_settings WHERE setting_category = 'restaurant' AND setting_key = ?`
+        ).get(key) as { setting_value: string } | undefined;
+        if (row?.setting_value) {
+          try {
+            orgSettings[key] = JSON.parse(row.setting_value);
+          } catch {
+            orgSettings[key] = row.setting_value;
+          }
+        }
+      }
+      
+      // Build organization branding object if any settings are present
+      if (Object.values(orgSettings).some(v => v)) {
+        organizationBranding = {
+          name: orgSettings['organization_name'] || undefined,
+          address: orgSettings['organization_address'] || undefined,
+          city: orgSettings['organization_city'] || undefined,
+          postalCode: orgSettings['organization_postal_code'] || undefined,
+          phone: orgSettings['organization_phone'] || undefined,
+          logoUrl: orgSettings['organization_logo_url'] || null,
+        };
+        console.log('[PrinterManager] Organization branding loaded:', organizationBranding);
+      }
     } catch (e) {
-      console.warn('[PrinterManager] Could not read language/currency settings:', e);
+      console.warn('[PrinterManager] Could not read language/currency/organization settings:', e);
     }
 
     console.log('[PrinterManager] generatePrintData - language:', language, 'currency:', currency);
@@ -947,7 +989,8 @@ export class PrinterManager
       currency: currency,
       characterSet: characterSet as any,
       greekRenderMode: greekRenderMode,
-      receiptTemplate: printer.receiptTemplate || 'classic'
+      receiptTemplate: printer.receiptTemplate || 'classic',
+      organizationBranding: organizationBranding,
     });
 
     switch (job.type) {
@@ -1400,5 +1443,156 @@ export class PrinterManager
     }
 
     return { printersImported };
+  }
+
+  // ==========================================================================
+  // Cash Drawer Integration
+  // ==========================================================================
+
+  /**
+   * ESC/POS command to open cash drawer
+   * ESC p m t1 t2 - Generate pulse on pin m for t1*2ms, wait t2*2ms
+   * Pin 2 (drawer 1): m=0x00, Pin 5 (drawer 2): m=0x01
+   */
+  private static readonly CASH_DRAWER_COMMANDS = {
+    // Standard pulse: 50ms on, 500ms off
+    OPEN_DRAWER_1: Buffer.from([0x1b, 0x70, 0x00, 0x19, 0xfa]),
+    OPEN_DRAWER_2: Buffer.from([0x1b, 0x70, 0x01, 0x19, 0xfa]),
+    // Short pulse: 30ms on, 30ms off (for some drawers)
+    OPEN_DRAWER_1_SHORT: Buffer.from([0x1b, 0x70, 0x00, 0x0f, 0x0f]),
+    // DLE DC4 alternative (for some Epson printers)
+    OPEN_DRAWER_DLE: Buffer.from([0x10, 0x14, 0x01, 0x00, 0x01]),
+  };
+
+  /**
+   * Open cash drawer connected to a receipt printer
+   *
+   * Cash drawers are typically connected to receipt printers via RJ11/RJ12 port.
+   * This sends an ESC/POS command to the printer which triggers the drawer.
+   *
+   * @param printerId - The receipt printer ID (cash drawer is connected to this printer)
+   * @param drawerNumber - Drawer number (1 or 2 for dual-drawer setups), default 1
+   * @returns Result of the cash drawer open operation
+   */
+  async openCashDrawer(
+    printerId?: string,
+    drawerNumber: 1 | 2 = 1
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      // Get printer to use
+      let targetPrinterId = printerId;
+
+      if (!targetPrinterId) {
+        // Find a receipt printer to use
+        const receiptPrinters = this.configStore.getByRole(PrinterRole.RECEIPT);
+        const defaultPrinter = receiptPrinters.find(p => p.isDefault && p.enabled);
+        const anyReceiptPrinter = receiptPrinters.find(p => p.enabled);
+
+        targetPrinterId = defaultPrinter?.id ?? anyReceiptPrinter?.id;
+      }
+
+      if (!targetPrinterId) {
+        return {
+          success: false,
+          error: 'No receipt printer available for cash drawer',
+        };
+      }
+
+      const config = this.configStore.load(targetPrinterId);
+      if (!config) {
+        return {
+          success: false,
+          error: 'Printer not found',
+        };
+      }
+
+      // Get or create transport
+      let transport = this.transports.get(targetPrinterId);
+      if (!transport || !transport.isConnected()) {
+        try {
+          await this.connectToPrinter(config);
+          transport = this.transports.get(targetPrinterId);
+        } catch (error) {
+          return {
+            success: false,
+            error: `Failed to connect to printer: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
+
+      if (!transport || !transport.isConnected()) {
+        return {
+          success: false,
+          error: 'Could not connect to printer',
+        };
+      }
+
+      // Select the appropriate command
+      const command = drawerNumber === 2
+        ? PrinterManager.CASH_DRAWER_COMMANDS.OPEN_DRAWER_2
+        : PrinterManager.CASH_DRAWER_COMMANDS.OPEN_DRAWER_1;
+
+      // Send the command
+      await transport.send(command);
+
+      console.log(`[PrinterManager] Cash drawer ${drawerNumber} opened via printer ${config.name}`);
+
+      return { success: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[PrinterManager] Failed to open cash drawer:', errorMessage);
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }
+
+  /**
+   * Open cash drawer using DLE DC4 command (alternative for Epson printers)
+   *
+   * @param printerId - The receipt printer ID
+   */
+  async openCashDrawerDLE(printerId?: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      let targetPrinterId = printerId;
+
+      if (!targetPrinterId) {
+        const receiptPrinters = this.configStore.getByRole(PrinterRole.RECEIPT);
+        const defaultPrinter = receiptPrinters.find(p => p.isDefault && p.enabled);
+        targetPrinterId = defaultPrinter?.id ?? receiptPrinters.find(p => p.enabled)?.id;
+      }
+
+      if (!targetPrinterId) {
+        return {
+          success: false,
+          error: 'No receipt printer available for cash drawer',
+        };
+      }
+
+      const config = this.configStore.load(targetPrinterId);
+      if (!config) {
+        return { success: false, error: 'Printer not found' };
+      }
+
+      let transport = this.transports.get(targetPrinterId);
+      if (!transport || !transport.isConnected()) {
+        await this.connectToPrinter(config);
+        transport = this.transports.get(targetPrinterId);
+      }
+
+      if (!transport || !transport.isConnected()) {
+        return { success: false, error: 'Could not connect to printer' };
+      }
+
+      await transport.send(PrinterManager.CASH_DRAWER_COMMANDS.OPEN_DRAWER_DLE);
+
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 }

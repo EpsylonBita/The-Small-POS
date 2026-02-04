@@ -2,12 +2,10 @@
  * RoomsService - POS Rooms Service
  *
  * Provides room management functionality for the POS system (Hotel Vertical).
- * Uses direct Supabase access (same pattern as useTables).
+ * Uses the Admin Dashboard API via IPC for proper authentication and audit logging.
  *
- * Task 17.1: Create POS rooms interface
+ * @since 2.1.0 - Migrated from direct Supabase to API via IPC
  */
-
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
 
 // Types
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance' | 'reserved';
@@ -49,24 +47,44 @@ export interface RoomStats {
   occupancyRate: number;
 }
 
-function transformFromAPI(data: Record<string, unknown>): Room {
+// API response type (snake_case from server)
+interface RoomFromAPI {
+  id: string;
+  organization_id: string;
+  branch_id: string;
+  room_number: string;
+  room_type: RoomType;
+  floor: number;
+  status: RoomStatus;
+  capacity: number;
+  rate_per_night: number | null;
+  amenities: string[];
+  notes: string | null;
+  current_guest_id?: string | null;
+  current_guest_name?: string | null;
+  checkout_date?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function transformFromAPI(data: RoomFromAPI): Room {
   return {
-    id: data.id as string,
-    organizationId: data.organization_id as string,
-    branchId: data.branch_id as string,
-    roomNumber: data.room_number as string,
-    roomType: (data.room_type as RoomType) || 'standard',
-    floor: (data.floor as number) || 1,
-    status: (data.status as RoomStatus) || 'available',
-    capacity: (data.capacity as number) || 2,
-    ratePerNight: data.rate_per_night as number | null,
-    amenities: (data.amenities as string[]) || [],
-    notes: data.notes as string | null,
-    currentGuestId: data.current_guest_id as string | null,
-    currentGuestName: data.current_guest_name as string | null,
-    checkoutDate: data.checkout_date as string | null,
-    createdAt: data.created_at as string,
-    updatedAt: data.updated_at as string,
+    id: data.id,
+    organizationId: data.organization_id,
+    branchId: data.branch_id,
+    roomNumber: data.room_number,
+    roomType: data.room_type || 'standard',
+    floor: data.floor || 1,
+    status: data.status || 'available',
+    capacity: data.capacity || 2,
+    ratePerNight: data.rate_per_night,
+    amenities: data.amenities || [],
+    notes: data.notes,
+    currentGuestId: data.current_guest_id || null,
+    currentGuestName: data.current_guest_name || null,
+    checkoutDate: data.checkout_date || null,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
   };
 }
 
@@ -74,7 +92,7 @@ function transformFromAPI(data: Record<string, unknown>): Room {
 class RoomsService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: ReturnType<typeof subscribeToTable> | null = null;
+  private realtimeUnsubscribe: (() => void) | null = null;
 
   setContext(branchId: string, organizationId: string): void {
     this.branchId = branchId;
@@ -88,41 +106,34 @@ class RoomsService {
         return [];
       }
 
-      console.log('[RoomsService] Fetching rooms from Supabase:', {
+      console.log('[RoomsService] Fetching rooms via API:', {
         branchId: this.branchId,
         organizationId: this.organizationId,
       });
 
-      let query = (supabase as any)
-        .from('rooms')
-        .select('*')
-        .eq('branch_id', this.branchId)
-        .order('floor', { ascending: true })
-        .order('room_number', { ascending: true });
-
-      if (this.organizationId) {
-        query = query.eq('organization_id', this.organizationId);
-      }
-
+      // Build filter options for API
+      const options: Record<string, string | number | undefined> = {};
       if (filters?.statusFilter && filters.statusFilter !== 'all') {
-        query = query.eq('status', filters.statusFilter);
+        options.status = filters.statusFilter;
       }
       if (filters?.floorFilter && filters.floorFilter !== 'all') {
-        query = query.eq('floor', filters.floorFilter);
+        options.floor = filters.floorFilter;
       }
       if (filters?.roomTypeFilter && filters.roomTypeFilter !== 'all') {
-        query = query.eq('room_type', filters.roomTypeFilter);
+        options.room_type = filters.roomTypeFilter;
       }
 
-      const { data, error } = await query;
+      // Use IPC to fetch rooms via API (proper auth & audit logging)
+      const result = await (window as any).api.invoke('sync:fetch-rooms', options);
 
-      if (error) {
-        console.error('[RoomsService] Supabase error:', error);
-        throw error;
+      if (!result.success) {
+        console.error('[RoomsService] API error:', result.error);
+        throw new Error(result.error || 'Failed to fetch rooms');
       }
 
-      let rooms = (data || []).map((item: Record<string, unknown>) => transformFromAPI(item));
+      let rooms = (result.rooms || []).map((item: RoomFromAPI) => transformFromAPI(item));
 
+      // Apply local search filter (not supported by API)
       if (filters?.searchTerm) {
         const term = filters.searchTerm.toLowerCase();
         rooms = rooms.filter(
@@ -142,24 +153,17 @@ class RoomsService {
 
   async updateStatus(roomId: string, newStatus: RoomStatus): Promise<Room> {
     try {
-      console.log('[RoomsService] Updating room status:', roomId, newStatus);
+      console.log('[RoomsService] Updating room status via API:', roomId, newStatus);
 
-      const { data, error } = await (supabase as any)
-        .from('rooms')
-        .update({
-          status: newStatus,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', roomId)
-        .select()
-        .single();
+      // Use IPC to update room via API (proper auth & audit logging)
+      const result = await (window as any).api.invoke('sync:update-room-status', roomId, newStatus);
 
-      if (error) {
-        console.error('[RoomsService] Supabase error:', error);
-        throw error;
+      if (!result.success) {
+        console.error('[RoomsService] API error:', result.error);
+        throw new Error(result.error || 'Failed to update room status');
       }
 
-      return transformFromAPI(data as Record<string, unknown>);
+      return transformFromAPI(result.room);
     } catch (error) {
       console.error('[RoomsService] Failed to update room status:', error);
       throw error;
@@ -197,7 +201,10 @@ class RoomsService {
   }
 
   subscribeToUpdates(callback: (room: Room) => void): void {
-    if (this.realtimeChannel) {
+    // Real-time updates are now handled via Supabase Realtime subscriptions
+    // set up elsewhere (e.g., in the RoomsPage component or a dedicated sync service)
+    // This method is kept for API compatibility but uses event-based updates
+    if (this.realtimeUnsubscribe) {
       this.unsubscribeFromUpdates();
     }
 
@@ -206,25 +213,27 @@ class RoomsService {
       return;
     }
 
-    this.realtimeChannel = subscribeToTable(
-      'rooms',
-      (payload: { new?: Record<string, unknown> }) => {
-        if (payload.new) {
-          console.log('[RoomsService] Realtime update received');
-          callback(transformFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
+    // Listen for room updates from the main process (if Supabase realtime is set up there)
+    const handler = (_event: any, payload: { room: RoomFromAPI }) => {
+      if (payload.room) {
+        console.log('[RoomsService] Received room update via IPC');
+        callback(transformFromAPI(payload.room));
+      }
+    };
 
-    console.log('[RoomsService] Subscribed to realtime updates');
+    (window as any).api.on('rooms:updated', handler);
+    this.realtimeUnsubscribe = () => {
+      (window as any).api.off('rooms:updated', handler);
+    };
+
+    console.log('[RoomsService] Subscribed to room updates via IPC');
   }
 
   unsubscribeFromUpdates(): void {
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-      console.log('[RoomsService] Unsubscribed from realtime updates');
+    if (this.realtimeUnsubscribe) {
+      this.realtimeUnsubscribe();
+      this.realtimeUnsubscribe = null;
+      console.log('[RoomsService] Unsubscribed from room updates');
     }
   }
 }

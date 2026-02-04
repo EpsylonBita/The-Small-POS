@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { History, X, Package, Truck, ShoppingBag, Store, ChevronRight, RefreshCw } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { formatCurrency, formatDateTime } from '../../utils/format';
 
 interface CustomerOrder {
     id: string;
@@ -73,23 +74,13 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
 
     if (!isOpen) return null;
 
-    const formatCurrency = (amount: number) => {
-        return new Intl.NumberFormat('el-GR', {
-            style: 'currency',
-            currency: 'EUR'
-        }).format(amount || 0);
-    };
-
-    const formatDate = (dateStr: string) => {
-        const date = new Date(dateStr);
-        return date.toLocaleDateString('el-GR', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-    };
+    const formatDate = (dateStr: string) => formatDateTime(dateStr, {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
 
     const getStatusColor = (status: string) => {
         switch (status?.toLowerCase()) {

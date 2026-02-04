@@ -122,6 +122,17 @@ export interface FetchOrdersOptions {
   offset?: number;
 }
 
+// Room filter options (Hotel Vertical)
+export interface FetchRoomsOptions {
+  status?: RoomStatus;
+  floor?: number;
+  room_type?: RoomType;
+}
+
+// Room types (Hotel Vertical) - forward declarations for use in FetchRoomsOptions
+export type RoomStatus = 'available' | 'occupied' | 'maintenance' | 'cleaning' | 'reserved';
+export type RoomType = 'standard' | 'deluxe' | 'suite' | 'penthouse' | 'accessible';
+
 export interface OrderFromAdmin {
   id: string;
   order_number: string;
@@ -193,11 +204,11 @@ async function resolveTerminalSettings(db: DatabaseManager): Promise<{
     // ignore, treat as missing API key
   }
 
+  // SECURITY: Do not log API key content - only log presence and length
   console.log(`[POS API Sync] resolveTerminalSettings:`, {
     terminalId,
     hasApiKey: !!apiKey,
     apiKeyLength: apiKey?.length || 0,
-    apiKeyPreview: apiKey ? `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}` : '(not set)'
   });
 
   return { terminalId, apiKey };
@@ -286,7 +297,7 @@ async function parseApiResponse<T>(
 /**
  * Build query string from options object
  */
-function buildQueryString(options: FetchTablesOptions | FetchReservationsOptions | FetchSuppliersOptions | FetchAnalyticsOptions | Record<string, unknown>): string {
+function buildQueryString(options: FetchTablesOptions | FetchReservationsOptions | FetchSuppliersOptions | FetchAnalyticsOptions | FetchOrdersOptions | FetchRoomsOptions | FetchDriveThruOptions | Record<string, unknown>): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(options)) {
     if (value !== undefined && value !== null && value !== '') {
@@ -418,16 +429,13 @@ export async function fetchOrdersFromAdmin(
   const queryString = buildQueryString(options || {});
   const url = `${base}/api/pos/orders${queryString}`;
 
+  // SECURITY: Do not log API key content - only log presence and length
   console.log(`[POS API Sync] fetchOrdersFromAdmin: Fetching orders`, {
     terminalId,
     url,
     options,
     hasApiKey: !!apiKey,
     apiKeyLength: apiKey?.length || 0,
-    headers: {
-      'x-terminal-id': headers['x-terminal-id'],
-      'x-pos-api-key': apiKey ? `${apiKey.substring(0, 8)}...` : '(missing)'
-    }
   });
 
   const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchOrdersFromAdmin');
@@ -441,5 +449,390 @@ export async function fetchOrdersFromAdmin(
     orders: data.orders || [],
     total: data.total || data.orders?.length || 0
   };
+}
+
+export interface RoomFromAdmin {
+  id: string;
+  room_number: string;
+  floor: number;
+  room_type: RoomType;
+  status: RoomStatus;
+  branch_id: string;
+  organization_id: string;
+  capacity?: number;
+  rate_per_night?: number;
+  amenities?: string[];
+  notes?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Fetch rooms from admin dashboard
+ * Uses the POS rooms API endpoint instead of direct Supabase access
+ */
+export async function fetchRoomsFromAdmin(
+  db: DatabaseManager,
+  options?: FetchRoomsOptions
+): Promise<RoomFromAdmin[]> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const queryString = buildQueryString(options || {});
+  const url = `${base}/api/pos/rooms${queryString}`;
+
+  console.log(`[POS API Sync] fetchRoomsFromAdmin: Fetching rooms`, { terminalId, url });
+
+  const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchRoomsFromAdmin');
+  const data = await parseApiResponse<{ success: boolean; rooms: RoomFromAdmin[] }>(
+    response,
+    'fetchRoomsFromAdmin'
+  );
+
+  console.log(`[POS API Sync] fetchRoomsFromAdmin: Success`, { count: data.rooms?.length || 0 });
+  return data.rooms || [];
+}
+
+/**
+ * Update room status via admin dashboard API
+ * Uses the POS rooms API endpoint instead of direct Supabase access
+ */
+export async function updateRoomStatusFromAdmin(
+  db: DatabaseManager,
+  roomId: string,
+  status: RoomStatus
+): Promise<RoomFromAdmin> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const url = `${base}/api/pos/rooms/${roomId}`;
+
+  console.log(`[POS API Sync] updateRoomStatusFromAdmin: Updating room`, { terminalId, roomId, status });
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ status }),
+    },
+    'updateRoomStatusFromAdmin'
+  );
+  const data = await parseApiResponse<{ success: boolean; room: RoomFromAdmin }>(
+    response,
+    'updateRoomStatusFromAdmin'
+  );
+
+  console.log(`[POS API Sync] updateRoomStatusFromAdmin: Success`, { roomId, status });
+  return data.room;
+}
+
+// ============================================================================
+// ORDER SYNC API
+// ============================================================================
+
+export interface OrderSyncOperation {
+  operation: 'insert' | 'update';
+  client_order_id: string;
+  data: Record<string, unknown>;
+  items?: OrderSyncItem[];
+}
+
+export interface OrderSyncItem {
+  id?: string;
+  menu_item_id: string;
+  menu_item_name?: string | null;
+  quantity: number;
+  unit_price: number;
+  total_price?: number;
+  customizations?: Record<string, unknown> | null;
+  notes?: string | null;
+}
+
+export interface OrderSyncResult {
+  client_order_id: string;
+  success: boolean;
+  supabase_id?: string;
+  order_number?: string;
+  error?: string;
+  operation: 'insert' | 'update';
+}
+
+export interface BatchSyncResponse {
+  success: boolean;
+  results: OrderSyncResult[];
+  sync_timestamp: string;
+  processed_count: number;
+  success_count: number;
+  error_count: number;
+}
+
+export interface IncrementalSyncResponse {
+  success: boolean;
+  orders: OrderFromAdmin[];
+  deleted_ids: string[];
+  sync_timestamp: string;
+  total_count: number;
+  has_more: boolean;
+}
+
+/**
+ * Batch sync orders to admin dashboard via authenticated API.
+ * This is the preferred method for syncing orders as it:
+ * - Uses per-terminal API keys (no service role key needed)
+ * - Provides better security (keys are rotatable without app update)
+ * - Includes server-side validation and audit logging
+ *
+ * @param db - Database manager for reading terminal settings
+ * @param operations - Array of sync operations (insert/update)
+ * @returns Promise with batch sync results
+ */
+export async function syncOrdersToAdmin(
+  db: DatabaseManager,
+  operations: OrderSyncOperation[]
+): Promise<BatchSyncResponse> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const url = `${base}/api/pos/orders/sync`;
+
+  console.log(`[POS API Sync] syncOrdersToAdmin: Syncing ${operations.length} orders`, {
+    terminalId,
+    url,
+    hasApiKey: !!apiKey,
+    operationCount: operations.length,
+  });
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ operations }),
+    },
+    'syncOrdersToAdmin'
+  );
+
+  const data = await parseApiResponse<BatchSyncResponse>(response, 'syncOrdersToAdmin');
+
+  console.log(`[POS API Sync] syncOrdersToAdmin: Completed`, {
+    processedCount: data.processed_count,
+    successCount: data.success_count,
+    errorCount: data.error_count,
+  });
+
+  return data;
+}
+
+/**
+ * Fetch order updates from admin dashboard since a given timestamp.
+ * Used for incremental sync to pull changes made by other terminals or admin.
+ *
+ * @param db - Database manager for reading terminal settings
+ * @param options - Sync options including 'since' timestamp
+ * @returns Promise with orders updated since timestamp and any deleted IDs
+ */
+export async function fetchOrderUpdatesFromAdmin(
+  db: DatabaseManager,
+  options?: {
+    since?: string;
+    limit?: number;
+    include_deleted?: boolean;
+  }
+): Promise<IncrementalSyncResponse> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const queryString = buildQueryString(options || {});
+  const url = `${base}/api/pos/orders/sync${queryString}`;
+
+  console.log(`[POS API Sync] fetchOrderUpdatesFromAdmin: Fetching updates`, {
+    terminalId,
+    url,
+    since: options?.since,
+    limit: options?.limit,
+  });
+
+  const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchOrderUpdatesFromAdmin');
+  const data = await parseApiResponse<IncrementalSyncResponse>(response, 'fetchOrderUpdatesFromAdmin');
+
+  console.log(`[POS API Sync] fetchOrderUpdatesFromAdmin: Success`, {
+    orderCount: data.orders?.length || 0,
+    deletedCount: data.deleted_ids?.length || 0,
+    hasMore: data.has_more,
+  });
+
+  return data;
+}
+
+/**
+ * Sync a single order to admin dashboard.
+ * Convenience wrapper around syncOrdersToAdmin for single-order operations.
+ *
+ * @param db - Database manager
+ * @param operation - The operation type ('insert' or 'update')
+ * @param clientOrderId - The local order ID
+ * @param data - Order data
+ * @param items - Optional order items for insert operations
+ * @returns Promise with sync result
+ */
+export async function syncSingleOrderToAdmin(
+  db: DatabaseManager,
+  operation: 'insert' | 'update',
+  clientOrderId: string,
+  data: Record<string, unknown>,
+  items?: OrderSyncItem[]
+): Promise<OrderSyncResult> {
+  const result = await syncOrdersToAdmin(db, [{
+    operation,
+    client_order_id: clientOrderId,
+    data,
+    items,
+  }]);
+
+  if (result.results && result.results.length > 0) {
+    return result.results[0];
+  }
+
+  return {
+    client_order_id: clientOrderId,
+    success: false,
+    error: 'Empty response from server',
+    operation,
+  };
+}
+
+// ============================================================================
+// DRIVE-THROUGH SYNC API
+// ============================================================================
+
+export interface DriveThruLaneFromAdmin {
+  id: string;
+  lane_number: number;
+  name: string;
+  is_active: boolean;
+  current_order_id: string | null;
+  branch_id: string;
+  organization_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DriveThruOrderFromAdmin {
+  id: string;
+  order_id: string;
+  order_number: string | null;
+  order_status: string | null;
+  order_total: number;
+  customer_name: string | null;
+  lane_id: string;
+  lane_number: number | null;
+  lane_name: string | null;
+  position: number;
+  status: string;
+  arrived_at: string;
+  served_at: string | null;
+  wait_time_seconds: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DriveThruQueueStats {
+  total_in_queue: number;
+  by_status: {
+    waiting: number;
+    preparing: number;
+    ready: number;
+  };
+  lanes_count: number;
+}
+
+export interface FetchDriveThruOptions {
+  lane_id?: string;
+  status?: string;
+}
+
+export interface FetchDriveThruResponse {
+  success: boolean;
+  lanes: DriveThruLaneFromAdmin[];
+  orders: DriveThruOrderFromAdmin[];
+  queue_stats: DriveThruQueueStats;
+}
+
+export interface UpdateDriveThruOrderResponse {
+  success: boolean;
+  drive_through_order: DriveThruOrderFromAdmin;
+}
+
+/**
+ * Fetch drive-through lanes and orders from admin dashboard
+ * Uses the POS drive-through API endpoint for proper auth & audit logging
+ */
+export async function fetchDriveThruFromAdmin(
+  db: DatabaseManager,
+  options?: FetchDriveThruOptions
+): Promise<FetchDriveThruResponse> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const queryString = buildQueryString(options || {});
+  const url = `${base}/api/pos/drive-through${queryString}`;
+
+  console.log(`[POS API Sync] fetchDriveThruFromAdmin: Fetching drive-through data`, { terminalId, url });
+
+  const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchDriveThruFromAdmin');
+  const data = await parseApiResponse<FetchDriveThruResponse>(response, 'fetchDriveThruFromAdmin');
+
+  console.log(`[POS API Sync] fetchDriveThruFromAdmin: Success`, {
+    lanesCount: data.lanes?.length || 0,
+    ordersCount: data.orders?.length || 0,
+  });
+
+  return data;
+}
+
+/**
+ * Update drive-through order status via admin dashboard API
+ */
+export async function updateDriveThruOrderStatusFromAdmin(
+  db: DatabaseManager,
+  driveThruOrderId: string,
+  status: string
+): Promise<DriveThruOrderFromAdmin> {
+  const base = getBaseUrl(db);
+  const { terminalId, apiKey } = await resolveTerminalSettings(db);
+  const headers = buildHeaders(terminalId, apiKey);
+  const url = `${base}/api/pos/drive-through`;
+
+  console.log(`[POS API Sync] updateDriveThruOrderStatusFromAdmin: Updating order`, {
+    terminalId,
+    driveThruOrderId,
+    status,
+  });
+
+  const response = await fetchWithTimeout(
+    url,
+    {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        drive_through_order_id: driveThruOrderId,
+        status,
+      }),
+    },
+    'updateDriveThruOrderStatusFromAdmin'
+  );
+
+  const data = await parseApiResponse<UpdateDriveThruOrderResponse>(
+    response,
+    'updateDriveThruOrderStatusFromAdmin'
+  );
+
+  console.log(`[POS API Sync] updateDriveThruOrderStatusFromAdmin: Success`, {
+    driveThruOrderId,
+    status,
+  });
+
+  return data.drive_through_order;
 }
 

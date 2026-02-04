@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { useAcquiredModules } from '../../hooks/useAcquiredModules';
+import { Package, Truck, Utensils } from 'lucide-react';
 
 interface OrderTypeSelectorProps {
   orderType: "dine-in" | "pickup" | "delivery";
@@ -56,10 +57,10 @@ export const OrderTypeSelector: React.FC<OrderTypeSelectorProps> = ({
                   : "border-gray-200 bg-white/50 text-gray-700 hover:border-gray-300 hover:bg-white/70"
             } hover:scale-[1.02] transform focus:outline-none focus:ring-2 focus:ring-blue-500/30`}
           >
-            <div className="text-2xl mb-2">
-              {type === "dine-in" && "🍽️"}
-              {type === "pickup" && "🥡"}
-              {type === "delivery" && "🚚"}
+            <div className="text-2xl mb-2 flex items-center justify-center">
+              {type === "dine-in" && <Utensils className="w-6 h-6" />}
+              {type === "pickup" && <Package className="w-6 h-6" />}
+              {type === "delivery" && <Truck className="w-6 h-6" />}
             </div>
             <div className="font-medium capitalize">
               {type === "dine-in"

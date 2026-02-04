@@ -26,6 +26,25 @@ export type FeatureAccessChecker = (
  * Get module metadata by ID - stub implementation
  */
 export function getModuleMetadata(moduleId: ModuleId): ModuleMetadata | null {
+  // Map known module icons
+  const iconMap: Record<string, string> = {
+    dashboard: 'LayoutDashboard',
+    settings: 'Settings',
+    orders: 'ClipboardList',
+    menu: 'BookOpen',
+    users: 'Users',
+    analytics: 'BarChart3',
+    reports: 'FileText',
+    inventory: 'Package',
+    tables: 'LayoutGrid',
+    reservations: 'Calendar',
+    kitchen: 'ChefHat',
+    kiosk: 'Monitor',
+    delivery: 'Truck',
+    loyalty: 'Gift',
+    staff: 'UserCog',
+  };
+
   // Return a basic stub for any module
   return {
     id: moduleId,
@@ -37,6 +56,7 @@ export function getModuleMetadata(moduleId: ModuleId): ModuleMetadata | null {
     sortOrder: 0,
     requiredFeatures: [],
     compatibleBusinessTypes: [],
+    icon: iconMap[moduleId] || 'Package',
   };
 }
 

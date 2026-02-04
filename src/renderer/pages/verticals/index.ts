@@ -2,8 +2,8 @@
 // This file allows lazy-loading all vertical views from a single entry point
 
 // Fast-food vertical
-export { QuickPOSView } from './fast-food/QuickPOSView';
 export { DriveThruView } from './fast-food/DriveThruView';
+export { DeliveryView } from './fast-food/DeliveryView';
 
 // Restaurant vertical
 export { TablesView } from './restaurant/TablesView';

@@ -16,6 +16,7 @@ import {
   Legend,
 } from 'recharts';
 import { motion } from 'framer-motion';
+import { formatDate as formatDateValue } from '../../utils/format';
 import type { SalesTrendData, TopItemData, HourlySalesData } from '../../types/reports';
 
 // Type workarounds for Recharts + React 19
@@ -66,9 +67,9 @@ interface SalesTrendChartProps {
 
 export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, currency }) => {
   const { t } = useTranslation();
-  const formatDate = (dateStr: string) => {
+  const formatChartDate = (dateStr: string) => {
     const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return formatDateValue(date, { month: 'short', day: 'numeric' });
   };
 
   return (
@@ -85,7 +86,7 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
             <CartesianGridC strokeDasharray="3 3" stroke={isDark ? '#374151' : '#e5e7eb'} />
             <XAxisC
               dataKey="date"
-              tickFormatter={formatDate}
+              tickFormatter={formatChartDate}
               stroke={isDark ? '#9ca3af' : '#6b7280'}
               style={{ fontSize: '12px' }}
             />
@@ -102,7 +103,7 @@ export const SalesTrendChart = memo<SalesTrendChartProps>(({ data, isDark, curre
                 color: isDark ? '#ffffff' : '#000000',
               }}
               formatter={(value: number) => [currency.format(value), 'Revenue']}
-              labelFormatter={formatDate}
+              labelFormatter={formatChartDate}
             />
             <AreaC
               type="monotone"

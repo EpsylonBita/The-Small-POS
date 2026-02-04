@@ -324,11 +324,15 @@ export class HeartbeatService {
         const pendingCommand = await this.checkForPendingCommands()
         if (pendingCommand) {
           console.log('Pending command found:', pendingCommand.command)
-          await this.acknowledgeCommand(pendingCommand.id)
+          // Execute command FIRST, then acknowledge
+          // This prevents losing commands if execution fails
           await this.executeCommand(pendingCommand)
+          // Only acknowledge AFTER successful execution
+          await this.acknowledgeCommand(pendingCommand.id)
         }
       } catch (commandError) {
-        console.error('Command processing failed:', commandError)
+        console.error('Command processing failed, command will be retried:', commandError)
+        // Command stays in pending/acknowledged state and will be retried on next heartbeat
       }
 
     } catch (error) {
@@ -371,10 +375,14 @@ export class HeartbeatService {
           const row = payload.new as AppControlCommand
           if (row && row.status === 'pending') {
             try {
-              await this.acknowledgeCommand(row.id)
+              // Execute command FIRST, then acknowledge
+              // This prevents losing commands if execution fails
               await this.executeCommand(row)
+              // Only acknowledge AFTER successful execution
+              await this.acknowledgeCommand(row.id)
             } catch (err) {
-              console.error('Realtime command handling failed:', err)
+              console.error('Realtime command handling failed, command will be retried:', err)
+              // Command stays in pending state and will be retried
             }
           }
         })
@@ -483,11 +491,13 @@ export class HeartbeatService {
     }
 
     try {
+      // Include both 'pending' and 'acknowledged' status
+      // This ensures commands that were acknowledged but execution failed are retried
       const { data, error } = await this.supabase
         .from(SUPABASE_TABLES.APP_CONTROL_COMMANDS)
         .select('*')
         .eq('app_id', this.terminalInfo.terminal_id)
-        .eq('status', 'pending')
+        .in('status', ['pending', 'acknowledged'])
         .order('created_at', { ascending: true })
         .limit(1)
         .maybeSingle()
@@ -704,7 +714,39 @@ export class HeartbeatService {
   }
 
   private async handleDisableCommand(command: AppControlCommand): Promise<void> {
-    console.log('Disabling terminal...')
+    console.log('Processing disable command...', { command: command.command, metadata: command.metadata })
+
+    // Check if this is a factory_reset command (terminal deleted from admin dashboard)
+    const isFactoryReset = command.metadata?.action === 'factory_reset'
+
+    if (isFactoryReset) {
+      console.warn('[HeartbeatService] Factory reset command received - clearing all data')
+
+      // Clear database first
+      try {
+        const dbSvc = this.databaseManager?.getDatabaseService?.()
+        if (dbSvc) {
+          await dbSvc.factoryReset()
+          console.log('[HeartbeatService] Database factory reset complete')
+        }
+      } catch (err) {
+        console.error('[HeartbeatService] Database factory reset failed:', err)
+        // Continue even if database reset fails - still notify renderer
+      }
+
+      // Notify renderer to clear localStorage and show onboarding
+      this.notifyRenderer('app:reset', {
+        reason: 'terminal_deleted',
+        commandId: command.id
+      })
+
+      // Stop heartbeat service
+      this.stop()
+      return
+    }
+
+    // Regular disable (not factory reset)
+    console.log('Disabling terminal (not factory reset)...')
 
     // Set pending control state
     this.pendingControlState = 'disabled'
@@ -786,8 +828,10 @@ export class HeartbeatService {
       const pendingCommand = await this.checkForPendingCommands()
       if (pendingCommand) {
         console.log('Force check - pending command found:', pendingCommand.command)
-        await this.acknowledgeCommand(pendingCommand.id)
+        // Execute command FIRST, then acknowledge
         await this.executeCommand(pendingCommand)
+        // Only acknowledge AFTER successful execution
+        await this.acknowledgeCommand(pendingCommand.id)
       } else {
         console.log('Force check - no pending commands')
       }

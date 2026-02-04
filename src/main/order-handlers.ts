@@ -20,11 +20,16 @@ export interface OrderHandlerDeps {
 
 /**
  * Get the admin API base URL for platform sync operations.
- * Prefers terminal-stored admin_url, then falls back to ADMIN_API_BASE_URL env var.
- * This ensures consistent URL resolution across all platform sync handlers.
+ * Prefers terminal-stored admin_dashboard_url, falls back to legacy admin_url,
+ * then ADMIN_API_BASE_URL env var. This ensures consistent URL resolution
+ * across all platform sync handlers.
  */
 function getAdminApiBaseUrl(settingsService: SettingsService | null): string {
-  // First preference: terminal-stored admin URL (set during connection string setup)
+  // First preference: terminal-stored admin dashboard URL
+  const terminalAdminDashboardUrl = (settingsService?.getSetting?.('terminal', 'admin_dashboard_url', '') as string) || '';
+  if (terminalAdminDashboardUrl) return terminalAdminDashboardUrl;
+
+  // Legacy fallback: admin_url
   const terminalAdminUrl = (settingsService?.getSetting?.('terminal', 'admin_url', '') as string) || '';
   if (terminalAdminUrl) return terminalAdminUrl;
 

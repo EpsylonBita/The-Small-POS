@@ -40,8 +40,6 @@ const NEW_IMPLEMENTED_MODULES = [
  */
 const REMAINING_COMING_SOON = [
   'branches',
-  'customer_web',
-  'customer_app',
 ];
 
 describe('New Module Implementations', () => {

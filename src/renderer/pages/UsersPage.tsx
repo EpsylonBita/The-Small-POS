@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getApiUrl } from '../../config/environment';
+import { posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import toast from 'react-hot-toast';
@@ -127,12 +128,11 @@ const UsersPage: React.FC = () => {
       if (posKey) headers['x-pos-api-key'] = String(posKey)
       if (termId) headers['x-terminal-id'] = String(termId)
 
-      const res = await fetch(getApiUrl('pos/users') + '?' + params.toString(), { method: 'GET', headers })
-      let appUsers: any[] = []
-      try {
-        const body = await res.json()
-        appUsers = Array.isArray(body?.users) ? body.users : []
-      } catch {}
+      const result = await posApiGet<{ users?: any[] }>(`pos/users?${params.toString()}`, { headers })
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to load users')
+      }
+      const appUsers = Array.isArray(result.data?.users) ? result.data.users : []
 
       // Merge into single list
       const unified = [
@@ -176,22 +176,36 @@ const UsersPage: React.FC = () => {
     }
   };
 
+  // Helper to get POS auth headers
+  const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
+    const ls = typeof window !== 'undefined' ? window.localStorage : null;
+    const posKey = (ls?.getItem('pos_api_key') || '').trim() || (ls?.getItem('POS_API_KEY') || '').trim();
+    let termId = '';
+    try {
+      const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
+      termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '');
+    } catch {}
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (posKey) headers['x-pos-api-key'] = String(posKey);
+    if (termId) headers['x-terminal-id'] = String(termId);
+    return headers;
+  };
+
   const handleViewUser = async (user: UserProfile) => {
     setSelectedUser(user);
     setShowDetailsModal(true);
 
-    // Fetch full customer data with addresses from admin dashboard API (same as CustomerSearchModal)
+    // Fetch full customer data with addresses from POS API
     if (!user.phone) {
       setUserAddresses([]);
       return;
     }
 
     try {
-      const response = await fetch(`${getApiUrl('customers/search')}?phone=${encodeURIComponent(user.phone)}`, {
+      const headers = await getPosAuthHeaders();
+      const response = await fetch(`${getApiUrl('pos/customers')}?phone=${encodeURIComponent(user.phone)}`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
       });
 
       if (!response.ok) {
@@ -202,7 +216,17 @@ const UsersPage: React.FC = () => {
       console.log('Customer details from API:', result);
 
       if (result.success && result.customer && result.customer.addresses) {
-        setUserAddresses(result.customer.addresses);
+        setUserAddresses(result.customer.addresses.map((addr: any) => ({
+          id: addr.id,
+          customer_id: user.id,
+          street_address: addr.street || addr.street_address,
+          city: addr.city || '',
+          postal_code: addr.postal_code || '',
+          floor_number: addr.floor_number,
+          address_type: addr.address_type || 'delivery',
+          is_default: addr.is_default,
+          delivery_notes: addr.delivery_notes || addr.notes,
+        })));
       } else {
         setUserAddresses([]);
       }
@@ -280,7 +304,7 @@ const UsersPage: React.FC = () => {
   const handleAddressSuggestionClick = async (suggestion: any) => {
     try {
       // Get place details to extract postal code and city
-      const response = await fetch('http://127.0.0.1:3001/api/google-maps/place-details', {
+      const response = await fetch(getApiUrl('google-maps/place-details'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -346,12 +370,11 @@ const UsersPage: React.FC = () => {
     try {
       // Combine street_address and city into a single address field for the API
       const combinedAddress = `${editedAddress.street_address || ''}, ${editedAddress.city || ''}`.trim();
+      const headers = await getPosAuthHeaders();
 
-      const response = await fetch(`http://127.0.0.1:3001/api/customers/${selectedUser.id}/addresses/${addressId}`, {
+      const response = await fetch(getApiUrl(`pos/customers/${selectedUser.id}/addresses/${addressId}`), {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           address: combinedAddress,
           postal_code: editedAddress.postal_code,
@@ -406,11 +429,10 @@ const UsersPage: React.FC = () => {
     }
 
     try {
-      const response = await fetch(`http://127.0.0.1:3001/api/customers/${selectedUser.id}/addresses/${addressId}`, {
+      const headers = await getPosAuthHeaders();
+      const response = await fetch(getApiUrl(`pos/customers/${selectedUser.id}/addresses/${addressId}`), {
         method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
       });
 
       if (!response.ok) {
@@ -461,22 +483,6 @@ const UsersPage: React.FC = () => {
     } finally {
       setUpdatingUserId(null);
     }
-  };
-
-  const formatCurrency = (amount?: number) => {
-    return new Intl.NumberFormat('el-GR', {
-      style: 'currency',
-      currency: 'EUR'
-    }).format(amount || 0);
-  };
-
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return 'N/A';
-    return new Date(dateString).toLocaleDateString('el-GR', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric'
-    });
   };
 
   const getLoyaltyBadge = (points: number) => {

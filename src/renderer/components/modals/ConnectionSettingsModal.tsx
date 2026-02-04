@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
-import { getApiUrl } from '../../../config/environment'
+import { posApiGet } from '../../utils/api-helpers'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
+import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 
 interface Props {
@@ -27,10 +28,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showPinSettings, setShowPinSettings] = useState(false)
   const [editingPin, setEditingPin] = useState(false)
   const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
+  const [showPaymentTerminalsSection, setShowPaymentTerminalsSection] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
   const [isClearingOperational, setIsClearingOperational] = useState(false)
+
+  // Factory reset confirmation dialogs
+  const [showFactoryResetWarning, setShowFactoryResetWarning] = useState(false)
+  const [showFactoryResetFinal, setShowFactoryResetFinal] = useState(false)
+  const [isResetting, setIsResetting] = useState(false)
 
   // Session timeout settings
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
@@ -285,36 +292,34 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         'x-pos-api-key': apiKey,
         'Origin': window.location.origin,
       }
-      const res = await fetch(getApiUrl('/pos/orders?limit=1'), { method: 'GET', headers })
-      let body: any = null
-      try { body = await res.json() } catch { }
-      if (res.ok) {
+      const result = await posApiGet('/pos/orders?limit=1', { headers })
+      if (result.success) {
         toast.success(t('modals.connectionSettings.connected'))
       } else {
-        const msg = body?.error || body?.message || `HTTP ${res.status}`
+        const msg = result.error || `HTTP ${result.status || 'error'}`
         toast.error(t('modals.connectionSettings.connectionFailed', { msg }))
-        console.warn('[Connection Test] Failed', { status: res.status, body })
+        console.warn('[Connection Test] Failed', { status: result.status, error: result.error })
       }
     } catch (e: any) {
       toast.error(e?.message || t('modals.connectionSettings.networkError'))
     }
   }
 
-  const handleClearDatabase = async () => {
-    // Double confirmation for factory reset - this is a destructive operation
-    const firstConfirm = confirm(t('settings.database.confirmClear'))
-    if (!firstConfirm) {
-      return
-    }
+  // Opens the first factory reset warning dialog
+  const handleClearDatabase = () => {
+    setShowFactoryResetWarning(true)
+  }
 
-    const secondConfirm = confirm(t('settings.database.confirmFactoryReset'))
-    if (!secondConfirm) {
-      return
-    }
+  // Called when user confirms the first warning - shows final confirmation
+  const handleFactoryResetWarningConfirm = () => {
+    setShowFactoryResetWarning(false)
+    setShowFactoryResetFinal(true)
+  }
 
+  // Called when user confirms final dialog - performs the actual reset
+  const handleFactoryResetFinalConfirm = async () => {
+    setIsResetting(true)
     try {
-      toast.loading(t('settings.database.resetting') || 'Performing factory reset...')
-
       // Call the factory reset handler in main process
       const result = await window.electron?.ipcRenderer?.invoke('settings:factory-reset')
 
@@ -322,7 +327,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         // Clear all localStorage
         localStorage.clear()
 
-        toast.dismiss()
+        setShowFactoryResetFinal(false)
         toast.success(t('settings.database.resetSuccess') || 'Factory reset complete. App will restart...')
 
         // Restart the app to go back to onboarding
@@ -339,8 +344,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       }
     } catch (e) {
       console.error('Failed to perform factory reset', e)
-      toast.dismiss()
       toast.error(t('settings.database.clearFailed'))
+    } finally {
+      setIsResetting(false)
     }
   }
 
@@ -353,6 +359,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
+      {showPaymentTerminalsSection ? (
+        <PaymentTerminalsSection onBack={() => setShowPaymentTerminalsSection(false)} />
+      ) : (
       <div className="space-y-4">
         {/* Connection Settings */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
@@ -566,7 +575,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   }`}
                 title={t('settings.display.langGreek')}
               >
-                ΕΛ
+                EL
               </button>
             </div>
           </div>
@@ -832,6 +841,25 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           />
         )}
 
+        {/* Payment Terminals Settings trigger */}
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <CreditCard className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+              <div className="text-left">
+                <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.paymentTerminals.label', 'Payment Terminals')}</span>
+                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.paymentTerminals.helpText', 'Configure ECR payment devices')}</span>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowPaymentTerminalsSection(true)}
+              className={liquidGlassModalButton('primary', 'md')}
+            >
+              {t('settings.paymentTerminals.configureButton', 'Configure')}
+            </button>
+          </div>
+        </div>
+
         {/* Clear Operational Data Confirmation Dialog */}
         <ConfirmDialog
           isOpen={showClearOperationalConfirm}
@@ -870,7 +898,47 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             </ul>
           }
         />
+
+        {/* Factory Reset Warning Dialog (Step 1) */}
+        <ConfirmDialog
+          isOpen={showFactoryResetWarning}
+          onClose={() => setShowFactoryResetWarning(false)}
+          onConfirm={handleFactoryResetWarningConfirm}
+          title={t('settings.database.factoryResetWarningTitle', 'Factory Reset Warning')}
+          message={t('settings.database.factoryResetWarningMessage', 'This will completely restore the POS terminal to factory settings.')}
+          variant="warning"
+          confirmText={t('common.actions.continue', 'Continue')}
+          cancelText={t('common.actions.cancel', 'Cancel')}
+          details={
+            <ul className="list-disc list-inside space-y-1 text-white/70">
+              <li>{t('settings.database.factoryResetItem.orders', 'All local orders will be deleted')}</li>
+              <li>{t('settings.database.factoryResetItem.settings', 'All settings will be cleared')}</li>
+              <li>{t('settings.database.factoryResetItem.terminal', 'Terminal configuration will be removed')}</li>
+              <li>{t('settings.database.factoryResetItem.reconnect', 'You will need to reconnect with connection string')}</li>
+            </ul>
+          }
+        />
+
+        {/* Factory Reset Final Confirmation Dialog (Step 2) */}
+        <ConfirmDialog
+          isOpen={showFactoryResetFinal}
+          onClose={() => setShowFactoryResetFinal(false)}
+          onConfirm={handleFactoryResetFinalConfirm}
+          title={t('settings.database.factoryResetFinalTitle', 'Final Confirmation')}
+          message={t('settings.database.factoryResetFinalMessage', 'This is your last chance to cancel.')}
+          variant="error"
+          confirmText={t('settings.database.factoryResetConfirmButton', 'Reset')}
+          cancelText={t('common.actions.cancel', 'Cancel')}
+          isLoading={isResetting}
+          requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that all data will be permanently deleted and the app will restart')}
+          details={
+            <div className="text-red-300 font-medium">
+              {t('settings.database.factoryResetFinalWarning', 'All data will be permanently deleted and the app will restart.')}
+            </div>
+          }
+        />
       </div>
+      )}
     </LiquidGlassModal>
   )
 }

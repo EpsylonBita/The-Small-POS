@@ -11,6 +11,7 @@ import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useRooms } from '../../../hooks/useRooms';
+import { formatDate } from '../../../utils/format';
 import { reservationsService } from '../../../services/ReservationsService';
 import { 
   Bed, RefreshCw, Users, Wrench, Sparkles, Calendar, X, 
@@ -774,7 +775,7 @@ const RoomCard: React.FC<{ room: Room; isDark: boolean; onClick: () => void }> =
       {room.checkoutDate && room.status === 'occupied' && (
         <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
           <Clock className="w-3 h-3 inline mr-1" />
-          {new Date(room.checkoutDate).toLocaleDateString()}
+          {formatDate(room.checkoutDate)}
         </div>
       )}
     </button>

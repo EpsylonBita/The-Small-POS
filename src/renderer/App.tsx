@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
+import { AlertTriangle } from "lucide-react";
 import { ThemeProvider } from "./contexts/theme-context";
 import { ShiftProvider, useShift } from "./contexts/shift-context";
 import { I18nProvider, useI18n } from "./contexts/i18n-context";
@@ -152,7 +153,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
       toast.error(message, {
         duration: 8000,
-        icon: '⚠️',
+        icon: <AlertTriangle className="w-4 h-4 text-amber-500" />,
       });
     };
 

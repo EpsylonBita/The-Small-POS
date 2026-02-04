@@ -15,7 +15,8 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { getApiUrl } from '../../config/environment';
+import { formatCurrency } from '../utils/format';
+import { posApiGet } from '../utils/api-helpers';
 
 interface LoyaltySettings {
   points_per_euro: number;
@@ -37,7 +38,7 @@ interface CustomerLoyalty {
 }
 
 const LoyaltyPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
@@ -47,36 +48,27 @@ const LoyaltyPage: React.FC = () => {
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerLoyalty | null>(null);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchData = useCallback(async () => {
     if (!staff?.organizationId) return;
     setLoading(true);
     try {
-      const settingsUrl = getApiUrl(`pos/loyalty/settings?organization_id=${staff.organizationId}`);
-      const customersUrl = getApiUrl(`pos/loyalty/customers?organization_id=${staff.organizationId}`);
       const [settingsRes, customersRes] = await Promise.all([
-        fetch(settingsUrl),
-        fetch(customersUrl),
+        posApiGet<{ settings: LoyaltySettings }>(
+          `pos/loyalty/settings?organization_id=${staff.organizationId}`
+        ),
+        posApiGet<{ customers: CustomerLoyalty[] }>(
+          `pos/loyalty/customers?organization_id=${staff.organizationId}`
+        ),
       ]);
 
-      if (settingsRes.ok) {
-        const data = await settingsRes.json();
-        setSettings(data.settings);
+      if (!settingsRes.success || !customersRes.success) {
+        throw new Error(settingsRes.error || customersRes.error || 'Failed to load loyalty data');
       }
-      if (customersRes.ok) {
-        const data = await customersRes.json();
-        setCustomers(data.customers || []);
-      } else {
-        // Mock data for demo
-        setCustomers([
-          { id: '1', user_profile_id: 'u1', points_balance: 450, total_earned: 1200, total_redeemed: 750, tier: 'gold', customer_name: 'John Doe', customer_email: 'john@example.com' },
-          { id: '2', user_profile_id: 'u2', points_balance: 120, total_earned: 320, total_redeemed: 200, tier: 'silver', customer_name: 'Jane Smith', customer_email: 'jane@example.com' },
-          { id: '3', user_profile_id: 'u3', points_balance: 50, total_earned: 50, total_redeemed: 0, tier: 'bronze', customer_name: 'Mike Johnson' },
-          { id: '4', user_profile_id: 'u4', points_balance: 2100, total_earned: 5500, total_redeemed: 3400, tier: 'platinum', customer_name: 'Sarah Williams', customer_email: 'sarah@example.com' },
-        ]);
-        setSettings({ points_per_euro: 1, redemption_rate: 0.01, min_redemption_points: 100, is_active: true });
-      }
+
+      setSettings(settingsRes.data?.settings || null);
+      setCustomers(customersRes.data?.customers || []);
     } catch (error) {
       console.error('Failed to fetch loyalty data:', error);
       toast.error(t('loyalty.errors.loadFailed', 'Failed to load loyalty data'));
@@ -149,7 +141,7 @@ const LoyaltyPage: React.FC = () => {
           <div>
             <h1 className="text-xl font-bold">{t('loyalty.title', 'Loyalty Program')}</h1>
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              {settings?.points_per_euro} {t('loyalty.pointsPerEuro', 'point per €1')} • {currency.format(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
+              {settings?.points_per_euro} {t('loyalty.pointsPerEuro', 'point per €1')} • {formatMoney(settings?.redemption_rate || 0.01)} {t('loyalty.perPoint', 'per point')}
             </p>
           </div>
         </div>
@@ -283,7 +275,7 @@ const LoyaltyPage: React.FC = () => {
                       {t('loyalty.canRedeem', 'Can redeem')}
                     </span>
                     <span className="font-medium">
-                      {currency.format(customer.points_balance * (settings?.redemption_rate || 0.01))}
+                      {formatMoney(customer.points_balance * (settings?.redemption_rate || 0.01))}
                     </span>
                   </div>
                 </div>

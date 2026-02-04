@@ -394,6 +394,10 @@ function transformOrder(order: any) {
     items = [];
   }
 
+  const pluginValue = order.plugin || order.order_plugin || order.platform || order.order_platform || null;
+  const externalPluginOrderId =
+    order.external_plugin_order_id || order.externalPlatformOrderId || order.external_platform_order_id || null;
+
   return {
     id: order.id,
     supabase_id: order.supabase_id, // Include Supabase ID for edit operations
@@ -437,11 +441,18 @@ function transformOrder(order: any) {
     payment_method: order.payment_method,
     paymentMethod: order.payment_method,
     paymentTransactionId: order.payment_transaction_id,
-    // Platform integration fields
-    platform: order.platform,
-    externalPlatformOrderId: order.external_platform_order_id,
-    platformCommissionPct: order.platform_commission_pct,
-    netEarnings: order.net_earnings,
+    // Plugin integration fields
+    plugin: pluginValue,
+    order_plugin: order.order_plugin || pluginValue,
+    external_plugin_order_id: externalPluginOrderId,
+    plugin_commission_pct: order.plugin_commission_pct ?? order.platform_commission_pct,
+    net_earnings: order.net_earnings,
+    terminal_id: order.terminal_id ?? null,
+    terminalId: order.terminal_id ?? null,
+    // Backward compatibility
+    platform: order.platform || pluginValue,
+    externalPlatformOrderId: order.external_platform_order_id || externalPluginOrderId,
+    platformCommissionPct: order.platform_commission_pct ?? order.plugin_commission_pct,
     // Driver assignment fields
     driver_id: order.driver_id,
     driverId: order.driver_id, // camelCase alias for frontend compatibility
@@ -1039,7 +1050,7 @@ export function registerOrderCrudHandlers(): void {
               timestamp: new Date(order.created_at || new Date()),
               items: printItems,
               subtotal: order.subtotal || 0,
-              tax: (order as any).tax || 0,
+              tax: (order as any).tax_amount ?? (order as any).tax ?? 0,
               tip: (order as any).tip || 0,
               deliveryFee: order.delivery_fee || 0,
               discount: discountAmount > 0 ? discountAmount : undefined,
@@ -1405,6 +1416,11 @@ export function registerOrderCrudHandlers(): void {
         payment_status: orderData.payment_status || 'pending',
         payment_method: orderData.payment_method || 'cash',
         payment_transaction_id: orderData.payment_transaction_id,
+        plugin: orderData.plugin || orderData.platform || null,
+        external_plugin_order_id: orderData.external_plugin_order_id || orderData.external_platform_order_id || null,
+        plugin_commission_pct: orderData.plugin_commission_pct ?? orderData.platform_commission_pct ?? null,
+        net_earnings: orderData.net_earnings ?? null,
+        terminal_id: orderData.terminal_id ?? null,
         branch_id: orderData.branch_id,
         organization_id: orderData.organization_id,
         staff_shift_id: orderData.staff_shift_id,

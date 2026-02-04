@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense } from '../../types';
@@ -8,6 +8,7 @@ import { sectionTitle, sectionSubtle, inputBase, liquidGlassModalCard, liquidGla
 import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
+import { formatTime } from '../../utils/format';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
@@ -739,6 +740,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         } catch { }
       }
 
+      // Validate branchId before attempting check-in
+      if (!branchId || (typeof branchId === 'string' && branchId.trim() === '')) {
+        console.error('[StaffShiftModal] Cannot check in: branchId is not configured');
+        setError(t('modals.staffShift.errors.noBranchConfigured', 'Branch not configured. Please contact admin.'));
+        setEnteredPin('');
+        return;
+      }
+
       // Prefer Electron IPC (main process handles Supabase + session) when available
       const hasElectron = typeof (window as any).electronAPI?.invoke === 'function';
       if (hasElectron) {
@@ -779,9 +788,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         body: JSON.stringify({
           p_staff_id: selectedStaff.id,
           p_staff_pin: enteredPin.trim(),
-          p_branch_id: branchId ?? null,
-          p_organization_id: organizationId ?? null,
-          p_terminal_id: terminalId ?? null,
+          // Sanitize UUIDs: empty strings cannot be cast to UUID by PostgreSQL
+          p_branch_id: branchId && branchId.trim() ? branchId : null,
+          p_organization_id: organizationId && organizationId.trim() ? organizationId : null,
+          p_terminal_id: terminalId || null,
           p_session_hours: 8
         })
       });
@@ -1357,19 +1367,28 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const totalExpenses = expenses.reduce((sum, exp) => sum + exp.amount, 0);
 
-  const getStatusSymbol = (delivery: any): string => {
+  const getStatusSymbol = (delivery: any): React.ReactNode => {
     const rawStatus = delivery.status || delivery.order_status || '';
     const normalizedStatus = rawStatus.toLowerCase();
     const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
-    return isCanceled ? '✗' : '✓';
+    return isCanceled
+      ? <XCircle className="w-4 h-4 text-red-400" />
+      : <CheckCircle className="w-4 h-4 text-green-400" />;
   };
 
-  const getPaymentSymbol = (paymentMethod: string): string => {
+  const getPaymentSymbol = (paymentMethod: string): React.ReactNode => {
     const method = (paymentMethod || '').toLowerCase();
-    if (method === 'cash') return '💵';
-    if (method === 'card') return '💳';
-    if (method === 'mixed') return '💵+💳';
-    return '💳'; // fallback
+    if (method === 'cash') return <Banknote className="w-4 h-4 text-green-400" />;
+    if (method === 'card') return <CreditCard className="w-4 h-4 text-blue-400" />;
+    if (method === 'mixed') {
+      return (
+        <span className="inline-flex items-center gap-1">
+          <Banknote className="w-4 h-4 text-green-400" />
+          <CreditCard className="w-4 h-4 text-blue-400" />
+        </span>
+      );
+    }
+    return <CreditCard className="w-4 h-4 text-gray-400" />; // fallback
   };
 
   // Debug logging
@@ -1599,7 +1618,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                               className={`inline-flex items-center gap-1.5 rounded-full border-2 px-3 py-1 text-sm font-bold transition-all ${badgeStyle}`}
                                             >
                                               {(role.is_primary || isCashier) && (
-                                                <span className="text-orange-400">★</span>
+                                                <Star className="w-4 h-4 text-orange-400" />
                                               )}
                                               {translateRoleName(role.role_name)}
                                             </span>
@@ -1762,7 +1781,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                     {translateRoleName(role.role_name)}
                                   </span>
                                   {role.is_primary && (
-                                    <span className="text-orange-400 shadow-orange-500/20 drop-shadow-sm">★</span>
+                                    <Star className="w-4 h-4 text-orange-400 shadow-orange-500/20 drop-shadow-sm" />
                                   )}
                                 </div>
                                 <span className={`text-sm ${role.is_primary ? 'text-blue-200/60' : 'text-gray-400'}`}>
@@ -2294,7 +2313,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <div className="flex gap-2">
                           <POSGlassBadge variant="info">{totalOrders} {t('modals.staffShift.totalOrders', 'Total')}</POSGlassBadge>
                           {canceledCount > 0 && (
-                            <POSGlassBadge variant="error">✗ {canceledCount} {t('modals.staffShift.canceledOrders', 'Canceled')}</POSGlassBadge>
+                            <POSGlassBadge variant="error">
+                              <span className="inline-flex items-center gap-1">
+                                <XCircle className="w-3 h-3" />
+                                {canceledCount} {t('modals.staffShift.canceledOrders', 'Canceled')}
+                              </span>
+                            </POSGlassBadge>
                           )}
                         </div>
                       </div>
@@ -2305,7 +2329,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-green-400 text-lg">{cashCount}</span>
                           </div>
                           <div className="text-right">
-                            <span className="text-xl">💵</span>
+                            <Banknote className="w-5 h-5 text-green-300 ml-auto" />
                             <div className="font-bold text-green-300">${cashTotal.toFixed(2)}</div>
                           </div>
                         </div>
@@ -2315,7 +2339,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-blue-400 text-lg">{cardCount}</span>
                           </div>
                           <div className="text-right">
-                            <span className="text-xl">💳</span>
+                            <CreditCard className="w-5 h-5 text-blue-300 ml-auto" />
                             <div className="font-bold text-blue-300">${cardTotal.toFixed(2)}</div>
                           </div>
                         </div>
@@ -2507,7 +2531,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-green-400 text-lg">{cashCount}</span>
                           </div>
                           <div className="text-right">
-                            <span className="text-xl">💵</span>
+                            <Banknote className="w-5 h-5 text-green-300 ml-auto" />
                             <div className="font-bold text-green-300">${cashTotal.toFixed(2)}</div>
                           </div>
                         </div>
@@ -2517,7 +2541,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <span className="font-bold text-blue-400 text-lg">{cardCount}</span>
                           </div>
                           <div className="text-right">
-                            <span className="text-xl">💳</span>
+                            <CreditCard className="w-5 h-5 text-blue-300 ml-auto" />
                             <div className="font-bold text-blue-300">${cardTotal.toFixed(2)}</div>
                           </div>
                         </div>
@@ -2564,8 +2588,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                     <td className="px-3 py-2 text-right font-medium text-gray-200" role="cell">${table.total_amount.toFixed(2)}</td>
                                     <td className="px-3 py-2 text-center" role="cell">
                                       <span className="inline-flex gap-1 items-center justify-center bg-black/20 px-1.5 py-0.5 rounded text-xs">
-                                        <span>{hasActive ? '✓' : '✗'}</span>
-                                        <span>{getPaymentSymbol(table.payment_method)}</span>
+                                        {hasActive ? (
+                                          <CheckCircle className="w-3 h-3 text-green-400" />
+                                        ) : (
+                                          <XCircle className="w-3 h-3 text-red-400" />
+                                        )}
+                                        <span className="inline-flex">{getPaymentSymbol(table.payment_method)}</span>
                                       </span>
                                     </td>
                                   </tr>
@@ -2660,7 +2688,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           ? opening + cashFromTables - expensesTotal
                           : opening + cashFromTables - expensesTotal - paymentAmount;
 
-                        const label = cashToReturn >= 0 ? t('modals.staffShift.amountToReturn', 'Cash to Return') : t('modals.staffShift.shortage', 'Shortage');
+                        const label = cashToReturn >= 0 ? t('modals.staffShift.amountToReturn', { defaultValue: 'Amount to collect from drawer' }) : t('modals.staffShift.shortage', 'Shortage');
                         const colorClass = cashToReturn >= 0 ? 'text-cyan-300' : 'text-red-400';
 
                         return (
@@ -2970,7 +2998,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                   <div className="text-xs text-gray-500 mt-1">
                                     {t('modals.staffShift.paidBy', {
                                       name: payment.cashier_name || t('common.unknown', 'Unknown'),
-                                      time: new Date(payment.created_at).toLocaleTimeString()
+                                      time: formatTime(payment.created_at)
                                     })}
                                   </div>
                                 </div>
@@ -3324,7 +3352,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         : 'bg-red-900/30 border-red-500/50'
                         }`}>
                         <span className={`text-base ${amountToReturn >= 0 ? 'text-yellow-200' : 'text-red-200'}`}>
-                          {t('modals.staffShift.amountToReturn', 'Ποσό που Θα Ληφθεί από Ταμείο')}
+                          {t('modals.staffShift.amountToReturn', { defaultValue: 'Amount to collect from drawer' })}
                         </span>
                         <span className={amountToReturn >= 0 ? 'text-xl text-yellow-300' : 'text-xl text-red-300'}>
                           ${amountToReturn.toFixed(2)}
@@ -3365,7 +3393,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </>
                 ) : (
                   <>
-                    ✓ {t('modals.staffShift.checkOut')}
+                    <Check className="w-5 h-5" />
+                    {t('modals.staffShift.checkOut')}
                   </>
                 )}
               </button>

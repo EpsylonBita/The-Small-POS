@@ -15,7 +15,7 @@ npm run dev:electron
 
 1. Click **"Check In"** button
 2. Select **Antoine Rousseau**
-3. Enter PIN: **5678**
+3. Enter PIN: **567890**
 4. Click **Continue**
 5. Select role: **Kitchen**
 6. Complete check-in ✅
@@ -26,7 +26,7 @@ npm run dev:electron
 
 ```bash
 # Set a PIN
-node set-staff-pin.js staff@example.com 1234
+node set-staff-pin.js staff@example.com 123456
 
 # List all staff
 node set-staff-pin.js
@@ -36,8 +36,8 @@ node set-staff-pin.js
 
 ## Staff with PINs
 
-- **Antoine Rousseau**: `5678`
-- **Development Admin**: `1234`
+- **Antoine Rousseau**: `567890`
+- **Development Admin**: `123456`
 
 ---
 
@@ -58,7 +58,7 @@ node set-staff-pin.js
 → Use `npm run dev:electron` (not `npx electron .`)
 
 **"Incorrect PIN"**
-→ Set PIN with: `node set-staff-pin.js email@example.com 1234`
+→ Set PIN with: `node set-staff-pin.js email@example.com 123456`
 
 **"Port already in use"**
 → Kill other process or change port

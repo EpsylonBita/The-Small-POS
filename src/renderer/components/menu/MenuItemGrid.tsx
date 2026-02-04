@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { MenuItemCard } from './MenuItemCard';
 import { menuService, MenuItem } from '../../services/MenuService';
+import { AlertTriangle, Utensils } from 'lucide-react';
 
 interface MenuItemGridProps {
   selectedCategory: string;
@@ -138,11 +139,9 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     return (
       <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
         <div className="text-center">
-          <div className={`text-6xl mb-4 ${
+          <AlertTriangle className={`w-12 h-12 mb-4 mx-auto ${
             resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
-          }`}>
-            😞
-          </div>
+          }`} />
           <p className={`text-lg font-medium mb-2 ${
             resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
           }`}>
@@ -174,11 +173,9 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
     return (
       <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
         <div className="text-center">
-          <div className={`text-6xl mb-4 ${
+          <Utensils className={`w-12 h-12 mb-4 mx-auto ${
             resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
-          }`}>
-            🍽️
-          </div>
+          }`} />
           <p className={`text-lg font-medium mb-2 ${
             resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
           }`}>

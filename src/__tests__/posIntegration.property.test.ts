@@ -16,7 +16,7 @@ type ModuleType =
   | 'reservations' | 'tables'
   | 'rooms' | 'housekeeping' | 'guest_billing'
   | 'appointments' | 'staff_schedule' | 'service_catalog'
-  | 'drive_through' | 'quick_pos'
+  | 'drive_through' | 'kiosk'
   | 'product_catalog';
 
 interface Module {
@@ -54,7 +54,7 @@ const VERTICAL_MODULES: Record<VerticalType, ModuleType[]> = {
   restaurant: ['reservations', 'tables'],
   hotel: ['rooms', 'housekeeping', 'guest_billing'],
   salon: ['appointments', 'staff_schedule', 'service_catalog'],
-  fast_food: ['drive_through', 'quick_pos'],
+  fast_food: ['drive_through', 'kiosk'],
   retail: ['product_catalog'],
 };
 

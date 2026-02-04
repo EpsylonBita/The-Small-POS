@@ -3,7 +3,8 @@ import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
 import type { Order, OrderItem } from '../../types/orders';
-import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote } from 'lucide-react';
+import { formatCurrency, formatDate, formatTime } from '../../utils/format';
+import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -156,7 +157,7 @@ export function OrderApprovalPanel({
 }: OrderApprovalPanelProps) {
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
-  const [estimatedTime, setEstimatedTime] = useState(30);
+  const [estimatedTime, setEstimatedTime] = useState(20);
   const [isApproving, setIsApproving] = useState(false);
   const [isDeclining, setIsDeclining] = useState(false);
   const [showDeclineModal, setShowDeclineModal] = useState(false);
@@ -164,6 +165,7 @@ export function OrderApprovalPanel({
   const [isPrinting, setIsPrinting] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
   const [itemsLoadError, setItemsLoadError] = useState<string | null>(null);
+  const canClose = viewOnly;
 
   // Normalize fields to handle different shapes
   const orderNumber = order.order_number || order.orderNumber || '';
@@ -486,18 +488,12 @@ export function OrderApprovalPanel({
     }
   }, [order.id, t]);
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('el-GR', {
-      style: 'currency',
-      currency: 'EUR'
-    }).format(amount);
-  };
 
   const getOrderTypeLabel = (type: string) => {
     switch (type?.toLowerCase()) {
-      case 'delivery': return t('orderDashboard.delivery') || 'Παράδοση';
-      case 'pickup': return t('orderDashboard.pickup') || 'Παραλαβή';
-      case 'dine-in': return t('orderDashboard.dineIn') || 'Εντός χώρου';
+      case 'delivery': return t('orderDashboard.delivery', { defaultValue: 'Delivery' });
+      case 'pickup': return t('orderDashboard.pickup', { defaultValue: 'Pickup' });
+      case 'dine-in': return t('orderDashboard.dineIn', { defaultValue: 'Dine In' });
       default: return type;
     }
   };
@@ -517,35 +513,46 @@ export function OrderApprovalPanel({
       {/* Backdrop */}
       <div
         className="liquid-glass-modal-backdrop fixed inset-0 z-[1000]"
-        onClick={onClose}
+        onClick={canClose ? onClose : undefined}
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] z-[1050] flex flex-col">
+      <div
+        className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] z-[1050] flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`order-approval-title-${order.id}`}
+        tabIndex={-1}
+      >
 
         {/* Header */}
         <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
           <div className="flex justify-between items-start gap-4">
             <div className="flex-1">
-              <h2 className="text-2xl font-bold liquid-glass-modal-text">
-                {t('orderApprovalPanel.orderNumber', { number: orderNumber }) || `Παραγγελία #${orderNumber}`}
+              <h2
+                id={`order-approval-title-${order.id}`}
+                className="text-2xl font-bold liquid-glass-modal-text"
+              >
+                {t('orderApprovalPanel.orderNumber', { number: orderNumber, defaultValue: `Order #${orderNumber}` })}
               </h2>
               <div className="flex items-center gap-3 mt-2 flex-wrap">
                 <span className="text-sm liquid-glass-modal-text-muted">
-                  {createdAt ? createdAt.toLocaleDateString('el-GR') + ' ' + createdAt.toLocaleTimeString('el-GR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                  {createdAt ? `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}` : ''}
                 </span>
                 <span className={`text-xs px-3 py-1 rounded-full border ${getStatusColor(order.status)}`}>
-                  {(t(`orders.status.${order.status}`) || order.status || 'ΕΚΚΡΕΜΕΙ').toUpperCase()}
+                  {t(`orders.status.${order.status}`, { defaultValue: (order.status || 'Pending') }).toUpperCase()}
                 </span>
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
-              aria-label={t('common.actions.close')}
-            >
-              <X className="w-6 h-6" />
-            </button>
+              {canClose ? (
+                <button
+                  onClick={onClose}
+                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+                  aria-label={t('common.actions.close')}
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              ) : null}
           </div>
         </div>
 
@@ -565,7 +572,7 @@ export function OrderApprovalPanel({
                       {getOrderTypeLabel(orderType)}
                     </h3>
                     <p className="text-sm liquid-glass-modal-text-muted">
-                      {t(`orders.status.${order.status}`) || order.status || 'Εκκρεμεί'}
+                      {t(`orders.status.${order.status}`, { defaultValue: order.status || 'Pending' })}
                     </p>
                   </div>
                 </div>
@@ -579,14 +586,14 @@ export function OrderApprovalPanel({
                 <div className="liquid-glass-modal-card">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                     <User className="w-4 h-4" />
-                    {t('orderApprovalPanel.name') || 'Πελάτης'}
+                    {t('orderApprovalPanel.name', { defaultValue: 'Customer' })}
                   </h4>
                   <div className="space-y-3">
                     <div className="flex items-center gap-3">
                       <User className="w-10 h-10 text-purple-500" />
                       <div>
                         <div className="font-semibold liquid-glass-modal-text">
-                          {customerName || t('orderApprovalPanel.guestCustomer') || 'Επισκέπτης'}
+                          {customerName || t('orderApprovalPanel.guestCustomer', { defaultValue: 'Guest' })}
                         </div>
                         {customerPhone && (
                           <div className="text-sm liquid-glass-modal-text-muted">
@@ -603,14 +610,14 @@ export function OrderApprovalPanel({
                   <div className="liquid-glass-modal-card">
                     <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                       <MapPin className="w-4 h-4" />
-                      {t('orderApprovalPanel.address') || 'Διεύθυνση'}
+                      {t('orderApprovalPanel.address', { defaultValue: 'Address' })}
                     </h4>
                     <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-3">
                       {/* Address Road */}
                       {deliveryAddress && (
                         <div className="flex flex-col">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.addressRoad') || 'Οδός'}
+                            {t('orderApprovalPanel.addressRoad', { defaultValue: 'Street' })}
                           </span>
                           <span className="font-medium liquid-glass-modal-text">
                             {deliveryAddress}
@@ -622,7 +629,7 @@ export function OrderApprovalPanel({
                       {deliveryPostalCode && (
                         <div className="flex flex-col">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.postalCode') || 'Τ.Κ.'}
+                            {t('orderApprovalPanel.postalCode', { defaultValue: 'Postal Code' })}
                           </span>
                           <span className="font-medium liquid-glass-modal-text">
                             {deliveryPostalCode}
@@ -634,7 +641,7 @@ export function OrderApprovalPanel({
                       {deliveryCity && (
                         <div className="flex flex-col">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.city') || 'Πόλη'}
+                            {t('orderApprovalPanel.city', { defaultValue: 'City' })}
                           </span>
                           <span className="font-medium liquid-glass-modal-text">
                             {deliveryCity}
@@ -646,7 +653,7 @@ export function OrderApprovalPanel({
                       {deliveryFloor && (
                         <div className="flex flex-col">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.floor') || 'Όροφος'}
+                            {t('orderApprovalPanel.floor', { defaultValue: 'Floor' })}
                           </span>
                           <span className="font-medium liquid-glass-modal-text">
                             {deliveryFloor}
@@ -658,7 +665,7 @@ export function OrderApprovalPanel({
                       {nameOnRinger && (
                         <div className="flex flex-col">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.nameOnRinger') || 'Όνομα στο κουδούνι'}
+                            {t('orderApprovalPanel.nameOnRinger', { defaultValue: 'Name on bell' })}
                           </span>
                           <span className="font-medium liquid-glass-modal-text">
                             {nameOnRinger}
@@ -670,7 +677,7 @@ export function OrderApprovalPanel({
                       {deliveryNotes && (
                         <div className="flex flex-col pt-2 border-t border-white/10">
                           <span className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted mb-1">
-                            {t('orderApprovalPanel.deliveryNotes') || 'Σημειώσεις'}
+                            {t('orderApprovalPanel.deliveryNotes', { defaultValue: 'Notes' })}
                           </span>
                           <span className="liquid-glass-modal-text italic">
                             {deliveryNotes}
@@ -685,7 +692,7 @@ export function OrderApprovalPanel({
                 <div className="liquid-glass-modal-card">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                     <CreditCard className="w-4 h-4" />
-                    {t('orderApprovalPanel.paymentMethod') || 'Πληρωμή'}
+                    {t('orderApprovalPanel.paymentMethod', { defaultValue: 'Payment' })}
                   </h4>
                   <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5">
                     <div className="flex items-center justify-between">
@@ -695,7 +702,7 @@ export function OrderApprovalPanel({
                           return (
                             <>
                               <p className="font-medium liquid-glass-modal-text">
-                                {t('modals.orderDetails.card') || 'Κάρτα'}
+                                {t('modals.orderDetails.card', { defaultValue: 'Card' })}
                               </p>
                               <CreditCard className="w-5 h-5 text-blue-500" />
                             </>
@@ -704,7 +711,7 @@ export function OrderApprovalPanel({
                           return (
                             <>
                               <p className="font-medium liquid-glass-modal-text">
-                                {t('modals.orderDetails.cash') || 'Μετρητά'}
+                                {t('modals.orderDetails.cash', { defaultValue: 'Cash' })}
                               </p>
                               <Banknote className="w-5 h-5 text-green-500" />
                             </>
@@ -718,7 +725,7 @@ export function OrderApprovalPanel({
                         } else {
                           return (
                             <p className="font-medium liquid-glass-modal-text">
-                              {t('modals.orderDetails.pending') || 'Εκκρεμεί'}
+                              {t('modals.orderDetails.pending', { defaultValue: 'Pending' })}
                             </p>
                           );
                         }
@@ -733,7 +740,7 @@ export function OrderApprovalPanel({
                 <div className="liquid-glass-modal-card h-full flex flex-col">
                   <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                     <Package className="w-4 h-4" />
-                    {t('orderApprovalPanel.orderItems') || 'Προϊόντα Παραγγελίας'}
+                    {t('orderApprovalPanel.orderItems', { defaultValue: 'Order Items' })}
                   </h4>
 
                   {isLoadingItems ? (
@@ -783,7 +790,10 @@ export function OrderApprovalPanel({
                                     <div className="mt-1 pt-1 border-t border-red-500/20">
                                       {item.customizations.filter((c: any) => c.isWithout).map((c: { name: string }, i: number) => (
                                         <div key={`without-${i}`} className="flex justify-between text-xs text-red-400">
-                                          <span className="line-through">🚫 {c.name}</span>
+                                          <span className="line-through inline-flex items-center gap-1">
+                                            <Ban className="w-3 h-3" />
+                                            {c.name}
+                                          </span>
                                         </div>
                                       ))}
                                     </div>
@@ -800,13 +810,13 @@ export function OrderApprovalPanel({
                     </div>
                   ) : (
                     <div className="text-center py-8 liquid-glass-modal-text-muted">
-                      <p className="mb-3">{itemsLoadError || t('orderApprovalPanel.noItems') || 'Δεν βρέθηκαν προϊόντα'}</p>
+                      <p className="mb-3">{itemsLoadError || t('orderApprovalPanel.noItems', { defaultValue: 'No items found' })}</p>
                       <button
                         onClick={handleRetryLoadItems}
                         disabled={isLoadingItems}
                         className="liquid-glass-modal-button"
                       >
-                        {t('orderApprovalPanel.retryLoadItems') || 'Προσπάθεια ξανά'}
+                        {t('orderApprovalPanel.retryLoadItems', { defaultValue: 'Try again' })}
                       </button>
                     </div>
                   )}
@@ -814,25 +824,25 @@ export function OrderApprovalPanel({
                   {/* Totals Section */}
                   <div className="mt-6 pt-6 border-t border-gray-200/50 dark:border-gray-700/50 space-y-2">
                     <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
-                      <span>{t('orderApprovalPanel.subtotal') || 'Υποσύνολο'}</span>
+                      <span>{t('orderApprovalPanel.subtotal', { defaultValue: 'Subtotal' })}</span>
                       <span>{formatCurrency(subtotal)}</span>
                     </div>
                     {taxAmount > 0 && (
                       <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
-                        <span>{t('orderApprovalPanel.tax') || 'Φόρος'}</span>
+                        <span>{t('orderApprovalPanel.tax', { defaultValue: 'Tax' })}</span>
                         <span>{formatCurrency(taxAmount)}</span>
                       </div>
                     )}
                     {deliveryFee > 0 && (
                       <div className="flex justify-between text-sm liquid-glass-modal-text-muted pb-2">
-                        <span>{t('orderApprovalPanel.deliveryFee') || 'Έξοδα Αποστολής'}</span>
+                        <span>{t('orderApprovalPanel.deliveryFee', { defaultValue: 'Delivery fee' })}</span>
                         <span>{formatCurrency(deliveryFee)}</span>
                       </div>
                     )}
                     {discountAmount > 0 && (
                       <div className="flex justify-between text-sm text-green-500 font-medium">
                         <span>
-                          🏷️ {t('orderApprovalPanel.discount') || 'Έκπτωση'}
+                          <span className="inline-flex items-center gap-2"><Tag className="w-4 h-4" aria-hidden="true" />{t('orderApprovalPanel.discount', { defaultValue: 'Discount' })}</span>
                           {discountPercentage > 0 && ` (${discountPercentage}%)`}
                         </span>
                         <span>-{formatCurrency(discountAmount)}</span>
@@ -840,7 +850,7 @@ export function OrderApprovalPanel({
                     )}
                     <div className="flex justify-between items-end pt-2 border-t border-dashed border-gray-300 dark:border-gray-600">
                       <span className="font-bold text-lg liquid-glass-modal-text">
-                        {t('orderApprovalPanel.totalAmount') || 'Συνολικό Ποσό'}
+                        {t('orderApprovalPanel.totalAmount', { defaultValue: 'Total' })}
                       </span>
                       <span className="font-bold text-2xl text-blue-600 dark:text-blue-400">
                         {formatCurrency(totalAmount)}
@@ -856,7 +866,7 @@ export function OrderApprovalPanel({
               <div className="liquid-glass-modal-card">
                 <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
                   <Clock className="w-4 h-4" />
-                  {t('orderApprovalPanel.estimatedTime') || 'Εκτιμώμενος Χρόνος Προετοιμασίας'}
+                  {t('orderApprovalPanel.estimatedTime', { defaultValue: 'Estimated prep time' })}
                 </h4>
                 <div className="grid grid-cols-6 gap-2">
                   {ESTIMATED_TIME_OPTIONS.map((time) => (
@@ -869,7 +879,7 @@ export function OrderApprovalPanel({
                           : 'liquid-glass-modal-button'
                       }`}
                     >
-                      {time}λ
+                      {time}{t('common.units.minutesShort', { defaultValue: 'm' })}
                     </button>
                   ))}
                 </div>
@@ -881,12 +891,12 @@ export function OrderApprovalPanel({
               <div className="liquid-glass-modal-card bg-red-500/10 border-red-500/30">
                 <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider text-red-600 dark:text-red-400 mb-4">
                   <XCircle className="w-4 h-4" />
-                  {t('orderApprovalPanel.declineReason') || 'Λόγος Απόρριψης'}
+                  {t('orderApprovalPanel.declineReason', { defaultValue: 'Decline reason' })}
                 </h4>
                 <textarea
                   value={declineReason}
                   onChange={(e) => setDeclineReason(e.target.value)}
-                  placeholder={t('orderApprovalPanel.declinePlaceholder') || 'Εισάγετε λόγο...'}
+                  placeholder={t('orderApprovalPanel.declinePlaceholder', { defaultValue: 'Enter a reason...' })}
                   className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-red-500 transition-all resize-none text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
                   rows={3}
                 />
@@ -907,14 +917,14 @@ export function OrderApprovalPanel({
                     className="flex-1 liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30 gap-2"
                   >
                     <Check className="w-4 h-4" />
-                    {isApproving ? (t('orderApprovalPanel.approving') || 'Έγκριση...') : (t('orderApprovalPanel.approveButton') || 'Έγκριση')}
+                    {isApproving ? (t('orderApprovalPanel.approving', { defaultValue: 'Approving...' })) : (t('orderApprovalPanel.approveButton', { defaultValue: 'Approve' }))}
                   </button>
                   <button
                     onClick={() => setShowDeclineModal(true)}
                     className="flex-1 liquid-glass-modal-button bg-red-600/20 hover:bg-red-600/30 text-red-400 border-red-500/30 gap-2"
                   >
                     <XCircle className="w-4 h-4" />
-                    {t('orderApprovalPanel.declineButton') || 'Απόρριψη'}
+                    {t('orderApprovalPanel.declineButton', { defaultValue: 'Decline' })}
                   </button>
                 </>
               ) : (
@@ -924,13 +934,13 @@ export function OrderApprovalPanel({
                     disabled={isDeclining}
                     className="flex-1 liquid-glass-modal-button bg-red-600/20 hover:bg-red-600/30 text-red-400 border-red-500/30"
                   >
-                    {isDeclining ? (t('orderApprovalPanel.declining') || 'Απόρριψη...') : (t('orderApprovalPanel.confirmDecline') || 'Επιβεβαίωση')}
+                    {isDeclining ? (t('orderApprovalPanel.declining', { defaultValue: 'Declining...' })) : (t('orderApprovalPanel.confirmDecline', { defaultValue: 'Confirm' }))}
                   </button>
                   <button
                     onClick={() => setShowDeclineModal(false)}
                     className="liquid-glass-modal-button"
                   >
-                    {t('common.actions.cancel') || 'Ακύρωση'}
+                    {t('common.actions.cancel', { defaultValue: 'Cancel' })}
                   </button>
                 </>
               )}
@@ -943,13 +953,13 @@ export function OrderApprovalPanel({
                 className="liquid-glass-modal-button w-full gap-2"
               >
                 <Printer className="w-4 h-4" />
-                {isPrinting ? (t('orderApprovalPanel.printing') || 'Εκτύπωση...') : (t('orderApprovalPanel.printReceipt') || 'Εκτύπωση Απόδειξης')}
+                {isPrinting ? (t('orderApprovalPanel.printing', { defaultValue: 'Printing...' })) : (t('orderApprovalPanel.printReceipt', { defaultValue: 'Print receipt' }))}
               </button>
               <button
                 onClick={onClose}
                 className="liquid-glass-modal-button w-full gap-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30"
               >
-                {t('common.actions.close') || 'Κλείσιμο'}
+                {t('common.actions.close', { defaultValue: 'Close' })}
               </button>
             </div>
           )}

@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatCurrency } from '../../utils/format';
@@ -301,7 +301,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                               <div className={`text-xs font-semibold mb-1 antialiased ${withIngredients.length > 0 ? 'mt-2' : ''} ${
                                 resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-500'
                               }`}>
-                                🚫 {t('menu.cart.without') || 'Χωρίς'}:
+                                <span className="inline-flex items-center gap-1">
+                                  <Ban className="w-3 h-3" aria-hidden="true" />
+                                  {t('menu.cart.without', { defaultValue: 'Without' })}:
+                                </span>
                               </div>
                               <div className="flex flex-wrap gap-1">
                                 {withoutIngredients.map((c, idx) => {

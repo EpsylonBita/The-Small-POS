@@ -198,6 +198,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       items: cartItems.map(item => ({
         id: item.id,
         menu_item_id: item.id,
+        product_id: item.id,
+        product_name: item.name,
         name: item.name,
         quantity: item.cartQuantity,
         price: item.price,

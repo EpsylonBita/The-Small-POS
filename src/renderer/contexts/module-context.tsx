@@ -29,10 +29,6 @@ import {
   STARTER_FEATURES,
 } from '../../shared/types/features';
 import {
-  POS_IMPLEMENTED_MODULES,
-  POS_COMING_SOON_MODULES,
-  CORE_MODULES,
-  shouldShowInNavigation,
   isCoreModule,
   getCoreModuleIds,
   getRemovedModuleIds,
@@ -112,7 +108,10 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 /**
  * Default core module metadata for fallback scenarios.
  * Used when API returns empty or no core modules.
- * 
+ *
+ * Note: Settings is NOT a module - it's handled by a dedicated gear icon button
+ * in NavigationSidebar that opens ConnectionSettingsModal.
+ *
  * @see Requirements 2.3, 1.4
  */
 const DEFAULT_CORE_MODULE_METADATA: Record<string, ModuleMetadata> = {
@@ -127,20 +126,6 @@ const DEFAULT_CORE_MODULE_METADATA: Record<string, ModuleMetadata> = {
     compatibleBusinessTypes: [],
     isCore: true,
     sortOrder: 0,
-    showInNavigation: true,
-    posEnabled: true,
-  },
-  settings: {
-    id: 'settings' as ModuleId,
-    name: 'Settings',
-    description: 'System settings and configuration',
-    icon: 'Settings',
-    route: '/settings',
-    category: 'core',
-    requiredFeatures: [],
-    compatibleBusinessTypes: [],
-    isCore: true,
-    sortOrder: 999,
     showInNavigation: true,
     posEnabled: true,
   },
@@ -333,12 +318,12 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
   /**
    * Transform POSModuleInfo[] from API to EnabledModule[] format.
-   * Filters modules using POS_IMPLEMENTED_MODULES registry.
-   * 
+   * Trusts the canonical module registry from admin dashboard.
+   *
    * Only shows modules that are:
    * 1. Core modules (dashboard, settings) - always shown
-   * 2. Purchased modules that are POS-enabled and implemented
-   * 
+   * 2. Purchased modules that are POS-enabled
+   *
    * Requirements: 1.1, 1.2, 2.1
    */
   const transformApiModules = useCallback(
@@ -346,8 +331,6 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       return modules
         // Filter to only POS-enabled modules (Requirement 2.1)
         .filter((m) => m.pos_enabled)
-        // Filter to only modules implemented in POS or coming soon (Requirement 2.1)
-        .filter((m) => shouldShowInNavigation(m.module_id))
         // Filter to only purchased modules OR core modules (core modules always show)
         .filter((m) => m.is_purchased || m.is_core || isCoreModule(m.module_id))
         .map((apiModule): EnabledModule => {
@@ -549,15 +532,40 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   // Known valid business types for runtime validation
   // Must match BusinessType from shared/types/organization.ts
   const VALID_BUSINESS_TYPES: BusinessType[] = [
+    // Food service
     'fast_food',
     'restaurant',
-    'hotel',
-    'salon',
+    'cafe',
+    'bar',
     'bar_cafe',
+    'bakery',
+    'catering',
+    'ghost_kitchen',
+    // Hospitality
+    'hotel',
+    'hotel_restaurant',
+    // Service (appointments)
+    'salon',
+    'spa',
+    'barbershop',
+    'beauty_salon',
+    'wellness',
+    'fitness',
+    'clinic',
+    'dental',
+    'medical_clinic',
+    'veterinary',
+    'physiotherapy',
+    // Retail
+    'retail',
+    'shop',
+    'boutique',
+    'convenience',
+    'grocery',
+    // Business models
     'food_truck',
     'chain',
     'franchise',
-    'retail',
   ];
 
   /**
@@ -817,7 +825,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Combines enabled and locked modules, filters by showInNavigation,
    * sorts by sortOrder ascending (modules without sortOrder default to end),
    * and includes access flags.
-   * Core modules (dashboard, settings) are always included regardless of API response.
+   * Core modules (dashboard) are always included regardless of API response.
    * This eliminates the need for NavigationSidebar to recompute on each render.
    * 
    * @see Requirements 2.3, 1.4, 2.4

@@ -63,6 +63,16 @@ export const TableActionModal: React.FC<TableActionModalProps> = memo(({
       label: t('tableActionModal.status.cleaning', { defaultValue: 'Cleaning' }),
       color: 'text-gray-500',
       bgClass: 'bg-gray-500/10 border-gray-500/30'
+    },
+    maintenance: {
+      label: t('tableActionModal.status.maintenance', { defaultValue: 'Maintenance' }),
+      color: 'text-orange-500',
+      bgClass: 'bg-orange-500/10 border-orange-500/30'
+    },
+    unavailable: {
+      label: t('tableActionModal.status.unavailable', { defaultValue: 'Unavailable' }),
+      color: 'text-slate-500',
+      bgClass: 'bg-slate-500/10 border-slate-500/30'
     }
   };
 

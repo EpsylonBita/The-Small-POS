@@ -28,7 +28,7 @@ module.exports = (env, argv) => {
     alias: {
       '@': path.resolve(__dirname, 'src'),
       '@renderer': path.resolve(__dirname, 'src/renderer'),
-      '@shared': path.resolve(__dirname, 'src/shared'),
+      '@shared': path.resolve(__dirname, '../shared'),
       // Fix for motion-utils ESM import (process/browser -> process/browser.js)
       'process/browser': require.resolve('process/browser.js')
     },

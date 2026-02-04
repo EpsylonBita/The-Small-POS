@@ -4,6 +4,7 @@ import { useTheme } from '../../../contexts/theme-context';
 import { User, Clock, ChevronLeft, ChevronRight, Calendar, Users, Briefcase, RefreshCw, AlertCircle } from 'lucide-react';
 import { posApiGet } from '../../../utils/api-helpers';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
+import { formatDate } from '../../../utils/format';
 
 interface StaffMember {
   id: string;
@@ -258,7 +259,7 @@ export const StaffScheduleView: React.FC = memo(() => {
             }`}>
               <Calendar className={`w-5 h-5 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />
               <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                {currentWeekStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - {weekDays[6]?.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                {formatDate(currentWeekStart, { month: 'short', day: 'numeric' })} - {weekDays[6] ? formatDate(weekDays[6], { month: 'short', day: 'numeric' }) : ''}
               </span>
             </div>
             <button

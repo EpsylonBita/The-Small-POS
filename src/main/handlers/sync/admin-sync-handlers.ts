@@ -6,11 +6,18 @@ import {
   fetchSuppliersFromAdmin,
   fetchAnalyticsFromAdmin,
   fetchOrdersFromAdmin,
+  fetchRoomsFromAdmin,
+  updateRoomStatusFromAdmin,
+  fetchDriveThruFromAdmin,
+  updateDriveThruOrderStatusFromAdmin,
   type FetchTablesOptions,
   type FetchReservationsOptions,
   type FetchSuppliersOptions,
   type FetchAnalyticsOptions,
   type FetchOrdersOptions,
+  type FetchRoomsOptions,
+  type FetchDriveThruOptions,
+  type RoomStatus,
 } from '../../api-sync';
 
 /**
@@ -436,6 +443,192 @@ export function setupAdminSyncHandlers(): void {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to fetch orders',
+      };
+    }
+  });
+
+  // Fetch rooms from admin dashboard (Hotel Vertical)
+  ipcMain.handle('sync:fetch-rooms', async (_event, options?: FetchRoomsOptions) => {
+    try {
+      console.log('[Sync Handlers] sync:fetch-rooms called', { options });
+      const rooms = await fetchRoomsFromAdmin(dbManager, options);
+      return { success: true, rooms };
+    } catch (error) {
+      console.error('[Sync Handlers] sync:fetch-rooms error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch rooms',
+      };
+    }
+  });
+
+  // Update room status via admin dashboard (Hotel Vertical)
+  ipcMain.handle('sync:update-room-status', async (_event, roomId: string, status: RoomStatus) => {
+    try {
+      console.log('[Sync Handlers] sync:update-room-status called', { roomId, status });
+      const room = await updateRoomStatusFromAdmin(dbManager, roomId, status);
+      return { success: true, room };
+    } catch (error) {
+      console.error('[Sync Handlers] sync:update-room-status error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update room status',
+      };
+    }
+  });
+
+  // Fetch drive-through data from admin dashboard (Fast-Food Vertical)
+  ipcMain.handle('sync:fetch-drive-thru', async (_event, options?: FetchDriveThruOptions) => {
+    try {
+      console.log('[Sync Handlers] sync:fetch-drive-thru called', { options });
+      const result = await fetchDriveThruFromAdmin(dbManager, options);
+      return {
+        success: true,
+        lanes: result.lanes || [],
+        orders: result.orders || [],
+        queue_stats: result.queue_stats,
+      };
+    } catch (error) {
+      console.error('[Sync Handlers] sync:fetch-drive-thru error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch drive-through data',
+      };
+    }
+  });
+
+  // Update drive-through order status via admin dashboard (Fast-Food Vertical)
+  ipcMain.handle(
+    'sync:update-drive-thru-order-status',
+    async (_event, driveThruOrderId: string, status: string) => {
+      try {
+        console.log('[Sync Handlers] sync:update-drive-thru-order-status called', {
+          driveThruOrderId,
+          status,
+        });
+        const order = await updateDriveThruOrderStatusFromAdmin(dbManager, driveThruOrderId, status);
+        return { success: true, order };
+      } catch (error) {
+        console.error('[Sync Handlers] sync:update-drive-thru-order-status error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to update drive-through order status',
+        };
+      }
+    }
+  );
+
+  // Generic authenticated fetch from admin dashboard API
+  // This allows renderer to make arbitrary API calls to the admin dashboard
+  // with proper terminal authentication headers
+  ipcMain.handle('api:fetch-from-admin', async (_event, path: string, options?: {
+    method?: string;
+    body?: any;
+    headers?: Record<string, string>;
+  }) => {
+    try {
+      const adminSyncService = serviceRegistry.adminDashboardSyncService;
+      if (!adminSyncService) {
+        return { success: false, error: 'Admin sync service not initialized' };
+      }
+
+      // Get the admin dashboard URL and terminal credentials
+      const db = dbManager.getDatabaseService();
+      const terminalId = (db?.settings?.getSetting?.('terminal', 'terminal_id', '') || '').toString();
+      const apiKey = (db?.settings?.getSetting?.('terminal', 'pos_api_key', '') || '').toString();
+      const adminUrl = (db?.settings?.getSetting?.('terminal', 'admin_dashboard_url', '') || process.env.ADMIN_DASHBOARD_URL || 'http://localhost:3001').toString();
+
+      if (!terminalId || !apiKey) {
+        return { success: false, error: 'Terminal credentials not configured' };
+      }
+
+      if (!adminUrl) {
+        return { success: false, error: 'Admin dashboard URL not configured' };
+      }
+
+      if (!path || typeof path !== 'string') {
+        return { success: false, error: 'Invalid API path' };
+      }
+
+      let baseUrl: URL;
+      try {
+        baseUrl = new URL(adminUrl);
+        if (!['http:', 'https:'].includes(baseUrl.protocol)) {
+          return { success: false, error: 'Admin dashboard URL must be http or https' };
+        }
+      } catch (e) {
+        return { success: false, error: 'Invalid admin dashboard URL' };
+      }
+
+      // Build the full URL and ensure it stays on the admin host
+      let fullUrl: URL;
+      try {
+        fullUrl = (path.startsWith('http://') || path.startsWith('https://'))
+          ? new URL(path)
+          : new URL(path, baseUrl);
+      } catch (e) {
+        return { success: false, error: 'Invalid API path' };
+      }
+
+      if (fullUrl.origin !== baseUrl.origin) {
+        return { success: false, error: 'Target host not allowed' };
+      }
+
+      // Build headers with terminal authentication
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...options?.headers,
+        'x-terminal-id': terminalId,
+        'x-pos-api-key': apiKey,
+      };
+
+      // Make the fetch request
+      const fetchOptions: RequestInit = {
+        method: options?.method || 'GET',
+        headers,
+        signal: AbortSignal.timeout(30000), // 30 second timeout
+      };
+
+      if (options?.body && options?.method !== 'GET') {
+        fetchOptions.body = typeof options.body === 'string'
+          ? options.body
+          : JSON.stringify(options.body);
+      }
+
+      console.log('[api:fetch-from-admin] Fetching:', fullUrl.toString(), { method: fetchOptions.method });
+
+      const response = await fetch(fullUrl.toString(), fetchOptions);
+
+      // Try to parse as JSON, fall back to text
+      let data;
+      const contentType = response.headers.get('content-type');
+      if (contentType?.includes('application/json')) {
+        data = await response.json();
+      } else {
+        data = await response.text();
+      }
+
+      if (!response.ok) {
+        console.error('[api:fetch-from-admin] Request failed:', response.status, data);
+        return {
+          success: false,
+          error: typeof data === 'object' && data?.error ? data.error : `HTTP ${response.status}`,
+          status: response.status,
+          data,
+        };
+      }
+
+      return {
+        success: true,
+        data,
+        status: response.status,
+      };
+    } catch (error) {
+      console.error('[api:fetch-from-admin] Error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to fetch from admin API',
       };
     }
   });

@@ -4,6 +4,7 @@ import { toast } from 'react-hot-toast'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { discoverBluetoothPrinters, getBluetoothStatus } from '../../utils/web-bluetooth-printer-discovery'
+import { Activity, AlertTriangle, ChefHat, Info, Pencil, Printer, Receipt, Tag, Trash2, Wine } from 'lucide-react'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
@@ -214,7 +215,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           setViewMode('discover')
           toast.success(t('settings.printer.bluetoothDeviceFound', { count: btDevices.length }))
         } else {
-          toast(t('settings.printer.noBluetoothDevicesFound'), { icon: 'ℹ️' })
+          toast(t('settings.printer.noBluetoothDevicesFound'), { icon: <Info className="w-4 h-4 text-blue-500" /> })
         }
       } else {
         toast.error(result?.error || t('settings.printer.bluetoothDiscoveryFailed'))
@@ -507,11 +508,11 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   // Render role assignment summary
   const renderRolesSummary = () => {
     const roles: PrinterRole[] = ['receipt', 'kitchen', 'bar', 'label']
-    const roleIcons: Record<PrinterRole, string> = {
-      receipt: '🧾',
-      kitchen: '👨‍🍳',
-      bar: '🍸',
-      label: '🏷️',
+    const roleIcons: Record<PrinterRole, React.ReactNode> = {
+      receipt: <Receipt className="w-4 h-4" />,
+      kitchen: <ChefHat className="w-4 h-4" />,
+      bar: <Wine className="w-4 h-4" />,
+      label: <Tag className="w-4 h-4" />,
     }
 
     return (
@@ -531,7 +532,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               }`}
             >
               <div className="flex items-center gap-1 text-sm">
-                <span>{roleIcons[role]}</span>
+                <span className="inline-flex items-center">{roleIcons[role]}</span>
                 <span className="font-medium liquid-glass-modal-text">{getRoleLabel(role)}</span>
               </div>
               <div className="text-xs liquid-glass-modal-text-muted mt-1">
@@ -616,7 +617,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     className={liquidGlassModalButton('secondary', 'sm')}
                     title={t('settings.printer.testPrint')}
                   >
-                    🖨️
+                    <Printer className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => handleGetDiagnostics(printer.id)}
@@ -624,14 +625,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     className={liquidGlassModalButton('secondary', 'sm')}
                     title={t('settings.printer.diagnostics')}
                   >
-                    📊
+                    <Activity className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => handleEdit(printer)}
                     className={liquidGlassModalButton('secondary', 'sm')}
                     title={t('common.actions.edit')}
                   >
-                    ✏️
+                    <Pencil className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => handleDelete(printer.id)}
@@ -639,7 +640,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     className={liquidGlassModalButton('danger', 'sm')}
                     title={t('common.actions.delete')}
                   >
-                    🗑️
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
               </div>
@@ -1069,7 +1070,9 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     diagnostics.connectionLatencyMs > 1000 ? 'text-red-400' : ''
                   }`}>
                     {diagnostics.connectionLatencyMs}ms
-                    {diagnostics.connectionLatencyMs > 500 && ' ⚠️'}
+                    {diagnostics.connectionLatencyMs > 500 && (
+                      <AlertTriangle className="w-3 h-3 inline-block ml-1 align-text-top text-yellow-400" />
+                    )}
                   </div>
                 </>
               )}
@@ -1082,7 +1085,12 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     diagnostics.signalStrength < 60 ? 'text-yellow-400' : ''
                   }`}>
                     {diagnostics.signalStrength}%
-                    {diagnostics.signalStrength < 30 && ' ⚠️ ' + t('settings.printer.weakSignal')}
+                    {diagnostics.signalStrength < 30 && (
+                      <span className="inline-flex items-center gap-1 ml-1 text-red-400">
+                        <AlertTriangle className="w-3 h-3" />
+                        {t('settings.printer.weakSignal')}
+                      </span>
+                    )}
                   </div>
                 </>
               )}

@@ -85,9 +85,9 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         <LiquidGlassModal
             isOpen={isOpen}
             onClose={onClose}
-            title=""
             size="sm"
             className="border-none"
+            ariaLabel={title}
         >
             <div className="flex flex-col gap-6">
                 <div className="flex items-center gap-4">

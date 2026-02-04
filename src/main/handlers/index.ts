@@ -21,6 +21,7 @@ import { registerShiftHandlers } from './shift/shift-handlers';
 import { registerReportHandlers } from './report/report-handlers';
 import { registerMenuHandlers } from './menu/menu-handlers';
 import { registerPrintHandlers } from './print/print-handlers';
+import { registerLabelPrintHandlers } from './print/label-print-handlers';
 import { registerCustomerHandlers } from './customers/customer-handlers';
 import { registerSettingsHandlers } from './settings/settings-handlers';
 import { registerOrderPreparationHandlers } from './orders/order-preparation-handlers';
@@ -41,6 +42,12 @@ import { registerDeliveryZoneHandlers } from './delivery-zone-handlers';
 // Module handlers
 import { registerModuleHandlers } from './module-handlers';
 
+// Dashboard metrics handlers
+import { registerDashboardMetricsHandlers } from './dashboard/dashboard-metrics-handlers';
+
+// Inventory handlers
+import { registerBundleInventoryHandlers } from './inventory';
+
 // Printer manager handlers
 import {
   registerPrinterManagerHandlers,
@@ -53,6 +60,9 @@ import {
 
 // Printer discovery handlers (migrated from ipc-router.ts)
 import { registerPrinterDiscoveryHandlers } from './printer-discovery-handlers';
+
+// ECR (Payment Terminal) handlers
+import { registerECRHandlers, unregisterECRHandlers, ECR_IPC_CHANNELS } from '../ecr/handlers';
 
 // Re-export all handlers
 export {
@@ -74,6 +84,7 @@ export {
   registerReportHandlers,
   registerMenuHandlers,
   registerPrintHandlers,
+  registerLabelPrintHandlers,
   registerCustomerHandlers,
   registerSettingsHandlers,
   registerOrderPreparationHandlers,
@@ -95,6 +106,12 @@ export {
   // Modules
   registerModuleHandlers,
 
+  // Dashboard metrics
+  registerDashboardMetricsHandlers,
+
+  // Inventory handlers
+  registerBundleInventoryHandlers,
+
   // Printer manager exports
   registerPrinterManagerHandlers,
   initializePrinterManager,
@@ -105,6 +122,11 @@ export {
 
   // Printer discovery (migrated from ipc-router.ts)
   registerPrinterDiscoveryHandlers,
+
+  // ECR (Payment Terminal) handlers
+  registerECRHandlers,
+  unregisterECRHandlers,
+  ECR_IPC_CHANNELS,
 };
 
 // Export utilities
@@ -135,6 +157,12 @@ export function registerAllMainHandlers(): void {
   // Module handlers
   registerModuleHandlers();
 
+  // Dashboard metrics handlers
+  registerDashboardMetricsHandlers();
+
+  // Inventory handlers (bundle inventory deduction)
+  registerBundleInventoryHandlers();
+
   // Order main handlers (existing)
   registerOrderMainHandlers();
 
@@ -156,6 +184,7 @@ export function registerAllDomainHandlers(): void {
   registerReportHandlers();
   registerMenuHandlers();
   registerPrintHandlers();
+  registerLabelPrintHandlers();
   registerCustomerHandlers();
   registerSettingsHandlers();
   registerOrderPreparationHandlers();

@@ -5,6 +5,7 @@ export type {
   OrderType,
   PaymentStatus,
   PaymentMethod,
+  CustomerType,
   Order,
   OrderItem,
   OrderItemOption,

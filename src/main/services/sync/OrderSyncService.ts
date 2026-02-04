@@ -8,6 +8,46 @@ import { FeatureService } from '../FeatureService';
 import { deriveOrderFinancials } from '../OrderService';
 import * as crypto from 'crypto';
 
+// ============================================================================
+// API SYNC TYPES
+// ============================================================================
+
+interface ApiSyncOperation {
+    operation: 'insert' | 'update';
+    client_order_id: string;
+    data: Record<string, unknown>;
+    items?: ApiSyncOrderItem[];
+}
+
+interface ApiSyncOrderItem {
+    id?: string;
+    menu_item_id: string;
+    menu_item_name?: string | null;
+    quantity: number;
+    unit_price: number;
+    total_price?: number;
+    customizations?: Record<string, unknown> | null;
+    notes?: string | null;
+}
+
+interface ApiSyncResult {
+    client_order_id: string;
+    success: boolean;
+    supabase_id?: string;
+    order_number?: string;
+    error?: string;
+    operation: 'insert' | 'update';
+}
+
+interface BatchSyncResponse {
+    success: boolean;
+    results: ApiSyncResult[];
+    sync_timestamp: string;
+    processed_count: number;
+    success_count: number;
+    error_count: number;
+}
+
 // Service role client for order operations (bypasses RLS)
 let serviceRoleClient: SupabaseClient | null = null;
 
@@ -33,11 +73,37 @@ export class OrderSyncService {
     private interTerminalService: InterTerminalCommunicationService | null = null;
     private featureService: FeatureService | null = null;
 
+    /**
+     * Feature flag: use authenticated API sync instead of direct Supabase access.
+     * When enabled, orders sync through admin-dashboard API endpoints using per-terminal API keys.
+     * This eliminates the need for service role key in the packaged app.
+     *
+     * Default: true (API sync enabled)
+     * Fallback: RPC sync if API fails (during transition period)
+     */
+    private useApiSync: boolean = true;
+
     constructor(
         private dbManager: DatabaseManager,
         private supabase: SupabaseClient,
         private terminalId: string
     ) { }
+
+    /**
+     * Enable or disable API-based sync.
+     * When disabled, falls back to direct Supabase RPC calls.
+     */
+    public setUseApiSync(enabled: boolean): void {
+        this.useApiSync = enabled;
+        console.log(`[OrderSyncService] API sync ${enabled ? 'enabled' : 'disabled'}`);
+    }
+
+    /**
+     * Check if API sync is enabled
+     */
+    public isApiSyncEnabled(): boolean {
+        return this.useApiSync;
+    }
 
     /**
      * Get the Supabase client for order operations.
@@ -83,6 +149,176 @@ export class OrderSyncService {
 
     public setFeatureService(service: FeatureService): void {
         this.featureService = service;
+    }
+
+    // ============================================================================
+    // API SYNC METHODS (Authenticated API instead of direct Supabase)
+    // ============================================================================
+
+    /**
+     * Get the admin dashboard base URL from settings or environment
+     */
+    private getAdminDashboardUrl(): string {
+        try {
+            const dbSvc = this.dbManager.getDatabaseService();
+            const storedUrl = dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', null) as string | null;
+            if (storedUrl) {
+                return storedUrl.replace(/\/$/, '');
+            }
+        } catch {
+            // Fall back to env
+        }
+        return (process.env.ADMIN_DASHBOARD_URL || 'http://localhost:3001').replace(/\/$/, '');
+    }
+
+    /**
+     * Resolve terminal settings (terminal_id and api_key) from database
+     */
+    private async resolveTerminalSettings(): Promise<{ terminalId: string; apiKey: string }> {
+        let terminalId = this.terminalId || 'terminal-001';
+        let apiKey = '';
+
+        try {
+            const dbSvc = this.dbManager.getDatabaseService();
+            const storedTid = dbSvc.settings.getSetting('terminal', 'terminal_id', '') as string;
+            if (storedTid && storedTid.trim()) {
+                terminalId = storedTid.trim();
+            }
+        } catch {
+            // Use default
+        }
+
+        try {
+            const dbSvc = this.dbManager.getDatabaseService();
+            const key = dbSvc.settings.getSetting('terminal', 'pos_api_key', '') as string;
+            if (key && key.trim()) {
+                apiKey = key.trim();
+            }
+        } catch {
+            // No API key configured
+        }
+
+        return { terminalId, apiKey };
+    }
+
+    /**
+     * Build request headers for admin API calls
+     */
+    private buildApiHeaders(terminalId: string, apiKey: string): Record<string, string> {
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'x-terminal-id': terminalId,
+        };
+
+        const adminToken = process.env.ADMIN_API_TOKEN || process.env.ADMIN_DASHBOARD_TOKEN;
+        if (adminToken) headers['Authorization'] = `Bearer ${adminToken}`;
+        if (apiKey) headers['x-pos-api-key'] = apiKey;
+
+        return headers;
+    }
+
+    /**
+     * Sync a single order via the authenticated API endpoint.
+     * This method is the secure alternative to direct Supabase access with service role key.
+     *
+     * @param operation - 'insert' or 'update'
+     * @param recordId - The local order ID (client_order_id)
+     * @param data - Order data to sync
+     * @param items - Optional order items for atomic insert
+     * @returns Promise resolving to sync result
+     */
+    private async syncOrderViaApi(
+        operation: 'insert' | 'update',
+        recordId: string,
+        data: Record<string, unknown>,
+        items?: ApiSyncOrderItem[]
+    ): Promise<{ success: boolean; supabase_id?: string; order_number?: string; error?: string }> {
+        const { terminalId, apiKey } = await this.resolveTerminalSettings();
+        const baseUrl = this.getAdminDashboardUrl();
+
+        if (!apiKey) {
+            console.warn('[OrderSyncService] No API key configured, cannot use API sync');
+            return { success: false, error: 'No API key configured' };
+        }
+
+        const headers = this.buildApiHeaders(terminalId, apiKey);
+
+        const syncOperation: ApiSyncOperation = {
+            operation,
+            client_order_id: recordId,
+            data,
+            items,
+        };
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
+        try {
+            console.log(`[OrderSyncService] Syncing order via API: ${operation} ${recordId}`);
+
+            const response = await fetch(`${baseUrl}/api/pos/orders/sync`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ operations: [syncOperation] }),
+                signal: controller.signal,
+            });
+
+            clearTimeout(timeoutId);
+
+            if (!response.ok) {
+                const errorText = await response.text().catch(() => 'Unknown error');
+                console.error(`[OrderSyncService] API sync failed: ${response.status} ${errorText}`);
+                return { success: false, error: `API error (${response.status}): ${errorText}` };
+            }
+
+            const result: BatchSyncResponse = await response.json();
+
+            if (result.results && result.results.length > 0) {
+                const opResult = result.results[0];
+                if (opResult.success) {
+                    console.log(`[OrderSyncService] ✓ Order synced via API: ${recordId} → ${opResult.supabase_id}`);
+                    return {
+                        success: true,
+                        supabase_id: opResult.supabase_id,
+                        order_number: opResult.order_number,
+                    };
+                } else {
+                    console.warn(`[OrderSyncService] API sync returned error: ${opResult.error}`);
+                    return { success: false, error: opResult.error };
+                }
+            }
+
+            return { success: false, error: 'Empty response from API' };
+        } catch (error: any) {
+            clearTimeout(timeoutId);
+
+            if (error.name === 'AbortError') {
+                console.error('[OrderSyncService] API sync timed out');
+                return { success: false, error: 'Request timed out' };
+            }
+
+            console.error('[OrderSyncService] API sync network error:', error?.message || error);
+            return { success: false, error: `Network error: ${error?.message || 'Unknown'}` };
+        }
+    }
+
+    /**
+     * Prepare order items for API sync
+     */
+    private prepareItemsForApiSync(localItems: any[]): ApiSyncOrderItem[] {
+        if (!Array.isArray(localItems)) return [];
+
+        return localItems.map((item: any) => ({
+            id: item.id,
+            menu_item_id: item.menuItemId || item.menu_item_id || item.subcategoryId || item.subcategory_id || item.id,
+            menu_item_name: item.name || item.title || item.menuItemName || item.menu_item_name || null,
+            quantity: item.quantity || 1,
+            unit_price: item.unit_price || item.unitPrice || item.price || 0,
+            total_price: item.total_price || item.totalPrice || ((item.quantity || 1) * (item.unit_price || item.unitPrice || item.price || 0)),
+            customizations: item.customizations || null,
+            notes: item.notes || null,
+        }));
     }
 
     /**
@@ -385,6 +621,39 @@ export class OrderSyncService {
             throw new Error('Cannot insert order: organization_id is required');
         }
 
+        // =========================================================================
+        // API SYNC PATH (Preferred - eliminates service role key requirement)
+        // =========================================================================
+        if (this.useApiSync) {
+            // Get local order items for atomic insert
+            let localItems: any[] = [];
+            try {
+                const localOrder = await this.dbManager.getOrderById(recordId);
+                localItems = Array.isArray((localOrder as any)?.items) ? (localOrder as any).items : [];
+            } catch {
+                // No items or order not found
+            }
+
+            const apiItems = this.prepareItemsForApiSync(localItems);
+            const apiData = {
+                ...data,
+                organization_id: organizationId,
+                status: mapStatusForSupabase(data.status as any),
+            };
+
+            const apiResult = await this.syncOrderViaApi('insert', recordId, apiData, apiItems);
+
+            if (apiResult.success && apiResult.supabase_id) {
+                // API sync succeeded, update local order with Supabase ID
+                await this.dbManager.updateOrderSupabaseId(recordId, apiResult.supabase_id);
+                console.log(`[OrderSyncService] ✓ Order ${recordId} synced via API → ${apiResult.supabase_id}`);
+                return;
+            }
+
+            // API sync failed, fall back to RPC/direct methods
+            console.warn(`[OrderSyncService] API sync failed for ${recordId}, falling back to RPC:`, apiResult.error);
+        }
+
         // Sanitize UUID fields
         const isUuid = (v: any) => typeof v === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(v);
         const branchId = isUuid(data.branch_id) ? data.branch_id : null;
@@ -463,7 +732,7 @@ export class OrderSyncService {
         // Fallback: Direct table operations (requires service_role key or RLS bypass)
         const payload: any = {
             client_order_id: recordId,
-            platform: 'pos',
+            plugin: 'pos',
             organization_id: organizationId,
             order_number: data.order_number || null,
             customer_name: data.customer_name,
@@ -696,6 +965,32 @@ export class OrderSyncService {
         if (!localOrder) {
             console.error('[OrderSyncService] Cannot update: Order not found in local DB', { recordId });
             throw new Error('Cannot update: Order not found');
+        }
+
+        // =========================================================================
+        // API SYNC PATH (Preferred - eliminates service role key requirement)
+        // =========================================================================
+        if (this.useApiSync) {
+            const apiData = {
+                ...data,
+                order_number: localOrder.order_number,
+                status: data.status ? mapStatusForSupabase(data.status as any) : undefined,
+            };
+
+            const apiResult = await this.syncOrderViaApi('update', recordId, apiData);
+
+            if (apiResult.success && apiResult.supabase_id) {
+                // API sync succeeded
+                // If we didn't have supabase_id locally, cache it now
+                if (!localOrder.supabase_id) {
+                    await this.dbManager.updateOrderSupabaseId(recordId, apiResult.supabase_id);
+                }
+                console.log(`[OrderSyncService] ✓ Order ${recordId} updated via API`);
+                return;
+            }
+
+            // API sync failed, fall back to direct methods
+            console.warn(`[OrderSyncService] API update failed for ${recordId}, falling back to direct:`, apiResult.error);
         }
 
         // Fallback resolution: if supabase_id is missing (e.g., update queued before insert completes),
@@ -1119,7 +1414,7 @@ export class OrderSyncService {
                 order_type: orderData.order_type,
                 status: orderData.status,
                 total_amount: orderData.total_amount,
-                tax: orderData.tax_amount || orderData.tax,
+                tax_amount: orderData.tax_amount ?? orderData.tax ?? null,
                 discount_amount: orderData.discount_amount,
                 payment_status: orderData.payment_status,
                 payment_method: orderData.payment_method,
@@ -1128,12 +1423,24 @@ export class OrderSyncService {
                 created_at: orderData.created_at,
                 updated_at: orderData.updated_at,
                 terminal_id: orderData.terminal_id,
-                branch_id: orderData.branch_id,
+                branch_id: orderData.branch_id ?? null,
+                cancellation_reason: orderData.cancellation_reason ?? orderData.cancellationReason ?? null,
                 source_terminal_id: sourceTerminalId,
                 routing_path: 'via_parent'
             };
 
-            const keys = Object.keys(row).filter(k => k !== undefined);
+            let tableColumns: Set<string> | null = null;
+            try {
+                const columnInfo = db.prepare('PRAGMA table_info(orders)').all() as any[];
+                tableColumns = new Set(columnInfo.map(col => col.name));
+            } catch (err) {
+                tableColumns = null;
+            }
+
+            const keys = Object.keys(row).filter(k => row[k] !== undefined && (!tableColumns || tableColumns.has(k)));
+            if (keys.length === 0) {
+                return;
+            }
             const placeholders = keys.map(() => '?').join(',');
             const values = keys.map(k => row[k]);
 
@@ -1144,7 +1451,9 @@ export class OrderSyncService {
             } catch (err: any) {
                 console.error('[OrderSyncService] Failed to insert forwarded order:', err);
                 if (err.message.includes('no such column')) {
-                    const fallbackKeys = keys.filter(k => k !== 'source_terminal_id' && k !== 'routing_path');
+                    const fallbackKeys = tableColumns
+                        ? keys.filter(k => tableColumns.has(k))
+                        : keys.filter(k => k !== 'source_terminal_id' && k !== 'routing_path');
                     const fallbackPlaceholders = fallbackKeys.map(() => '?').join(',');
                     const fallbackValues = fallbackKeys.map(k => row[k]);
                     const fallbackSql = `INSERT INTO orders (${fallbackKeys.join(',')}) VALUES (${fallbackPlaceholders})`;

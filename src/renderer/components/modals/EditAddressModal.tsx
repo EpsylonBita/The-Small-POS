@@ -3,6 +3,21 @@ import { useTranslation } from 'react-i18next';
 import { getApiUrl } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 
+// Helper to get POS auth headers
+const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
+  const ls = typeof window !== 'undefined' ? window.localStorage : null;
+  const posKey = (ls?.getItem('pos_api_key') || '').trim() || (ls?.getItem('POS_API_KEY') || '').trim();
+  let termId = '';
+  try {
+    const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
+    termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '');
+  } catch {}
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (posKey) headers['x-pos-api-key'] = String(posKey);
+  if (termId) headers['x-terminal-id'] = String(termId);
+  return headers;
+};
+
 interface CustomerAddress {
   id: string;
   street_address: string;
@@ -59,12 +74,10 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
     setIsLoading(true);
 
     try {
-
-      const response = await fetch(getApiUrl(`customers/${customerId}/addresses/${address.id}`), {
+      const headers = await getPosAuthHeaders();
+      const response = await fetch(getApiUrl(`pos/customers/${customerId}/addresses/${address.id}`), {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(formData),
       });
 

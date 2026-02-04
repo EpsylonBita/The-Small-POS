@@ -59,7 +59,7 @@ export async function getPosAuthHeaders(): Promise<Record<string, string>> {
 export async function posApiFetch<T = any>(
   endpoint: string,
   options: RequestInit = {}
-): Promise<{ success: boolean; data?: T; error?: string }> {
+): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   try {
     const authHeaders = await getPosAuthHeaders();
     const url = getApiUrl(endpoint);
@@ -77,12 +77,13 @@ export async function posApiFetch<T = any>(
       console.error(`[posApiFetch] ${endpoint} failed:`, response.status, errorData);
       return { 
         success: false, 
-        error: errorData.error || errorData.message || `HTTP ${response.status}` 
+        error: errorData.error || errorData.message || `HTTP ${response.status}`,
+        status: response.status
       };
     }
 
     const data = await response.json();
-    return { success: true, data };
+    return { success: true, data, status: response.status };
   } catch (error: any) {
     console.error(`[posApiFetch] ${endpoint} error:`, error);
     return { success: false, error: error.message || 'Network error' };
@@ -93,9 +94,10 @@ export async function posApiFetch<T = any>(
  * Shorthand for GET requests
  */
 export async function posApiGet<T = any>(
-  endpoint: string
-): Promise<{ success: boolean; data?: T; error?: string }> {
-  return posApiFetch<T>(endpoint, { method: 'GET' });
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
+  return posApiFetch<T>(endpoint, { ...options, method: 'GET' });
 }
 
 /**
@@ -109,5 +111,27 @@ export async function posApiPost<T = any>(
     method: 'POST',
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * Shorthand for PATCH requests
+ */
+export async function posApiPatch<T = any>(
+  endpoint: string,
+  body: any
+): Promise<{ success: boolean; data?: T; error?: string }> {
+  return posApiFetch<T>(endpoint, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Shorthand for DELETE requests
+ */
+export async function posApiDelete<T = any>(
+  endpoint: string
+): Promise<{ success: boolean; data?: T; error?: string }> {
+  return posApiFetch<T>(endpoint, { method: 'DELETE' });
 }
 

@@ -6,8 +6,10 @@
  */
 
 import React, { useState } from 'react';
+import { AlertTriangle, CheckCircle, Info, XCircle } from 'lucide-react';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import { useTheme } from '../../contexts/theme-context';
+import { formatCurrency } from '../../utils/format';
 
 interface ZoneValidationAlertProps {
   validationResult: DeliveryBoundaryValidationResponse;
@@ -60,33 +62,34 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
           bg: 'rgba(34, 197, 94, 0.1)',
           border: '#22c55e',
           text: '#22c55e',
-          icon: '✓'
+          icon: CheckCircle
         };
       case 'warning':
         return {
           bg: 'rgba(251, 191, 36, 0.1)',
           border: '#fbbf24',
           text: '#fbbf24',
-          icon: '⚠'
+          icon: AlertTriangle
         };
       case 'error':
         return {
           bg: 'rgba(239, 68, 68, 0.1)',
           border: '#ef4444',
           text: '#ef4444',
-          icon: '✕'
+          icon: XCircle
         };
       default:
         return {
           bg: 'rgba(59, 130, 246, 0.1)',
           border: '#3b82f6',
           text: '#3b82f6',
-          icon: 'ℹ'
+          icon: Info
         };
     }
   };
 
   const colors = getColors();
+  const Icon = colors.icon;
 
   // Format delivery time
   const formatDeliveryTime = (zone: NonNullable<typeof validationResult.zone>) => {
@@ -96,10 +99,6 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
     return 'N/A';
   };
 
-  // Format currency
-  const formatCurrency = (amount: number) => {
-    return `€${amount.toFixed(2)}`;
-  };
 
   return (
     <div
@@ -115,15 +114,11 @@ export const ZoneValidationAlert: React.FC<ZoneValidationAlertProps> = ({
     >
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
-        <span
-          style={{
-            fontSize: '24px',
-            marginRight: '12px',
-            color: colors.text
-          }}
-        >
-          {colors.icon}
-        </span>
+        <Icon
+          className="w-5 h-5"
+          aria-hidden="true"
+          style={{ color: colors.text, marginRight: '12px' }}
+        />
         <h3
           style={{
             margin: 0,

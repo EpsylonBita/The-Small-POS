@@ -7,6 +7,7 @@ import { ReservationInfoPanel } from './ReservationInfoPanel';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
 import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Plus } from 'lucide-react';
+import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
 
 interface TablesDashboardProps {
   branchId: string;
@@ -355,12 +356,7 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
   };
 
   const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatAmount = (amount: number) => {
-    return `€${amount.toFixed(2)}`;
+    return formatTimeValue(dateString, { hour: '2-digit', minute: '2-digit' });
   };
 
   if (activeOrders.length === 0) {
@@ -426,7 +422,7 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <div className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {formatAmount(totalAmount)}
+                    {formatCurrency(totalAmount)}
                   </div>
                   <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-400'}`}>
                     {formatTime(createdAt)}
@@ -486,12 +482,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
   }, [orders, today]);
 
   const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatAmount = (amount: number) => {
-    return `€${amount.toFixed(2)}`;
+    return formatTimeValue(dateString, { hour: '2-digit', minute: '2-digit' });
   };
 
   const getTimeDiff = (createdAt: string, updatedAt: string) => {
@@ -575,10 +566,10 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <div className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                    {formatAmount(totalAmount)}
+                    {formatCurrency(totalAmount)}
                   </div>
                   <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-400'}`}>
-                    {formatTime(createdAt)} → {formatTime(updatedAt)}
+                    {formatTime(createdAt)} - {formatTime(updatedAt)}
                   </div>
                 </div>
                 
@@ -595,7 +586,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
             {order.items && order.items.length > 0 && (
               <div className={`mt-3 pt-3 border-t ${isDark ? 'border-white/10' : 'border-green-100'}`}>
                 <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-500'}`}>
-                  {order.items.length} {t('tablesDashboard.items', { defaultValue: 'items' })} • {' '}
+                  {order.items.length} {t('tablesDashboard.items', { defaultValue: 'items' })} -{' '}
                   {order.items.slice(0, 2).map((item, idx) => (
                     <span key={idx}>
                       {item.quantity}x {item.name}
@@ -642,12 +633,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
   }, [orders, today]);
 
   const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const formatAmount = (amount: number) => {
-    return `€${amount.toFixed(2)}`;
+    return formatTimeValue(dateString, { hour: '2-digit', minute: '2-digit' });
   };
 
   if (canceledOrders.length === 0) {
@@ -719,7 +705,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
               <div className="flex items-center gap-4">
                 <div className="text-right">
                   <div className={`text-lg font-bold line-through ${isDark ? 'text-white/50' : 'text-gray-400'}`}>
-                    {formatAmount(totalAmount)}
+                    {formatCurrency(totalAmount)}
                   </div>
                   <div className={`text-xs ${isDark ? 'text-white/50' : 'text-gray-400'}`}>
                     {formatTime(updatedAt)}
@@ -739,7 +725,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
             {/* Items summary */}
             {order.items && order.items.length > 0 && (
               <div className={`mt-2 text-xs ${isDark ? 'text-white/40' : 'text-gray-400'}`}>
-                {order.items.length} {t('tablesDashboard.items', { defaultValue: 'items' })} • {' '}
+                {order.items.length} {t('tablesDashboard.items', { defaultValue: 'items' })} -{' '}
                 {order.items.slice(0, 2).map((item, idx) => (
                   <span key={idx}>
                     {item.quantity}x {item.name}
@@ -803,25 +789,35 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
   }, [tables, filter]);
 
   const statusConfig: Record<TableStatus, { color: string; label: string; bgClass: string }> = {
-    available: { 
-      color: 'green', 
+    available: {
+      color: 'green',
       label: t('tablesDashboard.tableStatus.available', { defaultValue: 'Available' }),
       bgClass: 'border-green-500 bg-green-500/10'
     },
-    occupied: { 
-      color: 'blue', 
+    occupied: {
+      color: 'blue',
       label: t('tablesDashboard.tableStatus.occupied', { defaultValue: 'Occupied' }),
       bgClass: 'border-blue-500 bg-blue-500/10'
     },
-    reserved: { 
-      color: 'yellow', 
+    reserved: {
+      color: 'yellow',
       label: t('tablesDashboard.tableStatus.reserved', { defaultValue: 'Reserved' }),
       bgClass: 'border-yellow-500 bg-yellow-500/10'
     },
-    cleaning: { 
-      color: 'gray', 
+    cleaning: {
+      color: 'gray',
       label: t('tablesDashboard.tableStatus.cleaning', { defaultValue: 'Cleaning' }),
       bgClass: 'border-gray-500 bg-gray-500/10'
+    },
+    maintenance: {
+      color: 'orange',
+      label: t('tablesDashboard.tableStatus.maintenance', { defaultValue: 'Maintenance' }),
+      bgClass: 'border-orange-500 bg-orange-500/10'
+    },
+    unavailable: {
+      color: 'slate',
+      label: t('tablesDashboard.tableStatus.unavailable', { defaultValue: 'Unavailable' }),
+      bgClass: 'border-slate-500 bg-slate-500/10'
     },
   };
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, shell, desktopCapturer } from 'electron';
+import { app, BrowserWindow, screen, shell, desktopCapturer, dialog } from 'electron';
 import * as path from 'path';
 import { AuthService } from './services/AuthService';
 
@@ -214,6 +214,20 @@ export class WindowManager {
             const ses = this.mainWindow.webContents.session;
             if (ses && typeof ses.setPermissionRequestHandler === 'function') {
                 ses.setPermissionRequestHandler((webContents, permission, callback) => {
+                    // SECURITY FIX: Validate origin before granting any permissions
+                    const url = webContents.getURL();
+                    const isTrustedOrigin = (
+                        url.startsWith('file://') ||                    // Local app files (production)
+                        url.startsWith('http://localhost') ||           // Dev server
+                        url.startsWith('http://127.0.0.1') ||           // Dev server alt
+                        url.startsWith('https://localhost')             // HTTPS dev server
+                    );
+
+                    if (!isTrustedOrigin) {
+                        console.warn(`[Permission] Denied ${permission} for untrusted origin: ${url}`);
+                        return callback(false);
+                    }
+
                     const allowed = new Set([
                         'geolocation',          // address autocomplete
                         'media',                // getUserMedia (camera/mic/screen w/ desktop constraint)
@@ -222,7 +236,7 @@ export class WindowManager {
                         'bluetooth'             // Web Bluetooth API for printer discovery
                     ]);
                     if (allowed.has(permission)) {
-                        console.log(`✅ Permission granted: ${permission}`);
+                        console.log(`✅ Permission granted: ${permission} for trusted origin`);
                         return callback(true);
                     }
                     console.log(`❌ Permission denied: ${permission}`);
@@ -230,7 +244,26 @@ export class WindowManager {
                 });
             }
             if (ses && typeof ses.setPermissionCheckHandler === 'function') {
-                ses.setPermissionCheckHandler((_wc, permission, _details) => {
+                ses.setPermissionCheckHandler((webContents, permission, _details) => {
+                    // SECURITY FIX: Apply same origin validation as setPermissionRequestHandler
+                    // webContents can be null for some permission checks
+                    if (!webContents) {
+                        return false; // Deny permissions when no webContents context
+                    }
+
+                    const url = webContents.getURL();
+                    const isTrustedOrigin = (
+                        url.startsWith('file://') ||                    // Local app files (production)
+                        url.startsWith('http://localhost') ||           // Dev server
+                        url.startsWith('http://127.0.0.1') ||           // Dev server alt
+                        url.startsWith('https://localhost')             // HTTPS dev server
+                    );
+
+                    if (!isTrustedOrigin) {
+                        // Silently deny for untrusted origins
+                        return false;
+                    }
+
                     return ['geolocation', 'media', 'display-capture', 'videoCapture', 'bluetooth'].includes(permission);
                 });
             }
@@ -266,23 +299,44 @@ export class WindowManager {
                 }
             });
             // Handle getDisplayMedia screen picking in Electron
+            // SECURITY: Require user consent before granting screen capture
             try {
                 const sesAny: any = ses as any;
                 if (sesAny && typeof sesAny.setDisplayMediaRequestHandler === 'function') {
-                    sesAny.setDisplayMediaRequestHandler((_request: any, callback: any) => {
-                        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-                            const chosen = (sources && sources.length > 0) ? sources[0] : null;
-                            if (chosen) {
-                                console.log('[ScreenCapture] setDisplayMediaRequestHandler: granting first screen');
-                                callback({ video: chosen });
+                    sesAny.setDisplayMediaRequestHandler(async (_request: any, callback: any) => {
+                        try {
+                            // SECURITY: Show consent dialog before granting screen capture
+                            const { response } = await dialog.showMessageBox({
+                                type: 'question',
+                                title: 'Screen Capture Request',
+                                message: 'Remote support is requesting to view your screen. This allows an administrator to see your POS display for troubleshooting.',
+                                detail: 'Do you want to allow screen sharing?',
+                                buttons: ['Allow', 'Deny'],
+                                defaultId: 1, // Default to Deny for security
+                                cancelId: 1,
+                            });
+
+                            if (response === 0) {
+                                // User allowed - get screen sources
+                                const sources = await desktopCapturer.getSources({ types: ['screen'] });
+                                const chosen = (sources && sources.length > 0) ? sources[0] : null;
+
+                                if (chosen) {
+                                    console.log('[ScreenCapture] User consented - granting screen capture');
+                                    callback({ video: chosen });
+                                } else {
+                                    console.warn('[ScreenCapture] No screen sources available');
+                                    callback({});
+                                }
                             } else {
-                                console.warn('[ScreenCapture] setDisplayMediaRequestHandler: no screen sources');
+                                // User denied
+                                console.log('[ScreenCapture] User denied screen capture request');
                                 callback({});
                             }
-                        }).catch((err) => {
+                        } catch (err) {
                             console.error('[ScreenCapture] setDisplayMediaRequestHandler error', err);
                             try { callback({}); } catch (_) { /* noop */ }
-                        });
+                        }
                     }, { useSystemPicker: false } as any);
                 }
             } catch (e) {

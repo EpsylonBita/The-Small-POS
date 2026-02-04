@@ -1,6 +1,18 @@
 // Main components
 export { default as RefactoredMainLayout } from './RefactoredMainLayout';
 export { default as OrderDashboard } from './OrderDashboard';
+
+// Business Category Dashboards (Food/Service/Product)
+export {
+  FoodDashboard,
+  ServiceDashboard,
+  ProductDashboard,
+  BusinessCategoryDashboard,
+} from './dashboards';
+
+// Dashboard components
+export { DashboardCard } from './DashboardCard';
+export type { DashboardCardProps, DashboardCardColor } from './DashboardCard';
 export { default as OrderGrid } from './OrderGrid';
 export { default as BulkActionsBar } from './BulkActionsBar';
 export { default as NavigationSidebar } from './NavigationSidebar';

@@ -1,9 +1,8 @@
 import React, { memo, useEffect, useRef, lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useOrderStore } from '../hooks/useOrderStore';
 
-import { OrderDashboard } from './OrderDashboard';
-import OrderFlow from './OrderFlow';
+import { BusinessCategoryDashboard } from './dashboards';
+import { NavigationProvider } from '../contexts/navigation-context';
 import NavigationSidebar from './NavigationSidebar';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import ContentContainer from './ui/ContentContainer';
@@ -14,7 +13,6 @@ import ZReportModal from './modals/ZReportModal';
 import ConnectionSettingsModal from './modals/ConnectionSettingsModal';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { ShiftManager, ShiftManagerRef } from './ShiftManager';
-import { OrderConflictBanner } from './OrderConflictBanner';
 import MenuManagementPage from '../pages/MenuManagementPage';
 import UsersPage from '../pages/UsersPage';
 import ReportsPage from '../pages/ReportsPage';
@@ -26,12 +24,14 @@ import LoyaltyPage from '../pages/LoyaltyPage';
 import SuppliersPage from '../pages/SuppliersPage';
 import InventoryPage from '../pages/InventoryPage';
 import KitchenDisplayPage from '../pages/KitchenDisplayPage';
+import KioskManagementPage from '../pages/KioskManagementPage';
+import IntegrationsPage from '../pages/IntegrationsPage';
 
 import { ExpenseModal } from './modals/ExpenseModal';
 
 // Lazy-loaded vertical views
-const QuickPOSView = lazy(() => import('../pages/verticals').then(m => ({ default: m.QuickPOSView })));
 const DriveThruView = lazy(() => import('../pages/verticals').then(m => ({ default: m.DriveThruView })));
+const DeliveryView = lazy(() => import('../pages/verticals').then(m => ({ default: m.DeliveryView })));
 const TablesView = lazy(() => import('../pages/verticals').then(m => ({ default: m.TablesView })));
 const ReservationsView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ReservationsView })));
 const RoomsView = lazy(() => import('../pages/verticals').then(m => ({ default: m.RoomsView })));
@@ -43,47 +43,10 @@ const ServiceCatalogView = lazy(() => import('../pages/verticals').then(m => ({ 
 const ProductCatalogView = lazy(() => import('../pages/verticals').then(m => ({ default: m.ProductCatalogView })));
 
 // View components
+// DashboardView now uses BusinessCategoryDashboard which automatically selects
+// the appropriate layout (Food/Service/Product) based on business type
 const DashboardView = () => {
-  const { initializeOrders, conflicts } = useOrderStore();
-
-  // Initialize orders when dashboard loads
-  useEffect(() => {
-    console.log('🎯 Dashboard loading - initializing orders...');
-    initializeOrders();
-  }, [initializeOrders]);
-
-  // Handle conflict resolution
-  const handleResolveConflict = async (conflictId: string, strategy: string) => {
-    try {
-      // Call IPC to resolve conflict
-      if (window.electronAPI) {
-        await window.electronAPI.ipcRenderer.invoke('orders:resolve-conflict', conflictId, strategy);
-      }
-    } catch (error) {
-      console.error('Failed to resolve conflict:', error);
-      throw error;
-    }
-  };
-
-  return (
-    <div className="p-6">
-      {/* Conflict Banner */}
-      {conflicts.length > 0 && (
-        <div className="mb-4">
-          <OrderConflictBanner
-            conflicts={conflicts}
-            onResolve={handleResolveConflict}
-          />
-        </div>
-      )}
-
-      {/* Orders Dashboard with tabs for Active/Delivered/Canceled */}
-      <OrderDashboard className="mb-6" />
-
-      {/* Order Flow includes the floating "Add Order" button */}
-      <OrderFlow />
-    </div>
-  );
+  return <BusinessCategoryDashboard />;
 };
 
 // Menu view uses the MenuManagementPage component
@@ -111,6 +74,34 @@ const ComingSoonView: React.FC<{ moduleName?: string }> = ({ moduleName = 'This 
         {t('common.featureNotReady', {
           feature: moduleName,
           defaultValue: `${moduleName} is not yet available. This feature will be added in a future update.`
+        })}
+      </p>
+    </div>
+  );
+};
+
+// View for modules that are enabled in admin but not implemented in this POS version
+// This is shown when a module ID doesn't have a corresponding VIEW_COMPONENT
+const ModuleNotAvailableView: React.FC<{ moduleId: string }> = ({ moduleId }) => {
+  const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+
+  return (
+    <div className="flex flex-col items-center justify-center h-full p-8">
+      <div className="text-6xl mb-4">📦</div>
+      <h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+        {t('common.moduleNotAvailable', { defaultValue: 'Module Not Available' })}
+      </h2>
+      <p className={`text-center max-w-md mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+        {t('common.moduleNotImplemented', {
+          moduleId,
+          defaultValue: `The "${moduleId}" module is enabled but not yet implemented in this POS version.`
+        })}
+      </p>
+      <p className={`text-sm text-center max-w-md ${isDark ? 'text-gray-500' : 'text-gray-500'}`}>
+        {t('common.updatePOSHint', {
+          defaultValue: 'Please update your POS software to access this module, or contact support if you believe this is an error.'
         })}
       </p>
     </div>
@@ -154,8 +145,6 @@ interface RefactoredMainLayoutProps {
 }
 
 export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className = '', onLogout }) => {
-  // Temporarily disabled to fix navigation
-  // const { initializeOrders } = useOrderStore();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { enabledModules, lockedModules } = useModules();
@@ -260,7 +249,8 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
 
     // Fast-food vertical (lazy-loaded)
     drive_through: DriveThruView,
-    quick_pos: QuickPOSView,
+    delivery: DeliveryView,
+    kiosk: () => <KioskManagementPage />, // Kiosk management for staff
     delivery_zones: DeliveryZonesView,
 
     // Retail vertical (lazy-loaded)
@@ -282,6 +272,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     // Customer-facing modules
     customer_web: CustomerWebView,
     customer_app: CustomerAppView,
+
+    // Integrations
+    plugin_integrations: () => <IntegrationsPage />,
+    integrations: () => <IntegrationsPage />, // alias
   };
 
   // Render current view based on navigation selection
@@ -294,7 +288,19 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     // The useEffect observes currentView and currentViewAccess to handle locked module redirects.
     // This function now only handles view component selection and Suspense wrapping.
 
-    const ViewComponent = VIEW_COMPONENTS[currentView] || VIEW_COMPONENTS['dashboard'];
+    const ViewComponent = VIEW_COMPONENTS[currentView];
+
+    // If the view component doesn't exist for this module ID, show ModuleNotAvailableView
+    // This handles cases where a module is enabled in admin but not yet implemented in this POS version
+    if (!ViewComponent) {
+      console.warn(`[Navigation] Unknown module "${currentView}" - showing ModuleNotAvailableView`);
+      return (
+        <Suspense fallback={<ViewLoadingSpinner />}>
+          <ModuleNotAvailableView moduleId={currentView} />
+        </Suspense>
+      );
+    }
+
     return (
       <Suspense fallback={<ViewLoadingSpinner />}>
         <ViewComponent />
@@ -303,34 +309,35 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   };
 
   return (
-    <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
-        ? 'bg-gray-50'
-        : 'bg-black'
-      } ${className}`}>
-      {/* Navigation Sidebar */}
-      <NavigationSidebar
-        currentView={currentView}
-        onViewChange={handleViewChange}
-        onLogout={handleLogout}
-        onEndShift={handleEndShift}
-        onStartShift={handleStartShift}
-        onOpenZReport={() => setShowZReport(true)}
-        isZReportOpen={showZReport}
-        onOpenSettings={() => {
-          try {
-            const electron = (window as any).electronAPI
-            electron?.refreshTerminalSettings?.()
-          } catch { }
-          setShowConnectionSettings(true)
-        }}
-      />
+    <NavigationProvider currentView={currentView} onViewChange={handleViewChange}>
+      <div className={`flex h-screen h-[100dvh] transition-all duration-300 overflow-hidden safe-area-all ${resolvedTheme === 'light'
+          ? 'bg-gray-50'
+          : 'bg-black'
+        } ${className}`}>
+        {/* Navigation Sidebar */}
+        <NavigationSidebar
+          currentView={currentView}
+          onViewChange={handleViewChange}
+          onLogout={handleLogout}
+          onEndShift={handleEndShift}
+          onStartShift={handleStartShift}
+          onOpenZReport={() => setShowZReport(true)}
+          isZReportOpen={showZReport}
+          onOpenSettings={() => {
+            try {
+              const electron = (window as any).electronAPI
+              electron?.refreshTerminalSettings?.()
+            } catch { }
+            setShowConnectionSettings(true)
+          }}
+        />
 
-      {/* Main Content Area with Container */}
-      <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
-        <ContentContainer className="flex-1 min-h-0 overflow-auto relative touch-scroll">
-          <div className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]">
-            {renderCurrentView()}
-          </div>
+        {/* Main Content Area with Container */}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
+          <ContentContainer className="flex-1 min-h-0 overflow-auto relative touch-scroll">
+            <div className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]">
+              {renderCurrentView()}
+            </div>
 
           {/* Shift required overlay when no active shift */}
           {!isShiftActive && (
@@ -395,9 +402,10 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
         requiredPlan={blockedModule?.requiredPlan}
       />
 
-      {/* Order Flow - Temporarily disabled to fix navigation */}
-      {/* <OrderFlow /> */}
-    </div>
+        {/* Order Flow - Temporarily disabled to fix navigation */}
+        {/* <OrderFlow /> */}
+      </div>
+    </NavigationProvider>
   );
 });
 

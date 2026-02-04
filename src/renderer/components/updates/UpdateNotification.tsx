@@ -3,6 +3,7 @@ import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { UpdateInfo } from 'electron-updater';
 import { useI18n } from '../../contexts/i18n-context';
+import { formatDate } from '../../utils/format';
 
 /* 
  * UpdateNotification Component
@@ -45,7 +46,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     <div>
                         <h3 className="text-lg font-bold text-white">{t('updates.available.version', { version: updateInfo.version })}</h3>
                         <p className="text-sm text-gray-300">
-                            {t('updates.available.released', { date: new Date(updateInfo.releaseDate).toLocaleDateString() })}
+                            {t('updates.available.released', { date: formatDate(updateInfo.releaseDate) })}
                         </p>
                     </div>
                 </div>

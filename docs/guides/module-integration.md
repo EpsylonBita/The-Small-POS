@@ -4,7 +4,7 @@ Overview
 
 How POS loads purchased modules and gates UI dynamically. Covers ModuleSyncService, local caching, the useAcquiredModules hook, and testing.
 
-Last Updated: 2025-12-08
+Last Updated: 2026-02-04
 
 ---
 
@@ -47,6 +47,8 @@ sequenceDiagram
 
 - Fetch interval default 2 minutes; timeout 30s.
 - Notifies renderer on success/errors; falls back to cache on failures.
+- Realtime subscriptions reuse the shared Supabase client (single WebSocket) and apply
+  backoff with stability gating to avoid reconnect storms.
 
 Example (from src/main/services/ModuleSyncService.ts):
 

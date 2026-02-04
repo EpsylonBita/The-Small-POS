@@ -174,16 +174,14 @@ export class CustomerService {
       }
 
       const result = await response.json();
-      
-      // Debug: Log the raw API response
-      console.log('[CustomerService] Raw API response:', JSON.stringify({
+
+      // SECURITY: Only log non-PII data for debugging
+      console.log('[CustomerService] API response received:', {
         success: result?.success,
         hasCustomer: !!result?.customer,
-        customerRingerName: result?.customer?.ringer_name,
-        customerNameOnRinger: result?.customer?.name_on_ringer,
-        addressCount: result?.customer?.addresses?.length,
-        firstAddressNotes: result?.customer?.addresses?.[0]?.notes
-      }));
+        addressCount: result?.customer?.addresses?.length || 0,
+        // REMOVED: customerRingerName, customerNameOnRinger, firstAddressNotes (PII)
+      });
 
       // Support both shapes:
       // A) { success, data: { customer, hasConflict } }
@@ -394,14 +392,24 @@ export class CustomerService {
   /**
    * Search customers by name or phone (for autocomplete)
    *
-   * @param query - Search query
+   * @param query - Search query (minimum 2 characters required)
    * @param limit - Maximum results to return
    * @returns Array of matching customers
    */
-  public async searchCustomers(query: string, limit: number = 1000): Promise<Customer[]> {
+  public async searchCustomers(query: string, limit: number = 100): Promise<Customer[]> {
+    // SECURITY: Require minimum query length to prevent full-table scans
+    const trimmedQuery = (query || '').trim();
+    if (trimmedQuery.length < 2) {
+      console.log('[CustomerService] Search query too short, returning empty results');
+      return [];
+    }
+
+    // SECURITY: Cap limit to prevent excessive data exposure
+    const safeLimit = Math.min(limit, 100);
+
     try {
-      // Try Admin API first
-      const url = `${this.ADMIN_API_BASE_URL}/customers?search=${encodeURIComponent(query)}&limit=${limit}`;
+      // Try Admin API first with authentication (use /pos/customers endpoint)
+      const url = `${this.ADMIN_API_BASE_URL}/pos/customers?search=${encodeURIComponent(trimmedQuery)}&limit=${safeLimit}`;
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.API_TIMEOUT_MS);
@@ -410,6 +418,9 @@ export class CustomerService {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
+          // SECURITY: Include authentication headers
+          'x-pos-api-key': this.posApiKey || '',
+          'x-terminal-id': this.terminalId || '',
         },
         signal: controller.signal,
       });
@@ -418,16 +429,23 @@ export class CustomerService {
 
       if (response.ok) {
         const result = await response.json();
-        // Admin API returns { data: Customer[], pagination: {...} }
-        return (result.data || []).map((c: any) => this.normalizeCustomerData(c));
+        // POS API returns { success, customers: [...], multiple: true } or { success, customer: {...} }
+        if (result.success) {
+          if (result.multiple && result.customers) {
+            return result.customers.map((c: any) => this.normalizeCustomerData(c));
+          } else if (result.customer) {
+            return [this.normalizeCustomerData(result.customer)];
+          }
+        }
+        return [];
       }
     } catch (error) {
-      console.warn('Admin API search failed, falling back to Supabase:', error);
+      console.warn('[CustomerService] Admin API search failed, falling back to Supabase:', error);
     }
 
-    // Fallback to Supabase
+    // Fallback to Supabase (RLS will enforce organization_id filtering)
     try {
-      let supabaseQuery = this.supabaseClient
+      const { data, error } = await this.supabaseClient
         .from('customers')
         .select(`
           id,
@@ -444,17 +462,10 @@ export class CustomerService {
           version,
           updated_by,
           last_synced_at
-        `);
-
-      // If query is provided, filter by name or phone
-      // If query is empty, fetch all customers
-      if (query && query.trim()) {
-        supabaseQuery = supabaseQuery.or(`name.ilike.%${query}%,phone.ilike.%${query}%`);
-      }
-
-      const { data, error } = await supabaseQuery
+        `)
+        .or(`name.ilike.%${trimmedQuery}%,phone.ilike.%${trimmedQuery}%`)
         .order('created_at', { ascending: false })
-        .limit(limit);
+        .limit(safeLimit);
 
       if (error) {
         throw error;
@@ -462,7 +473,7 @@ export class CustomerService {
 
       return (data || []).map((c: any) => this.normalizeCustomerData(c));
     } catch (error) {
-      console.error('Customer search failed:', error);
+      console.error('[CustomerService] Customer search failed:', error);
       return [];
     }
   }

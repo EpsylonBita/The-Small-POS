@@ -16,7 +16,8 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { getApiUrl } from '../../config/environment';
+import { posApiGet } from '../utils/api-helpers';
+import { formatCurrency, formatDate } from '../utils/format';
 
 interface Coupon {
   id: string;
@@ -33,7 +34,7 @@ interface Coupon {
 }
 
 const CouponsPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
@@ -43,29 +44,20 @@ const CouponsPage: React.FC = () => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchCoupons = useCallback(async () => {
     if (!staff?.organizationId) return;
     setLoading(true);
     try {
       const branchParam = staff?.branchId ? `&branch_id=${staff.branchId}` : '';
-      const apiUrl = getApiUrl(`pos/coupons?organization_id=${staff.organizationId}${branchParam}`);
-      const response = await fetch(apiUrl, {
-        headers: { 'Content-Type': 'application/json' }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setCoupons(data.coupons || []);
-      } else {
-        // Mock data for demo
-        setCoupons([
-          { id: '1', code: 'SAVE20', name: 'Summer Sale', discount_type: 'percentage', discount_value: 20, usage_limit: 100, usage_count: 45, min_order_amount: 25, expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(), is_active: true },
-          { id: '2', code: 'FLAT5', name: 'Flat Discount', discount_type: 'fixed', discount_value: 5, usage_count: 12, is_active: true },
-          { id: '3', code: 'WELCOME10', name: 'New Customer', discount_type: 'percentage', discount_value: 10, usage_limit: 1, usage_count: 0, is_active: true },
-          { id: '4', code: 'EXPIRED50', name: 'Old Promo', discount_type: 'percentage', discount_value: 50, usage_count: 200, expires_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), is_active: false },
-        ]);
+      const result = await posApiGet<{ coupons?: Coupon[] }>(
+        `pos/coupons?organization_id=${staff.organizationId}${branchParam}`
+      );
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to load coupons');
       }
+      setCoupons(result.data?.coupons || []);
     } catch (error) {
       console.error('Failed to fetch coupons:', error);
       toast.error(t('coupons.errors.loadFailed', 'Failed to load coupons'));
@@ -249,7 +241,7 @@ const CouponsPage: React.FC = () => {
                   <div className="flex items-center gap-1">
                     {coupon.discount_type === 'percentage' ? <Percent className="w-4 h-4 text-cyan-500" /> : <DollarSign className="w-4 h-4 text-cyan-500" />}
                     <span className="font-bold text-lg">
-                      {coupon.discount_type === 'percentage' ? `${coupon.discount_value}%` : currency.format(coupon.discount_value)}
+                      {coupon.discount_type === 'percentage' ? `${coupon.discount_value}%` : formatMoney(coupon.discount_value)}
                     </span>
                   </div>
                 </div>
@@ -258,7 +250,7 @@ const CouponsPage: React.FC = () => {
                   {coupon.min_order_amount && coupon.min_order_amount > 0 && (
                     <div className="flex justify-between">
                       <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>{t('coupons.minOrder', 'Min Order')}</span>
-                      <span>{currency.format(coupon.min_order_amount)}</span>
+                      <span>{formatMoney(coupon.min_order_amount)}</span>
                     </div>
                   )}
                   {coupon.usage_limit && (
@@ -272,7 +264,7 @@ const CouponsPage: React.FC = () => {
                       <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>{t('coupons.expires', 'Expires')}</span>
                       <span className={`flex items-center gap-1 ${expired ? 'text-red-500' : ''}`}>
                         <Calendar className="w-3 h-3" />
-                        {new Date(coupon.expires_at).toLocaleDateString()}
+                        {formatDate(coupon.expires_at)}
                       </span>
                     </div>
                   )}

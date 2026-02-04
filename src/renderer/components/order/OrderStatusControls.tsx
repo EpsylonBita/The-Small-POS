@@ -4,7 +4,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import toast from 'react-hot-toast';
 import type { Order, OrderStatus } from '../../types/orders';
-import { isExternalPlatform, getPlatformName } from '../../utils/platform-icons';
+import { isExternalPlatform, getPlatformName } from '../../utils/plugin-icons';
 
 interface OrderStatusControlsProps {
   order: Order;
@@ -37,25 +37,25 @@ export function OrderStatusControls({
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Check if this is an external platform order
-  const orderPlatform = order.platform || order.order_platform;
-  const externalOrderId = order.external_platform_order_id;
-  const isPlatformOrder = orderPlatform && externalOrderId && isExternalPlatform(orderPlatform);
+  const orderPlugin = order.plugin || order.order_plugin || order.platform || order.order_platform;
+  const externalOrderId = order.external_plugin_order_id || order.external_platform_order_id;
+  const isPlatformOrder = orderPlugin && externalOrderId && isExternalPlatform(orderPlugin);
 
   // Handle notifying platform that order is ready
   const handleNotifyPlatformReady = useCallback(async () => {
-    if (!isPlatformOrder || !orderPlatform || !externalOrderId) return;
+    if (!isPlatformOrder || !orderPlugin || !externalOrderId) return;
 
     setIsNotifyingPlatform(true);
     try {
       await window.electronAPI.notifyPlatformReady(order.id);
-      const platformName = getPlatformName(orderPlatform);
+      const platformName = getPlatformName(orderPlugin);
       toast.success(t('orders.messages.platformNotified', { platform: platformName }));
     } catch (error) {
       toast.error(t('orders.messages.platformNotifyFailed'));
     } finally {
       setIsNotifyingPlatform(false);
     }
-  }, [order.id, isPlatformOrder, orderPlatform, externalOrderId, t]);
+  }, [order.id, isPlatformOrder, orderPlugin, externalOrderId, t]);
 
   const handleStatusChange = useCallback(
     async (newStatus: OrderStatus) => {
@@ -198,7 +198,7 @@ export function OrderStatusControls({
               >
                 {isNotifyingPlatform
                   ? t('orders.actions.processing')
-                  : t('orders.actions.notifyPlatformReady', { platform: getPlatformName(orderPlatform || '') })}
+                  : t('orders.actions.notifyPlatformReady', { platform: getPlatformName(orderPlugin || '') })}
               </button>
             )}
           </div>
@@ -232,7 +232,7 @@ export function OrderStatusControls({
                 >
                   {isNotifyingPlatform
                     ? t('orders.actions.processing')
-                    : t('orders.actions.notifyPlatformReady', { platform: getPlatformName(orderPlatform || '') })}
+                    : t('orders.actions.notifyPlatformReady', { platform: getPlatformName(orderPlugin || '') })}
                 </button>
               )}
             </div>

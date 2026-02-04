@@ -101,12 +101,13 @@ export const API_TIMEOUT_MS = 8000; // 8 seconds
 /**
  * Constructs full API URL for Admin Dashboard endpoints
  * Used by CustomerService, MenuService, etc.
- * @param endpoint - API endpoint path (e.g., '/customers/search')
- * @returns Full URL (e.g., 'http://localhost:3001/api/customers/search')
+ * @param endpoint - API endpoint path (e.g., 'pos/customers' or '/api/pos/customers')
+ * @returns Full URL (e.g., 'http://localhost:3001/api/pos/customers')
  */
 export const getApiUrl = (endpoint: string) => {
   const baseUrl = environment.ADMIN_API_BASE_URL.replace(/\/+$/, '');
-  const cleanEndpoint = endpoint.replace(/^\/+/, '');
+  // Remove leading slashes and 'api/' prefix since base URL already includes /api
+  const cleanEndpoint = endpoint.replace(/^\/+/, '').replace(/^api\//, '');
   return `${baseUrl}/${cleanEndpoint}`;
 };
 

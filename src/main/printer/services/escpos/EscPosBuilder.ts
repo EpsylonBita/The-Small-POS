@@ -892,6 +892,210 @@ export class EscPosBuilder {
   }
 
   // ==========================================================================
+  // Barcode Printing Commands
+  // ==========================================================================
+
+  /**
+   * ESC/POS Barcode types
+   */
+  static readonly BARCODE_TYPE = {
+    UPC_A: 0x41,      // UPC-A (11-12 digits)
+    UPC_E: 0x42,      // UPC-E (6-8 digits)
+    EAN13: 0x43,      // EAN-13 (12-13 digits)
+    EAN8: 0x44,       // EAN-8 (7-8 digits)
+    CODE39: 0x45,     // Code 39
+    ITF: 0x46,        // Interleaved 2 of 5
+    CODABAR: 0x47,    // Codabar
+    CODE93: 0x48,     // Code 93
+    CODE128: 0x49,    // Code 128
+  };
+
+  /**
+   * HRI (Human Readable Interpretation) positions
+   */
+  static readonly HRI_POSITION = {
+    NONE: 0,      // Not printed
+    ABOVE: 1,     // Above the barcode
+    BELOW: 2,     // Below the barcode
+    BOTH: 3,      // Both above and below
+  };
+
+  /**
+   * Set barcode height (GS h n)
+   * @param height - Height in dots (1-255, default is usually 162)
+   */
+  setBarcodeHeight(height: number): this {
+    const clampedHeight = Math.max(1, Math.min(255, height));
+    this.buffer.push(GS, 0x68, clampedHeight); // GS h n
+    return this;
+  }
+
+  /**
+   * Set barcode width/module width (GS w n)
+   * @param width - Module width (2-6, default is usually 3)
+   */
+  setBarcodeWidth(width: number): this {
+    const clampedWidth = Math.max(2, Math.min(6, width));
+    this.buffer.push(GS, 0x77, clampedWidth); // GS w n
+    return this;
+  }
+
+  /**
+   * Set HRI (Human Readable Interpretation) position (GS H n)
+   * @param position - HRI position (use EscPosBuilder.HRI_POSITION)
+   */
+  setHRIPosition(position: number): this {
+    const clampedPosition = Math.max(0, Math.min(3, position));
+    this.buffer.push(GS, 0x48, clampedPosition); // GS H n
+    return this;
+  }
+
+  /**
+   * Set HRI font (GS f n)
+   * @param font - Font type (0 = Font A, 1 = Font B)
+   */
+  setHRIFont(font: 0 | 1): this {
+    this.buffer.push(GS, 0x66, font); // GS f n
+    return this;
+  }
+
+  /**
+   * Print barcode (GS k m d1...dk NUL for type A, GS k m n d1...dn for type B)
+   *
+   * @param type - Barcode type (use EscPosBuilder.BARCODE_TYPE)
+   * @param content - Barcode content (digits/alphanumeric depending on type)
+   * @param options - Optional settings for height, width, HRI position
+   *
+   * @example
+   * // Print EAN-13 barcode
+   * builder.printBarcode(EscPosBuilder.BARCODE_TYPE.EAN13, '5901234123457');
+   *
+   * // Print Code128 barcode with options
+   * builder.printBarcode(EscPosBuilder.BARCODE_TYPE.CODE128, 'ABC-12345', {
+   *   height: 100,
+   *   width: 3,
+   *   hriPosition: EscPosBuilder.HRI_POSITION.BELOW
+   * });
+   */
+  printBarcode(
+    type: number,
+    content: string,
+    options?: {
+      height?: number;
+      width?: number;
+      hriPosition?: number;
+      hriFont?: 0 | 1;
+    }
+  ): this {
+    // Apply options if provided
+    if (options?.height !== undefined) {
+      this.setBarcodeHeight(options.height);
+    }
+    if (options?.width !== undefined) {
+      this.setBarcodeWidth(options.width);
+    }
+    if (options?.hriPosition !== undefined) {
+      this.setHRIPosition(options.hriPosition);
+    }
+    if (options?.hriFont !== undefined) {
+      this.setHRIFont(options.hriFont);
+    }
+
+    // Use function B format (GS k m n d1...dn) for types >= 65 (0x41)
+    // Function B is more reliable and supports specifying data length
+    if (type >= 0x41) {
+      const dataBytes: number[] = [];
+      for (let i = 0; i < content.length; i++) {
+        dataBytes.push(content.charCodeAt(i));
+      }
+
+      // GS k m n d1...dn
+      this.buffer.push(GS, 0x6b, type, dataBytes.length, ...dataBytes);
+    } else {
+      // Function A format (GS k m d1...dk NUL) for older types
+      const dataBytes: number[] = [];
+      for (let i = 0; i < content.length; i++) {
+        dataBytes.push(content.charCodeAt(i));
+      }
+
+      // GS k m d1...dk NUL
+      this.buffer.push(GS, 0x6b, type, ...dataBytes, 0x00);
+    }
+
+    return this;
+  }
+
+  /**
+   * Print EAN-13 barcode (convenience method)
+   * @param barcode - 13-digit EAN-13 barcode
+   * @param options - Optional settings
+   */
+  printEAN13(
+    barcode: string,
+    options?: { height?: number; width?: number; hriPosition?: number }
+  ): this {
+    // Remove any spaces or dashes, ensure 13 digits
+    const cleaned = barcode.replace(/[\s\-]/g, '');
+    if (cleaned.length !== 13 || !/^\d+$/.test(cleaned)) {
+      console.warn('EAN-13 barcode must be exactly 13 digits');
+      return this;
+    }
+
+    return this.printBarcode(EscPosBuilder.BARCODE_TYPE.EAN13, cleaned, {
+      height: options?.height ?? 80,
+      width: options?.width ?? 3,
+      hriPosition: options?.hriPosition ?? EscPosBuilder.HRI_POSITION.BELOW,
+    });
+  }
+
+  /**
+   * Print UPC-A barcode (convenience method)
+   * @param barcode - 12-digit UPC-A barcode
+   * @param options - Optional settings
+   */
+  printUPCA(
+    barcode: string,
+    options?: { height?: number; width?: number; hriPosition?: number }
+  ): this {
+    const cleaned = barcode.replace(/[\s\-]/g, '');
+    if (cleaned.length !== 12 || !/^\d+$/.test(cleaned)) {
+      console.warn('UPC-A barcode must be exactly 12 digits');
+      return this;
+    }
+
+    return this.printBarcode(EscPosBuilder.BARCODE_TYPE.UPC_A, cleaned, {
+      height: options?.height ?? 80,
+      width: options?.width ?? 3,
+      hriPosition: options?.hriPosition ?? EscPosBuilder.HRI_POSITION.BELOW,
+    });
+  }
+
+  /**
+   * Print Code 128 barcode (convenience method)
+   * @param content - Alphanumeric content
+   * @param options - Optional settings
+   */
+  printCode128(
+    content: string,
+    options?: { height?: number; width?: number; hriPosition?: number }
+  ): this {
+    if (content.length === 0 || content.length > 48) {
+      console.warn('Code 128 content must be 1-48 characters');
+      return this;
+    }
+
+    // Code 128 with Code Set B prefix for alphanumeric
+    // {B indicates Code Set B (ASCII 32-127)
+    const code128Content = '{B' + content;
+
+    return this.printBarcode(EscPosBuilder.BARCODE_TYPE.CODE128, code128Content, {
+      height: options?.height ?? 80,
+      width: options?.width ?? 2,
+      hriPosition: options?.hriPosition ?? EscPosBuilder.HRI_POSITION.BELOW,
+    });
+  }
+
+  // ==========================================================================
   // Enhanced Formatting Methods for Receipt Templates
   // ==========================================================================
 

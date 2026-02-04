@@ -135,6 +135,20 @@ export function registerAuthHandlers(): void {
       // Save hashed PINs to settings
       settingsService.setSetting('staff', 'admin_pin_hash', adminPinHash);
       settingsService.setSetting('staff', 'staff_pin_hash', staffPinHash);
+      settingsService.setSetting('terminal', 'pin_reset_required', false);
+
+      // Best-effort: clear reset flag in Admin Dashboard
+      try {
+        const adminSync = serviceRegistry.get('adminDashboardSyncService');
+        if (adminSync) {
+          const result = await adminSync.pushSettingsToAdmin('terminal', { pin_reset_required: false }, true);
+          if (!result?.success) {
+            console.warn('[auth:setup-pin] Failed to clear pin_reset_required in admin:', result?.error);
+          }
+        }
+      } catch (err) {
+        console.warn('[auth:setup-pin] Admin reset flag sync failed:', err);
+      }
 
       console.log('[auth:setup-pin] PINs configured successfully');
       return { success: true };

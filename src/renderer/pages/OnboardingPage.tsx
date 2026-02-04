@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
+import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
 
 type SupportedLanguage = 'en' | 'el';
@@ -49,13 +50,13 @@ const OnboardingPage: React.FC = () => {
 
         try {
             if (!connectionString) {
-                throw new Error(t('onboarding.validationError') || 'Please enter the connection string');
+                throw new Error(t('onboarding.validationError', { defaultValue: 'Please enter the connection string' }));
             }
 
             // Decode the connection string to extract all credentials
             const decoded = decodeConnectionString(connectionString.trim());
             if (!decoded) {
-                throw new Error(t('onboarding.invalidConnectionString') || 'Invalid connection string. Please copy it again from the admin dashboard.');
+                throw new Error(t('onboarding.invalidConnectionString', { defaultValue: 'Invalid connection string. Please copy it again from the admin dashboard.' }));
             }
 
             // Call the backend to update credentials and sync
@@ -66,7 +67,7 @@ const OnboardingPage: React.FC = () => {
             });
 
             if (result && result.success) {
-                toast.success(t('onboarding.success') || 'Terminal configured successfully!');
+                toast.success(t('onboarding.success', { defaultValue: 'Terminal configured successfully!' }));
                 // Restart the entire Electron app to reinitialize with new settings
                 setTimeout(async () => {
                     try {
@@ -77,12 +78,12 @@ const OnboardingPage: React.FC = () => {
                     }
                 }, 1500);
             } else {
-                throw new Error(result?.error || 'Failed to configure terminal');
+                throw new Error(result?.error || t('onboarding.configureFailed', { defaultValue: 'Failed to configure terminal' }));
             }
         } catch (err: any) {
             console.error('Onboarding failed:', err);
-            setError(err.message || 'An unexpected error occurred');
-            toast.error(err.message || 'Failed to configure terminal');
+            setError(err.message || t('onboarding.unexpectedError', { defaultValue: 'An unexpected error occurred' }));
+            toast.error(err.message || t('onboarding.configureFailed', { defaultValue: 'Failed to configure terminal' }));
         } finally {
             setIsSubmitting(false);
         }
@@ -94,14 +95,14 @@ const OnboardingPage: React.FC = () => {
 
                 {/* Header */}
                 <div className="text-center mb-8">
-                    <h1 className="text-3xl font-bold mb-2 text-blue-400">POS Terminal Setup</h1>
-                    <p className="text-slate-400">Step {step} of 2</p>
+                    <h1 className="text-3xl font-bold mb-2 text-blue-400">{t('onboarding.title', { defaultValue: 'POS Terminal Setup' })}</h1>
+                    <p className="text-slate-400">{t('onboarding.step', { defaultValue: 'Step {{current}} of {{total}}', current: step, total: 2 })}</p>
                 </div>
 
                 {/* Step 1: Language Selection */}
                 {step === 1 && (
                     <div className="space-y-4">
-                        <h2 className="text-xl font-semibold text-center mb-6">Select Language / Επιλέξτε γλώσσα</h2>
+                        <h2 className="text-xl font-semibold text-center mb-6">{t('onboarding.selectLanguage', { defaultValue: 'Select Language' })}</h2>
                         <div className="grid grid-cols-1 gap-4">
                             <button
                                 onClick={() => handleLanguageSelect('en')}
@@ -110,8 +111,8 @@ const OnboardingPage: React.FC = () => {
                                     : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
                                     }`}
                             >
-                                <span className="text-lg font-medium">English</span>
-                                {language === 'en' && <span>✓</span>}
+                                <span className="text-lg font-medium">{t('onboarding.language.english', { defaultValue: 'English' })}</span>
+                                {language === 'en' && <Check className="w-4 h-4" aria-hidden="true" />}
                             </button>
                             <button
                                 onClick={() => handleLanguageSelect('el')}
@@ -120,8 +121,8 @@ const OnboardingPage: React.FC = () => {
                                     : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
                                     }`}
                             >
-                                <span className="text-lg font-medium">Ελληνικά (Greek)</span>
-                                {language === 'el' && <span>✓</span>}
+                                <span className="text-lg font-medium">{t('onboarding.language.greek', { defaultValue: 'Greek' })}</span>
+                                {language === 'el' && <Check className="w-4 h-4" aria-hidden="true" />}
                             </button>
                         </div>
                     </div>
@@ -132,16 +133,16 @@ const OnboardingPage: React.FC = () => {
                     <form onSubmit={handleSubmit} className="space-y-6">
                         <div>
                             <label className="block text-sm font-medium text-slate-300 mb-2">
-                                {t('onboarding.connectionString') || 'Connection String'}
+                                {t('onboarding.connectionString', { defaultValue: 'Connection String' })}
                             </label>
                             <p className="text-xs text-slate-400 mb-3">
-                                {t('onboarding.connectionStringHelp') || 'Paste the connection string from the Admin Dashboard (Branches → Create Terminal)'}
+                                {t('onboarding.connectionStringHelp', { defaultValue: 'Paste the connection string from the Admin Dashboard (Branches -> Create Terminal)' })}
                             </p>
                             <textarea
                                 value={connectionString}
                                 onChange={(e) => setConnectionString(e.target.value)}
                                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all font-mono text-sm"
-                                placeholder={t('onboarding.connectionStringPlaceholder') || 'Paste connection string here...'}
+                                placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection string here...' })}
                                 rows={3}
                                 required
                             />
@@ -160,7 +161,7 @@ const OnboardingPage: React.FC = () => {
                                 className="flex-1 px-4 py-3 rounded-lg border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
                                 disabled={isSubmitting}
                             >
-                                {t('common.back') || 'Back'}
+                                {t('common.back', { defaultValue: 'Back' })}
                             </button>
                             <button
                                 type="submit"
@@ -170,7 +171,7 @@ const OnboardingPage: React.FC = () => {
                                 {isSubmitting ? (
                                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                                 ) : (
-                                    t('onboarding.connect') || 'Connect & Sync'
+                                    t('onboarding.connect', { defaultValue: 'Connect & Sync' })
                                 )}
                             </button>
                         </div>

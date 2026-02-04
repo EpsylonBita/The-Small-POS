@@ -7,18 +7,23 @@ export type PaymentStatus = 'pending' | 'processing' | 'completed' | 'failed' | 
 export type PaymentMethod = 'cash' | 'card' | 'digital';
 export type SyncStatus = 'synced' | 'pending' | 'failed';
 
-/** Order platform - where the order originated from */
-export type OrderPlatform =
+/** Order plugin - where the order originated from */
+export type OrderPlugin =
   | 'pos'           // In-store POS system
   | 'web'           // Customer web app
   | 'android-ios'   // Customer mobile app
-  | 'wolt'          // Wolt delivery platform
-  | 'efood'         // E-food delivery platform
-  | 'box'           // Box delivery platform
+  | 'wolt'          // Wolt delivery plugin
+  | 'efood'         // E-food delivery plugin
+  | 'box'           // Box delivery plugin
   | 'uber_eats'     // Uber Eats
   | 'booking'       // Booking.com
   | 'tripadvisor'   // TripAdvisor
   | 'airbnb';       // Airbnb
+
+/**
+ * @deprecated Use OrderPlugin instead
+ */
+export type OrderPlatform = OrderPlugin;
 
 // Order item options interface
 export interface OrderItemOption {
@@ -28,6 +33,9 @@ export interface OrderItemOption {
   price?: number;
   category?: string;
 }
+
+// Customer type for tiered pricing
+export type CustomerType = 'retail' | 'wholesale' | 'member';
 
 // Order item interface
 export interface OrderItem {
@@ -39,6 +47,10 @@ export interface OrderItem {
   special_instructions?: string; // For backward compatibility
   options?: OrderItemOption[];
   customizations?: any[];
+  // Tiered pricing tracking
+  originalPrice?: number; // Original retail price before tier discount
+  appliedPriceType?: CustomerType; // Which price tier was applied
+  priceTierLabel?: string; // Human-readable tier label (e.g., "Wholesale (min 10)")
 }
 
 // Order pricing breakdown
@@ -66,6 +78,8 @@ export interface Order {
   order_number?: string;
   orderNumber: string; // Required for renderer compatibility
   status: OrderStatus;
+  cancellation_reason?: string; // snake_case for storage compatibility
+  cancellationReason?: string; // Reason for cancellation
   items: OrderItem[];
   total_amount: number;
   totalAmount: number; // Required for renderer compatibility
@@ -122,7 +136,6 @@ export interface Order {
 
   // Preparation tracking
   preparationProgress?: number; // 0-100 percentage
-  cancellationReason?: string; // Reason for cancellation
 
   // Sync information
   supabase_id?: string;
@@ -131,6 +144,10 @@ export interface Order {
   version?: number; // For optimistic locking
   updatedBy?: string; // User who last updated
   lastSyncedAt?: string; // Last sync timestamp
+  terminal_id?: string | null;
+  terminalId?: string | null; // For backward compatibility
+  branch_id?: string | null;
+  branchId?: string | null; // For backward compatibility
 
   // Enhanced pricing breakdown
   pricing?: OrderPricing;
@@ -138,17 +155,25 @@ export interface Order {
   deliveryFee?: number;
   pickupDiscount?: number;
   serviceFee?: number;
+  tax_amount?: number; // snake_case for storage compatibility
   taxAmount?: number;
+  tax?: number; // legacy fallback
   deliveryZoneId?: string | null;
   pricingCalculatedAt?: string | null;
   pricingVersion?: string | null;
 
-  // Platform tracking (for external platform orders like Wolt, Efood, etc.)
-  platform?: string; // Platform where order originated (e.g., 'wolt', 'efood', 'pos')
-  order_platform?: string; // Alternative field name for platform
-  external_platform_order_id?: string; // Original order ID from external platform
-  platform_commission_pct?: number; // Commission percentage charged by platform
-  net_earnings?: number; // Net earnings after platform commission deduction
+  // Plugin tracking (for external plugin orders like Wolt, Efood, etc.)
+  plugin?: OrderPlugin | string; // Plugin where order originated (e.g., 'wolt', 'efood', 'pos')
+  order_plugin?: OrderPlugin | string; // Alternative field name for plugin
+  external_plugin_order_id?: string; // Original order ID from external plugin
+  plugin_commission_pct?: number; // Commission percentage charged by plugin
+  net_earnings?: number; // Net earnings after plugin commission deduction
+
+  // Backward compatibility - @deprecated
+  platform?: string; // @deprecated Use plugin instead
+  order_platform?: string; // @deprecated Use order_plugin instead
+  external_platform_order_id?: string; // @deprecated Use external_plugin_order_id instead
+  platform_commission_pct?: number; // @deprecated Use plugin_commission_pct instead
 
   // Hybrid Sync Routing information
   routing_path?: string; // 'main', 'via_parent', 'direct_cloud'
@@ -165,7 +190,9 @@ export interface OrderRow {
   customer_email?: string;
   items: string; // JSON string
   total_amount: number;
+  tax_amount?: number;
   status: OrderStatus;
+  cancellation_reason?: string;
   order_type?: OrderType;
   table_number?: string;
   delivery_address?: string;
@@ -186,11 +213,17 @@ export interface OrderRow {
   discount_percentage?: number;
   discount_amount?: number;
   driver_id?: string;
-  // Platform tracking
+  terminal_id?: string | null;
+  branch_id?: string | null;
+  // Plugin tracking
+  plugin?: OrderPlugin | string;
+  external_plugin_order_id?: string;
+  plugin_commission_pct?: number;
+  net_earnings?: number;
+  // Backward compatibility - @deprecated
   platform?: string;
   external_platform_order_id?: string;
   platform_commission_pct?: number;
-  net_earnings?: number;
   // Hybrid Sync Routing information
   routing_path?: string;
   source_terminal_id?: string;

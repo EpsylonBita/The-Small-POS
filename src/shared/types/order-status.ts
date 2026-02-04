@@ -28,8 +28,8 @@ import type { OrderStatus, SupabaseOrderStatus } from '../../../../shared/types/
 
 /**
  * Map POS status to Supabase status
- * IMPORTANT: Supabase database only allows: pending, confirmed, preparing, ready, completed, cancelled
- * 'delivered' and 'out_for_delivery' are POS-local statuses that must be mapped to 'completed'
+ * NOTE: All canonical statuses are now allowed in the database constraint:
+ * pending, confirmed, preparing, ready, out_for_delivery, delivered, completed, cancelled, refunded
  */
 export function mapStatusForSupabase(status: string): SupabaseOrderStatus {
   const statusMap: Record<string, SupabaseOrderStatus> = {
@@ -37,10 +37,11 @@ export function mapStatusForSupabase(status: string): SupabaseOrderStatus {
     confirmed: 'confirmed',
     preparing: 'preparing',
     ready: 'ready',
-    out_for_delivery: 'completed',  // Map to completed for Supabase
-    delivered: 'completed',          // Map to completed for Supabase
-    cancelled: 'cancelled',
+    out_for_delivery: 'out_for_delivery',
+    delivered: 'delivered',
     completed: 'completed',
+    cancelled: 'cancelled',
+    refunded: 'refunded',
   };
 
   return statusMap[status] || 'pending';
@@ -62,10 +63,11 @@ export function mapStatusForPOS(status: string): OrderStatus {
     confirmed: 'confirmed',
     preparing: 'preparing',
     ready: 'ready',
-    out_for_delivery: 'delivered',
+    out_for_delivery: 'out_for_delivery',
     delivered: 'delivered',
-    cancelled: 'cancelled',
     completed: 'completed',
+    cancelled: 'cancelled',
+    refunded: 'refunded',
   };
 
   return statusMap[status] || 'pending';

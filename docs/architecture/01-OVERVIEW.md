@@ -146,6 +146,7 @@ pos-system/
 - **Purpose**: User session and security management
 - **Key Features**:
   - PIN-based authentication
+  - Admin-triggered PIN reset enforcement (PIN setup required before login)
   - Session management with timeouts
   - Activity tracking
   - Security logging
@@ -303,7 +304,7 @@ Local SQLite Database ↔ Sync Service ↔ Supabase Cloud
 
 ### **Authentication Flow**
 ```
-PIN Entry → Auth Service → Session Creation → Main Interface
+PIN Entry (auto-submit at 6 digits / setup if reset required) → Auth Service → Session Creation → Main Interface
     ↓              ↓             ↓              ↓
 Activity    Security      Local Storage    Auto-logout
 Tracking    Logging       Persistence      on Timeout
@@ -359,7 +360,7 @@ class ModuleSyncService {
   private adminDashboardUrl: string;
   private terminalId: string;
   private apiKey: string;
-  private syncInterval = 5 * 60 * 1000; // 5 minutes
+  private syncInterval = 2 * 60 * 1000; // 2 minutes
 
   async fetchEnabledModules(): Promise<POSModulesEnabledResponse> {
     const response = await fetch(
@@ -388,6 +389,10 @@ class ModuleSyncService {
   }
 }
 ```
+
+Notes:
+- Realtime subscriptions reuse the shared Supabase client to avoid multiple WebSocket connections.
+- Reconnects use exponential backoff with a stability window before resetting attempts.
 
 ### API Response Format
 

@@ -1,6 +1,8 @@
+import { createElement } from 'react';
 import { create } from 'zustand';
 import { mapStatusForPOS, isValidOrderStatus } from '../../shared/types/order-status';
 import toast from 'react-hot-toast';
+import { Bell } from 'lucide-react';
 import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
 import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';
 import type { Order } from '../../shared/types/orders';
@@ -28,6 +30,7 @@ interface SyncRetryInfo {
 // Define the order store interface
 interface OrderStore {
   orders: Order[];
+  pendingExternalOrders: Order[];
   selectedOrder: Order | null;
   isLoading: boolean;
   error: POSError | null;
@@ -106,9 +109,163 @@ let isStoreInitialized = false;
 // Error handler instance
 const errorHandler = ErrorHandler.getInstance();
 
+const INTERNAL_PLUGINS = new Set(['pos', 'web', 'android-ios', 'kiosk']);
+
+const getOrderPlugin = (order: Order | any): string | null => {
+  return (
+    (order as any).plugin ||
+    (order as any).order_plugin ||
+    (order as any).platform ||
+    (order as any).order_platform ||
+    null
+  );
+};
+
+const getExternalPluginOrderId = (order: Order | any): string | null => {
+  return (
+    (order as any).external_plugin_order_id ||
+    (order as any).externalPluginOrderId ||
+    (order as any).external_platform_order_id ||
+    null
+  );
+};
+
+const isPendingExternalOrder = (order: Order | any): boolean => {
+  const plugin = getOrderPlugin(order);
+  const externalId = getExternalPluginOrderId(order);
+  return (
+    order?.status === 'pending' &&
+    !!externalId &&
+    !!plugin &&
+    !INTERNAL_PLUGINS.has(plugin)
+  );
+};
+
+const getOrderUniqueKey = (order: Order | any): string => {
+  const plugin = getOrderPlugin(order);
+  const externalId = getExternalPluginOrderId(order);
+  if (externalId && plugin) {
+    return `ext:${plugin}:${externalId}`;
+  }
+  const orderNumber = (order as any).order_number || (order as any).orderNumber;
+  if (orderNumber) {
+    return `ord:${orderNumber}`;
+  }
+  const supabaseId = (order as any).supabase_id || (order as any).supabaseId;
+  if (supabaseId) {
+    return `sup:${supabaseId}`;
+  }
+  return `id:${order?.id || Math.random().toString(36).slice(2)}`;
+};
+
+const dedupeOrders = (orders: Order[]): Order[] => {
+  const byKey = new Map<string, Order>();
+
+  const getOrderKeys = (order: Order | any): string[] => {
+    const keys: string[] = [];
+    if (order?.id) keys.push(`id:${order.id}`);
+
+    const plugin = getOrderPlugin(order);
+    const externalId = getExternalPluginOrderId(order);
+    if (externalId && plugin) keys.push(`ext:${plugin}:${externalId}`);
+
+    const orderNumber = (order as any).order_number || (order as any).orderNumber;
+    if (orderNumber) keys.push(`ord:${orderNumber}`);
+
+    const supabaseId = (order as any).supabase_id || (order as any).supabaseId;
+    if (supabaseId) keys.push(`sup:${supabaseId}`);
+
+    return keys;
+  };
+
+  const chooseOrder = (existing: Order, incoming: Order): Order => {
+    const existingStatus = (existing as any).sync_status || (existing as any).syncStatus;
+    const incomingStatus = (incoming as any).sync_status || (incoming as any).syncStatus;
+    if (existingStatus === 'pending' && incomingStatus !== 'pending') return existing;
+    if (incomingStatus === 'pending' && existingStatus !== 'pending') return incoming;
+
+    const existingTs = new Date((existing as any).updated_at || (existing as any).updatedAt || (existing as any).created_at || (existing as any).createdAt || 0).getTime();
+    const incomingTs = new Date((incoming as any).updated_at || (incoming as any).updatedAt || (incoming as any).created_at || (incoming as any).createdAt || 0).getTime();
+    return incomingTs >= existingTs ? incoming : existing;
+  };
+
+  const replaceOrderReferences = (from: Order, to: Order) => {
+    if (from === to) return;
+    for (const [key, value] of byKey.entries()) {
+      if (value === from) {
+        byKey.set(key, to);
+      }
+    }
+  };
+
+  orders.forEach((order) => {
+    const keys = getOrderKeys(order);
+    if (keys.length === 0) {
+      byKey.set(`rand:${Math.random().toString(36).slice(2)}`, order);
+      return;
+    }
+
+    const existingKey = keys.find((key) => byKey.has(key));
+    if (!existingKey) {
+      keys.forEach((key) => byKey.set(key, order));
+      return;
+    }
+
+    const existing = byKey.get(existingKey);
+    if (!existing) {
+      keys.forEach((key) => byKey.set(key, order));
+      return;
+    }
+
+    const chosen = chooseOrder(existing, order);
+    const other = chosen === existing ? order : existing;
+    replaceOrderReferences(other, chosen);
+    keys.forEach((key) => byKey.set(key, chosen));
+  });
+
+  return Array.from(new Set(byKey.values()));
+};
+
+const splitOrdersForQueue = (orders: Order[]): { visible: Order[]; pendingExternal: Order[] } => {
+  const uniqueOrders = dedupeOrders(orders);
+  const visible: Order[] = [];
+  const pendingExternal: Order[] = [];
+
+  uniqueOrders.forEach((order) => {
+    visible.push(order);
+    if (isPendingExternalOrder(order)) {
+      pendingExternal.push(order);
+    }
+  });
+
+  pendingExternal.sort((a, b) => {
+    const aTime = new Date((a as any).created_at || (a as any).createdAt || 0).getTime();
+    const bTime = new Date((b as any).created_at || (b as any).createdAt || 0).getTime();
+    return aTime - bTime;
+  });
+
+  return { visible, pendingExternal };
+};
+
+const splitOrdersForState = (orders: Order[]): { orders: Order[]; pendingExternalOrders: Order[] } => {
+  const split = splitOrdersForQueue(orders);
+  return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
+};
+
+const findOrderIndex = (orders: Order[], incoming: any): number => {
+  return orders.findIndex((order) =>
+    order.id === incoming.id ||
+    (order as any).supabase_id === incoming.id ||
+    (order as any).supabase_id === incoming.supabase_id ||
+    ((order as any).order_number && incoming.order_number && (order as any).order_number === incoming.order_number) ||
+    (order.orderNumber && incoming.orderNumber && order.orderNumber === incoming.orderNumber)
+  );
+};
+
 // Create the order store without subscribeWithSelector to avoid subscription conflicts
 export const useOrderStore = create<OrderStore>()((set, get) => ({
     orders: [],
+    pendingExternalOrders: [],
     selectedOrder: null,
     isLoading: false,
     error: null,
@@ -189,25 +346,26 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
           // Always accept remote: merge/overwrite local snapshot with remote payload
           set((state) => {
-            const existingOrderIndex = state.orders.findIndex(order =>
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const existingOrderIndex = combined.findIndex(order =>
               order.id === orderData.id ||
-              order.supabase_id === orderData.id ||
-              (order.order_number && orderData.order_number && order.order_number === orderData.order_number)
+              (order as any).supabase_id === orderData.id ||
+              ((order as any).order_number && orderData.order_number && (order as any).order_number === orderData.order_number)
             );
 
             if (existingOrderIndex >= 0) {
-              const current: any = state.orders[existingOrderIndex] as any;
+              const current: any = combined[existingOrderIndex] as any;
               // Do not overwrite local pending changes
               if ((current as any).sync_status === 'pending' || (current as any).syncStatus === 'pending') {
-                return { orders: state.orders };
+                return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
               }
               // Only accept newer remote updates
               const currentTs = new Date((current as any).updatedAt || (current as any).updated_at || 0).getTime();
               const incomingTs = new Date((orderData as any).updated_at || (orderData as any).updatedAt || 0).getTime();
               if (incomingTs && currentTs && incomingTs <= currentTs) {
-                return { orders: state.orders };
+                return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
               }
-              const updatedOrders = [...state.orders];
+              const updatedOrders = [...combined];
               const mappedStatus = (orderData as any).status ? mapStatusForPOS((orderData as any).status as any) : (current as any).status;
               const currentStatus = (current as any).status as string;
               // Treat delivered and cancelled as final and sticky; do not revert them due to incoming non-final statuses
@@ -219,10 +377,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                 ...orderData,
                 status: nextStatus
               };
-              return { orders: updatedOrders };
+              const split = splitOrdersForQueue(updatedOrders as Order[]);
+              return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
             } else {
               // Do not add remote-only orders; trigger refresh instead
-              return { orders: state.orders };
+              return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
             }
           });
 
@@ -234,8 +393,9 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           console.log('📡 Received order status update:', { orderId, status });
 
           const incomingMapped = mapStatusForPOS(status as any);
-          set((state) => ({
-            orders: state.orders.map(order =>
+          set((state) => {
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const updated = combined.map(order =>
               order.id === orderId
                 ? {
                     ...order,
@@ -244,8 +404,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                     updatedAt: new Date().toISOString()
                   }
                 : order
-            )
-          }));
+            );
+            const split = splitOrdersForQueue(updated as Order[]);
+            return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
+          });
 
           get()._invalidateCache();
         };
@@ -261,28 +423,28 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           }
 
           set((state) => {
-            // Check if order already exists
-            const existingOrderIndex = state.orders.findIndex(order => order.id === orderData.id);
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const existingOrderIndex = findOrderIndex(combined, orderData);
 
             if (existingOrderIndex >= 0) {
               console.log('📡 [useOrderStore] Updating existing order:', orderData.id);
-              // Update existing order
-              const updatedOrders = [...state.orders];
+              const updatedOrders = [...combined];
               updatedOrders[existingOrderIndex] = { ...updatedOrders[existingOrderIndex], ...orderData };
-              return { orders: updatedOrders };
-            } else {
-              console.log('📡 [useOrderStore] Adding new order to state:', orderData.id);
-              // Add the new order to the beginning of the list (most recent first)
-              return { orders: [orderData, ...state.orders] };
+              return splitOrdersForState(updatedOrders as Order[]);
             }
+
+            console.log('📡 [useOrderStore] Adding new order to state:', orderData.id);
+            return splitOrdersForState([orderData, ...combined] as Order[]);
           });
+
+
 
           get()._invalidateCache();
 
           // Show toast notification for new order
           toast.success(`New order #${orderData.order_number || orderData.id.slice(0, 8)} received!`, {
             duration: 5000,
-            icon: '🔔'
+            icon: createElement(Bell, { className: 'w-4 h-4 text-blue-500' })
           });
         };
 
@@ -297,33 +459,26 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           }
 
           set((state) => {
-            // Find order by id, supabase_id, or order_number
-            const existingOrderIndex = state.orders.findIndex(order =>
-              order.id === orderData.id ||
-              (order as any).supabase_id === orderData.id ||
-              (order as any).supabase_id === orderData.supabase_id ||
-              (order.order_number && orderData.order_number && order.order_number === orderData.order_number) ||
-              (order.orderNumber && orderData.orderNumber && order.orderNumber === orderData.orderNumber)
-            );
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const existingOrderIndex = findOrderIndex(combined, orderData);
 
             if (existingOrderIndex >= 0) {
               console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
-              const updatedOrders = [...state.orders];
-              // Merge the update with existing order data
+              const updatedOrders = [...combined];
               updatedOrders[existingOrderIndex] = {
                 ...updatedOrders[existingOrderIndex],
                 ...orderData,
-                // Ensure items are updated
                 items: orderData.items || updatedOrders[existingOrderIndex].items,
-                // Update total amount
                 totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
               };
-              return { orders: updatedOrders };
-            } else {
-              console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
-              return { orders: state.orders };
+              return splitOrdersForState(updatedOrders as Order[]);
             }
+
+            console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
+            return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
           });
+
+
 
           get()._invalidateCache();
         };
@@ -340,9 +495,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
           console.log('📡 Received order deletion:', { orderId });
 
-          set((state) => ({
-            orders: state.orders.filter(order => order.id !== orderId)
-          }));
+          set((state) => {
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const updatedOrders = combined.filter(order => order.id !== orderId);
+            return splitOrdersForState(updatedOrders as Order[]);
+          });
+
+
 
           get()._invalidateCache();
         };
@@ -351,8 +510,9 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         const handlePaymentUpdate = ({ orderId, paymentStatus, paymentMethod, transactionId }: any) => {
           console.log('📡 Received payment update:', { orderId, paymentStatus });
 
-          set((state) => ({
-            orders: state.orders.map(order =>
+          set((state) => {
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const updatedOrders = combined.map(order =>
               order.id === orderId
                 ? {
                     ...order,
@@ -362,8 +522,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                     updatedAt: new Date().toISOString()
                   }
                 : order
-            )
-          }));
+            );
+            return splitOrdersForState(updatedOrders as Order[]);
+          });
+
+
 
           get()._invalidateCache();
         };
@@ -398,9 +561,14 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         const handleConflictResolved = ({ conflictId, orderId, strategy }: any) => {
           console.log('✅ Conflict resolved:', { conflictId, orderId, strategy });
 
+          // Remove resolved conflict from state
           set((state) => ({
-            conflicts: state.conflicts.filter(c => c.id !== conflictId)
+            ...state,
+            conflicts: state.conflicts.filter(c => c.id !== conflictId && c.orderId !== orderId)
           }));
+
+          get()._invalidateCache();
+
 
           toast.success(`Conflict resolved using ${strategy} strategy`);
         };
@@ -450,7 +618,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         // Listen for orders cleared event
         const handleOrdersCleared = () => {
           console.log('🗑️  Orders cleared, refreshing...');
-          set({ orders: [], conflicts: [] });
+          set({ orders: [], pendingExternalOrders: [], conflicts: [] });
           get()._invalidateCache();
           toast.success('All orders cleared successfully');
         };
@@ -525,7 +693,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           );
         }, RETRY.MAX_RETRY_ATTEMPTS, RETRY.RETRY_DELAY_MS);
 
-        set({ orders });
+        set(splitOrdersForState(orders));
         get()._invalidateCache();
         get()._setLoading(operation, false);
       } catch (error) {
@@ -616,7 +784,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       try {
         // Use local state since electron API is simplified
         const state = get();
-        return state.orders.find(order => order.id === orderId) || null;
+        return (
+          state.orders.find(order => order.id === orderId) ||
+          state.pendingExternalOrders.find(order => order.id === orderId) ||
+          null
+        );
       } catch (error) {
         console.error('Failed to get order by ID:', error);
         return null;
@@ -645,13 +817,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         // Update local state after successful API call
         const mappedLocalStatus = mapStatusForPOS(status as any);
-        set((state) => ({
-          orders: state.orders.map(order =>
-            order.id === orderId
-              ? { ...order, status: mappedLocalStatus as any, updatedAt: new Date().toISOString() }
-              : order
-          )
-        }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === orderId
+            ? { ...order, status: mappedLocalStatus as any, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
         get()._invalidateCache();
         get()._setLoading(operation, false);
 
@@ -731,7 +907,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     // Silent refresh - updates orders in background without loading states or toast errors
     // Ideal for fast polling (1-2 sec) without UI flicker
-    silentRefresh: async () => {
+        silentRefresh: async () => {
       try {
         const orderService = OrderService.getInstance();
         const fetchedOrders = await orderService.fetchOrders();
@@ -750,7 +926,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               fetchedOrders.filter(o => (o as any).supabase_id)
                 .map(o => [(o as any).supabase_id, o])
             );
-            
+
             // Helper to check if an order exists in fetched results using any identifier
             const existsInFetched = (order: Order) => {
               const orderNum = order.orderNumber || (order as any).order_number;
@@ -759,11 +935,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                      (orderNum && fetchedOrdersByOrderNumber.has(orderNum)) ||
                      (supabaseId && fetchedOrdersBySupabaseId.has(supabaseId));
             };
-            
+
+            const combinedCurrent = [...state.orders, ...state.pendingExternalOrders];
+
             // Preserve any orders in current state that aren't in the fetched list
             // This prevents race conditions where a newly created order hasn't been
             // committed to the database yet when silentRefresh runs
-            const preservedOrders = state.orders.filter(order => {
+            const preservedOrders = combinedCurrent.filter(order => {
               // Keep orders that are not in the fetched list AND were created recently (within last 30 seconds)
               // This handles the race condition where order is created but not yet in DB query results
               if (!existsInFetched(order)) {
@@ -777,10 +955,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               }
               return false;
             });
-            
+
             // Merge: fetched orders + preserved recent orders
             const mergedOrders = [...fetchedOrders, ...preservedOrders];
-            
+
             // Remove duplicates using order_number as primary key (consistent across local and remote)
             // Fall back to id if order_number is not available
             const uniqueOrders = Array.from(
@@ -789,8 +967,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                 return [key, o];
               })).values()
             );
-            
-            return { orders: uniqueOrders };
+
+            return splitOrdersForState(uniqueOrders as Order[]);
           });
           get()._invalidateCache();
         }
@@ -804,19 +982,23 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
          updatePaymentStatus: async (orderId: string, paymentStatus: NonNullable<Order['paymentStatus']>, paymentMethod?: Order['paymentMethod'], transactionId?: string) => {
        try {
          // Update local state optimistically
-         set((state) => ({
-           orders: state.orders.map(order =>
-             order.id === orderId
-               ? {
-                   ...order,
-                   paymentStatus,
-                   paymentMethod: paymentMethod || order.paymentMethod,
-                   paymentTransactionId: transactionId || order.paymentTransactionId,
-                   updatedAt: new Date().toISOString()
-                 }
-               : order
-           )
-         }));
+           set((state) => {
+             const combined = [...state.orders, ...state.pendingExternalOrders];
+             const updatedOrders = combined.map(order =>
+               order.id === orderId
+                 ? {
+                     ...order,
+                     paymentStatus,
+                     paymentMethod: paymentMethod || order.paymentMethod,
+                     paymentTransactionId: transactionId || order.paymentTransactionId,
+                     updatedAt: new Date().toISOString()
+                   }
+                 : order
+             );
+             return splitOrdersForState(updatedOrders as Order[]);
+           });
+
+
          get()._invalidateCache();
 
          // TODO: Sync with backend when payment API is available
@@ -864,13 +1046,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
          updateEstimatedTime: async (orderId: string, estimatedTime: number) => {
        try {
          // Update local state optimistically
-         set((state) => ({
-           orders: state.orders.map(order =>
-             order.id === orderId
-               ? { ...order, estimatedTime, updatedAt: new Date().toISOString() }
-               : order
-           )
-         }));
+           set((state) => {
+             const combined = [...state.orders, ...state.pendingExternalOrders];
+             const updatedOrders = combined.map(order =>
+               order.id === orderId
+                 ? { ...order, estimatedTime, updatedAt: new Date().toISOString() }
+                 : order
+             );
+             return splitOrdersForState(updatedOrders as Order[]);
+           });
+
+
          get()._invalidateCache();
 
          // TODO: Sync with backend when estimated time API is available
@@ -888,13 +1074,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       try {
         const result = await window.electronAPI?.approveOrder?.(orderId, estimatedTime);
         if (result?.success) {
-          set((state) => ({
-            orders: state.orders.map(order =>
-              order.id === orderId
-                ? { ...order, status: 'confirmed', estimatedTime: estimatedTime || 30, updatedAt: new Date().toISOString() }
-                : order
-            )
-          }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === orderId
+            ? { ...order, status: 'confirmed', estimatedTime: estimatedTime || 20, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
           get()._invalidateCache();
           toast.success('Order approved');
           return true;
@@ -916,13 +1106,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       try {
         const result = await window.electronAPI?.declineOrder?.(orderId, reason);
         if (result?.success) {
-          set((state) => ({
-            orders: state.orders.map(order =>
-              order.id === orderId
-                ? { ...order, status: 'cancelled', cancellationReason: reason, updatedAt: new Date().toISOString() }
-                : order
-            )
-          }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === orderId
+            ? { ...order, status: 'cancelled', cancellationReason: reason, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
           get()._invalidateCache();
           toast.success('Order declined');
           return true;
@@ -944,13 +1138,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       try {
         const result = await window.electronAPI?.assignDriverToOrder?.(orderId, driverId, notes);
         if (result?.success) {
-          set((state) => ({
-            orders: state.orders.map(order =>
-              order.id === orderId
-                ? { ...order, status: 'completed', driverId, driverName: result.driverName, updatedAt: new Date().toISOString() }
-                : order
-            )
-          }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === orderId
+            ? { ...order, status: 'completed', driverId, driverName: result.driverName, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
           // Persist final status via dedicated IPC
           try {
             await window.electronAPI?.invoke?.('order:update-status', { orderId, status: 'completed' });
@@ -980,13 +1178,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           ? window.electronAPI.updateOrderType(orderId, 'pickup')
           : window.electronAPI?.invoke?.('order:update-type', orderId, 'pickup')));
         if (resp?.success) {
-          set((state) => ({
-            orders: state.orders.map(order =>
-              order.id === (resp.orderId || orderId)
-                ? { ...order, orderType: 'pickup', driverId: undefined, updatedAt: new Date().toISOString() }
-                : order
-            )
-          }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === (resp.orderId || orderId)
+            ? { ...order, orderType: 'pickup', driverId: undefined, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
           get()._invalidateCache();
           toast.success('Converted to Pickup');
           return true;
@@ -1014,13 +1216,17 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       try {
         const result = await window.electronAPI?.updateOrderPreparation?.(orderId, stage, progress);
         if (result?.success) {
-          set((state) => ({
-            orders: state.orders.map(order =>
-              order.id === orderId
-                ? { ...order, preparationProgress: progress, updatedAt: new Date().toISOString() }
-                : order
-            )
-          }));
+      set((state) => {
+        const combined = [...state.orders, ...state.pendingExternalOrders];
+        const updatedOrders = combined.map(order =>
+          order.id === orderId
+            ? { ...order, preparationProgress: progress, updatedAt: new Date().toISOString() }
+            : order
+        );
+        return splitOrdersForState(updatedOrders as Order[]);
+      });
+
+
           get()._invalidateCache();
           return true;
         }
@@ -1051,10 +1257,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             ? await window.electronAPI.resolveOrderConflictAlias(conflictId, strategy)
             : await window.electronAPI.resolveOrderConflictAlt(conflictId, strategy);
           if (result) {
-            // Remove resolved conflict
+            // Remove resolved conflict from state
             set((state) => ({
+              ...state,
               conflicts: state.conflicts.filter(c => c.id !== conflictId)
             }));
+
+
+
+
             return true;
           }
         }

@@ -1,17 +1,11 @@
 import React, { useState, useEffect, forwardRef, useImperativeHandle } from 'react';
+import { AlertTriangle, CheckCircle } from 'lucide-react';
 import { useShift } from '../contexts/shift-context';
 import { StaffShiftModal } from './modals/StaffShiftModal';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
 import { useFeatures } from '../hooks/useFeatures';
-
-// Currency formatter for EUR in Greek locale
-const formatCurrency = (amount: number): string => {
-  return new Intl.NumberFormat('el-GR', {
-    style: 'currency',
-    currency: 'EUR'
-  }).format(amount);
-};
+import { formatCurrency } from '../utils/format';
 
 export interface ShiftManagerRef {
   openCheckout: () => void;
@@ -75,8 +69,8 @@ export const ShiftManager = forwardRef<ShiftManagerRef>((props, ref) => {
         : t('shiftManager.shortage', { amount });
 
       const toastStyle = variance >= 0
-        ? { icon: '✅', style: { background: '#10b981', color: 'white' } }
-        : { icon: '⚠️', style: { background: '#f59e0b', color: 'white' } };
+        ? { icon: <CheckCircle className="w-4 h-4" />, style: { background: '#10b981', color: 'white' } }
+        : { icon: <AlertTriangle className="w-4 h-4" />, style: { background: '#f59e0b', color: 'white' } };
 
       toast.success(t('shiftManager.shiftEndedWithVariance', { variance: varianceText }), toastStyle);
     } else {

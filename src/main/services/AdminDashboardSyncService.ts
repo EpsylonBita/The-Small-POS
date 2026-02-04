@@ -487,7 +487,16 @@ export class AdminDashboardSyncService {
     try {
       console.log('🔄 Starting sync with admin dashboard...');
 
-      // Sync menu data
+      // IMPORTANT: Send heartbeat FIRST to ensure terminal exists in database with api_key_hash
+      // This is required before any other API calls that need terminal authentication
+      // The heartbeat creates/updates the terminal record with the API key hash
+      console.log('💓 Sending initial heartbeat to register terminal...');
+      await this.sendHeartbeat();
+
+      // Small delay to ensure database write completes
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Sync menu data (now terminal exists with api_key_hash)
       await this.syncMenuData();
 
       // Small delay between sync calls to avoid rate limiting
@@ -613,9 +622,9 @@ export class AdminDashboardSyncService {
           // Update local database with menu data
           console.log(`📋 Received menu updates: ${menuData.sync_stats?.categories_updated ?? 0} categories, ${menuData.sync_stats?.subcategories_updated ?? 0} items`);
 
-          // TODO: Update local database with menu data
           const dbSvc = this.dbManager.getDatabaseService();
           if (dbSvc && menuData.menu_data) {
+            // Cache updated subcategories
             const subcategories = menuData.menu_data.subcategories || [];
             if (Array.isArray(subcategories) && subcategories.length > 0) {
               const cacheItems = subcategories.map((item: any) => ({
@@ -629,6 +638,52 @@ export class AdminDashboardSyncService {
               console.log(`[AdminDashboardSyncService] Persisted ${cacheItems.length} subcategories to cache`);
             } else {
               console.warn('[AdminDashboardSyncService] No subcategories found in menu update', Object.keys(menuData.menu_data));
+            }
+
+            // Process deleted/deactivated items for cache eviction
+            if (menuData.deleted_items) {
+              const { category_ids, subcategory_ids, ingredient_ids } = menuData.deleted_items as {
+                category_ids?: string[];
+                subcategory_ids?: string[];
+                ingredient_ids?: string[];
+              };
+
+              if (Array.isArray(subcategory_ids) && subcategory_ids.length > 0) {
+                const evicted = dbSvc.deleteSubcategoriesFromCache(subcategory_ids);
+                console.log(`[AdminDashboardSyncService] Evicted ${evicted} deactivated subcategories from cache`);
+              }
+
+              // Log category/ingredient eviction counts for debugging
+              if (Array.isArray(category_ids) && category_ids.length > 0) {
+                console.log(`[AdminDashboardSyncService] ${category_ids.length} categories marked for eviction (client-side)`);
+              }
+              if (Array.isArray(ingredient_ids) && ingredient_ids.length > 0) {
+                console.log(`[AdminDashboardSyncService] ${ingredient_ids.length} ingredients marked for eviction (client-side)`);
+              }
+
+              // Notify renderer to clear these items from UI state
+              this.notifyRenderer('menu:items-deleted', {
+                category_ids: category_ids || [],
+                subcategory_ids: subcategory_ids || [],
+                ingredient_ids: ingredient_ids || [],
+              });
+            }
+
+            // Process branch-specific overrides
+            if (menuData.menu_data.branch_overrides && Array.isArray(menuData.menu_data.branch_overrides)) {
+              const overrides = menuData.menu_data.branch_overrides as Array<{
+                subcategory_id: string;
+                price_override?: number | null;
+                availability_override?: boolean | null;
+                updated_at: string;
+              }>;
+              if (overrides.length > 0) {
+                const applied = dbSvc.applyBranchOverrides(overrides);
+                console.log(`[AdminDashboardSyncService] Applied ${applied} branch overrides`);
+
+                // Notify renderer about price/availability changes
+                this.notifyRenderer('menu:branch-overrides', { overrides });
+              }
             }
           }
           this.menuVersion++;

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { POSGlassModal } from './ui/pos-glass-components';
+import { Check } from 'lucide-react';
+import { LiquidGlassModal } from './ui/pos-glass-components';
 import toast from 'react-hot-toast';
 
 interface DiagnosticResult {
@@ -74,7 +75,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   };
 
   return (
-    <POSGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg">
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg">
       <div className="space-y-6">
         {/* Check Button */}
         <div className="flex justify-between items-center">
@@ -146,7 +147,10 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                             </div>
                           </div>
                           {selectedDriverId === shift.staff_id && (
-                            <div className="text-green-400">✓ Selected</div>
+                            <div className="flex items-center gap-1 text-green-400">
+                              <Check className="w-4 h-4" />
+                              <span>Selected</span>
+                            </div>
                           )}
                         </div>
                       </button>
@@ -198,6 +202,6 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
           </div>
         )}
       </div>
-    </POSGlassModal>
+    </LiquidGlassModal>
   );
 };

@@ -617,6 +617,7 @@ class MenuService {
             return await supabase
               .from('subcategories')
               .select('*')
+              .eq('is_available', true)
               .order('display_order', { ascending: true });
           })(),
           TIMING.MENU_LOAD_TIMEOUT,
@@ -628,15 +629,15 @@ class MenuService {
         throw ErrorFactory.network('Failed to fetch menu items');
       }
 
-      // Filter out RLS test data and inactive items (items with "RLS" in the name or "Test" prefix)
+      // Filter out RLS test data (items with "RLS" in the name or "Test" prefix)
       const filteredData = (data || []).filter((item: any) => {
         const name = (item.name || '').toLowerCase();
-        // Filter out RLS test items and items that aren't active
+        // Filter out RLS test items
         if (name.includes('rls') || name.startsWith('test ')) {
           return false;
         }
-        // Only include active items
-        return item.is_active !== false;
+        // Only include available items (consistent with getMenuItemsByCategory)
+        return item.is_available !== false;
       });
 
       const normalized = filteredData.map((item: any) => this.normalizeMenuItem(item));

@@ -1,7 +1,11 @@
 // Table types for POS System
 // Shared between components for table management
 
-export type TableStatus = 'available' | 'occupied' | 'reserved' | 'cleaning';
+// Import canonical TableStatus from shared types
+import type { TableStatus as CanonicalTableStatus } from '../../../../shared/types/table-status';
+
+// Re-export canonical TableStatus
+export type TableStatus = CanonicalTableStatus;
 export type TableShape = 'rectangle' | 'circle' | 'square' | 'custom';
 
 export interface RestaurantTable {
@@ -94,17 +98,23 @@ export function getStatusColor(status: TableStatus): string {
       return 'yellow';
     case 'cleaning':
       return 'gray';
+    case 'maintenance':
+      return 'orange';
+    case 'unavailable':
+      return 'slate';
     default:
       return 'gray';
   }
 }
 
 export function getStatusClasses(status: TableStatus): string {
-  const colors = {
+  const colors: Record<TableStatus, string> = {
     available: 'border-green-500 bg-green-500/10',
     occupied: 'border-blue-500 bg-blue-500/10',
     reserved: 'border-yellow-500 bg-yellow-500/10',
     cleaning: 'border-gray-500 bg-gray-500/10',
+    maintenance: 'border-orange-500 bg-orange-500/10',
+    unavailable: 'border-slate-500 bg-slate-500/10',
   };
   return colors[status] || colors.available;
 }

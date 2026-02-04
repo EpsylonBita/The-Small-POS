@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import type { UpdateInfo } from 'electron-updater';
+import { AlertTriangle } from 'lucide-react';
 
 interface UpdateReadyModalProps {
     isOpen: boolean;
@@ -40,8 +41,9 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
                     You can install it now (requires restart) or it will be installed automatically the next time you restart the app.
                 </p>
 
-                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-sm text-yellow-200">
-                    ⚠️ Note: The application will restart immediately if you choose "Install Now".
+                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-sm text-yellow-200 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 mt-0.5 text-yellow-300" />
+                    <span>Note: The application will restart immediately if you choose "Install Now".</span>
                 </div>
 
                 <div className="flex flex-col gap-3 pt-4">

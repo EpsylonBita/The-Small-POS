@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle } from 'lucide-react';
+import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle, Mail } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { getApiUrl, environment } from '../../../config/environment';
+import { posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
 import { inputBase } from '../../styles/designSystem';
+import { formatDate } from '../../utils/format';
 
 interface CustomerAddress {
   id: string;
@@ -153,7 +155,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       // Use POS-authenticated endpoint with both search and phone parameters for compatibility
       // The search parameter supports phone or name; phone is for backward compatibility with older API versions
       const encodedQuery = encodeURIComponent(query.trim());
-      const endpoint = getApiUrl(`pos/customers?search=${encodedQuery}&phone=${encodedQuery}`);
+      const endpoint = `pos/customers?search=${encodedQuery}&phone=${encodedQuery}`;
 
       // Build headers with POS authentication
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -170,27 +172,26 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         endpoint
       });
 
-      const response = await fetch(endpoint, {
-        method: 'GET',
+      const result = await posApiGet<any>(endpoint, {
         headers,
         credentials: 'omit', // Don't send cookies for POS endpoint
       });
 
-      if (!response.ok) {
-        if (response.status === 401) {
+      if (!result.success) {
+        if (result.status === 401) {
           console.warn('[CustomerSearch] Authentication failed (401). Check terminal credentials in Settings.');
           setError(t('modals.customerSearch.authFailed'));
           setIsSearching(false);
           return;
         }
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(result.error || `HTTP ${result.status || 'error'}`);
       }
 
-      const result = await response.json();
+      const payload = result.data;
 
       // Handle multiple results
-      if (result.success && result.multiple && result.customers) {
-        const customersList = result.customers.map((c: any) => ({
+      if (payload?.success && payload.multiple && payload.customers) {
+        const customersList = payload.customers.map((c: any) => ({
           id: c.id,
           phone: c.phone,
           name: c.name,
@@ -209,23 +210,23 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         setError(null);
         setCustomers(customersList);
         setCustomer(null);
-      } else if (result.success && result.customer) {
+      } else if (payload?.success && payload.customer) {
         // Single customer result
         const customerObj = {
-          id: result.customer.id,
-          phone: result.customer.phone,
-          name: result.customer.name,
-          email: result.customer.email,
-          address: result.customer.address,
-          postal_code: result.customer.postal_code,
-          floor_number: result.customer.floor_number,
-          notes: result.customer.notes,
-          name_on_ringer: result.customer.name_on_ringer,
-          version: result.customer.version,
-          addresses: result.customer.addresses,
-          is_banned: result.customer.is_banned,
-          ban_reason: result.customer.ban_reason,
-          banned_at: result.customer.banned_at,
+          id: payload.customer.id,
+          phone: payload.customer.phone,
+          name: payload.customer.name,
+          email: payload.customer.email,
+          address: payload.customer.address,
+          postal_code: payload.customer.postal_code,
+          floor_number: payload.customer.floor_number,
+          notes: payload.customer.notes,
+          name_on_ringer: payload.customer.name_on_ringer,
+          version: payload.customer.version,
+          addresses: payload.customer.addresses,
+          is_banned: payload.customer.is_banned,
+          ban_reason: payload.customer.ban_reason,
+          banned_at: payload.customer.banned_at,
         };
 
         // Clear error when customer is found
@@ -512,47 +513,45 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       }
 
       // Fetch by exact phone to get full customer data with addresses
-      const endpoint = getApiUrl(`pos/customers?phone=${encodeURIComponent(selectedCustomer.phone)}`);
+      const endpoint = `pos/customers?phone=${encodeURIComponent(selectedCustomer.phone)}`;
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (posKey) headers['x-pos-api-key'] = String(posKey);
       if (termId) headers['x-terminal-id'] = String(termId);
 
-      const response = await fetch(endpoint, { method: 'GET', headers, credentials: 'omit' });
+      const result = await posApiGet<any>(endpoint, { headers, credentials: 'omit' });
+      const payload = result.success ? result.data : null;
 
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success && result.customer) {
+      if (result.success && payload?.success && payload.customer) {
           console.log('[CustomerSearch] Full customer data received:', {
-            id: result.customer.id,
-            name: result.customer.name,
-            name_on_ringer: result.customer.name_on_ringer,
-            addressCount: result.customer.addresses?.length,
-            addresses: result.customer.addresses?.map((a: any) => ({
+            id: payload.customer.id,
+            name: payload.customer.name,
+            name_on_ringer: payload.customer.name_on_ringer,
+            addressCount: payload.customer.addresses?.length,
+            addresses: payload.customer.addresses?.map((a: any) => ({
               id: a.id,
               street: a.street_address,
               notes: a.notes
             }))
           });
           const customerObj = {
-            id: result.customer.id,
-            phone: result.customer.phone,
-            name: result.customer.name,
-            email: result.customer.email,
-            address: result.customer.address,
-            postal_code: result.customer.postal_code,
-            floor_number: result.customer.floor_number,
-            notes: result.customer.notes,
-            name_on_ringer: result.customer.name_on_ringer,
-            version: result.customer.version,
-            addresses: result.customer.addresses,
-            is_banned: result.customer.is_banned,
-            ban_reason: result.customer.ban_reason,
-            banned_at: result.customer.banned_at,
+            id: payload.customer.id,
+            phone: payload.customer.phone,
+            name: payload.customer.name,
+            email: payload.customer.email,
+            address: payload.customer.address,
+            postal_code: payload.customer.postal_code,
+            floor_number: payload.customer.floor_number,
+            notes: payload.customer.notes,
+            name_on_ringer: payload.customer.name_on_ringer,
+            version: payload.customer.version,
+            addresses: payload.customer.addresses,
+            is_banned: payload.customer.is_banned,
+            ban_reason: payload.customer.ban_reason,
+            banned_at: payload.customer.banned_at,
           };
           setCustomer(customerObj);
           setCustomers([]);
           return;
-        }
       }
       // Fallback to using the selected customer from list if fetch fails
       setCustomer(selectedCustomer);
@@ -673,7 +672,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
               )}
               {customer.banned_at && (
                 <p className="text-xs text-red-400/70 mt-1 ml-6">
-                  {t('modals.customerSearch.bannedOn', 'Banned on')}: {new Date(customer.banned_at).toLocaleDateString()}
+                  {t('modals.customerSearch.bannedOn', 'Banned on')}: {formatDate(customer.banned_at)}
                 </p>
               )}
             </div>
@@ -839,8 +838,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                 // Single or no addresses - show full details as originally
                 <>
                   {customer.email && (
-                    <p className="text-sm liquid-glass-modal-text-muted mb-1">
-                      ✉️ {customer.email}
+                    <p className="text-sm liquid-glass-modal-text-muted mb-1 flex items-center gap-2">
+                      <Mail className="w-4 h-4" aria-hidden="true" />
+                      <span>{customer.email}</span>
                     </p>
                   )}
                   {customer.address && (

@@ -14,6 +14,7 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
+import { formatCurrency } from '../utils/format';
 
 interface DeliveryZone {
   id: string;
@@ -29,7 +30,7 @@ interface DeliveryZone {
 }
 
 const DeliveryZonesPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
@@ -37,7 +38,7 @@ const DeliveryZonesPage: React.FC = () => {
   const [selectedZone, setSelectedZone] = useState<DeliveryZone | null>(null);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchZones = useCallback(async () => {
     if (!staff?.branchId) return;
@@ -48,19 +49,11 @@ const DeliveryZonesPage: React.FC = () => {
         `pos/delivery-zones?branch_id=${staff.branchId}`
       );
 
-      if (result.success && result.data) {
-        const zonesData = Array.isArray(result.data) ? result.data : (result.data.zones || []);
-        setZones(zonesData);
-      } else {
-        console.warn('Delivery zones API returned no data, using fallback');
-        // Mock data for demo
-        setZones([
-          { id: '1', name: 'Zone A - City Center', min_order_amount: 10, delivery_fee: 0, estimated_time_min: 15, estimated_time_max: 25, is_active: true, color_code: '#22c55e' },
-          { id: '2', name: 'Zone B - Inner Suburbs', min_order_amount: 15, delivery_fee: 2.50, estimated_time_min: 25, estimated_time_max: 40, is_active: true, color_code: '#3b82f6' },
-          { id: '3', name: 'Zone C - Outer Areas', min_order_amount: 25, delivery_fee: 5.00, estimated_time_min: 40, estimated_time_max: 60, is_active: true, color_code: '#f59e0b' },
-          { id: '4', name: 'Zone D - Extended', min_order_amount: 35, delivery_fee: 8.00, estimated_time_min: 50, estimated_time_max: 75, is_active: false, color_code: '#ef4444' },
-        ]);
+      if (!result.success || !result.data) {
+        throw new Error(result.error || 'Delivery zones API returned no data');
       }
+      const zonesData = Array.isArray(result.data) ? result.data : (result.data.zones || []);
+      setZones(zonesData);
     } catch (error) {
       console.error('Failed to fetch delivery zones:', error);
       toast.error(t('deliveryZones.errors.loadFailed', 'Failed to load delivery zones'));
@@ -137,7 +130,7 @@ const DeliveryZonesPage: React.FC = () => {
             <div>
               <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('deliveryZones.avgFee', 'Avg Delivery Fee')}</p>
               <p className="text-xl font-bold">
-                {currency.format(activeZones.length > 0 ? activeZones.reduce((sum, z) => sum + z.delivery_fee, 0) / activeZones.length : 0)}
+                {formatMoney(activeZones.length > 0 ? activeZones.reduce((sum, z) => sum + z.delivery_fee, 0) / activeZones.length : 0)}
               </p>
             </div>
           </div>
@@ -206,14 +199,14 @@ const DeliveryZonesPage: React.FC = () => {
                   <DollarSign className="w-4 h-4 text-gray-400" />
                   <div>
                     <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{t('deliveryZones.minOrder', 'Min Order')}</p>
-                    <p className="font-medium">{currency.format(zone.min_order_amount)}</p>
+                    <p className="font-medium">{formatMoney(zone.min_order_amount)}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <Truck className="w-4 h-4 text-gray-400" />
                   <div>
                     <p className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{t('deliveryZones.fee', 'Delivery Fee')}</p>
-                    <p className="font-medium">{zone.delivery_fee === 0 ? t('common.free', 'Free') : currency.format(zone.delivery_fee)}</p>
+                    <p className="font-medium">{zone.delivery_fee === 0 ? t('common.free', 'Free') : formatMoney(zone.delivery_fee)}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 col-span-2">

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle, ChevronDown, ChevronUp, CheckCircle, XCircle, RefreshCw, Clock } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
+import { formatDate as formatDateValue } from '../utils/format';
 
 interface OrderConflict {
   id: string;
@@ -55,7 +56,7 @@ export const OrderConflictBanner: React.FC<OrderConflictBannerProps> = ({
     }
   };
 
-  const formatDate = (dateString: string) => {
+  const formatConflictDate = (dateString: string) => {
     const date = new Date(dateString);
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
@@ -64,7 +65,7 @@ export const OrderConflictBanner: React.FC<OrderConflictBannerProps> = ({
     if (diffMins < 1) return 'Just now';
     if (diffMins < 60) return `${diffMins}m ago`;
     if (diffMins < 1440) return `${Math.floor(diffMins / 60)}h ago`;
-    return date.toLocaleDateString();
+    return formatDateValue(date);
   };
 
   const getConflictDescription = (conflict: OrderConflict): string => {

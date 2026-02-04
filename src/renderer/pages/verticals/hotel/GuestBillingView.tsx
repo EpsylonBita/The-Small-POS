@@ -1,9 +1,10 @@
 import React, { memo, useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
-import { CreditCard, User, Calendar, Plus, Search, FileText, RefreshCw, AlertCircle } from 'lucide-react';
+import { CreditCard, User, Calendar, Plus, Search, FileText, RefreshCw, AlertCircle, X } from 'lucide-react';
 import { posApiGet } from '../../../utils/api-helpers';
 import { useTerminalSettings } from '../../../hooks/useTerminalSettings';
+import { formatCurrency } from '../../../utils/format';
 
 interface GuestFolio {
   id: string;
@@ -72,7 +73,7 @@ export const GuestBillingView: React.FC = memo(() => {
   }, [fetchFolios]);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const filteredFolios = folios.filter(f => {
     const matchesSearch = f.guestName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -161,7 +162,7 @@ export const GuestBillingView: React.FC = memo(() => {
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('guestBilling.stats.totalBalance', { defaultValue: 'Total Balance' })}
             </div>
-            <div className={`text-xl font-bold text-blue-500`}>{currency.format(stats.totalBalance)}</div>
+            <div className={`text-xl font-bold text-blue-500`}>{formatMoney(stats.totalBalance)}</div>
           </div>
           <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -222,7 +223,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.room', { defaultValue: 'Room' })} {folio.roomNumber}
                 </span>
                 <span className={`font-bold ${folio.balance > 0 ? 'text-blue-500' : 'text-green-500'}`}>
-                  {currency.format(folio.balance)}
+                  {formatMoney(folio.balance)}
                 </span>
               </div>
             </button>
@@ -241,7 +242,7 @@ export const GuestBillingView: React.FC = memo(() => {
               onClick={() => setSelectedFolio(null)}
               className={`text-sm ${isDark ? 'text-gray-400 hover:text-white' : 'text-gray-500 hover:text-gray-700'}`}
             >
-              ✕
+              <X className="w-4 h-4" />
             </button>
           </div>
 
@@ -277,7 +278,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.totalCharges', { defaultValue: 'Total Charges' })}
                 </span>
                 <span className={isDark ? 'text-white' : 'text-gray-900'}>
-                  {currency.format(selectedFolio.totalCharges)}
+                  {formatMoney(selectedFolio.totalCharges)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -285,7 +286,7 @@ export const GuestBillingView: React.FC = memo(() => {
                   {t('guestBilling.totalPayments', { defaultValue: 'Total Payments' })}
                 </span>
                 <span className="text-green-500">
-                  -{currency.format(selectedFolio.totalPayments)}
+                  -{formatMoney(selectedFolio.totalPayments)}
                 </span>
               </div>
             </div>
@@ -305,7 +306,7 @@ export const GuestBillingView: React.FC = memo(() => {
               <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
                 {t('guestBilling.balance', { defaultValue: 'Balance' })}
               </span>
-              <span className="text-xl font-bold text-blue-500">{currency.format(selectedFolio.balance)}</span>
+              <span className="text-xl font-bold text-blue-500">{formatMoney(selectedFolio.balance)}</span>
             </div>
             <div className="grid grid-cols-2 gap-2">
               <button className="flex items-center justify-center gap-2 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">

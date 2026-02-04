@@ -31,6 +31,10 @@ import {
   shutdownPrinterManager,
 } from '../handlers/printer-manager-handlers';
 
+// ECR (Payment Terminal) handlers
+import { registerECRHandlers } from '../ecr/handlers';
+import { PaymentTerminalManager } from '../ecr/services/PaymentTerminalManager';
+
 /**
  * Initialize the database with fallback handling
  */
@@ -136,11 +140,11 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
       source: persistedTerminalId ? 'connection_string' : (process.env.TERMINAL_ID ? 'env' : 'default')
     });
 
-    // Get admin API URL from local settings first, then env
+    // Get admin API URL from connection string stored in local settings ONLY
     const storedAdminUrl = settingsService.getSetting<string>('terminal', 'admin_dashboard_url', '');
     const adminApiBaseUrl = storedAdminUrl
       ? storedAdminUrl.replace(/\/$/, '') + '/api'
-      : process.env.ADMIN_API_BASE_URL;
+      : undefined;
 
     // Get organization ID from settings
     const organizationId = settingsService.getSetting<string>('terminal', 'organization_id', '');
@@ -150,16 +154,25 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
       console.warn('[initializeServices] No Organization ID found in settings');
     }
 
-    // Get database key - prioritize service role key for RLS bypass in main process
-    // This allows the POS backend to act as a trusted service
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY ||
-      process.env.SUPABASE_ANON_KEY ||
-      '';
+    // SECURITY: Only use anon key in Electron app - service role key bypasses RLS
+    // and would allow any terminal to access ALL organizations' data
+    const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
+
+    // SECURITY WARNING: Service role key should NEVER be shipped with the Electron app
+    if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      const allowServiceRoleDesktop = process.env.ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP === 'true';
+      if (allowServiceRoleDesktop) {
+        console.warn('[SECURITY WARNING] SUPABASE_SERVICE_ROLE_KEY detected and explicitly allowed for desktop via ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP.');
+        console.warn('[SECURITY WARNING] This bypasses RLS and should never be used in production.');
+      } else {
+        console.warn('[SECURITY WARNING] SUPABASE_SERVICE_ROLE_KEY detected in environment and will be ignored by the desktop app.');
+        console.warn('[SECURITY WARNING] Remove this key from the production environment.');
+      }
+    }
 
     console.log('[initializeServices] Supabase auth config:', {
-      hasServiceKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
       hasAnonKey: !!process.env.SUPABASE_ANON_KEY,
-      usingKeyType: process.env.SUPABASE_SERVICE_ROLE_KEY ? 'service_role' : 'anon'
+      usingKeyType: 'anon' // Always anon for security
     });
 
     // Initialize CustomerService with terminal ID and API key
@@ -180,11 +193,11 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
 
     // Initialize SyncService with CustomerService and SettingsService
     const syncService = new SyncService(dbManager, customerService, settingsService);
-    const adminApiUrl = process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL;
+    // Admin URL comes ONLY from connection string (storedAdminUrl already retrieved above)
     const adminDashboardSyncService = new AdminDashboardSyncService(
       dbManager,
       undefined,
-      adminApiUrl
+      storedAdminUrl || undefined
     );
     serviceRegistry.register('syncService', syncService);
     serviceRegistry.register('adminDashboardSyncService', adminDashboardSyncService);
@@ -194,19 +207,22 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
     serviceRegistry.register('heartbeatService', heartbeatService);
 
     // Initialize ModuleSyncService for syncing modules from admin dashboard
-    // Try to get stored admin URL from local settings first
-    let adminDashboardUrl = process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || 'http://localhost:3001';
+    // Admin URL comes ONLY from connection string stored in local settings
+    let adminDashboardUrl = '';
     try {
       const dbSvc = dbManager.getDatabaseService?.();
       if (dbSvc?.settings) {
-        const storedUrl = dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', null) as string | null;
-        if (storedUrl) {
-          adminDashboardUrl = storedUrl;
-          console.log(`[initialization] Using stored admin dashboard URL: ${adminDashboardUrl}`);
+        adminDashboardUrl = dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', '') as string;
+        if (adminDashboardUrl) {
+          console.log(`[initialization] Using admin dashboard URL from connection string: ${adminDashboardUrl}`);
         }
       }
     } catch (e) {
-      console.warn('[initialization] Failed to load stored admin URL:', e);
+      console.warn('[initialization] Failed to load admin URL from settings:', e);
+    }
+
+    if (!adminDashboardUrl) {
+      console.warn('[initialization] No admin dashboard URL configured - terminal needs to be paired with a connection string');
     }
     const moduleSyncService = new ModuleSyncService({
       adminDashboardUrl,
@@ -292,6 +308,20 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
       // Log but don't fail startup - printer functionality is not critical
       console.error('⚠️ Failed to initialize PrinterManager:', printerError);
       logErrorToFile(printerError as Error);
+    }
+
+    // Initialize ECR (Payment Terminal) Manager and register IPC handlers
+    console.log('💳 Initializing Payment Terminal Manager...');
+    try {
+      const ecrManager = new PaymentTerminalManager(dbManager.db);
+      await ecrManager.initialize();
+      registerECRHandlers(ecrManager);
+      serviceRegistry.register('paymentTerminalManager', ecrManager);
+      console.log('💳 Payment Terminal Manager initialized successfully');
+    } catch (ecrError) {
+      // Log but don't fail startup - payment terminal functionality is not critical
+      console.error('⚠️ Failed to initialize Payment Terminal Manager:', ecrError);
+      logErrorToFile(ecrError as Error);
     }
 
     // Note: AutoUpdaterService is initialized in main.ts after all handlers are registered

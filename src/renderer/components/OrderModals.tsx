@@ -1,7 +1,6 @@
 import React, { memo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { POSGlassModal, POSGlassButton, POSGlassInput } from './ui/pos-glass-components';
 
 interface Customer {
   id: string;

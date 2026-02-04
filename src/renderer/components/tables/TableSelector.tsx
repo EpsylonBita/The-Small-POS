@@ -119,6 +119,16 @@ export const TableSelector: React.FC<TableSelectorProps> = memo(({
       label: t('tableSelector.status.cleaning', { defaultValue: 'Cleaning' }),
       bgClass: 'border-gray-500 bg-gray-500/10',
       textClass: 'text-gray-500'
+    },
+    maintenance: {
+      label: t('tableSelector.status.maintenance', { defaultValue: 'Maintenance' }),
+      bgClass: 'border-orange-500 bg-orange-500/10',
+      textClass: 'text-orange-500'
+    },
+    unavailable: {
+      label: t('tableSelector.status.unavailable', { defaultValue: 'Unavailable' }),
+      bgClass: 'border-slate-500 bg-slate-500/10',
+      textClass: 'text-slate-500'
     }
   };
 

@@ -45,6 +45,7 @@ coverage/
 # Debug files
 debug_*.js
 fix_*.js
+fix-*.html
 restore_*.js
 check-*.js
 test-*.js

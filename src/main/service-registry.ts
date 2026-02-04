@@ -23,6 +23,7 @@ import type { ModuleSyncService } from './services/ModuleSyncService';
 import type { PrinterManager } from './printer/services/PrinterManager';
 import type { FeatureService } from './services/FeatureService';
 import type { AutoUpdaterService } from './auto-updater';
+import type { PaymentTerminalManager } from './ecr/services/PaymentTerminalManager';
 
 export interface ServiceInstances {
   dbManager: DatabaseManager | null;
@@ -41,6 +42,7 @@ export interface ServiceInstances {
   printerManager: PrinterManager | null;
   featureService: FeatureService | null;
   autoUpdaterService: AutoUpdaterService | null;
+  paymentTerminalManager: PaymentTerminalManager | null;
 }
 
 class ServiceRegistry {
@@ -63,6 +65,7 @@ class ServiceRegistry {
     printerManager: null,
     featureService: null,
     autoUpdaterService: null,
+    paymentTerminalManager: null,
   };
 
   // Cleanup function for realtime handlers

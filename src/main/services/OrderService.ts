@@ -10,7 +10,9 @@ interface OrderRow {
   customer_email?: string;
   items: string; // JSON string
   total_amount: number;
+  tax_amount?: number;
   status: 'pending' | 'confirmed' | 'preparing' | 'ready' | 'out_for_delivery' | 'delivered' | 'completed' | 'cancelled';
+  cancellation_reason?: string;
   order_type?: 'dine-in' | 'takeaway' | 'delivery';
   table_number?: string;
   delivery_address?: string;
@@ -40,6 +42,13 @@ interface OrderRow {
   delivery_floor?: string;
   delivery_city?: string;
   delivery_postal_code?: string;
+  // Plugin tracking
+  plugin?: string;
+  external_plugin_order_id?: string;
+  plugin_commission_pct?: number;
+  net_earnings?: number;
+  terminal_id?: string;
+  branch_id?: string;
 }
 
 interface OrderFilters {
@@ -62,7 +71,9 @@ export interface Order {
   customer_email?: string;
   items: OrderItem[];
   total_amount: number;
+  tax_amount?: number;
   status: 'pending' | 'confirmed' | 'preparing' | 'ready' | 'out_for_delivery' | 'delivered' | 'completed' | 'cancelled';
+  cancellation_reason?: string;
   order_type?: 'dine-in' | 'takeaway' | 'delivery';
   table_number?: string;
   delivery_address?: string;
@@ -89,7 +100,6 @@ export interface Order {
   tip_amount?: number;
   // Financial breakdown (explicitly passed from frontend)
   subtotal?: number;
-  tax_amount?: number;
   tax_rate?: number; // Percentage, e.g., 24 for 24%
   delivery_fee?: number;
   // Versioning and sync metadata
@@ -98,10 +108,16 @@ export interface Order {
   last_synced_at?: string;
   remote_version?: number;
   // Platform tracking (for external platform orders like Wolt, Efood, etc.)
+  plugin?: string;
+  external_plugin_order_id?: string;
+  plugin_commission_pct?: number;
+  net_earnings?: number;
+  terminal_id?: string;
+  branch_id?: string;
+  // Backward compatibility
   platform?: string;
   external_platform_order_id?: string;
   platform_commission_pct?: number;
-  net_earnings?: number;
 }
 
 export interface OrderItem {
@@ -216,6 +232,16 @@ export class OrderService extends BaseService {
 
       // Get terminal ID from environment or generate one
       const terminalId = process.env.TERMINAL_ID || 'terminal-' + this.generateId().substring(0, 8);
+      const branchId = (orderData as any).branch_id ?? this.getLocalSetting('terminal', 'branch_id') ?? null;
+      const taxAmount =
+        (orderData as any).tax_amount ??
+        (orderData as any).taxAmount ??
+        (orderData as any).tax ??
+        null;
+      const cancellationReason =
+        (orderData as any).cancellation_reason ??
+        (orderData as any).cancellationReason ??
+        null;
 
       const order: Order = {
         id: this.generateId(),
@@ -225,7 +251,9 @@ export class OrderService extends BaseService {
         customer_email: orderData.customer_email,
         items: orderData.items || [],
         total_amount: orderData.total_amount || 0,
+        tax_amount: taxAmount,
         status: orderData.status || 'pending',
+        cancellation_reason: cancellationReason,
         order_type: orderData.order_type || 'takeaway',
         table_number: orderData.table_number,
         delivery_address: orderData.delivery_address,
@@ -249,6 +277,12 @@ export class OrderService extends BaseService {
         discount_percentage: orderData.discount_percentage,
         discount_amount: orderData.discount_amount,
         tip_amount: orderData.tip_amount,
+        plugin: orderData.plugin || orderData.platform || 'pos',
+        external_plugin_order_id: orderData.external_plugin_order_id || orderData.external_platform_order_id,
+        plugin_commission_pct: orderData.plugin_commission_pct || orderData.platform_commission_pct,
+        net_earnings: orderData.net_earnings,
+        terminal_id: orderData.terminal_id || terminalId,
+        branch_id: branchId,
         // Versioning and sync metadata
         version: 1,
         updated_by: terminalId
@@ -257,13 +291,14 @@ export class OrderService extends BaseService {
       const stmt = this.db.prepare(`
         INSERT INTO orders (
           id, order_number, customer_name, customer_phone, customer_email,
-          items, total_amount, status, order_type, table_number,
+          items, total_amount, tax_amount, status, cancellation_reason, order_type, table_number,
           delivery_address, delivery_notes, delivery_floor, delivery_city, delivery_postal_code, name_on_ringer, special_instructions, created_at, updated_at,
           estimated_time, supabase_id, sync_status, payment_status,
           payment_method, payment_transaction_id, staff_shift_id, staff_id,
           driver_id, driver_name, discount_percentage, discount_amount, tip_amount,
+          plugin, external_plugin_order_id, plugin_commission_pct, net_earnings, terminal_id, branch_id,
           version, updated_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
 
@@ -271,7 +306,7 @@ export class OrderService extends BaseService {
       stmt.run(
         order.id, order.order_number, order.customer_name, order.customer_phone,
         order.customer_email, JSON.stringify(order.items), order.total_amount,
-        order.status, order.order_type, order.table_number, order.delivery_address,
+        order.tax_amount, order.status, order.cancellation_reason, order.order_type, order.table_number, order.delivery_address,
         order.delivery_notes || null, order.delivery_floor || null, order.delivery_city || null,
         order.delivery_postal_code || null, order.name_on_ringer || null,
         order.special_instructions, order.created_at, order.updated_at,
@@ -280,6 +315,7 @@ export class OrderService extends BaseService {
         order.staff_shift_id || null, order.staff_id || null, order.driver_id || null,
         order.driver_name || null,
         order.discount_percentage || null, order.discount_amount || null, order.tip_amount || null,
+        order.plugin || null, order.external_plugin_order_id || null, order.plugin_commission_pct || null, order.net_earnings || null, order.terminal_id || null, order.branch_id || null,
         order.version, order.updated_by
       );
 
@@ -454,6 +490,7 @@ export class OrderService extends BaseService {
           sync_status = ?, payment_status = ?, payment_method = ?,
           payment_transaction_id = ?, staff_shift_id = ?, staff_id = ?,
           driver_id = ?, driver_name = ?, discount_percentage = ?, discount_amount = ?, tip_amount = ?,
+          plugin = ?, external_plugin_order_id = ?, plugin_commission_pct = ?, net_earnings = ?, terminal_id = ?,
           version = ?, updated_by = ?
         WHERE id = ?
       `);
@@ -471,6 +508,7 @@ export class OrderService extends BaseService {
         updatedOrder.driver_id || null, updatedOrder.driver_name || null,
         updatedOrder.discount_percentage || null,
         updatedOrder.discount_amount || null, updatedOrder.tip_amount || null,
+        updatedOrder.plugin || null, updatedOrder.external_plugin_order_id || null, updatedOrder.plugin_commission_pct || null, updatedOrder.net_earnings || null, updatedOrder.terminal_id || null,
         updatedOrder.version, updatedOrder.updated_by, id
       );
 
@@ -728,7 +766,17 @@ export class OrderService extends BaseService {
       version: row.version,
       updated_by: row.updated_by,
       last_synced_at: row.last_synced_at,
-      remote_version: row.remote_version
+      remote_version: row.remote_version,
+      // Plugin tracking
+      plugin: row.plugin || undefined,
+      external_plugin_order_id: row.external_plugin_order_id,
+      plugin_commission_pct: row.plugin_commission_pct,
+      net_earnings: row.net_earnings,
+      terminal_id: row.terminal_id,
+      // Backward compatibility
+      platform: (row as any).platform,
+      external_platform_order_id: (row as any).external_platform_order_id,
+      platform_commission_pct: (row as any).platform_commission_pct
     };
   }
 

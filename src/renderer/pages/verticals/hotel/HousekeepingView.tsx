@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
 import { Clock, User, Filter } from 'lucide-react';
 
-type TaskStatus = 'pending' | 'in_progress' | 'completed';
-type Priority = 'high' | 'medium' | 'low';
+type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'verified' | 'cancelled';
+// Priority matches DB schema: low, normal, high, urgent (not 'medium')
+type Priority = 'urgent' | 'high' | 'normal' | 'low';
 
 interface HousekeepingTask {
   id: string;
@@ -21,7 +22,7 @@ const MOCK_TASKS: HousekeepingTask[] = Array.from({ length: 20 }, (_, i) => ({
   roomNumber: `${Math.floor(i / 4) + 1}${String((i % 4) + 1).padStart(2, '0')}`,
   taskType: (['cleaning', 'turndown', 'maintenance'] as const)[i % 3],
   assignedStaff: ['Maria', 'Carlos', 'Anna', 'James'][i % 4],
-  priority: (['high', 'medium', 'low'] as Priority[])[i % 3],
+  priority: (['high', 'normal', 'low'] as Priority[])[i % 3],
   status: (['pending', 'in_progress', 'completed'] as TaskStatus[])[i % 3],
   estimatedTime: [30, 45, 60][i % 3],
 }));
@@ -42,7 +43,12 @@ export const HousekeepingView: React.FC = memo(() => {
     { status: 'completed', label: t('housekeepingView.status.completed', { defaultValue: 'Completed' }) },
   ];
 
-  const priorityColors: Record<Priority, string> = { high: 'red', medium: 'yellow', low: 'green' };
+  const priorityColors: Record<Priority, string> = {
+    urgent: 'red',
+    high: 'orange',
+    normal: 'yellow',
+    low: 'green',
+  };
 
   // Extract unique values for filters
   const floors = [...new Set(tasks.map(t => t.roomNumber.charAt(0)))].sort();
@@ -111,8 +117,9 @@ export const HousekeepingView: React.FC = memo(() => {
           className={`px-3 py-1.5 rounded-lg text-sm ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
         >
           <option value="all">{t('housekeepingView.filter.allPriorities', { defaultValue: 'All Priorities' })}</option>
+          <option value="urgent">{t('housekeepingView.priority.urgent', { defaultValue: 'Urgent' })}</option>
           <option value="high">{t('housekeepingView.priority.high', { defaultValue: 'High' })}</option>
-          <option value="medium">{t('housekeepingView.priority.medium', { defaultValue: 'Medium' })}</option>
+          <option value="normal">{t('housekeepingView.priority.normal', { defaultValue: 'Normal' })}</option>
           <option value="low">{t('housekeepingView.priority.low', { defaultValue: 'Low' })}</option>
         </select>
         <select

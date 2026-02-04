@@ -13,7 +13,8 @@
  * - Dangerous channels automatically disabled in production builds
  */
 
-import { contextBridge, ipcRenderer, IpcRendererEvent, desktopCapturer, clipboard } from 'electron';
+// SECURITY: desktopCapturer removed - screen capture now goes through IPC with consent dialog
+import { contextBridge, ipcRenderer, IpcRendererEvent, clipboard } from 'electron';
 import type { RecordStaffPaymentParams, RecordStaffPaymentResponse, StaffPayment } from '../renderer/types/shift';
 import { filterAllowedInvokes } from './ipc-security';
 
@@ -94,6 +95,16 @@ const ALLOWED_CHANNELS = [
 
   // Terminal config events (heartbeat updates)
   'terminal-config-updated',
+
+  // ECR (Payment Terminal) events
+  'ecr:event:device-connected',
+  'ecr:event:device-disconnected',
+  'ecr:event:device-status-changed',
+  'ecr:event:transaction-started',
+  'ecr:event:transaction-status',
+  'ecr:event:transaction-completed',
+  'ecr:event:display-message',
+  'ecr:event:error',
 
   // Auto-updater events
   'update-checking',
@@ -317,6 +328,7 @@ const electronAPI = {
         // Settings
         'get-settings',
         'update-settings',
+        'settings:get',
         'settings:get-local',
         'settings:update-local',
         'settings:set',
@@ -414,6 +426,9 @@ const electronAPI = {
         'report:get-daily-staff-performance',
         'report:submit-z-report',
 
+        // Screen capture
+        'screen-capture:get-sources',
+
         // SECURITY: Removed 'input:inject' - critical security vulnerability
         // Remote input injection is extremely dangerous and can lead to full system compromise
         // If remote support is needed, implement specific, validated actions instead
@@ -425,9 +440,11 @@ const electronAPI = {
         'menu:get-categories',
         'menu:get-subcategories',
         'menu:get-ingredients',
+        'menu:get-combos',
         'menu:update-category',
         'menu:update-subcategory',
         'menu:update-ingredient',
+        'menu:update-combo',
         'menu:trigger-check-for-updates',
 
         // Printers / device discovery (legacy)
@@ -460,6 +477,34 @@ const electronAPI = {
         'modules:fetch-from-admin',
         'modules:get-cached',
         'modules:save-cache',
+
+        // Admin API fetch (authenticated requests)
+        'api:fetch-from-admin',
+
+        // ECR (Payment Terminal) management
+        'ecr:discover-devices',
+        'ecr:get-devices',
+        'ecr:get-device',
+        'ecr:add-device',
+        'ecr:update-device',
+        'ecr:remove-device',
+        'ecr:get-default-terminal',
+        'ecr:connect-device',
+        'ecr:disconnect-device',
+        'ecr:get-device-status',
+        'ecr:get-all-statuses',
+        'ecr:process-payment',
+        'ecr:process-refund',
+        'ecr:void-transaction',
+        'ecr:cancel-transaction',
+        'ecr:settlement',
+        'ecr:get-recent-transactions',
+        'ecr:query-transactions',
+        'ecr:get-transaction-stats',
+        'ecr:get-transaction-for-order',
+
+        // Cash drawer
+        'printer:open-cash-drawer',
       ];
 
       // Filter out dangerous channels in production builds
@@ -1005,9 +1050,12 @@ const electronAPI = {
     return ipcRenderer.invoke('report:submit-z-report', params);
   },
 
-  // Screen capture - expose desktopCapturer for screen streaming
-  desktopCapturer: {
-    getSources: (options: any) => desktopCapturer.getSources(options)
+  // Screen capture - SECURITY: Use IPC to go through main process consent dialog
+  // Direct desktopCapturer access is removed for security
+  screenCapture: {
+    // Request screen capture permission through main process (shows consent dialog)
+    getSources: (options: { types: ('screen' | 'window')[] }) =>
+      ipcRenderer.invoke('screen-capture:get-sources', options),
   },
 
   // =========================================================================
@@ -1131,6 +1179,54 @@ const electronAPI = {
    */
   printerGetBluetoothStatus: () => {
     return ipcRenderer.invoke('printer:bluetooth-status');
+  },
+
+  // =========================================================================
+  // Label Printing Methods
+  // =========================================================================
+
+  /**
+   * Print a label (barcode, shelf, or price)
+   * @param request - Label print request with type and data
+   * @param printerId - Optional specific printer ID
+   */
+  printLabel: (request: {
+    type: 'barcode' | 'shelf' | 'price';
+    barcode?: string;
+    barcodeType?: string;
+    productName: string;
+    productPrice?: number;
+    productSku?: string;
+    productDescription?: string;
+    showName?: boolean;
+    showPrice?: boolean;
+    quantity?: number;
+    size?: 'small' | 'medium' | 'large';
+    template?: 'standard' | 'compact' | 'detailed' | 'price-focus';
+    oldPrice?: number;
+    showSaleIndicator?: boolean;
+  }, printerId?: string) => {
+    return ipcRenderer.invoke('label:print', request, printerId);
+  },
+
+  /**
+   * Print batch labels for multiple products
+   * @param items - Array of products with quantities
+   * @param labelType - Type of label to print
+   * @param printerId - Optional specific printer ID
+   */
+  printBatchLabels: (items: Array<{
+    product: {
+      name: string;
+      sku?: string;
+      barcode?: string;
+      barcodeType?: string;
+      price: number;
+      description?: string;
+    };
+    quantity: number;
+  }>, labelType: 'barcode' | 'shelf' | 'price' = 'barcode', printerId?: string) => {
+    return ipcRenderer.invoke('label:print-batch', items, labelType, printerId);
   },
 
   /**
@@ -1266,6 +1362,274 @@ const electronAPI = {
    */
   setUpdateChannel: (channel: 'stable' | 'beta') => {
     return ipcRenderer.invoke('update:set-channel', channel);
+  },
+
+  // =========================================================================
+  // Admin Dashboard API Methods
+  // =========================================================================
+
+  /**
+   * Fetch data from the admin dashboard API with terminal authentication
+   * @param path - API path (e.g., '/api/pos/inventory')
+   * @param options - Optional fetch options (method, body, headers)
+   * @returns Promise resolving to the API response
+   */
+  fetchFromApi: async (path: string, options?: {
+    method?: string;
+    body?: any;
+    headers?: Record<string, string>;
+  }): Promise<any> => {
+    return ipcRenderer.invoke('api:fetch-from-admin', path, options);
+  },
+
+  // =========================================================================
+  // ECR (Payment Terminal) Methods
+  // =========================================================================
+
+  /**
+   * Discover available payment terminals
+   * @param connectionTypes - Optional array of connection types to search
+   * @param timeout - Optional timeout in milliseconds
+   */
+  ecrDiscoverDevices: (connectionTypes?: string[], timeout?: number) => {
+    return ipcRenderer.invoke('ecr:discover-devices', connectionTypes, timeout);
+  },
+
+  /**
+   * Get all configured ECR devices
+   */
+  ecrGetDevices: () => {
+    return ipcRenderer.invoke('ecr:get-devices');
+  },
+
+  /**
+   * Get a specific ECR device
+   * @param deviceId - The device ID
+   */
+  ecrGetDevice: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:get-device', deviceId);
+  },
+
+  /**
+   * Add a new ECR device
+   * @param config - Device configuration
+   */
+  ecrAddDevice: (config: any) => {
+    return ipcRenderer.invoke('ecr:add-device', config);
+  },
+
+  /**
+   * Update an ECR device
+   * @param deviceId - The device ID
+   * @param updates - Partial updates
+   */
+  ecrUpdateDevice: (deviceId: string, updates: any) => {
+    return ipcRenderer.invoke('ecr:update-device', deviceId, updates);
+  },
+
+  /**
+   * Remove an ECR device
+   * @param deviceId - The device ID
+   */
+  ecrRemoveDevice: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:remove-device', deviceId);
+  },
+
+  /**
+   * Get the default payment terminal
+   */
+  ecrGetDefaultTerminal: () => {
+    return ipcRenderer.invoke('ecr:get-default-terminal');
+  },
+
+  /**
+   * Connect to an ECR device
+   * @param deviceId - The device ID
+   */
+  ecrConnectDevice: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:connect-device', deviceId);
+  },
+
+  /**
+   * Disconnect from an ECR device
+   * @param deviceId - The device ID
+   */
+  ecrDisconnectDevice: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:disconnect-device', deviceId);
+  },
+
+  /**
+   * Get the status of an ECR device
+   * @param deviceId - The device ID
+   */
+  ecrGetDeviceStatus: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:get-device-status', deviceId);
+  },
+
+  /**
+   * Get all ECR device statuses
+   */
+  ecrGetAllStatuses: () => {
+    return ipcRenderer.invoke('ecr:get-all-statuses');
+  },
+
+  /**
+   * Process a card payment
+   * @param amount - Amount in cents
+   * @param options - Optional parameters (deviceId, orderId, tipAmount, currency)
+   */
+  ecrProcessPayment: (amount: number, options?: {
+    deviceId?: string;
+    orderId?: string;
+    tipAmount?: number;
+    currency?: string;
+    reference?: string;
+  }) => {
+    return ipcRenderer.invoke('ecr:process-payment', amount, options);
+  },
+
+  /**
+   * Process a refund
+   * @param amount - Amount in cents
+   * @param options - Optional parameters
+   */
+  ecrProcessRefund: (amount: number, options?: {
+    deviceId?: string;
+    orderId?: string;
+    originalTransactionId?: string;
+    currency?: string;
+  }) => {
+    return ipcRenderer.invoke('ecr:process-refund', amount, options);
+  },
+
+  /**
+   * Void a transaction
+   * @param transactionId - The transaction ID to void
+   * @param deviceId - Optional device ID
+   */
+  ecrVoidTransaction: (transactionId: string, deviceId?: string) => {
+    return ipcRenderer.invoke('ecr:void-transaction', transactionId, deviceId);
+  },
+
+  /**
+   * Cancel an in-progress transaction
+   * @param deviceId - The device ID
+   */
+  ecrCancelTransaction: (deviceId: string) => {
+    return ipcRenderer.invoke('ecr:cancel-transaction', deviceId);
+  },
+
+  /**
+   * Perform end-of-day settlement
+   * @param deviceId - Optional device ID (uses default if not specified)
+   */
+  ecrSettlement: (deviceId?: string) => {
+    return ipcRenderer.invoke('ecr:settlement', deviceId);
+  },
+
+  /**
+   * Get recent transactions
+   * @param limit - Maximum number of transactions to return
+   */
+  ecrGetRecentTransactions: (limit?: number) => {
+    return ipcRenderer.invoke('ecr:get-recent-transactions', limit);
+  },
+
+  /**
+   * Query transactions with filters
+   * @param filters - Transaction filters
+   */
+  ecrQueryTransactions: (filters: any) => {
+    return ipcRenderer.invoke('ecr:query-transactions', filters);
+  },
+
+  /**
+   * Get transaction statistics
+   * @param filters - Optional filters
+   */
+  ecrGetTransactionStats: (filters?: any) => {
+    return ipcRenderer.invoke('ecr:get-transaction-stats', filters);
+  },
+
+  /**
+   * Get the transaction associated with an order
+   * @param orderId - The order ID
+   */
+  ecrGetTransactionForOrder: (orderId: string) => {
+    return ipcRenderer.invoke('ecr:get-transaction-for-order', orderId);
+  },
+
+  /**
+   * Listen for ECR device connected events
+   * @param callback - Function to call when a device connects
+   */
+  onEcrDeviceConnected: (callback: (deviceId: string) => void) => {
+    const subscription = (_event: IpcRendererEvent, deviceId: string) => callback(deviceId);
+    ipcRenderer.on('ecr:event:device-connected', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:device-connected', subscription);
+  },
+
+  /**
+   * Listen for ECR device disconnected events
+   * @param callback - Function to call when a device disconnects
+   */
+  onEcrDeviceDisconnected: (callback: (deviceId: string) => void) => {
+    const subscription = (_event: IpcRendererEvent, deviceId: string) => callback(deviceId);
+    ipcRenderer.on('ecr:event:device-disconnected', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:device-disconnected', subscription);
+  },
+
+  /**
+   * Listen for ECR device status changes
+   * @param callback - Function to call when status changes
+   */
+  onEcrDeviceStatusChanged: (callback: (deviceId: string, status: any) => void) => {
+    const subscription = (_event: IpcRendererEvent, deviceId: string, status: any) => callback(deviceId, status);
+    ipcRenderer.on('ecr:event:device-status-changed', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:device-status-changed', subscription);
+  },
+
+  /**
+   * Listen for ECR transaction completion events
+   * @param callback - Function to call when a transaction completes
+   */
+  onEcrTransactionCompleted: (callback: (data: any) => void) => {
+    const subscription = (_event: IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('ecr:event:transaction-completed', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:transaction-completed', subscription);
+  },
+
+  /**
+   * Listen for ECR display messages
+   * @param callback - Function to call when a display message is received
+   */
+  onEcrDisplayMessage: (callback: (deviceId: string, message: string) => void) => {
+    const subscription = (_event: IpcRendererEvent, deviceId: string, message: string) => callback(deviceId, message);
+    ipcRenderer.on('ecr:event:display-message', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:display-message', subscription);
+  },
+
+  /**
+   * Listen for ECR errors
+   * @param callback - Function to call when an error occurs
+   */
+  onEcrError: (callback: (deviceId: string, error: string) => void) => {
+    const subscription = (_event: IpcRendererEvent, deviceId: string, error: string) => callback(deviceId, error);
+    ipcRenderer.on('ecr:event:error', subscription);
+    return () => ipcRenderer.removeListener('ecr:event:error', subscription);
+  },
+
+  // =========================================================================
+  // Cash Drawer Methods
+  // =========================================================================
+
+  /**
+   * Open the cash drawer connected to a receipt printer
+   * @param printerId - Optional printer ID (uses default if not specified)
+   * @param drawerNumber - Optional drawer number (1 or 2, default 1)
+   */
+  openCashDrawer: (printerId?: string, drawerNumber?: 1 | 2) => {
+    return ipcRenderer.invoke('printer:open-cash-drawer', printerId, drawerNumber);
   },
 };
 

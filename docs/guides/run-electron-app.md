@@ -38,21 +38,21 @@ Once the Electron app is running:
 
 1. **Click "Check In"** button in the sidebar
 2. **Select a staff member** (e.g., Antoine Rousseau)
-3. **Enter PIN** (e.g., 5678 for Antoine)
+3. **Enter PIN** (e.g., 567890 for Antoine)
 4. **Select role** (e.g., Kitchen)
 5. **Complete check-in** ✅
 
 ### Staff Members with PINs Set
 
 Currently configured:
-- **Antoine Rousseau**: PIN `5678`
-- **Development Admin**: PIN `1234` (if set)
+- **Antoine Rousseau**: PIN `567890`
+- **Development Admin**: PIN `123456` (if set)
 
 ### Setting PINs for Other Staff
 
 Use the helper script:
 ```bash
-node set-staff-pin.js staff@example.com 1234
+node set-staff-pin.js staff@example.com 123456
 ```
 
 Or list all staff:
@@ -140,7 +140,7 @@ The installer will be in the `release` folder.
    ```
 
 2. **Test check-in:**
-   - Use Antoine Rousseau with PIN 5678
+   - Use Antoine Rousseau with PIN 567890
    - Or set PINs for other staff members
 
 3. **Verify functionality:**

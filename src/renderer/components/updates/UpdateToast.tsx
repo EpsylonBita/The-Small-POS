@@ -1,6 +1,7 @@
 import React from 'react';
 import { toast, Toast } from 'react-hot-toast';
 import { useI18n } from '../../contexts/i18n-context';
+import { RefreshCw } from 'lucide-react';
 
 /**
  * UpdateToast Component
@@ -37,7 +38,7 @@ export const UpdateToast: React.FC<UpdateToastProps> = ({ t, version, onOpenDial
         }
       }}
     >
-      <span className="text-2xl">🔄</span>
+      <RefreshCw className="w-6 h-6 text-white" />
       <div>
         <div className="font-semibold text-white">{translate('updates.title.available')}</div>
         <div className="text-sm text-white/80">

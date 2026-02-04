@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { reservationsService, type Reservation } from '../../services/ReservationsService';
 import { supabase } from '../../../shared/supabase';
+import { formatDate as formatDateValue, formatTime as formatTimeValue } from '../../utils/format';
 import {
   X,
   User,
@@ -146,12 +147,12 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
 
   // Format time for display
   const formatTime = (datetime: string) => {
-    return new Date(datetime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return formatTimeValue(datetime, { hour: '2-digit', minute: '2-digit' });
   };
 
   // Format date for display
   const formatDate = (date: string) => {
-    return new Date(date).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    return formatDateValue(date, { weekday: 'short', month: 'short', day: 'numeric' });
   };
 
   if (isLoading) {

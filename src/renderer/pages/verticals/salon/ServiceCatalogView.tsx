@@ -5,6 +5,7 @@ import { useModules } from '../../../contexts/module-context';
 import { useServices } from '../../../hooks/useServices';
 import { Scissors, Clock, Search, Plus, Edit2, Trash2, Loader2, RefreshCw } from 'lucide-react';
 import type { Service, ServiceCategory } from '../../../services/ServicesService';
+import { formatCurrency } from '../../../utils/format';
 
 export const ServiceCatalogView: React.FC = memo(() => {
   const { t } = useTranslation();
@@ -85,7 +86,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
   const [selectedService, setSelectedService] = useState<Service | null>(null);
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'EUR' });
+  const formatPrice = (amount: number) => formatCurrency(amount);
 
   // Fetch services using the hook
   const {
@@ -158,7 +159,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
               {t('serviceCatalog.stats.avgPrice', { defaultValue: 'Avg Price' })}
             </div>
-            <div className={`text-xl font-bold text-blue-500`}>{currency.format(stats.avgPrice)}</div>
+            <div className={`text-xl font-bold text-blue-500`}>{formatPrice(stats.avgPrice)}</div>
           </div>
         </div>
 
@@ -276,7 +277,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
                       <span className={isDark ? 'text-gray-300' : 'text-gray-600'}>{service.durationMinutes}min</span>
                     </span>
                   </div>
-                  <span className="text-lg font-bold text-blue-500">{currency.format(service.price)}</span>
+                  <span className="text-lg font-bold text-blue-500">{formatPrice(service.price)}</span>
                 </div>
 
                 {/* Quick Actions */}

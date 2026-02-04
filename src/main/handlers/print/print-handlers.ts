@@ -483,7 +483,7 @@ export function registerPrintHandlers() {
         timestamp: new Date(order.created_at || new Date()),
         items: printItems,
         subtotal: order.subtotal || 0,
-        tax: (order as any).tax || 0,
+        tax: (order as any).tax_amount ?? (order as any).tax ?? 0,
         tip: (order as any).tip || 0,
         deliveryFee: order.delivery_fee || 0,
         discount: discountAmount > 0 ? discountAmount : undefined,
@@ -573,6 +573,12 @@ export function registerPrintHandlers() {
    *   window.electronAPI.printerTestGreekDirect('ascii', 'POS-80') // Specify printer name
    */
   ipcMain.handle('printer:test-greek-direct', async (_event, testMode?: string, printerNameArg?: string) => {
+    // SECURITY: Defense in depth - also check at handler level
+    // This handler accepts user-provided printer name which could be exploited
+    if (process.env.NODE_ENV !== 'development') {
+      return { success: false, error: 'This handler is only available in development mode' };
+    }
+
     const fs = await import('fs');
     const path = await import('path');
     const os = await import('os');

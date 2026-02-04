@@ -17,6 +17,11 @@ import {
   TransportEvent,
 } from './PrinterTransport';
 import { PrinterErrorCode, SystemConnectionDetails } from '../types';
+import {
+  validatePrinterName,
+  sanitizeForPowerShellSingleQuote,
+  sanitizeForPowerShellDoubleQuote,
+} from './validation';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -67,7 +72,11 @@ export class SystemTransport extends BasePrinterTransport {
     options?: SystemTransportOptions
   ) {
     super(options);
-    this.systemName = connectionDetails.systemName;
+
+    // SECURITY: Validate printer name to prevent command injection
+    validatePrinterName(connectionDetails.systemName);
+    this.systemName = connectionDetails.systemName.trim();
+
     this.systemOptions = { ...DEFAULT_SYSTEM_OPTIONS, ...options };
     this.tempDir = path.join(os.tmpdir(), 'pos-printer-' + Date.now());
   }
@@ -87,10 +96,13 @@ export class SystemTransport extends BasePrinterTransport {
    */
   protected async doConnect(): Promise<void> {
     try {
+      // SECURITY: Printer name was validated in constructor
+      // Use proper escaping for PowerShell single-quoted strings
+      const safePrinterName = sanitizeForPowerShellSingleQuote(this.systemName);
+
       // Verify the printer exists by querying the Windows print spooler
-      // This uses PowerShell to check if the printer is available
       const { stdout } = await execAsync(
-        `powershell -Command "Get-Printer -Name '${this.systemName.replace(/'/g, "''")}'"`
+        `powershell -Command "Get-Printer -Name '${safePrinterName}'"`
       );
 
       if (!stdout || stdout.includes('cannot find')) {
@@ -151,14 +163,16 @@ export class SystemTransport extends BasePrinterTransport {
 
       console.log(`[SystemTransport] Wrote ${data.length} bytes to temp file: ${tempFile}`);
 
-      // Use Win32 API via PowerShell to send raw data
-      const escapedPrinterName = this.systemName.replace(/'/g, "''");
+      // SECURITY: Printer name was validated in constructor
+      // Use proper escaping for PowerShell double-quoted strings
+      const safePrinterName = sanitizeForPowerShellDoubleQuote(this.systemName);
+      const safeFilePath = tempFile.replace(/\\/g, '\\\\').replace(/`/g, '``').replace(/\$/g, '`$').replace(/"/g, '`"');
       const psScriptFile = path.join(this.tempDir, `print-script-${Date.now()}.ps1`);
 
       const rawPrintScript = `
 Add-Type -AssemblyName System.Drawing
-$printerName = "${escapedPrinterName}"
-$filePath = "${tempFile.replace(/\\/g, '\\\\')}"
+$printerName = "${safePrinterName}"
+$filePath = "${safeFilePath}"
 
 # Read the raw data
 $rawData = [System.IO.File]::ReadAllBytes($filePath)

@@ -1,13 +1,15 @@
 /**
  * DriveThruService - POS Drive-Through Service
- * 
+ *
  * Provides drive-through lane and order queue management for the POS system (Fast-food Vertical).
- * Uses direct Supabase connection for real-time data.
- * 
+ * Uses the Admin Dashboard API via IPC for proper authentication and audit logging.
+ * Real-time updates still use Supabase Realtime (with RLS).
+ *
+ * @since 2.2.0 - Migrated from direct Supabase to API via IPC (security fix)
  * Task 17.3: Create POS drive-through interface
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
 
 // Types
 export type DriveThruOrderStatus = 'waiting' | 'preparing' | 'ready' | 'served';
@@ -65,7 +67,7 @@ function transformLaneFromAPI(data: any): DriveThruLane {
   };
 }
 
-// Transform order from API
+// Transform order from API response
 function transformOrderFromAPI(data: any): DriveThruOrder {
   return {
     id: data.id,
@@ -73,9 +75,9 @@ function transformOrderFromAPI(data: any): DriveThruOrder {
     branchId: data.branch_id,
     laneId: data.lane_id,
     orderId: data.order_id,
-    orderNumber: data.order_number || data.orders?.order_number || `DT-${data.id.slice(-4).toUpperCase()}`,
-    customerName: data.customer_name || data.orders?.customer_name || null,
-    itemsCount: data.items_count || data.orders?.items_count || 0,
+    orderNumber: data.order_number || `DT-${data.id?.slice(-4).toUpperCase() || '0000'}`,
+    customerName: data.customer_name || null,
+    itemsCount: 0, // Not available without separate order_items query
     position: data.position || 0,
     status: data.status || 'waiting',
     arrivedAt: data.arrived_at,
@@ -101,102 +103,83 @@ class DriveThruService {
   }
 
   /**
-   * Fetch all lanes for the branch
+   * Fetch all lanes for the branch via API
    */
   async fetchLanes(): Promise<DriveThruLane[]> {
     try {
-      const { data, error } = await supabase
-        .from('drive_thru_lanes')
-        .select('*')
-        .eq('branch_id', this.branchId)
-        .order('lane_number', { ascending: true });
-
-      if (error) {
-        console.error('Error fetching drive-thru lanes:', error);
-        throw error;
+      if (!this.branchId) {
+        console.warn('[DriveThruService] Missing branchId');
+        return [];
       }
 
-      return (data || []).map(transformLaneFromAPI);
+      console.log('[DriveThruService] Fetching lanes via API');
+
+      const result = await (window as any).api.invoke('sync:fetch-drive-thru', {});
+
+      if (!result.success) {
+        console.error('[DriveThruService] API error:', result.error);
+        throw new Error(result.error || 'Failed to fetch drive-thru data');
+      }
+
+      return (result.lanes || []).map(transformLaneFromAPI);
     } catch (error) {
-      console.error('Failed to fetch lanes:', error);
+      console.error('[DriveThruService] Failed to fetch lanes:', error);
       return [];
     }
   }
 
   /**
-   * Fetch all orders in the queue
+   * Fetch all orders in the queue via API
    */
   async fetchOrders(laneId?: string): Promise<DriveThruOrder[]> {
     try {
-      let query = supabase
-        .from('drive_thru_orders')
-        .select(`
-          *,
-          orders:order_id(order_number, customer_name, items_count)
-        `)
-        .eq('branch_id', this.branchId)
-        .neq('status', 'served')
-        .order('position', { ascending: true });
+      if (!this.branchId) {
+        console.warn('[DriveThruService] Missing branchId');
+        return [];
+      }
 
+      console.log('[DriveThruService] Fetching orders via API', { laneId });
+
+      const options: Record<string, string | undefined> = {};
       if (laneId) {
-        query = query.eq('lane_id', laneId);
+        options.lane_id = laneId;
       }
 
-      const { data, error } = await query;
+      const result = await (window as any).api.invoke('sync:fetch-drive-thru', options);
 
-      if (error) {
-        console.error('Error fetching drive-thru orders:', error);
-        throw error;
+      if (!result.success) {
+        console.error('[DriveThruService] API error:', result.error);
+        throw new Error(result.error || 'Failed to fetch drive-thru orders');
       }
 
-      return (data || []).map(transformOrderFromAPI);
+      return (result.orders || []).map(transformOrderFromAPI);
     } catch (error) {
-      console.error('Failed to fetch orders:', error);
+      console.error('[DriveThruService] Failed to fetch orders:', error);
       return [];
     }
   }
 
   /**
-   * Update order status (move through stages)
+   * Update order status (move through stages) via API
    */
   async updateOrderStatus(orderId: string, status: DriveThruOrderStatus): Promise<DriveThruOrder> {
     try {
-      const updateData: any = {
-        status,
-        updated_at: new Date().toISOString(),
-      };
+      console.log('[DriveThruService] Updating order status via API:', { orderId, status });
 
-      // If marking as served, set served_at and calculate wait time
-      if (status === 'served') {
-        const { data: currentOrder } = await supabase
-          .from('drive_thru_orders')
-          .select('arrived_at')
-          .eq('id', orderId)
-          .single();
+      const result = await (window as any).api.invoke(
+        'sync:update-drive-thru-order-status',
+        orderId,
+        status
+      );
 
-        if (currentOrder?.arrived_at) {
-          const arrivedAt = new Date(currentOrder.arrived_at);
-          const servedAt = new Date();
-          updateData.served_at = servedAt.toISOString();
-          updateData.wait_time_seconds = Math.round((servedAt.getTime() - arrivedAt.getTime()) / 1000);
-        }
+      if (!result.success) {
+        console.error('[DriveThruService] API error:', result.error);
+        throw new Error(result.error || 'Failed to update order status');
       }
 
-      const { data: order, error } = await supabase
-        .from('drive_thru_orders')
-        .update(updateData)
-        .eq('id', orderId)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Error updating order status:', error);
-        throw error;
-      }
-
-      return transformOrderFromAPI(order);
+      return transformOrderFromAPI(result.order);
     } catch (error) {
-      console.error('Failed to update order status:', error);
+      console.error('[DriveThruService] Failed to update order status:', error);
       throw error;
     }
   }

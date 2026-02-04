@@ -1,6 +1,7 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, createElement } from 'react';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
+import { AlertTriangle, Power, RefreshCw, Ban, CheckCircle, Clock } from 'lucide-react';
 
 interface UseAppEventsProps {
     onLogout: () => void;
@@ -32,7 +33,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             console.log('Control command received:', data);
             toast.error(data.message || tRef.current('system.controlCommand', { type: data.type }), {
                 duration: 5000,
-                icon: '⚠️',
+                icon: createElement(AlertTriangle, { className: 'w-4 h-4 text-amber-500' }),
             });
         };
 
@@ -41,7 +42,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             setIsShuttingDown(true);
             toast.error(tRef.current('system.shuttingDown'), {
                 duration: Infinity,
-                icon: '🔴',
+                icon: createElement(Power, { className: 'w-4 h-4 text-red-500' }),
             });
         };
 
@@ -50,7 +51,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             setIsShuttingDown(true);
             toast.loading(tRef.current('system.restarting'), {
                 duration: Infinity,
-                icon: '🔄',
+                icon: createElement(RefreshCw, { className: 'w-4 h-4 text-blue-500 animate-spin' }),
             });
         };
 
@@ -58,7 +59,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             console.log('Terminal disabled:', data);
             toast.error(tRef.current('system.terminalDisabled'), {
                 duration: Infinity,
-                icon: '🚫',
+                icon: createElement(Ban, { className: 'w-4 h-4 text-red-500' }),
             });
         };
 
@@ -66,7 +67,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             console.log('Terminal enabled:', data);
             toast.success(tRef.current('system.terminalEnabled'), {
                 duration: 3000,
-                icon: '✅',
+                icon: createElement(CheckCircle, { className: 'w-4 h-4 text-green-500' }),
             });
         };
 
@@ -78,7 +79,7 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
             console.warn('Session timeout received:', data);
             toast.error(tRef.current('system.sessionExpired'), {
                 duration: 5000,
-                icon: '⏱️',
+                icon: createElement(Clock, { className: 'w-4 h-4 text-amber-500' }),
             });
             onLogoutRef.current();
         };

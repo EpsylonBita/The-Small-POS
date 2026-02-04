@@ -1,4 +1,5 @@
 import React from 'react';
+import { AlertOctagon, AlertTriangle, AlertCircle, Info, HelpCircle, X, RefreshCw } from 'lucide-react';
 import { POSError, ErrorSeverity, ErrorType } from '../../../shared/utils/error-handler';
 import { useI18n } from '../../contexts/i18n-context';
 
@@ -67,24 +68,24 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
     }
   };
 
-  const getSeverityIcon = (severity: ErrorSeverity | undefined): string => {
+  const getSeverityIcon = (severity: ErrorSeverity | undefined) => {
     const s = (severity || 'medium').toLowerCase();
     switch (s) {
       case 'critical':
-        return '🚨';
+        return AlertOctagon;
       case 'high':
-        return '⚠️';
+        return AlertTriangle;
       case 'medium':
-        return '⚡';
+        return AlertCircle;
       case 'low':
-        return 'ℹ️';
+        return Info;
       default:
-        return '❓';
+        return HelpCircle;
     }
   };
 
   const severityColor = getSeverityColor(posError.severity);
-  const severityIcon = getSeverityIcon(posError.severity);
+  const SeverityIcon = getSeverityIcon(posError.severity);
 
   return (
     <div
@@ -100,15 +101,11 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
     >
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'flex-start', marginBottom: '12px' }}>
-        <div
-          style={{
-            fontSize: '32px',
-            marginRight: '12px',
-            lineHeight: '1'
-          }}
-        >
-          {severityIcon}
-        </div>
+        <SeverityIcon
+          className="w-8 h-8"
+          aria-hidden="true"
+          style={{ color: severityColor, marginRight: '12px' }}
+        />
         <div style={{ flex: '1' }}>
           <h3
             style={{
@@ -152,7 +149,7 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
             }}
             aria-label={t('errors.dismissError')}
           >
-            ✕
+            <X className="w-5 h-5" aria-hidden="true" />
           </button>
         )}
       </div>
@@ -249,7 +246,10 @@ export const ErrorDisplay: React.FC<ErrorDisplayProps> = ({
             onMouseEnter={(e) => (e.currentTarget.style.opacity = '0.9')}
             onMouseLeave={(e) => (e.currentTarget.style.opacity = '1')}
           >
-            🔄 Retry
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+              <RefreshCw className="w-4 h-4" aria-hidden="true" />
+              Retry
+            </span>
           </button>
         )}
         {onDismiss && !onRetry && (

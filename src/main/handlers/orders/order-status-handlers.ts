@@ -9,6 +9,7 @@ import { ipcMain } from 'electron';
 import { serviceRegistry } from '../../service-registry';
 import { ErrorHandler, withTimeout } from '../../../shared/utils/error-handler';
 import { TIMING } from '../../../shared/constants';
+import { processBundleInventoryDeduction } from '../inventory';
 
 const errorHandler = ErrorHandler.getInstance();
 
@@ -17,6 +18,8 @@ const errorHandler = ErrorHandler.getInstance();
  */
 function getAdminApiBaseUrl(): string {
   const settingsService = serviceRegistry.get('settingsService');
+  const terminalAdminDashboardUrl = (settingsService?.getSetting?.('terminal', 'admin_dashboard_url', '') as string) || '';
+  if (terminalAdminDashboardUrl) return terminalAdminDashboardUrl;
   const terminalAdminUrl = (settingsService?.getSetting?.('terminal', 'admin_url', '') as string) || '';
   if (terminalAdminUrl) return terminalAdminUrl;
   const envAdminUrl = (process.env['ADMIN_API_BASE_URL'] || '').trim();
@@ -115,7 +118,7 @@ export function registerOrderStatusHandlers(): void {
         // Update activity for session management
         authService?.updateActivity();
 
-        // Record driver earning if order was completed and is a delivery
+        // Process bundle inventory deduction and record driver earning if order was completed
         try {
           if (coercedStatus === 'completed') {
             let odr = await dbManager.getOrderById(orderId as any);
@@ -124,6 +127,30 @@ export function registerOrderStatusHandlers(): void {
                 odr = await dbManager.getOrderBySupabaseId(orderId as any);
               } catch { }
             }
+
+            // Process bundle inventory deduction for completed orders
+            if (odr) {
+              try {
+                let orderItems = odr.items;
+                if (typeof orderItems === 'string') {
+                  try {
+                    orderItems = JSON.parse(orderItems);
+                  } catch (e) {
+                    orderItems = [];
+                  }
+                }
+                if (Array.isArray(orderItems) && orderItems.length > 0) {
+                  const deductionResult = await processBundleInventoryDeduction(odr.id, orderItems);
+                  if (deductionResult.eventsEmitted > 0) {
+                    console.log(`[order:update-status] ✅ Bundle inventory deduction processed: ${deductionResult.eventsEmitted} event(s)`);
+                  }
+                }
+              } catch (bundleError) {
+                console.warn('[order:update-status] Bundle inventory deduction error (ignored):', bundleError);
+              }
+            }
+
+            // Record driver earning if order is a delivery
             if (odr && String(odr.order_type || '').toLowerCase() === 'delivery' && odr.driver_id) {
               const pmLower = String(odr.payment_method || '').toLowerCase();
               let paymentMethod: 'cash' | 'card' | 'mixed' = 'mixed';
@@ -304,9 +331,9 @@ export function registerOrderStatusHandlers(): void {
             paymentStatus: fresh.payment_status,
             paymentMethod: fresh.payment_method,
             paymentTransactionId: fresh.payment_transaction_id,
-            platform: fresh.platform,
-            externalPlatformOrderId: fresh.external_platform_order_id,
-            platformCommissionPct: fresh.platform_commission_pct,
+            plugin: fresh.plugin || fresh.platform,
+            externalPluginOrderId: fresh.external_plugin_order_id || fresh.external_platform_order_id,
+            pluginCommissionPct: fresh.plugin_commission_pct ?? fresh.platform_commission_pct,
             netEarnings: fresh.net_earnings,
           };
           mainWindow.webContents.send('order-realtime-update', payload);
@@ -389,11 +416,11 @@ export function registerOrderStatusHandlers(): void {
       }
 
       // Platform sync for external orders
-      const platformField = order.platform as string | undefined;
-      const externalPlatformOrderIdField = order.external_platform_order_id as string | undefined;
+      const pluginField = (order.plugin || order.platform) as string | undefined;
+      const externalPluginOrderIdField = (order.external_plugin_order_id || order.external_platform_order_id) as string | undefined;
       const orderNumber = order.order_number as string | undefined;
 
-      if (externalPlatformOrderIdField && platformField) {
+      if (externalPluginOrderIdField && pluginField) {
         setTimeout(() => {
           try {
             const adminApiBaseUrl = getAdminApiBaseUrl();
@@ -404,9 +431,9 @@ export function registerOrderStatusHandlers(): void {
 
             const { terminalId, apiKey } = getTerminalCredentials();
 
-            console.log(`[order:approve] Triggering platform sync for ${platformField} order ${externalPlatformOrderIdField}`);
+            console.log(`[order:approve] Triggering plugin sync for ${pluginField} order ${externalPluginOrderIdField}`);
 
-            fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+            fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -417,14 +444,14 @@ export function registerOrderStatusHandlers(): void {
                 action: 'approved',
                 posOrderId: order.id,
                 orderNumber: orderNumber || null,
-                externalPlatformOrderId: externalPlatformOrderIdField,
-                platform: platformField,
+                externalPluginOrderId: externalPluginOrderIdField,
+                plugin: pluginField,
                 estimatedTime,
               }),
             })
               .then((res) => {
                 if (res.ok) {
-                  console.log(`[order:approve] Platform sync successful for ${platformField} order ${externalPlatformOrderIdField}`);
+                  console.log(`[order:approve] Plugin sync successful for ${pluginField} order ${externalPluginOrderIdField}`);
                 } else {
                   console.warn(`[order:approve] Platform sync failed with status ${res.status}`);
                 }
@@ -493,11 +520,11 @@ export function registerOrderStatusHandlers(): void {
       }
 
       // Platform sync for external orders
-      const platformField = order.platform as string | undefined;
-      const externalPlatformOrderIdField = order.external_platform_order_id as string | undefined;
+      const pluginField = (order.plugin || order.platform) as string | undefined;
+      const externalPluginOrderIdField = (order.external_plugin_order_id || order.external_platform_order_id) as string | undefined;
       const orderNumber = order.order_number as string | undefined;
 
-      if (externalPlatformOrderIdField && platformField) {
+      if (externalPluginOrderIdField && pluginField) {
         setTimeout(() => {
           try {
             const adminApiBaseUrl = getAdminApiBaseUrl();
@@ -508,9 +535,9 @@ export function registerOrderStatusHandlers(): void {
 
             const { terminalId, apiKey } = getTerminalCredentials();
 
-            console.log(`[order:decline] Triggering platform sync for ${platformField} order ${externalPlatformOrderIdField}`);
+            console.log(`[order:decline] Triggering plugin sync for ${pluginField} order ${externalPluginOrderIdField}`);
 
-            fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+            fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -521,14 +548,14 @@ export function registerOrderStatusHandlers(): void {
                 action: 'declined',
                 posOrderId: order.id,
                 orderNumber: orderNumber || null,
-                externalPlatformOrderId: externalPlatformOrderIdField,
-                platform: platformField,
+                externalPluginOrderId: externalPluginOrderIdField,
+                plugin: pluginField,
                 reason,
               }),
             })
               .then((res) => {
                 if (res.ok) {
-                  console.log(`[order:decline] Platform sync successful for ${platformField} order ${externalPlatformOrderIdField}`);
+                  console.log(`[order:decline] Plugin sync successful for ${pluginField} order ${externalPluginOrderIdField}`);
                 } else {
                   console.warn(`[order:decline] Platform sync failed with status ${res.status}`);
                 }

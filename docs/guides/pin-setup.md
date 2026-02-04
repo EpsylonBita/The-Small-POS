@@ -12,10 +12,10 @@ This will show you all staff members and their emails.
 
 ### 2. Set a PIN for a Staff Member
 ```bash
-node set-staff-pin.js staff@example.com 1234
+node set-staff-pin.js staff@example.com 123456
 ```
 
-Replace `staff@example.com` with the actual email and `1234` with your desired 4-digit PIN.
+Replace `staff@example.com` with the actual email and `123456` with your desired 6+ digit PIN.
 
 ### 3. Test Check-In
 1. Open the POS system (it should already be running at http://localhost:3002)
@@ -34,16 +34,16 @@ Open the browser console (F12) and look for error messages. The console will sho
 
 ```bash
 # Set PIN for cashier
-node set-staff-pin.js cashier@restaurant.com 1111
+node set-staff-pin.js cashier@restaurant.com 111111
 
 # Set PIN for manager
-node set-staff-pin.js manager@restaurant.com 2222
+node set-staff-pin.js manager@restaurant.com 222222
 
 # Set PIN for kitchen staff
-node set-staff-pin.js chef@restaurant.com 3333
+node set-staff-pin.js chef@restaurant.com 333333
 
 # Set PIN for driver
-node set-staff-pin.js driver@restaurant.com 4444
+node set-staff-pin.js driver@restaurant.com 444444
 ```
 
 ## Troubleshooting
@@ -63,6 +63,16 @@ node set-staff-pin.js driver@restaurant.com 4444
 - PINs are case-sensitive (though they should be numbers only)
 - Try setting the PIN again
 
+## Resetting a Terminal PIN (Admin Dashboard)
+
+If a terminal PIN is forgotten or needs to be rotated:
+
+1. Open **Admin Dashboard → POS → Terminals**.
+2. Select the terminal and open **Terminal Settings**.
+3. Under **Login PIN**, click **Reset PIN**.
+4. Click **Sync to Terminal** (or **Save**) to push the setting.
+5. On next login, the POS will require a new 6+ digit PIN and auto-login after it’s set.
+
 ### Still Having Issues?
 Check the detailed guide in `PIN_VERIFICATION_FIX.md`
 
@@ -78,7 +88,7 @@ The system now:
 ## Security Best Practices
 
 1. **Use unique PINs** - Don't give everyone the same PIN
-2. **Use 4-digit PINs** - Easy to remember, hard enough to guess
+2. **Use 6+ digit PINs** - Easy enough to remember, harder to guess
 3. **Change PINs regularly** - Especially if staff leaves
 4. **Don't share PINs** - Each staff member should have their own
 

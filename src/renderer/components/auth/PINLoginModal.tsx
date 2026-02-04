@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { useTranslation } from 'react-i18next'
+import { Delete as DeleteIcon } from 'lucide-react'
 
 interface PINLoginModalProps {
   isOpen: boolean
@@ -17,6 +18,8 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
   const { t } = useTranslation()
   const titleToShow = title ?? t('auth.login.title')
   const subtitleToShow = subtitle ?? t('auth.login.subtitle')
+  const maskChar = '\u2022'
+  const emptyPin = '-'.repeat(6)
 
   const handleNumber = (n: string) => {
     if (pin.length < 6) {
@@ -114,7 +117,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
 
           <div className="bg-gray-100 rounded-xl p-4 text-center mb-3">
             <div className="text-2xl font-mono tracking-widest">
-              {pin.replace(/./g, '●') || '──────'}
+              {pin ? maskChar.repeat(pin.length) : emptyPin}
             </div>
           </div>
           {error && <p className="text-red-600 text-sm mb-3 text-center">{error}</p>}
@@ -132,7 +135,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
               0
             </button>
             <button onClick={handleBack} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold">
-              ←
+              <DeleteIcon size={18} aria-hidden="true" />
             </button>
           </div>
 

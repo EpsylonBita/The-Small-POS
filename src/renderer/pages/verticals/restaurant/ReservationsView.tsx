@@ -11,6 +11,7 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAcquiredModules } from '../../../hooks/useAcquiredModules';
 import { useReservations } from '../../../hooks/useReservations';
+import { formatDate, formatTime } from '../../../utils/format';
 import {
   Calendar,
   Users,
@@ -450,7 +451,7 @@ export const ReservationsView: React.FC = memo(() => {
                       <div className="flex items-center gap-4 text-sm">
                         <span className="flex items-center gap-1">
                           <Clock className="w-4 h-4" />
-                          {new Date(res.reservationDatetime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          {formatTime(res.reservationDatetime, { hour: '2-digit', minute: '2-digit' })}
                         </span>
                         <span className="flex items-center gap-1">
                           <Users className="w-4 h-4" />
@@ -475,7 +476,7 @@ export const ReservationsView: React.FC = memo(() => {
                         {res.checkInDate && res.checkOutDate && (
                           <span className="flex items-center gap-1">
                             <Calendar className="w-4 h-4" />
-                            {new Date(res.checkInDate).toLocaleDateString()} - {new Date(res.checkOutDate).toLocaleDateString()}
+                            {formatDate(res.checkInDate)} - {formatDate(res.checkOutDate)}
                           </span>
                         )}
                       </div>

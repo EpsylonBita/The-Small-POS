@@ -19,7 +19,8 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { getApiUrl } from '../../config/environment';
+import { formatCurrency, formatDate } from '../utils/format';
+import { posApiGet } from '../utils/api-helpers';
 
 interface Supplier {
   id: string;
@@ -47,7 +48,7 @@ interface Invoice {
 }
 
 const SuppliersPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
@@ -58,33 +59,20 @@ const SuppliersPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'suppliers' | 'invoices'>('suppliers');
 
   const isDark = resolvedTheme === 'dark';
-  const currency = new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'EUR' });
+  const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchSuppliers = useCallback(async () => {
     if (!staff?.organizationId || !staff?.branchId) return;
     setLoading(true);
     try {
-      const apiUrl = getApiUrl(`pos/suppliers?organization_id=${staff.organizationId}&branch_id=${staff.branchId}`);
-      const response = await fetch(apiUrl, {
-        headers: { 'Content-Type': 'application/json' }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setSuppliers(data.suppliers || []);
-        setInvoices(data.invoices || []);
-      } else {
-        // Mock data for demo
-        setSuppliers([
-          { id: '1', name: 'Fresh Foods Co.', contact_name: 'John Smith', email: 'john@freshfoods.com', phone: '+30 210 1234567', category: 'Produce', payment_terms: 'Net 30', is_active: true, total_orders: 45, total_spent: 12500, last_order_date: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString() },
-          { id: '2', name: 'Dairy Direct', contact_name: 'Maria Garcia', email: 'maria@dairydirect.com', phone: '+30 210 7654321', category: 'Dairy', payment_terms: 'Net 15', is_active: true, total_orders: 32, total_spent: 8750, last_order_date: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString() },
-          { id: '3', name: 'Meat Masters', contact_name: 'Nikos Papadopoulos', email: 'nikos@meatmasters.gr', phone: '+30 210 9876543', category: 'Meat', payment_terms: 'COD', is_active: true, total_orders: 28, total_spent: 15200, last_order_date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() },
-        ]);
-        setInvoices([
-          { id: '1', supplier_id: '1', invoice_number: 'INV-2024-001', amount: 1250, status: 'pending', due_date: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString(), created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() },
-          { id: '2', supplier_id: '2', invoice_number: 'INV-2024-002', amount: 875, status: 'paid', due_date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), created_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString() },
-          { id: '3', supplier_id: '3', invoice_number: 'INV-2024-003', amount: 2100, status: 'overdue', due_date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), created_at: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString() },
-        ]);
+      const result = await posApiGet<{ suppliers?: Supplier[]; invoices?: Invoice[] }>(
+        `pos/suppliers?organization_id=${staff.organizationId}&branch_id=${staff.branchId}`
+      );
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to load suppliers');
       }
+      setSuppliers(result.data?.suppliers || []);
+      setInvoices(result.data?.invoices || []);
     } catch (error) {
       console.error('Failed to fetch suppliers:', error);
       toast.error(t('suppliers.errors.loadFailed', 'Failed to load suppliers'));
@@ -184,7 +172,7 @@ const SuppliersPage: React.FC = () => {
             <div className="p-2 rounded-lg bg-cyan-500/20"><DollarSign className="w-5 h-5 text-cyan-500" /></div>
             <div>
               <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.owed', 'Total Owed')}</p>
-              <p className="text-lg font-bold">{currency.format(stats.totalOwed)}</p>
+              <p className="text-lg font-bold">{formatMoney(stats.totalOwed)}</p>
             </div>
           </div>
         </motion.div>
@@ -250,7 +238,7 @@ const SuppliersPage: React.FC = () => {
               </div>
               <div className={`mt-4 pt-4 border-t ${isDark ? 'border-gray-700' : 'border-gray-200'} flex justify-between text-sm`}>
                 <span>{t('suppliers.orders', 'Orders')}: <strong>{supplier.total_orders || 0}</strong></span>
-                <span>{t('suppliers.spent', 'Spent')}: <strong>{currency.format(supplier.total_spent || 0)}</strong></span>
+                <span>{t('suppliers.spent', 'Spent')}: <strong>{formatMoney(supplier.total_spent || 0)}</strong></span>
               </div>
             </motion.div>
           ))}
@@ -274,13 +262,13 @@ const SuppliersPage: React.FC = () => {
                   <tr key={invoice.id} className={`${isDark ? 'hover:bg-gray-750' : 'hover:bg-gray-50'} transition-colors`}>
                     <td className="px-4 py-3 font-medium">{invoice.invoice_number}</td>
                     <td className="px-4 py-3">{supplier?.name || '-'}</td>
-                    <td className="px-4 py-3 text-right font-medium">{currency.format(invoice.amount)}</td>
+                    <td className="px-4 py-3 text-right font-medium">{formatMoney(invoice.amount)}</td>
                     <td className="px-4 py-3 text-center">
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${getInvoiceStatusColor(invoice.status)}`}>
                         {t(`suppliers.status.${invoice.status}`, invoice.status)}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right">{new Date(invoice.due_date).toLocaleDateString()}</td>
+                    <td className="px-4 py-3 text-right">{formatDate(invoice.due_date)}</td>
                   </tr>
                 );
               })}
