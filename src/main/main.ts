@@ -51,6 +51,11 @@ try {
   console.warn('Failed to configure Google API key:', e);
 }
 
+// Ensure Windows uses the branded app icon for taskbar/shortcuts
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.thesmall.pos');
+}
+
 // App ready handler
 app.whenReady().then(async () => {
   try {

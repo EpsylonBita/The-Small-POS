@@ -1,6 +1,6 @@
 {
   "name": "the-small-pos-system",
-  "version": "1.1.62",
+  "version": "1.1.63",
   "description": "Point of Sale system for The Small with offline capabilities",
   "main": "dist/main/main.js",
   "homepage": "./",
@@ -158,6 +158,16 @@
       "dist/**/*",
       "node_modules/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "public/icon.png",
+        "to": "icon.png"
+      }
     ],
     "asarUnpack": [
       "**/*.node",

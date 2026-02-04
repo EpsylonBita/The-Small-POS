@@ -2,6 +2,14 @@ import { app, BrowserWindow, screen, shell, desktopCapturer, dialog } from 'elec
 import * as path from 'path';
 import { AuthService } from './services/AuthService';
 
+const getAppIconPath = () => {
+    const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+    if (app.isPackaged) {
+        return path.join(process.resourcesPath, iconFile);
+    }
+    return path.join(__dirname, '../../public', iconFile);
+};
+
 export class WindowManager {
     private mainWindow: BrowserWindow | null = null;
     private isDev: boolean;
@@ -46,7 +54,7 @@ export class WindowManager {
             titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
             frame: false, // Frameless window for custom titlebar
             show: false, // Start hidden, show after content loads
-            icon: path.join(__dirname, '../../public/icon.png'), // Add app icon
+            icon: getAppIconPath(), // Add app icon
             // Touch-friendly window behavior
             resizable: true,
             maximizable: true,
