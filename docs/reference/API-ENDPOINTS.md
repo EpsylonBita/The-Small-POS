@@ -41,7 +41,7 @@ Centralized reference of all admin dashboard API endpoints the POS system calls.
 
 | Endpoint | Method | Handler | Purpose |
 |----------|--------|---------|---------|
-| `/api/platform-sync/notify` | POST | order-status-handlers | Platform sync notification |
+| `/api/plugin-sync/notify` | POST | order-status-handlers | Plugin sync notification |
 | `/api/pos/payments` | POST | payment-handlers | Payment processing |
 | `/api/pos/z-report` | GET | report-handlers | Get Z-report |
 | `/api/pos/z-report/submit` | POST | report-handlers | Submit Z-report |
@@ -85,8 +85,7 @@ Centralized reference of all admin dashboard API endpoints the POS system calls.
 
 | Service | Location | Description |
 |---------|----------|-------------|
-| AdminDashboardSyncService | `src/main/services/AdminDashboardSyncService.ts` | Enhanced sync with rate-limit retry |
-| AdminDashboardSyncService (basic) | `src/main/admin-dashboard-sync-service.ts` | Basic sync implementation |
+| AdminDashboardSyncService | `src/main/services/AdminDashboardSyncService.ts` | Admin dashboard sync with rate-limit retry |
 | ModuleSyncService | `src/main/services/ModuleSyncService.ts` | Module enablement sync |
 | CustomerService | `src/main/services/CustomerService.ts` | Customer data management |
 | StaffAuthService | `src/main/services/StaffAuthService.ts` | Staff authentication |
@@ -162,11 +161,6 @@ The `users` module is for **customer management**, NOT staff management:
 - **Staff Management**: Handled separately under Branches/POS settings
 
 The CustomerService (`src/main/services/CustomerService.ts`) handles all customer-related operations.
-
-### Two AdminDashboardSyncService Files
-The two sync service files are **intentionally different**:
-- `src/main/admin-dashboard-sync-service.ts` - Basic synchronization
-- `src/main/services/AdminDashboardSyncService.ts` - Enhanced with rate-limit retry logic
 
 ### Authentication
 All API calls require proper authentication headers:

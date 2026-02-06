@@ -5,6 +5,11 @@ import { environment, getApiUrl, isDevelopment } from '../config/environment';
 import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
 import { API } from '../shared/constants';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+  updateTerminalCredentialCache,
+} from '../renderer/services/terminal-credentials';
 
 // Utility functions - now using centralized debug logger
 
@@ -88,49 +93,47 @@ export class OrderService {
   private cachedApiKey: string | null = null;
 
   /**
-   * Get credentials from localStorage, IPC cache, or fetch from main process.
-   * This ensures we have credentials even if localStorage hasn't been synced yet.
+   * Get credentials from in-memory cache, then refresh from main process if needed.
    */
   private async getCredentials(): Promise<{ terminalId: string; apiKey: string }> {
-    // 1. Try localStorage first
-    let terminalId = typeof window !== 'undefined' ? (localStorage.getItem('terminal_id') || '') : '';
-    let apiKey = typeof window !== 'undefined' ? (localStorage.getItem('pos_api_key') || '') : '';
+    const cached = getCachedTerminalCredentials();
 
-    // 2. If localStorage is empty, use IPC cache
+    // 1. Start with renderer cache and terminal id persisted metadata
+    let terminalId = typeof window !== 'undefined' ? (localStorage.getItem('terminal_id') || '') : '';
+    let apiKey = cached.apiKey || '';
+
+    if (!terminalId && cached.terminalId) {
+      terminalId = cached.terminalId;
+    }
+
+    // 2. If cache is empty, use service cache
     if (!terminalId && this.cachedTerminalId) terminalId = this.cachedTerminalId;
     if (!apiKey && this.cachedApiKey) apiKey = this.cachedApiKey;
 
-    // 3. If still empty, fetch from main process via IPC
-    if ((!terminalId || !apiKey) && typeof window !== 'undefined' && (window as any).electron?.ipcRenderer) {
+    // 3. If still empty, refresh from main process via IPC
+    if (!terminalId || !apiKey) {
       try {
-        const settings = await (window as any).electron.ipcRenderer.invoke('terminal-config:get-settings');
-        if (settings) {
-          const ipcTerminalId = settings['terminal.terminal_id'] || settings?.terminal?.terminal_id || '';
-          const ipcApiKey = settings['terminal.pos_api_key'] || settings?.terminal?.pos_api_key || '';
+        const refreshed = await refreshTerminalCredentialCache();
+        const ipcTerminalId = refreshed.terminalId || '';
+        const ipcApiKey = refreshed.apiKey || '';
 
-          if (ipcTerminalId && !terminalId) {
-            terminalId = ipcTerminalId;
-            this.cachedTerminalId = ipcTerminalId;
-            // Also sync to localStorage for future use
-            localStorage.setItem('terminal_id', ipcTerminalId);
-            console.log('[OrderService] Synced terminal_id from IPC to localStorage:', ipcTerminalId);
-          }
-          if (ipcApiKey && !apiKey) {
-            apiKey = ipcApiKey;
-            this.cachedApiKey = ipcApiKey;
-            // Also sync to localStorage for future use
-            localStorage.setItem('pos_api_key', ipcApiKey);
-            console.log('[OrderService] Synced pos_api_key from IPC to localStorage (len:', ipcApiKey.length, ')');
-          }
+        if (ipcTerminalId && !terminalId) {
+          terminalId = ipcTerminalId;
+          this.cachedTerminalId = ipcTerminalId;
+          localStorage.setItem('terminal_id', ipcTerminalId);
+        }
+        if (ipcApiKey && !apiKey) {
+          apiKey = ipcApiKey;
+          this.cachedApiKey = ipcApiKey;
+          updateTerminalCredentialCache({ apiKey: ipcApiKey });
         }
       } catch (err) {
         console.warn('[OrderService] Failed to fetch credentials from IPC:', err);
       }
     }
 
-    // 4. Final fallback to environment
+    // 4. Final fallback for terminal id only; API key must come from paired terminal config
     if (!terminalId) terminalId = environment.TERMINAL_ID || 'terminal-001';
-    if (!apiKey) apiKey = environment.POS_API_KEY || environment.POS_API_SHARED_KEY || '';
 
     return { terminalId, apiKey };
   }
@@ -138,8 +141,8 @@ export class OrderService {
   private buildHeadersSync(): Record<string, string> {
     const lsTerminal = typeof window !== 'undefined' ? (localStorage.getItem('terminal_id') || '') : ''
     const terminalId = lsTerminal || this.cachedTerminalId || environment.TERMINAL_ID || 'terminal-001'
-    const lsApiKey = typeof window !== 'undefined' ? (localStorage.getItem('pos_api_key') || '') : ''
-    const apiKey = lsApiKey || this.cachedApiKey || environment.POS_API_KEY || environment.POS_API_SHARED_KEY || ''
+    const cached = getCachedTerminalCredentials()
+    const apiKey = cached.apiKey || this.cachedApiKey || ''
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
@@ -156,8 +159,7 @@ export class OrderService {
     console.log('[OrderService] Building headers:', {
       terminalId: terminalId || 'MISSING',
       apiKeyPresent: !!apiKey,
-      apiKeyLast4: apiKey ? apiKey.slice(-4) : 'MISSING',
-      headers: { ...headers, 'x-pos-api-key': apiKey ? '***' + apiKey.slice(-4) : 'MISSING' }
+      hasPosApiKeyHeader: !!headers['x-pos-api-key']
     })
 
     return headers
@@ -182,8 +184,7 @@ export class OrderService {
     console.log('[OrderService] Building headers:', {
       terminalId: terminalId || 'MISSING',
       apiKeyPresent: !!apiKey,
-      apiKeyLast4: apiKey ? apiKey.slice(-4) : 'MISSING',
-      headers: { ...headers, 'x-pos-api-key': apiKey ? '***' + apiKey.slice(-4) : 'MISSING' }
+      hasPosApiKeyHeader: !!headers['x-pos-api-key']
     })
 
     return headers

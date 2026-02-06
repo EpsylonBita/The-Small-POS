@@ -44,8 +44,7 @@ function getAdminApiBaseUrl(settingsService: SettingsService | null): string {
 function getTerminalCredentials(settingsService: SettingsService | null): { terminalId: string; apiKey: string } {
   const terminalId = (settingsService?.getSetting?.('terminal', 'terminal_id', '') as string) || '';
   const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-  const envApiKey = (process.env['POS_API_KEY'] || process.env['POS_API_SHARED_KEY'] || '').trim();
-  return { terminalId, apiKey: terminalApiKey || envApiKey };
+  return { terminalId, apiKey: terminalApiKey };
 }
 
 export function registerOrderHandlers({
@@ -197,18 +196,20 @@ export function registerOrderHandlers({
     }
   });
 
-  ipcMain.handle('order:update-status', async (_event, { orderId, status }) => {
+  ipcMain.handle('order:update-status', async (_event, { orderId, status, estimatedTime }) => {
     console.log('[IPC order:update-status] 📨 Received', { orderId, status, timestamp: new Date().toISOString() });
     try {
       // Check permission
       const hasPermission = (await staffAuthService.hasPermission('update_order_status')) || (await authService.hasPermission('update_order_status'));
-      // Allow trusted terminals (configured API key) or env key to perform local status updates
+      // Allow trusted terminals (configured API key) to perform local status updates
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
       const desiredStatus = String(status || '').toLowerCase();
       // Coerce deprecated out_for_delivery to completed for consistency
       const coercedStatus = desiredStatus === 'out_for_delivery' ? 'completed' : desiredStatus;
+      const normalizedEstimatedTime = Number.isFinite(Number(estimatedTime))
+        ? Math.max(1, Math.round(Number(estimatedTime)))
+        : undefined;
       const allowByStatus = coercedStatus === 'cancelled' || coercedStatus === 'canceled';
 
       console.log('[IPC order:update-status] 🔐 Permission check', {
@@ -216,7 +217,6 @@ export function registerOrderHandlers({
         terminalTrusted,
         allowByStatus,
         hasTerminalKey: !!terminalApiKey,
-        hasEnvKey: !!envApiKey,
       });
 
       if (!hasPermission && !terminalTrusted && !allowByStatus) {
@@ -253,6 +253,27 @@ export function registerOrderHandlers({
       }
 
       if (success) {
+        if (normalizedEstimatedTime !== undefined) {
+          try {
+            let targetOrder = await dbManager.getOrderById(orderId as any);
+            if (!targetOrder) {
+              targetOrder = await dbManager.getOrderBySupabaseId(orderId as any);
+            }
+            if (targetOrder?.id) {
+              await withTimeout(
+                dbManager.executeQuery(
+                  `UPDATE orders SET estimated_time = ?, updated_at = ? WHERE id = ?`,
+                  [normalizedEstimatedTime, new Date().toISOString(), targetOrder.id]
+                ),
+                TIMING.DATABASE_QUERY_TIMEOUT,
+                'Update order estimated time',
+              );
+            }
+          } catch (etaError) {
+            console.warn('[IPC order:update-status] Failed to persist estimated_time (continuing):', etaError);
+          }
+        }
+
         // Update activity for session management
         authService.updateActivity();
 
@@ -322,7 +343,11 @@ export function registerOrderHandlers({
 
         // Notify renderer about the update
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('order-status-updated', { orderId, status: coercedStatus });
+          mainWindow.webContents.send('order-status-updated', {
+            orderId,
+            status: coercedStatus,
+            estimatedTime: normalizedEstimatedTime,
+          });
         }
         console.log('[IPC order:update-status] 📤 Returning success', { orderId, status: coercedStatus });
         return { success: true };
@@ -358,8 +383,7 @@ export function registerOrderHandlers({
         || (await authService.hasPermission('update_order_status'));
       const currentSession = await staffAuthService.getCurrentSession();
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
 
       if (!hasPerm && !currentSession && !terminalTrusted) {
         console.warn('[IPC order:update-type] Permission denied');
@@ -844,7 +868,7 @@ export function registerOrderHandlers({
 
             console.log(`[order:approve] Triggering platform sync for ${platformField} order ${externalPlatformOrderIdField}`);
 
-            fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+            fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -857,9 +881,9 @@ export function registerOrderHandlers({
                 posOrderId: order.id,
                 // orderNumber: business-facing order number for display/reference
                 orderNumber: orderNumber || null,
-                // externalPlatformOrderId: original order ID from external platform (e.g., Wolt order ID)
-                externalPlatformOrderId: externalPlatformOrderIdField,
-                platform: platformField,
+                // externalPluginOrderId: original order ID from external plugin (e.g., Wolt order ID)
+                externalPluginOrderId: externalPlatformOrderIdField,
+                plugin: platformField,
                 estimatedTime,
               }),
             })
@@ -944,7 +968,7 @@ export function registerOrderHandlers({
 
             console.log(`[order:decline] Triggering platform sync for ${platformField} order ${externalPlatformOrderIdField}`);
 
-            fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+            fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -957,9 +981,9 @@ export function registerOrderHandlers({
                 posOrderId: order.id,
                 // orderNumber: business-facing order number for display/reference
                 orderNumber: orderNumber || null,
-                // externalPlatformOrderId: original order ID from external platform (e.g., Wolt order ID)
-                externalPlatformOrderId: externalPlatformOrderIdField,
-                platform: platformField,
+                // externalPluginOrderId: original order ID from external plugin (e.g., Wolt order ID)
+                externalPluginOrderId: externalPlatformOrderIdField,
+                plugin: platformField,
                 reason,
               }),
             })
@@ -1034,7 +1058,7 @@ export function registerOrderHandlers({
       console.log(`[order:notify-platform-ready] Notifying ${platformField} that order ${externalPlatformOrderIdField} is ready`);
 
       // Fire-and-forget call to platform sync API
-      fetch(`${adminApiBaseUrl}/api/platform-sync/notify`, {
+      fetch(`${adminApiBaseUrl}/api/plugin-sync/notify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1043,10 +1067,10 @@ export function registerOrderHandlers({
         },
         body: JSON.stringify({
           action: 'ready',
-          platform: platformField,
+          plugin: platformField,
           posOrderId: order.id,
           orderNumber,
-          externalPlatformOrderId: externalPlatformOrderIdField,
+          externalPluginOrderId: externalPlatformOrderIdField,
         }),
       })
         .then((res) => {
@@ -1079,8 +1103,7 @@ export function registerOrderHandlers({
         || (await authService.hasPermission('update_order_status'));
       const currentSession = await staffAuthService.getCurrentSession();
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
       if (!hasPerm && !currentSession && !terminalTrusted) {
         return { success: false, error: 'Insufficient permissions' };
       }

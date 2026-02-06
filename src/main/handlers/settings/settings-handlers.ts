@@ -184,19 +184,14 @@ export function registerSettingsHandlers(): void {
   ipcMain.handle('terminal-config:get-settings', async () => {
     try {
       // Merge settings from both TerminalConfigService (pos_configurations)
-      // and SettingsService (local_settings) to include API key
+      // and SettingsService (local_settings)
       const localSettings = await settingsService.getSettings();
-      console.log('[terminal-config:get-settings] localSettings:', JSON.stringify(localSettings, null, 2));
 
       if (terminalConfigService) {
         const terminalSettings = terminalConfigService.getSettings();
-        console.log('[terminal-config:get-settings] terminalSettings:', JSON.stringify(terminalSettings, null, 2));
         // Merge: local_settings takes precedence for credentials
-        const merged = { ...terminalSettings, ...localSettings };
-        console.log('[terminal-config:get-settings] merged result:', JSON.stringify(merged, null, 2));
-        return merged;
+        return { ...terminalSettings, ...localSettings };
       }
-      console.log('[terminal-config:get-settings] returning localSettings only');
       return localSettings;
     } catch (error) {
       console.error('terminal-config:get-settings failed:', error);
@@ -245,9 +240,7 @@ export function registerSettingsHandlers(): void {
       if (terminalId) {
         try {
           const apiKey =
-            (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) ||
-            process.env.POS_API_SHARED_KEY ||
-            '';
+            (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
           if (apiKey) {
             // Get admin URL from local settings first
             const storedAdminUrl = settingsService?.getSetting?.('terminal', 'admin_dashboard_url', '') as string || '';

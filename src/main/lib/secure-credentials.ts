@@ -19,6 +19,7 @@ interface CredentialsStore {
   'supabase-url'?: string;
   'supabase-anon-key'?: string;
   'google-api-key'?: string;
+  'terminal-pos-api-key'?: string;
   _migrated?: boolean;
 }
 
@@ -304,6 +305,41 @@ export async function getGoogleApiKey(): Promise<string | null> {
   } catch (error) {
     console.error('[SecureCredentials] Failed to retrieve Google API key:', error);
     return process.env.GOOGLE_MAPS_API_KEY || null;
+  }
+}
+
+/**
+ * Store terminal POS API key securely.
+ * This is the credential used for admin-dashboard POS API authentication.
+ */
+export function storeTerminalApiKey(apiKey: string): void {
+  try {
+    setCredential('terminal-pos-api-key', apiKey);
+  } catch (error) {
+    console.error('[SecureCredentials] Failed to store terminal POS API key:', error);
+  }
+}
+
+/**
+ * Retrieve terminal POS API key from secure storage.
+ */
+export function getTerminalApiKey(): string | null {
+  try {
+    return getCredential('terminal-pos-api-key');
+  } catch (error) {
+    console.error('[SecureCredentials] Failed to retrieve terminal POS API key:', error);
+    return null;
+  }
+}
+
+/**
+ * Delete terminal POS API key from secure storage.
+ */
+export function deleteTerminalApiKey(): void {
+  try {
+    deleteCredential('terminal-pos-api-key');
+  } catch (error) {
+    console.error('[SecureCredentials] Failed to delete terminal POS API key:', error);
   }
 }
 

@@ -31,7 +31,7 @@ export function registerSettingsMainHandlers(): void {
       const adminUrl = settingsService.getSetting<string>('terminal', 'admin_dashboard_url', '');
 
       console.log('[settings:is-configured] Database values:');
-      console.log('[settings:is-configured]   apiKey:', apiKey ? `"${apiKey.slice(0, 4)}...${apiKey.slice(-4)}" (len=${apiKey.length})` : '(empty)');
+      console.log('[settings:is-configured]   hasApiKey:', !!apiKey);
       console.log('[settings:is-configured]   adminUrl:', adminUrl ? `"${adminUrl}"` : '(empty)');
 
       // Both must be non-empty strings to be considered configured

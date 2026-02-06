@@ -465,7 +465,19 @@
       "qty": "Qty:",
       "without": "Without",
       "minimumNotMet": "Minimum order not met",
-      "addMoreToOrder": "Add {{amount}} more to complete order"
+      "addMoreToOrder": "Add {{amount}} more to complete order",
+      "couponPlaceholder": "Coupon code",
+      "applyCoupon": "Apply",
+      "couponOff": "off",
+      "couponApplied": "Coupon applied!",
+      "couponInvalid": "Invalid coupon code",
+      "couponError": "Failed to validate coupon",
+      "couponDiscount": "Coupon",
+      "manualItem": "Manual Item",
+      "addManualItem": "Manual Item",
+      "manualPricePlaceholder": "Price",
+      "manualNamePlaceholder": "Item name (optional)",
+      "manualItemAdded": "Manual item added"
     },
     "emptyState": {
       "title": "No Menu Items",
@@ -591,6 +603,28 @@
       "noItems": "No items found",
       "noItemsDescription": "Try selecting a different category or sync menu data",
       "syncMenuData": "Sync Menu Data"
+    },
+    "combos": {
+      "noCombos": "No combos available",
+      "addedToCart": "Combo added to cart",
+      "types": {
+        "fixed": "Combo",
+        "choice": "Choice",
+        "bogo": "Offer"
+      },
+      "bogo": {
+        "shortLabel": "Buy {{buy}} Get {{get}} {{discount}}",
+        "free": "FREE",
+        "autoApplied": "Auto-applied",
+        "infoToast": "BOGO offer will be applied when qualifying items are in cart"
+      },
+      "anyFrom": "Any {{category}}",
+      "choice": {
+        "pickFrom": "Pick from {{category}}",
+        "selectItem": "Select an item...",
+        "noItems": "No items available",
+        "addToCart": "Add to Cart"
+      }
     },
     "summary": {
       "header": "Order Summary",
@@ -1892,6 +1926,7 @@
       "order": "Order",
       "allItems": "All Items",
       "featured": "Featured",
+      "combos": "Combos & Offers",
       "customerLabel": "Customer: {{name}} ({{phone}})",
       "deliveryTo": "Delivery to: {{address}}",
       "zone": "Zone",

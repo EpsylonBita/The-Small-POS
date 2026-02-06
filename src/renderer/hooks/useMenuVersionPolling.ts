@@ -4,6 +4,10 @@ import { getApiUrl, API_TIMEOUT_MS, environment } from '../../config/environment
 import { posApiGet } from '../utils/api-helpers'
 import { menuService } from '../services/MenuService'
 import useTerminalSettings from './useTerminalSettings'
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../services/terminal-credentials'
 
 interface PollState {
   isPolling: boolean
@@ -31,10 +35,10 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
   const [state, setState] = useState<PollState>({ isPolling: false, lastSeen: null, error: null, checks: 0 })
   const mountedRef = useRef(true)
 
-  // Resolve credentials (prefer terminal settings; fallback to env)
+  // Resolve credentials (prefer terminal settings + in-memory credential cache)
   const creds = useMemo(() => {
+    const cached = getCachedTerminalCredentials()
     const lsTerminal = (typeof localStorage !== 'undefined' ? localStorage.getItem('terminal_id') : '') || ''
-    const lsApi = (typeof localStorage !== 'undefined' ? localStorage.getItem('pos_api_key') : '') || ''
 
     const terminalId = (
       getSetting<string>('terminal', 'terminal_id', lsTerminal || environment.TERMINAL_ID) ||
@@ -43,42 +47,33 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
       ''
     ).trim()
 
-    const sharedKey = (
-      getSetting<string>('pos', 'shared_key', environment.POS_API_SHARED_KEY) ||
-      environment.POS_API_SHARED_KEY ||
-      ''
-    ).trim()
-
     const apiKeyFromPos = (
-      getSetting<string>('pos', 'api_key', environment.POS_API_KEY) ||
-      environment.POS_API_KEY ||
-      lsApi ||
+      getSetting<string>('pos', 'api_key', '') ||
       ''
     ).trim()
 
     const apiKeyFromTerminal = (
-      getSetting<string>('terminal', 'pos_api_key', lsApi || '') ||
-      lsApi ||
+      getSetting<string>('terminal', 'pos_api_key', cached.apiKey || '') ||
       ''
     ).trim()
 
-    const apiKey = (apiKeyFromTerminal || apiKeyFromPos || lsApi).trim()
-    return { terminalId, sharedKey, apiKey }
+    const apiKey = (apiKeyFromTerminal || apiKeyFromPos || cached.apiKey || '').trim()
+    return { terminalId, apiKey }
   }, [getSetting])
 
   // Load persisted version on mount
   useEffect(() => {
     const v = localStorage.getItem('pos.menu.latest_updated_at')
     if (v) setState(prev => ({ ...prev, lastSeen: v }))
+    void refreshTerminalCredentialCache()
     return () => { mountedRef.current = false }
   }, [])
 
   const triggerMenuSync = useCallback(async (latest: string | null) => {
-    // Always re-resolve from localStorage to avoid stale values
+    // Always re-resolve from latest cache to avoid stale values
+    const cached = getCachedTerminalCredentials()
     const lsTerminal = (typeof localStorage !== 'undefined' ? localStorage.getItem('terminal_id') : '') || ''
-    const lsApi = (typeof localStorage !== 'undefined' ? localStorage.getItem('pos_api_key') : '') || ''
-    // Prioritize localStorage over creds (which may be stale from useMemo initialization)
-    const terminalId = (lsTerminal || creds.terminalId || environment.TERMINAL_ID || '').trim()
+    const terminalId = (lsTerminal || cached.terminalId || creds.terminalId || environment.TERMINAL_ID || '').trim()
     if (!terminalId) return
     try {
       const params = new URLSearchParams()
@@ -86,19 +81,16 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
       if (state.lastSeen) params.set('last_sync', state.lastSeen)
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-terminal-id': terminalId }
-      // Prioritize localStorage over creds (which may be stale from useMemo initialization)
-      const apiKey = (lsApi || creds.apiKey || environment.POS_API_KEY || '').trim()
+      const apiKey = (cached.apiKey || creds.apiKey || '').trim()
       if (apiKey) headers['x-pos-api-key'] = apiKey
-      else if (creds.sharedKey) headers['x-pos-sync-key'] = creds.sharedKey
+      else throw new Error('Missing per-terminal POS API key for menu sync')
 
       // Debug logging for troubleshooting auth issues
       console.log('[triggerMenuSync] auth debug:', {
         hasApiKey: !!apiKey,
-        apiKeyLen: apiKey?.length || 0,
-        apiKeyLast4: apiKey?.slice(-4) || '',
         terminalId,
-        lsApiLen: lsApi?.length || 0,
-        credsApiLen: creds.apiKey?.length || 0
+        hasCachedApiKey: !!cached.apiKey,
+        hasMemoApiKey: !!creds.apiKey
       })
 
       const endpoint = `/pos/menu-sync?${params.toString()}`
@@ -131,7 +123,7 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
       console.warn('[useMenuVersionPolling] triggerMenuSync error:', e?.message || e)
       if (mountedRef.current) setState(prev => ({ ...prev, error: e?.message || 'Menu sync failed' }))
     }
-  }, [creds.apiKey, creds.sharedKey, creds.terminalId, state.lastSeen])
+  }, [creds.apiKey, creds.terminalId, state.lastSeen])
 
   const debugCountRef = useRef(0)
   const fallbackUsedRef = useRef(false)
@@ -140,16 +132,15 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
     try {
       if (mountedRef.current) setState(prev => ({ ...prev, isPolling: true, error: null }))
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      // Re-resolve latest creds on each poll - prioritize localStorage (freshest source)
+      // Re-resolve latest creds on each poll
+      const cached = getCachedTerminalCredentials()
       const lsTerminal = (typeof localStorage !== 'undefined' ? localStorage.getItem('terminal_id') : '') || ''
-      const lsApi = (typeof localStorage !== 'undefined' ? localStorage.getItem('pos_api_key') : '') || ''
-      // Prioritize localStorage over creds (which may be stale from useMemo initialization)
-      const terminalId = (lsTerminal || creds.terminalId || environment.TERMINAL_ID || '').trim()
-      const apiKey = (lsApi || creds.apiKey || environment.POS_API_KEY || '').trim()
+      const terminalId = (lsTerminal || cached.terminalId || creds.terminalId || environment.TERMINAL_ID || '').trim()
+      const apiKey = (cached.apiKey || creds.apiKey || '').trim()
 
       if (terminalId) headers['x-terminal-id'] = terminalId
       if (apiKey) headers['x-pos-api-key'] = apiKey
-      if (!apiKey && creds.sharedKey) headers['x-pos-sync-key'] = creds.sharedKey
+      if (!apiKey) throw new Error('Missing per-terminal POS API key for menu version polling')
 
       const since = state.lastSeen
       const params = new URLSearchParams()
@@ -168,10 +159,7 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
             hasTerminalId: !!headers['x-terminal-id'],
             terminalId: headers['x-terminal-id'],
             hasApiKey: !!headers['x-pos-api-key'],
-            apiKeyLen: headers['x-pos-api-key']?.length || 0,
-            apiKeyLast4: headers['x-pos-api-key']?.slice(-4) || '',
-            hasSyncKey: !!headers['x-pos-sync-key'],
-            syncKeyLen: headers['x-pos-sync-key']?.length || 0
+            usingCachedApiKey: !!cached.apiKey
           })
         }
       } catch {}
@@ -198,7 +186,7 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
     } catch (e: any) {
       if (mountedRef.current) setState(prev => ({ ...prev, isPolling: false, error: e?.message || 'Check failed', checks: prev.checks + 1 }))
     }
-  }, [enabled, creds.sharedKey, creds.apiKey, creds.terminalId, state.lastSeen, triggerMenuSync])
+  }, [enabled, creds.apiKey, creds.terminalId, state.lastSeen, triggerMenuSync])
 
   // Interval loop
   useEffect(() => {

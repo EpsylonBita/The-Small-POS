@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { getApiUrl, environment } from '../../../config/environment';
+import { getApiUrl } from '../../../config/environment';
 import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useTheme } from '../../contexts/theme-context';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 
 import { inputBase } from '../../styles/designSystem';
 
@@ -713,15 +714,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
       // Fallback to localStorage
       const ls = typeof window !== 'undefined' ? window.localStorage : null;
+      const refreshed = await refreshTerminalCredentialCache();
       if (!posKey) {
-        posKey = (ls?.getItem('pos_api_key') || '').trim() ||
-          (environment.POS_API_KEY || '').trim() ||
-          (environment.POS_API_SHARED_KEY || '').trim() ||
-          (ls?.getItem('POS_API_KEY') || ls?.getItem('POS_API_SHARED_KEY') || '').trim();
-        console.log('[validateDeliveryAddress] Got API key from localStorage/env:', posKey ? `(len: ${posKey.length})` : '(empty)');
+        posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
+        console.log('[validateDeliveryAddress] Got API key from credential cache:', posKey ? '(present)' : '(empty)');
       }
       if (!termId) {
-        termId = (ls?.getItem('terminal_id') || '').trim();
+        termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim();
         console.log('[validateDeliveryAddress] Got terminal ID from localStorage:', termId || '(empty)');
       }
 
@@ -861,14 +860,12 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       }
 
       // Fallback to localStorage if main process didn't have credentials
+      const refreshed = await refreshTerminalCredentialCache()
       if (!posKey) {
-        posKey = (ls?.getItem('pos_api_key') || '').trim() ||
-          (environment.POS_API_KEY || '').trim() ||
-          (environment.POS_API_SHARED_KEY || '').trim() ||
-          (ls?.getItem('POS_API_KEY') || ls?.getItem('POS_API_SHARED_KEY') || '').trim()
+        posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim()
       }
       if (!termId) {
-        termId = (ls?.getItem('terminal_id') || '').trim()
+        termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim()
       }
 
       // Build headers with authentication

@@ -68,7 +68,7 @@ export class DeliveryZoneValidator {
       maxDeliveryDistance: 10000,
       // Pass authentication credentials
       authToken: this.config.authToken,
-      apiKey: this.config.apiKey || environment.POS_API_KEY,
+      apiKey: this.config.apiKey,
       terminalId: this.config.terminalId
     });
 

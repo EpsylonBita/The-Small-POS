@@ -31,8 +31,8 @@ export function getSupabaseConfig(platform: string = 'desktop') {
 
   const envServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
   const isElectron = typeof process !== 'undefined' && !!(process as any).versions?.electron;
-  const allowServiceRoleDesktop = process.env['ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP'] === 'true';
-  const exposeServiceRoleKey = !!envServiceKey && (!isElectron || allowServiceRoleDesktop);
+  // SECURITY: Never expose service role key inside Electron (desktop) builds.
+  const exposeServiceRoleKey = !!envServiceKey && !isElectron;
 
   return {
     url: envUrl || '',
@@ -57,6 +57,63 @@ export const SUPABASE_CONFIG = {
   get anonKey() { return getConfig().anonKey; },
 } as const;
 
+export interface SupabaseContext {
+  terminalId?: string;
+  organizationId?: string;
+  branchId?: string;
+  clientType?: string;
+}
+
+const storedContext: SupabaseContext = {};
+
+function hydrateContextFromLocalStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!storedContext.terminalId) {
+      const tid = window.localStorage.getItem('terminal_id');
+      if (tid) storedContext.terminalId = tid;
+    }
+    if (!storedContext.organizationId) {
+      const oid = window.localStorage.getItem('organization_id');
+      if (oid) storedContext.organizationId = oid;
+    }
+    if (!storedContext.branchId) {
+      const bid = window.localStorage.getItem('branch_id');
+      if (bid) storedContext.branchId = bid;
+    }
+  } catch {
+    // Ignore storage access errors (e.g., blocked in some contexts)
+  }
+}
+
+function buildGlobalHeaders(): Record<string, string> {
+  return {
+    'x-application-name': 'pos-system',
+    'x-terminal-id': storedContext.terminalId || '',
+    'x-organization-id': storedContext.organizationId || '',
+    'x-branch-id': storedContext.branchId || '',
+    'x-client-type': storedContext.clientType || 'desktop',
+  };
+}
+
+export function setSupabaseContext(context: SupabaseContext): void {
+  if (context.terminalId !== undefined) storedContext.terminalId = context.terminalId;
+  if (context.organizationId !== undefined) storedContext.organizationId = context.organizationId;
+  if (context.branchId !== undefined) storedContext.branchId = context.branchId;
+  if (context.clientType !== undefined) storedContext.clientType = context.clientType;
+
+  if (supabaseClient) {
+    const headers = buildGlobalHeaders();
+    (supabaseClient as any).headers = headers;
+    if ((supabaseClient as any).rest) {
+      (supabaseClient as any).rest.headers = headers;
+    }
+    if ((supabaseClient as any).storage) {
+      (supabaseClient as any).storage.headers = headers;
+    }
+  }
+}
+
 // Check if configuration is available
 export function isSupabaseConfigured(): boolean {
   const config = getConfig();
@@ -75,6 +132,7 @@ let supabaseClient: SupabaseClient | null = null;
 export function getSupabaseClient(): SupabaseClient {
   if (!supabaseClient) {
     const config = getConfig();
+    hydrateContextFromLocalStorage();
     // Create client even with empty/default values - it will fail gracefully on API calls
     // This allows the app to start and show onboarding
     supabaseClient = createClient(
@@ -83,9 +141,7 @@ export function getSupabaseClient(): SupabaseClient {
       {
         ...config.options,
         global: {
-          headers: {
-            'x-application-name': 'pos-system',
-          }
+          headers: buildGlobalHeaders(),
         }
       }
     );

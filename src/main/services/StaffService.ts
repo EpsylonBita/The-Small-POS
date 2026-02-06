@@ -664,7 +664,7 @@ export class StaffService extends BaseService {
       const cashSalesStmt = this.db.prepare(`
         SELECT COALESCE(SUM(total_amount), 0) as total
         FROM orders
-        WHERE staff_shift_id = ? AND payment_method = 'cash' AND status IN ('delivered', 'completed')
+        WHERE staff_shift_id = ? AND payment_method = 'cash' AND status IN ('delivered', 'completed', 'refunded')
           AND LOWER(COALESCE(order_type, '')) != 'delivery'
       `);
       const cashSales = (cashSalesStmt.get(params.shiftId) as any)?.total || 0;
@@ -1655,7 +1655,7 @@ export class StaffService extends BaseService {
       SELECT order_type as type, payment_method as method,
              COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
       FROM orders
-      WHERE staff_shift_id = ? AND status != 'cancelled'
+      WHERE staff_shift_id = ? AND status NOT IN ('cancelled', 'canceled')
       GROUP BY order_type, payment_method
     `);
     const rows = breakdownStmt.all(shiftId) as any[];
@@ -1706,7 +1706,7 @@ export class StaffService extends BaseService {
       SELECT payment_method as method,
              COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
       FROM orders
-      WHERE staff_shift_id = ? AND status = 'cancelled'
+      WHERE staff_shift_id = ? AND status IN ('cancelled', 'canceled', 'refunded')
       GROUP BY payment_method
     `);
     const canceledRows = canceledStmt.all(shiftId) as any[];

@@ -19,7 +19,7 @@ The POS system uses **TWO separate sync services** with **distinct responsibilit
 
 ## 🔍 Detailed Service Comparison
 
-### AdminDashboardSyncService (admin-dashboard-sync-service.ts)
+### AdminDashboardSyncService (services/AdminDashboardSyncService.ts)
 
 **Purpose:** Pull data FROM admin dashboard REST API
 
@@ -143,13 +143,8 @@ Admin Dashboard
 
 **Recommendation:**
 ```typescript
-// OLD:
-import { SyncService } from './sync-service';
-import { AdminDashboardSyncService } from './admin-dashboard-sync-service';
-
-// NEW (Proposed):
-import { SupabaseSyncService } from './SupabaseSyncService';
-import { AdminDashboardSyncService } from './AdminDashboardSyncService';
+// Current:
+import { AdminDashboardSyncService } from './services/AdminDashboardSyncService';
 ```
 
 **Rationale:** "SupabaseSyncService" clearly indicates it syncs with Supabase, while "AdminDashboardSyncService" already has a clear name.

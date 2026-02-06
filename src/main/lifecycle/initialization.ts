@@ -22,7 +22,7 @@ import { ScreenCaptureService } from '../services/ScreenCaptureService';
 import { CustomerService } from '../services/CustomerService';
 import { WindowManager } from '../window-manager';
 import { ModuleSyncService } from '../services/ModuleSyncService';
-import { getSupabaseClient, isSupabaseConfigured } from '../../shared/supabase-config';
+import { getSupabaseClient, isSupabaseConfigured, setSupabaseContext } from '../../shared/supabase-config';
 import { setupRealtimeHandlers } from '../index';
 import {
   initializePrinterManager,
@@ -123,16 +123,13 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
     serviceRegistry.register('staffAuthService', staffAuthService);
 
     // Get terminal ID and API key first (needed for CustomerService)
-    // IMPORTANT: Persisted settings from connection string take priority over env vars
     const persistedTerminalId = settingsService.getSetting<string>('terminal', 'terminal_id', '');
     const persistedApiKey = settingsService.getSetting<string>('terminal', 'pos_api_key', '');
 
-    // Persisted settings (from connection string) take priority over env vars
+    // Terminal ID may fall back to env for developer convenience.
+    // API key must come from persisted terminal pairing config only.
     const terminalId = persistedTerminalId || process.env.TERMINAL_ID || 'terminal-001';
-    const posApiKey = persistedApiKey ||
-      process.env.POS_API_KEY ||
-      process.env.POS_API_SHARED_KEY ||
-      '';
+    const posApiKey = persistedApiKey || '';
 
     console.log('[initializeServices] Terminal credentials resolved:', {
       terminalId,
@@ -154,20 +151,37 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
       console.warn('[initializeServices] No Organization ID found in settings');
     }
 
+    // Get branch ID from settings (if available)
+    const branchId = settingsService.getSetting<string>('terminal', 'branch_id', '');
+    if (branchId) {
+      console.log('[initializeServices] Using Branch ID:', branchId);
+    } else {
+      console.warn('[initializeServices] No Branch ID found in settings');
+    }
+
+    // Set Supabase request context headers before creating any clients
+    setSupabaseContext({
+      terminalId,
+      organizationId: organizationId || undefined,
+      branchId: branchId || undefined,
+      clientType: 'desktop',
+    });
+
     // SECURITY: Only use anon key in Electron app - service role key bypasses RLS
     // and would allow any terminal to access ALL organizations' data
     const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
 
-    // SECURITY WARNING: Service role key should NEVER be shipped with the Electron app
+    // SECURITY: Service role key must never be present in Electron runtime
     if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      const allowServiceRoleDesktop = process.env.ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP === 'true';
-      if (allowServiceRoleDesktop) {
-        console.warn('[SECURITY WARNING] SUPABASE_SERVICE_ROLE_KEY detected and explicitly allowed for desktop via ALLOW_SUPABASE_SERVICE_ROLE_DESKTOP.');
-        console.warn('[SECURITY WARNING] This bypasses RLS and should never be used in production.');
-      } else {
-        console.warn('[SECURITY WARNING] SUPABASE_SERVICE_ROLE_KEY detected in environment and will be ignored by the desktop app.');
-        console.warn('[SECURITY WARNING] Remove this key from the production environment.');
-      }
+      console.error('[SECURITY BLOCK] SUPABASE_SERVICE_ROLE_KEY detected in desktop environment.');
+      console.error('[SECURITY BLOCK] This key bypasses RLS and must be removed before startup.');
+      await dialog.showMessageBox({
+        type: 'error',
+        title: 'Security Configuration Error',
+        message: 'SUPABASE_SERVICE_ROLE_KEY is set in the desktop environment. This bypasses RLS and is not allowed. Remove the key and restart.',
+        buttons: ['Exit'],
+      });
+      return false;
     }
 
     console.log('[initializeServices] Supabase auth config:', {
@@ -274,7 +288,7 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
     // Pass databaseManager to heartbeatService and initialize
     // Only initialize if terminal is configured (has API key)
     heartbeatService.setDatabaseManager(dbManager);
-    const isTerminalConfigured = !!(persistedApiKey || process.env.POS_API_KEY);
+    const isTerminalConfigured = !!persistedApiKey;
     if (isTerminalConfigured) {
       console.log('🔄 Initializing HeartbeatService (terminal is configured)...');
       await heartbeatService.initialize();

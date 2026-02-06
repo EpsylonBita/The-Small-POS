@@ -85,9 +85,7 @@ export function registerTerminalConfigHandlers(): void {
       if (terminalId) {
         try {
           const apiKey =
-            (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) ||
-            process.env.POS_API_SHARED_KEY ||
-            '';
+            (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
           if (apiKey) {
             // Get admin URL from local settings first
             const storedAdminUrl = settingsService?.getSetting?.('terminal', 'admin_dashboard_url', '') as string || '';

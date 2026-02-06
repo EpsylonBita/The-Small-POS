@@ -458,7 +458,19 @@
       "qty": "Ποσ.:",
       "without": "Χωρίς",
       "minimumNotMet": "Δεν καλύπτεται η ελάχιστη παραγγελία",
-      "addMoreToOrder": "Προσθέστε {{amount}} ακόμα για να ολοκληρώσετε"
+      "addMoreToOrder": "Προσθέστε {{amount}} ακόμα για να ολοκληρώσετε",
+      "couponPlaceholder": "Κωδικός κουπονιού",
+      "applyCoupon": "Εφαρμογή",
+      "couponOff": "έκπτωση",
+      "couponApplied": "Το κουπόνι εφαρμόστηκε!",
+      "couponInvalid": "Μη έγκυρος κωδικός κουπονιού",
+      "couponError": "Αποτυχία επικύρωσης κουπονιού",
+      "couponDiscount": "Κουπόνι",
+      "manualItem": "Χειροκίνητο Είδος",
+      "addManualItem": "Χειροκίνητο Είδος",
+      "manualPricePlaceholder": "Τιμή",
+      "manualNamePlaceholder": "Όνομα είδους (προαιρετικό)",
+      "manualItemAdded": "Το είδος προστέθηκε"
     },
     "emptyState": {
       "title": "Δεν Υπάρχουν Προϊόντα Μενού",
@@ -584,6 +596,28 @@
       "noItems": "Δεν βρέθηκαν προϊόντα",
       "noItemsDescription": "Δοκιμάστε διαφορετική κατηγορία ή συγχρονίστε δεδομένα μενού",
       "syncMenuData": "Συγχρονισμός Δεδομένων Μενού"
+    },
+    "combos": {
+      "noCombos": "Δεν υπάρχουν διαθέσιμα κόμπο",
+      "addedToCart": "Το κόμπο προστέθηκε στο καλάθι",
+      "types": {
+        "fixed": "Κόμπο",
+        "choice": "Επιλογή",
+        "bogo": "Προσφορά"
+      },
+      "bogo": {
+        "shortLabel": "Αγόρασε {{buy}} Πάρε {{get}} {{discount}}",
+        "free": "ΔΩΡΕΑΝ",
+        "autoApplied": "Αυτόματη εφαρμογή",
+        "infoToast": "Η προσφορά BOGO θα εφαρμοστεί όταν τα κατάλληλα προϊόντα βρίσκονται στο καλάθι"
+      },
+      "anyFrom": "Οποιοδήποτε {{category}}",
+      "choice": {
+        "pickFrom": "Επιλέξτε από {{category}}",
+        "selectItem": "Επιλέξτε ένα προϊόν...",
+        "noItems": "Δεν υπάρχουν διαθέσιμα προϊόντα",
+        "addToCart": "Προσθήκη στο Καλάθι"
+      }
     },
     "summary": {
       "header": "Σύνοψη Παραγγελίας",
@@ -1882,6 +1916,7 @@
       "order": "Παραγγελία",
       "allItems": "Όλα τα Προϊόντα",
       "featured": "Επιλεγμένα",
+      "combos": "Κόμπο & Προσφορές",
       "customerLabel": "Πελάτης: {{name}} ({{phone}})",
       "deliveryTo": "Παράδοση σε: {{address}}",
       "zone": "Ζώνη",

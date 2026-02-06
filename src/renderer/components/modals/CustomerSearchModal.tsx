@@ -2,13 +2,14 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle, Mail } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { getApiUrl, environment } from '../../../config/environment';
+import { getApiUrl } from '../../../config/environment';
 import { posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
 import { inputBase } from '../../styles/designSystem';
 import { formatDate } from '../../utils/format';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 
 interface CustomerAddress {
   id: string;
@@ -72,6 +73,37 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  const resolvePosCredentials = useCallback(async (): Promise<{ posKey: string; termId: string }> => {
+    const ls = typeof window !== 'undefined' ? window.localStorage : null;
+    const electron = typeof window !== 'undefined' ? window.electron : undefined;
+
+    let posKey = '';
+    let termId = '';
+
+    try {
+      if (electron?.ipcRenderer) {
+        const [mainTerminalId, mainApiKey] = await Promise.all([
+          electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
+          electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
+        ]);
+        termId = (mainTerminalId || '').toString().trim();
+        posKey = (mainApiKey || '').toString().trim();
+      }
+    } catch (e) {
+      console.warn('[CustomerSearch] Failed to get credentials from main process:', e);
+    }
+
+    const refreshed = await refreshTerminalCredentialCache();
+    if (!posKey) {
+      posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
+    }
+    if (!termId) {
+      termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim();
+    }
+
+    return { posKey, termId };
+  }, []);
+
   // Set customer from initialCustomer prop when modal opens
   useEffect(() => {
     if (isOpen && initialCustomer) {
@@ -108,41 +140,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     setCustomers([]);
 
     try {
-      // Get POS API key and terminal ID from main process first (most reliable), then localStorage fallback
-      const ls = typeof window !== 'undefined' ? window.localStorage : null;
-      const electron = typeof window !== 'undefined' ? window.electron : undefined;
-
-      let posKey = '';
-      let termId = '';
-
-      // Try to get credentials from main process via IPC (where connection string credentials are stored)
-      try {
-        if (electron?.ipcRenderer) {
-          const [mainTerminalId, mainApiKey] = await Promise.all([
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-          ]);
-          termId = (mainTerminalId || '').toString().trim();
-          posKey = (mainApiKey || '').toString().trim();
-          console.log('[CustomerSearch] Got credentials from main process:', {
-            hasTerminalId: !!termId,
-            hasApiKey: !!posKey
-          });
-        }
-      } catch (e) {
-        console.warn('[CustomerSearch] Failed to get credentials from main process:', e);
-      }
-
-      // Fallback to localStorage if main process didn't have credentials
-      if (!posKey) {
-        posKey = (ls?.getItem('pos_api_key') || '').trim() ||
-          (environment.POS_API_KEY || '').trim() ||
-          (environment.POS_API_SHARED_KEY || '').trim() ||
-          (ls?.getItem('POS_API_KEY') || ls?.getItem('POS_API_SHARED_KEY') || '').trim();
-      }
-      if (!termId) {
-        termId = (ls?.getItem('terminal_id') || '').trim();
-      }
+      const { posKey, termId } = await resolvePosCredentials();
 
       // Check if we have credentials before making the request
       if (!posKey && !termId) {
@@ -244,7 +242,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     } finally {
       setIsSearching(false);
     }
-  }, [t]);
+  }, [resolvePosCredentials, t]);
 
   // Real-time search effect
   useEffect(() => {
@@ -364,34 +362,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
     setIsDeleting(true);
     try {
-      // Get POS credentials for authentication
-      const ls = typeof window !== 'undefined' ? window.localStorage : null;
-      const electron = typeof window !== 'undefined' ? window.electron : undefined;
-
-      let posKey = '';
-      let termId = '';
-
-      // Get credentials from electron or localStorage
-      try {
-        if (electron?.ipcRenderer) {
-          const [mainTerminalId, mainApiKey] = await Promise.all([
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-          ]);
-          termId = (mainTerminalId || '').toString().trim();
-          posKey = (mainApiKey || '').toString().trim();
-        }
-      } catch {
-        // Fallback to localStorage
-      }
-
-      // Fallback to localStorage if electron didn't provide values
-      if (!posKey && ls) {
-        posKey = (ls.getItem('pos_api_key') || '').trim();
-      }
-      if (!termId && ls) {
-        termId = (ls.getItem('terminal_id') || '').trim();
-      }
+      const { posKey, termId } = await resolvePosCredentials();
 
       // Build headers with POS authentication
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -483,34 +454,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     setIsSearching(true);
     try {
       // Fetch fresh customer data with addresses using the customer's phone
-      const ls = typeof window !== 'undefined' ? window.localStorage : null;
-      const electron = typeof window !== 'undefined' ? window.electron : undefined;
-
-      let posKey = '';
-      let termId = '';
-
-      // Get credentials
-      try {
-        if (electron?.ipcRenderer) {
-          const [mainTerminalId, mainApiKey] = await Promise.all([
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-          ]);
-          termId = (mainTerminalId || '').toString().trim();
-          posKey = (mainApiKey || '').toString().trim();
-        }
-      } catch (e) {
-        console.warn('[CustomerSearch] Failed to get credentials:', e);
-      }
-
-      if (!posKey) {
-        posKey = (ls?.getItem('pos_api_key') || '').trim() ||
-          (environment.POS_API_KEY || '').trim() ||
-          (environment.POS_API_SHARED_KEY || '').trim();
-      }
-      if (!termId) {
-        termId = (ls?.getItem('terminal_id') || '').trim();
-      }
+      const { posKey, termId } = await resolvePosCredentials();
 
       // Fetch by exact phone to get full customer data with addresses
       const endpoint = `pos/customers?phone=${encodeURIComponent(selectedCustomer.phone)}`;
@@ -763,23 +707,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                         onClick={async () => {
                                           toast.dismiss(toastInstance.id);
                                           try {
-                                            // Get POS credentials
-                                            const ls = typeof window !== 'undefined' ? window.localStorage : null;
-                                            const electron = typeof window !== 'undefined' ? window.electron : undefined;
-                                            let posKey = '';
-                                            let termId = '';
-                                            try {
-                                              if (electron?.ipcRenderer) {
-                                                const [mainTerminalId, mainApiKey] = await Promise.all([
-                                                  electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-                                                  electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-                                                ]);
-                                                termId = (mainTerminalId || '').toString().trim();
-                                                posKey = (mainApiKey || '').toString().trim();
-                                              }
-                                            } catch { /* fallback */ }
-                                            if (!posKey && ls) posKey = (ls.getItem('pos_api_key') || '').trim();
-                                            if (!termId && ls) termId = (ls.getItem('terminal_id') || '').trim();
+                                            const { posKey, termId } = await resolvePosCredentials();
 
                                             const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                                             if (posKey) headers['x-pos-api-key'] = String(posKey);

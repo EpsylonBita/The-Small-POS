@@ -59,7 +59,7 @@ class WaiterCheckoutTemplate extends BaseReceiptTemplate {
       const orders = Array.isArray(table.orders) ? table.orders : [];
       orders.forEach((order: any) => {
         const s = (order.status || '').toLowerCase();
-        if (s === 'cancelled' || s === 'canceled') canceledOrders++;
+        if (s === 'cancelled' || s === 'canceled' || s === 'refunded') canceledOrders++;
         const pm = (order.payment_method || '').toLowerCase();
         if (pm === 'cash') cashOrdersCount++;
         else if (pm === 'card') cardOrdersCount++;
@@ -164,7 +164,7 @@ class WaiterCheckoutTemplate extends BaseReceiptTemplate {
 
       const hasActive = orders.some((o: any) => {
         const s = (o.status || '').toLowerCase();
-        return s !== 'cancelled' && s !== 'canceled';
+        return s !== 'cancelled' && s !== 'canceled' && s !== 'refunded';
       });
       const statusSymbol = hasActive ? '✓' : '✗';
 
@@ -224,7 +224,7 @@ export function generateWaiterCheckoutReceiptBuffer(
     const orders = Array.isArray(table.orders) ? table.orders : [];
     orders.forEach((order: any) => {
       const s = (order.status || '').toLowerCase();
-      if (s === 'cancelled' || s === 'canceled') canceledOrders++;
+      if (s === 'cancelled' || s === 'canceled' || s === 'refunded') canceledOrders++;
       const pm = (order.payment_method || '').toLowerCase();
       if (pm === 'cash') cashOrdersCount++;
       else if (pm === 'card') cardOrdersCount++;
@@ -299,7 +299,7 @@ export function generateWaiterCheckoutReceiptBuffer(
 
       const hasActive = orders.some((o: any) => {
         const s = (o.status || '').toLowerCase();
-        return s !== 'cancelled' && s !== 'canceled';
+        return s !== 'cancelled' && s !== 'canceled' && s !== 'refunded';
       });
       const statusSymbol = hasActive ? '[OK]' : '[X]';
 
@@ -444,7 +444,7 @@ export function generateWaiterCheckoutReceipt(
     const orders = Array.isArray(table.orders) ? table.orders : [];
     orders.forEach((order: any) => {
       const s = (order.status || '').toLowerCase();
-      if (s === 'cancelled' || s === 'canceled') canceledOrders++;
+      if (s === 'cancelled' || s === 'canceled' || s === 'refunded') canceledOrders++;
       const pm = (order.payment_method || '').toLowerCase();
       if (pm === 'cash') cashOrdersCount++;
       else if (pm === 'card') cardOrdersCount++;
@@ -479,7 +479,7 @@ export function generateWaiterCheckoutReceipt(
 
       const hasActive = orders.some((o: any) => {
         const s = (o.status || '').toLowerCase();
-        return s !== 'cancelled' && s !== 'canceled';
+        return s !== 'cancelled' && s !== 'canceled' && s !== 'refunded';
       });
       const statusSymbol = hasActive ? '✓' : '✗';
 

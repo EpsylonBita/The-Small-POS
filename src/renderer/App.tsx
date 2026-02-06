@@ -26,6 +26,11 @@ import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
 import { useWindowState } from "./hooks/useWindowState";
 import { updateAdminUrlFromSettings } from "../config/environment";
+import { setSupabaseContext } from "../shared/supabase-config";
+import {
+  clearTerminalCredentialCache,
+  updateTerminalCredentialCache,
+} from "./services/terminal-credentials";
 
 // Extend window interface for electron API (Comment 1: secure preload)
 declare global {
@@ -50,7 +55,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
   const [isConfigured, setIsConfigured] = useState<boolean | null>(null);
 
-  // Check configuration status on startup and sync credentials to localStorage
+  // Check configuration status on startup and sync credentials to in-memory cache
   useEffect(() => {
     const checkConfiguration = async () => {
       if (window.electron?.ipcRenderer) {
@@ -81,23 +86,26 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
             console.log('Terminal not configured, clearing stale session data');
             localStorage.removeItem("pos-user");
             localStorage.removeItem("terminal_id");
-            localStorage.removeItem("pos_api_key");
+            clearTerminalCredentialCache();
           } else {
-            // If configured, sync credentials from main process to localStorage
+            // If configured, sync credentials from main process to in-memory cache
             // This ensures menu-version polling can authenticate immediately
             try {
-              const settings = await window.electron.ipcRenderer.invoke('terminal-config:get-settings');
-              console.log('[ConfigGuard] Raw settings from main:', JSON.stringify(settings, null, 2));
+              const [settings, apiKeyFromMain] = await Promise.all([
+                window.electron.ipcRenderer.invoke('terminal-config:get-settings'),
+                window.electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
+              ]);
 
               const terminalId = settings?.['terminal.terminal_id'] || settings?.terminal?.terminal_id;
-              const apiKey = settings?.['terminal.pos_api_key'] || settings?.terminal?.pos_api_key;
+              const apiKey =
+                (typeof apiKeyFromMain === 'string' ? apiKeyFromMain : '') ||
+                settings?.['terminal.pos_api_key'] ||
+                settings?.terminal?.pos_api_key;
 
               console.log('[ConfigGuard] Resolved credentials:', {
                 terminalId: terminalId || '(not found)',
-                apiKeyLen: apiKey?.length || 0,
-                apiKeyLast4: apiKey?.slice(-4) || '(not found)',
+                hasApiKey: !!apiKey,
                 lsTerminalId: localStorage.getItem('terminal_id') || '(not in localStorage)',
-                lsApiKeyLen: localStorage.getItem('pos_api_key')?.length || 0
               });
 
               // Always sync if we have values - don't skip if already in localStorage
@@ -105,13 +113,30 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
               if (terminalId) {
                 localStorage.setItem('terminal_id', terminalId);
                 console.log('[ConfigGuard] Synced terminal_id to localStorage:', terminalId);
+                updateTerminalCredentialCache({ terminalId });
               }
               if (apiKey) {
-                localStorage.setItem('pos_api_key', apiKey);
-                console.log('[ConfigGuard] Synced pos_api_key to localStorage (len:', apiKey.length, ')');
+                updateTerminalCredentialCache({ apiKey });
               }
+
+              const branchId = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id;
+              const organizationId = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id;
+              if (branchId) {
+                localStorage.setItem('branch_id', branchId);
+                updateTerminalCredentialCache({ branchId });
+              }
+              if (organizationId) {
+                localStorage.setItem('organization_id', organizationId);
+                updateTerminalCredentialCache({ organizationId });
+              }
+              setSupabaseContext({
+                terminalId: terminalId || undefined,
+                organizationId: organizationId || undefined,
+                branchId: branchId || undefined,
+                clientType: 'desktop',
+              });
             } catch (syncErr) {
-              console.warn('[ConfigGuard] Failed to sync credentials to localStorage:', syncErr);
+              console.warn('[ConfigGuard] Failed to sync terminal credentials cache:', syncErr);
             }
           }
         } catch (err) {
@@ -138,8 +163,8 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       // Clear all local storage
       localStorage.removeItem("pos-user");
       localStorage.removeItem("terminal_id");
-      localStorage.removeItem("pos_api_key");
       localStorage.removeItem("admin_dashboard_url");
+      clearTerminalCredentialCache();
 
       setIsConfigured(false);
 
@@ -165,17 +190,24 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
   }, [t]);
 
   // Listen for terminal-credentials-updated event (after onboarding)
-  // This stores credentials in localStorage for immediate renderer access
+  // This stores credentials in in-memory cache for immediate renderer access
   useEffect(() => {
     if (!window.electron?.ipcRenderer) return;
 
     const handleCredentialsUpdated = (data: { terminalId?: string; apiKey?: string }) => {
-      console.log('[ConfigGuard] Terminal credentials updated, storing in localStorage');
+      console.log('[ConfigGuard] Terminal credentials updated');
       if (data?.terminalId) {
         localStorage.setItem('terminal_id', data.terminalId);
+        updateTerminalCredentialCache({ terminalId: data.terminalId });
+        setSupabaseContext({
+          terminalId: data.terminalId,
+          organizationId: localStorage.getItem('organization_id') || undefined,
+          branchId: localStorage.getItem('branch_id') || undefined,
+          clientType: 'desktop',
+        });
       }
       if (data?.apiKey) {
-        localStorage.setItem('pos_api_key', data.apiKey);
+        updateTerminalCredentialCache({ apiKey: data.apiKey });
       }
     };
 
@@ -195,12 +227,20 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       console.log('[ConfigGuard] Terminal config updated from heartbeat:', data);
       if (data?.branch_id) {
         localStorage.setItem('branch_id', data.branch_id);
+        updateTerminalCredentialCache({ branchId: data.branch_id });
         console.log('[ConfigGuard] Stored branch_id in localStorage:', data.branch_id);
       }
       if (data?.organization_id) {
         localStorage.setItem('organization_id', data.organization_id);
+        updateTerminalCredentialCache({ organizationId: data.organization_id });
         console.log('[ConfigGuard] Stored organization_id in localStorage:', data.organization_id);
       }
+      setSupabaseContext({
+        terminalId: localStorage.getItem('terminal_id') || undefined,
+        organizationId: data?.organization_id || localStorage.getItem('organization_id') || undefined,
+        branchId: data?.branch_id || localStorage.getItem('branch_id') || undefined,
+        clientType: 'desktop',
+      });
     };
 
     window.electron.ipcRenderer.on('terminal-config-updated', handleConfigUpdated);

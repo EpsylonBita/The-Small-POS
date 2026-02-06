@@ -18,10 +18,10 @@ export function getWaiterShiftData(db: Database.Database, shiftId: string): Wait
     const waiterTablesStmt = db.prepare(`
     SELECT 
       o.table_number,
-      COUNT(*) as order_count,
-      COALESCE(SUM(o.total_amount), 0) as total_amount,
-      COALESCE(SUM(CASE WHEN o.payment_method = 'cash' THEN o.total_amount ELSE 0 END), 0) as cash_amount,
-      COALESCE(SUM(CASE WHEN o.payment_method != 'cash' THEN o.total_amount ELSE 0 END), 0) as card_amount,
+      SUM(CASE WHEN o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN 1 ELSE 0 END) as order_count,
+      COALESCE(SUM(CASE WHEN o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN o.total_amount ELSE 0 END), 0) as total_amount,
+      COALESCE(SUM(CASE WHEN o.payment_method = 'cash' AND o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN o.total_amount ELSE 0 END), 0) as cash_amount,
+      COALESCE(SUM(CASE WHEN o.payment_method != 'cash' AND o.status NOT IN ('cancelled', 'canceled', 'refunded') THEN o.total_amount ELSE 0 END), 0) as card_amount,
       GROUP_CONCAT(
         json_object(
           'id', o.id,

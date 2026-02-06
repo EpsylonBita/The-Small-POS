@@ -3,7 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
 import { MenuCart } from '../menu/MenuCart';
+import type { AppliedCoupon } from '../menu/MenuCart';
 import { MenuItemModal } from '../menu/MenuItemModal';
+import { ComboChoiceModal } from '../menu/ComboChoiceModal';
+import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
@@ -12,8 +15,11 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { menuService } from '../../services/MenuService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
+import type { MenuCombo } from '@shared/types/combo';
+import { getComboPrice } from '@shared/types/combo';
 import { Pencil } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
+import { posApiPost } from '../../utils/api-helpers';
 
 interface MenuModalProps {
   isOpen: boolean;
@@ -82,6 +88,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
 
+  // Combos state
+  const [combos, setCombos] = useState<MenuCombo[]>([]);
+  const [selectedCombo, setSelectedCombo] = useState<MenuCombo | null>(null);
+
+  // Coupon state
+  const [appliedCoupon, setAppliedCoupon] = useState<AppliedCoupon | null>(null);
+  const [isValidatingCoupon, setIsValidatingCoupon] = useState(false);
+  const [couponError, setCouponError] = useState<string | null>(null);
+
   // State for editing a cart item
   const [editingCartItem, setEditingCartItem] = useState<any>(null);
 
@@ -146,6 +161,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Clear locally fetched delivery zone info and default minimum
       setLocalDeliveryZoneInfo(null);
       setDefaultMinimumOrderAmount(0);
+      // Clear combos/coupon state
+      setAppliedCoupon(null);
+      setCouponError(null);
+      setSelectedCombo(null);
     }
   }, [isOpen, cartItems.length]);
 
@@ -377,7 +396,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         // Default categories
         const defaultCategories = [
           { id: "all", name: t('modals.menu.allItems'), icon: "🍽️" },
-          { id: "featured", name: t('modals.menu.featured'), icon: "⭐" }
+          { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
+          { id: "combos", name: t('modals.menu.combos', 'Combos & Offers'), icon: "🎁" },
         ];
 
         // Combine default categories with database categories
@@ -413,6 +433,168 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       loadCategories();
     }
   }, [isOpen]);
+
+  // Load combos when modal opens
+  useEffect(() => {
+    const loadCombos = async () => {
+      try {
+        const combosData = await menuService.getMenuCombos();
+        setCombos(combosData);
+      } catch (error) {
+        console.error('Error loading combos:', error);
+        setCombos([]);
+      }
+    };
+
+    if (isOpen) {
+      loadCombos();
+    }
+  }, [isOpen]);
+
+  // Handle combo selection
+  const handleComboSelect = (combo: MenuCombo) => {
+    if (combo.combo_type === 'choice') {
+      // Open choice modal for selection
+      setSelectedCombo(combo);
+    } else if (combo.combo_type === 'bogo') {
+      // BOGO - show info toast
+      toast.success(
+        t('menu.combos.bogo.infoToast', 'BOGO offer will be applied when qualifying items are in cart'),
+        { duration: 3000 }
+      );
+    } else {
+      // Fixed combo - add directly to cart
+      handleAddFixedComboToCart(combo);
+    }
+  };
+
+  // Add a fixed combo to cart
+  const handleAddFixedComboToCart = (combo: MenuCombo) => {
+    const comboPrice = getComboPrice(combo, orderType);
+    const comboName = combo.name_en; // Will be localized in cart display
+
+    const cartItem = {
+      id: `combo-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+      menuItemId: combo.id,
+      name: comboName,
+      price: comboPrice,
+      quantity: 1,
+      customizations: [],
+      notes: '',
+      totalPrice: comboPrice,
+      basePrice: comboPrice,
+      unitPrice: comboPrice,
+      is_combo: true,
+      combo_id: combo.id,
+      combo_type: combo.combo_type,
+      combo_items: combo.items?.map((item) => ({
+        subcategory_id: item.subcategory_id || '',
+        name: item.subcategory?.name || item.subcategory?.name_en || '',
+        name_en: item.subcategory?.name_en,
+        name_el: item.subcategory?.name_el,
+        quantity: item.quantity,
+        unit_price: item.subcategory?.base_price || 0,
+      })) || [],
+    };
+
+    setCartItems((prev) => [...prev, cartItem]);
+    toast.success(t('menu.combos.addedToCart', 'Combo added to cart'));
+  };
+
+  // Handle choice combo confirmation
+  const handleComboChoiceConfirm = (combo: MenuCombo, chosenItems: ChosenComboItem[]) => {
+    const comboPrice = getComboPrice(combo, orderType);
+    const comboName = combo.name_en;
+
+    const cartItem = {
+      id: `combo-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+      menuItemId: combo.id,
+      name: comboName,
+      price: comboPrice,
+      quantity: 1,
+      customizations: [],
+      notes: '',
+      totalPrice: comboPrice,
+      basePrice: comboPrice,
+      unitPrice: comboPrice,
+      is_combo: true,
+      combo_id: combo.id,
+      combo_type: combo.combo_type,
+      combo_items: chosenItems.map((item) => ({
+        subcategory_id: item.subcategory_id,
+        name: item.name,
+        name_en: item.name_en,
+        name_el: item.name_el,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+      })),
+    };
+
+    setCartItems((prev) => [...prev, cartItem]);
+    setSelectedCombo(null);
+    toast.success(t('menu.combos.addedToCart', 'Combo added to cart'));
+  };
+
+  // Coupon handlers
+  const handleApplyCoupon = async (code: string) => {
+    setIsValidatingCoupon(true);
+    setCouponError(null);
+    try {
+      const result = await posApiPost<{
+        valid: boolean;
+        coupon?: AppliedCoupon;
+        error?: string;
+      }>('pos/coupons/validate', { code, order_total: cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) });
+
+      if (result.success && result.data?.valid && result.data?.coupon) {
+        setAppliedCoupon(result.data.coupon);
+        setCouponError(null);
+        toast.success(t('menu.cart.couponApplied', 'Coupon applied!'));
+      } else {
+        setCouponError(result.data?.error || t('menu.cart.couponInvalid', 'Invalid coupon code'));
+      }
+    } catch (error) {
+      console.error('Error validating coupon:', error);
+      setCouponError(t('menu.cart.couponError', 'Failed to validate coupon'));
+    } finally {
+      setIsValidatingCoupon(false);
+    }
+  };
+
+  const handleRemoveCoupon = () => {
+    setAppliedCoupon(null);
+    setCouponError(null);
+  };
+
+  // Add manual item to cart
+  const handleAddManualItem = (price: number, name?: string) => {
+    const cartItem = {
+      id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
+      menuItemId: 'manual',
+      name: name || t('menu.cart.manualItem', 'Manual Item'),
+      price,
+      quantity: 1,
+      customizations: [],
+      notes: '',
+      totalPrice: price,
+      basePrice: price,
+      unitPrice: price,
+      is_manual: true,
+    };
+    setCartItems((prev) => [...prev, cartItem]);
+    toast.success(t('menu.cart.manualItemAdded', 'Manual item added'));
+  };
+
+  // Calculate coupon discount
+  const calculateCouponDiscount = (): number => {
+    if (!appliedCoupon) return 0;
+    const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+    const afterManualDiscount = subtotal * (1 - discountPercentage / 100);
+    if (appliedCoupon.discount_type === 'percentage') {
+      return afterManualDiscount * (appliedCoupon.discount_value / 100);
+    }
+    return Math.min(appliedCoupon.discount_value, afterManualDiscount);
+  };
 
   const handleAddToCart = async (item: any, quantity: number, customizations: any[], notes: string) => {
     // Get category ID from the item, or fallback to selected category
@@ -599,7 +781,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const handlePaymentComplete = async (paymentData: any) => {
     const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
     const discountAmount = subtotal * (discountPercentage / 100);
-    const totalAfterDiscount = subtotal - discountAmount;
+    const couponDiscountAmount = calculateCouponDiscount();
+    const totalAfterDiscount = subtotal - discountAmount - couponDiscountAmount;
 
     // Debug: Log cart items with notes, categoryName, and customizations before passing to onOrderComplete
     console.log('[MenuModal.handlePaymentComplete] cartItems details:', cartItems.map(item => ({
@@ -634,7 +817,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           paymentData,
           discountPercentage,
           discountAmount,
-          deliveryZoneInfo: effectiveDeliveryZoneInfo // Pass delivery zone info to OrderDashboard for correct fee calculation
+          deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
+          ...(appliedCoupon ? {
+            coupon_id: appliedCoupon.id,
+            coupon_code: appliedCoupon.code,
+            coupon_discount_amount: couponDiscountAmount,
+          } : {}),
         });
       }
 
@@ -735,6 +923,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               orderType={orderType}
               onItemSelect={setSelectedMenuItem}
               onQuickAdd={handleQuickAdd}
+              comboMode={selectedCategory === 'combos'}
+              combos={combos}
+              onComboSelect={handleComboSelect}
             />
           </div>
 
@@ -753,6 +944,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               isSaving={isSavingEdit}
               orderType={orderType}
               minimumOrderAmount={effectiveMinimumOrderAmount}
+              appliedCoupon={appliedCoupon}
+              onApplyCoupon={editMode ? undefined : handleApplyCoupon}
+              onRemoveCoupon={handleRemoveCoupon}
+              couponDiscount={calculateCouponDiscount()}
+              isValidatingCoupon={isValidatingCoupon}
+              couponError={couponError}
+              onAddManualItem={editMode ? undefined : handleAddManualItem}
             />
           </div>
         </div>
@@ -774,6 +972,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           initialQuantity={editingCartItem?.quantity || 1}
           initialNotes={editingCartItem?.notes || ''}
           isEditMode={!!editingCartItem}
+        />
+      )}
+
+      {/* Combo Choice Modal */}
+      {isOpen && selectedCombo && (
+        <ComboChoiceModal
+          isOpen={!!selectedCombo}
+          combo={selectedCombo}
+          orderType={orderType}
+          onClose={() => setSelectedCombo(null)}
+          onConfirm={handleComboChoiceConfirm}
         />
       )}
 

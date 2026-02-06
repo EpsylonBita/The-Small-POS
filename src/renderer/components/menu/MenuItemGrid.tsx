@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { MenuItemCard } from './MenuItemCard';
+import { ComboCard } from './ComboCard';
 import { menuService, MenuItem } from '../../services/MenuService';
 import { AlertTriangle, Utensils } from 'lucide-react';
+import type { MenuCombo } from '@shared/types/combo';
 
 interface MenuItemGridProps {
   selectedCategory: string;
@@ -12,6 +14,10 @@ interface MenuItemGridProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSyncMenu?: () => void;
   onQuickAdd?: (item: MenuItem, quantity: number) => void;
+  // Combo mode
+  comboMode?: boolean;
+  combos?: MenuCombo[];
+  onComboSelect?: (combo: MenuCombo) => void;
 }
 
 export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
@@ -20,7 +26,10 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   onItemSelect,
   orderType = 'pickup',
   onSyncMenu,
-  onQuickAdd
+  onQuickAdd,
+  comboMode = false,
+  combos = [],
+  onComboSelect,
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -117,6 +126,41 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
       // Continue without real-time updates
     }
   }, [selectedCategory, selectedSubcategory]);
+
+  // Combo mode - render combo cards instead of menu items
+  if (comboMode && onComboSelect) {
+    if (combos.length === 0) {
+      return (
+        <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
+          <div className="text-center">
+            <Utensils className={`w-12 h-12 mb-4 mx-auto ${
+              resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
+            }`} />
+            <p className={`text-lg font-medium mb-2 ${
+              resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
+            }`}>
+              {t('menu.combos.noCombos', 'No combos available')}
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex-1 p-2 sm:p-4 overflow-y-auto touch-scroll scrollbar-hide">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
+          {combos.map((combo) => (
+            <ComboCard
+              key={combo.id}
+              combo={combo}
+              orderType={orderType}
+              onSelect={onComboSelect}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (

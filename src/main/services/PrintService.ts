@@ -962,20 +962,32 @@ export class PrintService {
       // Get expenses
       const expenses = db.prepare('SELECT * FROM shift_expenses WHERE staff_shift_id = ?').all(shiftId) as any[];
 
-      // Get staff payments
+      // Get staff payments (from staff_payments table)
       const staffPayments = db.prepare(`
         SELECT
-          e.id, e.staff_id, e.amount, e.description, e.created_at,
-          (SELECT staff_name FROM staff_shifts s WHERE s.staff_id = e.staff_id ORDER BY s.check_in_time DESC LIMIT 1) as staff_name,
-          (SELECT role_type FROM staff_shifts s WHERE s.staff_id = e.staff_id ORDER BY s.check_in_time DESC LIMIT 1) as role_type,
-          (SELECT check_in_time FROM staff_shifts s WHERE s.staff_id = e.staff_id ORDER BY s.check_in_time DESC LIMIT 1) as check_in_time,
-          (SELECT check_out_time FROM staff_shifts s WHERE s.staff_id = e.staff_id ORDER BY s.check_in_time DESC LIMIT 1) as check_out_time
-        FROM shift_expenses e
-        WHERE e.staff_shift_id = ? AND e.expense_type = 'staff_payment'
-        ORDER BY e.created_at DESC
+          sp.id,
+          sp.paid_to_staff_id as staff_id,
+          sp.staff_shift_id as recipient_shift_id,
+          sp.amount,
+          sp.notes as description,
+          sp.created_at,
+          sp.payment_type,
+          COALESCE(
+            NULLIF(TRIM(s.first_name || ' ' || s.last_name), ''),
+            recipient_shift.staff_name,
+            'Staff'
+          ) as staff_name,
+          COALESCE(recipient_shift.role_type, 'staff') as role_type,
+          recipient_shift.check_in_time,
+          recipient_shift.check_out_time
+        FROM staff_payments sp
+        LEFT JOIN staff s ON sp.paid_to_staff_id = s.id
+        LEFT JOIN staff_shifts recipient_shift ON recipient_shift.id = sp.staff_shift_id
+        WHERE sp.paid_by_cashier_shift_id = ?
+        ORDER BY sp.created_at DESC
       `).all(shiftId) as any[];
 
-      // Get driver deliveries
+      // Get driver deliveries - only count completed/delivered orders
       const driverDeliveries = db.prepare(`
         SELECT
           de.id, de.order_id, de.delivery_fee, de.tip_amount, de.total_earning,
@@ -984,6 +996,7 @@ export class PrintService {
         FROM driver_earnings de
         LEFT JOIN orders o ON de.order_id = o.id
         WHERE de.staff_shift_id = ?
+          AND o.status IN ('delivered', 'completed')
           ORDER BY de.created_at DESC
       `).all(shiftId) as any[];
 
@@ -999,7 +1012,7 @@ export class PrintService {
         SELECT order_type as type, payment_method as method,
                COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
         FROM orders
-        WHERE staff_shift_id = ? AND status IN ('delivered', 'completed')
+        WHERE staff_shift_id = ? AND status NOT IN ('cancelled', 'canceled')
         GROUP BY order_type, payment_method
       `).all(shiftId) as any[];
 
@@ -1043,7 +1056,7 @@ export class PrintService {
         SELECT payment_method as method,
                COUNT(*) as count, COALESCE(SUM(total_amount), 0) as total
         FROM orders
-        WHERE staff_shift_id = ? AND status = 'canceled'
+        WHERE staff_shift_id = ? AND status IN ('cancelled', 'canceled', 'refunded')
         GROUP BY payment_method
       `).all(shiftId) as any[];
 
@@ -1078,21 +1091,6 @@ export class PrintService {
       console.error('Error getting shift summary:', error);
       return null;
     }
-  }
-
-  /**
-   * Send receipt to thermal printer
-   * TODO: Implement actual thermal printer communication
-   */
-  private async sendToPrinter(receipt: string): Promise<void> {
-    // This would interface with thermal printer drivers/libraries
-    // Examples:
-    // - USB printer: node-thermal-printer
-    // - Network printer: Socket connection
-    // - Serial printer: serialport package
-
-    // For now, just log
-    console.log('Sending to printer:', receipt);
   }
 
   private getPaperCharWidth(): number {

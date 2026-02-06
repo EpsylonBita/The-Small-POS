@@ -7,7 +7,7 @@ export default defineConfig({
   expect: { timeout: 15000 },
   reporter: [
     ['list'],
-    ['html', { outputFolder: path.resolve(__dirname, '../../test-results/html-report') }],
+    ['html', { outputFolder: path.resolve(__dirname, '../../playwright-report') }],
   ],
   use: {
     trace: 'on-first-retry',

@@ -14,8 +14,31 @@
  */
 
 import * as fc from 'fast-check';
-import Database from 'better-sqlite3';
+import type BetterSqlite3 from 'better-sqlite3';
 import { ReportService } from '../main/services/ReportService';
+
+let BetterSqlite3Ctor: typeof BetterSqlite3 | null = null;
+let betterSqlite3LoadError: Error | null = null;
+let betterSqlite3Available = false;
+
+try {
+  BetterSqlite3Ctor = require('better-sqlite3') as typeof BetterSqlite3;
+} catch (error) {
+  betterSqlite3LoadError = error as Error;
+}
+
+if (BetterSqlite3Ctor) {
+  try {
+    const probe = new BetterSqlite3Ctor(':memory:');
+    probe.close();
+    betterSqlite3Available = true;
+  } catch (error) {
+    betterSqlite3LoadError = error as Error;
+    BetterSqlite3Ctor = null;
+  }
+}
+
+const describeIfBetterSqlite3 = betterSqlite3Available ? describe : describe.skip;
 
 // Note: fast-check is configured globally via the shared setup file (src/tests/setup.ts)
 // which imports propertyTestConfig.ts. Settings are env-driven:
@@ -25,8 +48,14 @@ import { ReportService } from '../main/services/ReportService';
 /**
  * Test Database Setup
  */
-function createTestDatabase(): Database.Database {
-  const db = new Database(':memory:');
+function createTestDatabase(): BetterSqlite3.Database {
+  if (!BetterSqlite3Ctor) {
+    throw new Error(
+      `better-sqlite3 unavailable: ${betterSqlite3LoadError?.message || 'unknown error'}`
+    );
+  }
+
+  const db = new BetterSqlite3Ctor(':memory:');
   db.pragma('foreign_keys = OFF');
 
   // Create all required tables
@@ -201,6 +230,13 @@ function createTestDatabase(): Database.Database {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS local_settings (
+      setting_category TEXT NOT NULL,
+      setting_key TEXT NOT NULL,
+      setting_value TEXT,
+      UNIQUE(setting_category, setting_key)
+    );
   `);
 
   return db;
@@ -238,7 +274,7 @@ interface DriverEarningsFixture {
   cardAmount: number;
 }
 
-function seedDriverShift(db: Database.Database, fixture: DriverShiftFixture, targetDate: string): void {
+function seedDriverShift(db: BetterSqlite3.Database, fixture: DriverShiftFixture, targetDate: string): void {
   const checkInTime = `${targetDate}T08:00:00`;
   const checkOutTime = `${targetDate}T17:00:00`;
   const now = new Date().toISOString();
@@ -264,7 +300,7 @@ function seedDriverShift(db: Database.Database, fixture: DriverShiftFixture, tar
 }
 
 function seedDriverEarnings(
-  db: Database.Database,
+  db: BetterSqlite3.Database,
   fixture: DriverEarningsFixture,
   targetDate: string
 ): void {
@@ -293,7 +329,7 @@ function seedDriverEarnings(
 }
 
 function seedOrder(
-  db: Database.Database,
+  db: BetterSqlite3.Database,
   staffShiftId: string,
   driverId: string,
   driverName: string,
@@ -333,8 +369,8 @@ const driverShiftArb = fc.record({
   openingCashAmount: fc.float({ min: Math.fround(0), max: Math.fround(100), noNaN: true }),
 });
 
-describe('Feature: z-report-fixes, Property 3: Driver Cash Return Tracking Invariant', () => {
-  let db: Database.Database;
+describeIfBetterSqlite3('Feature: z-report-fixes, Property 3: Driver Cash Return Tracking Invariant', () => {
+  let db: BetterSqlite3.Database;
   let reportService: ReportService;
   let targetDate: string;
 

@@ -10,6 +10,11 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+  updateTerminalCredentialCache,
+} from '../../services/terminal-credentials';
 
 interface Props {
   isOpen: boolean
@@ -49,12 +54,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   useEffect(() => {
     if (!isOpen) return
-    const lsTerminal = localStorage.getItem('terminal_id') || ''
-    const lsApiKey = localStorage.getItem('pos_api_key') || ''
+    const lsTerminal = localStorage.getItem('terminal_id') || getCachedTerminalCredentials().terminalId || ''
+    const lsApiKey = getCachedTerminalCredentials().apiKey || ''
     const lsPin = localStorage.getItem('staff.simple_pin') || ''
     setTerminalId(lsTerminal)
     setApiKey(lsApiKey)
     setPin(lsPin)
+    void refreshTerminalCredentialCache().then((resolved) => {
+      if (resolved.terminalId) setTerminalId(resolved.terminalId)
+      if (resolved.apiKey) setApiKey(resolved.apiKey)
+    })
 
     // Load session timeout settings from main process
     const loadSecuritySettings = async () => {
@@ -78,11 +87,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
     // Check if terminal ID or API key changed
     const oldTerminalId = localStorage.getItem('terminal_id')
-    const oldApiKey = localStorage.getItem('pos_api_key')
+    const oldApiKey = getCachedTerminalCredentials().apiKey
     const hasChanged = oldTerminalId !== terminalId || oldApiKey !== apiKey
 
     localStorage.setItem('terminal_id', terminalId)
-    localStorage.setItem('pos_api_key', apiKey)
+    updateTerminalCredentialCache({ terminalId, apiKey })
 
     try {
       // Persist under the correct category ('terminal'), not 'pos'

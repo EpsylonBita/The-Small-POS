@@ -82,7 +82,7 @@ class DriverCheckoutTemplate extends BaseReceiptTemplate {
 
     // Delivery Summary
     const canceledOrders = driverDeliveries.filter((d: any) => 
-      d.status === 'cancelled' || d.status === 'canceled'
+      d.status === 'cancelled' || d.status === 'canceled' || d.status === 'refunded'
     ).length;
 
     this.builder
@@ -153,7 +153,7 @@ class DriverCheckoutTemplate extends BaseReceiptTemplate {
 
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
       const normalizedStatus = rawStatus.toLowerCase();
-      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled' || normalizedStatus === 'refunded';
       const statusSymbol = isCanceled ? '✗' : '✓';
 
       const paymentMethod = (delivery.payment_method || '').toLowerCase();
@@ -237,7 +237,7 @@ export function generateDriverCheckoutReceiptBuffer(
     : startingAmount + totalCashCollected - paymentAmount - totalExpenses;
 
   const canceledOrders = driverDeliveries.filter((d: any) => 
-    d.status === 'cancelled' || d.status === 'canceled'
+    d.status === 'cancelled' || d.status === 'canceled' || d.status === 'refunded'
   ).length;
 
   const lines: TextLine[] = [];
@@ -305,7 +305,7 @@ export function generateDriverCheckoutReceiptBuffer(
 
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
       const normalizedStatus = rawStatus.toLowerCase();
-      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled' || normalizedStatus === 'refunded';
       const statusSymbol = isCanceled ? '[X]' : '[OK]';
 
       const paymentMethod = (delivery.payment_method || '').toLowerCase();
@@ -469,7 +469,7 @@ export function generateDriverCheckoutReceipt(
   receipt += '\n';
   
   // Delivery Summary
-  const canceledOrders = driverDeliveries.filter((d: any) => d.status === 'cancelled' || d.status === 'canceled').length;
+  const canceledOrders = driverDeliveries.filter((d: any) => d.status === 'cancelled' || d.status === 'canceled' || d.status === 'refunded').length;
   receipt += 'DELIVERY SUMMARY\n';
   receipt += line() + '\n';
   receipt += leftRight('Total Orders:', totalOrders.toString()) + '\n';
@@ -491,7 +491,7 @@ export function generateDriverCheckoutReceipt(
       const amount = formatCurrency(delivery.total_amount);
       const rawStatus = (delivery as any).status || (delivery as any).order_status || '';
       const normalizedStatus = rawStatus.toLowerCase();
-      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+      const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled' || normalizedStatus === 'refunded';
       const statusSymbol = isCanceled ? '✗' : '✓';
       const paymentMethod = (delivery.payment_method || '').toLowerCase();
       let paymentSymbol: string;

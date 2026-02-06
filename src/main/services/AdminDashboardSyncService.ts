@@ -43,6 +43,14 @@ export interface TerminalHeartbeat {
   };
 }
 
+interface PendingSyncOperation {
+  id?: string;
+  table_name?: string;
+  operation?: string;
+  sync_status?: string;
+  [key: string]: unknown;
+}
+
 export class AdminDashboardSyncService {
   private dbManager: DatabaseManager;
   private mainWindow: BrowserWindow | null = null;
@@ -58,6 +66,10 @@ export class AdminDashboardSyncService {
   private terminalHealth: number = 0;
   private settingsVersion: number = 0;
   private menuVersion: number = 0;
+  private cpuSample = process.cpuUsage();
+  private cpuSampleTimestamp = Date.now();
+  private lastCpuUsage: number = 0;
+  private lastMemoryUsage: number = 0;
 
   constructor(dbManager: DatabaseManager, terminalId?: string, adminDashboardUrl?: string) {
     this.dbManager = dbManager;
@@ -135,6 +147,11 @@ export class AdminDashboardSyncService {
     if (adminDashboardUrl) {
       this.adminDashboardUrl = adminDashboardUrl;
     }
+    // Ensure ModuleSyncService uses the latest admin URL
+    const moduleSyncService = serviceRegistry.moduleSyncService;
+    if (moduleSyncService && adminDashboardUrl) {
+      moduleSyncService.setAdminDashboardUrl(adminDashboardUrl);
+    }
 
     // 3. Persist new credentials to the fresh database (AFTER factory reset)
     try {
@@ -153,8 +170,8 @@ export class AdminDashboardSyncService {
       console.error('[AdminDashboardSyncService] Failed to persist new credentials:', persistError);
     }
 
-    // 3.1. Notify renderer to store credentials in localStorage for immediate access
-    // This ensures menu-version polling can authenticate immediately without waiting for settings sync
+    // 3.1. Notify renderer to refresh its in-memory terminal credential cache immediately
+    // This avoids waiting for the next settings refresh cycle before authenticated API calls
     this.notifyRenderer('terminal-credentials-updated', { terminalId, apiKey, adminDashboardUrl: urlToStore });
 
     // 4. Test connection with new credentials
@@ -274,12 +291,18 @@ export class AdminDashboardSyncService {
         console.warn('Failed to get financial sync stats for heartbeat', e);
       }
 
+      // Keep queue and health metrics current for heartbeat payload.
+      this.pendingItems = await this.getPendingItemsCount();
+      const cpuUsage = this.getCpuUsage();
+      const memoryUsage = this.getMemoryUsage();
+      const healthScore = this.calculateHealthScore(cpuUsage, memoryUsage, this.pendingItems);
+
       const heartbeatData: TerminalHeartbeat = {
         terminal_id: storedTid,
         status: 'online',
-        health_score: this.calculateHealthScore(),
-        cpu_usage: this.getCpuUsage(),
-        memory_usage: this.getMemoryUsage(),
+        health_score: healthScore,
+        cpu_usage: cpuUsage,
+        memory_usage: memoryUsage,
         queue_length: this.pendingItems,
         last_order_time: await this.getLastOrderTime(),
         version: '1.0.0',
@@ -449,7 +472,7 @@ export class AdminDashboardSyncService {
       // Process any pending sync operations from the response
       if (result.pending_sync_operations && result.pending_sync_operations.length > 0) {
         console.log(`📥 Received ${result.pending_sync_operations.length} pending sync operations`);
-        // TODO: Process pending sync operations
+        await this.handlePendingSyncOperations(result.pending_sync_operations as PendingSyncOperation[]);
       }
 
     } catch (error) {
@@ -544,6 +567,40 @@ export class AdminDashboardSyncService {
       }
     } catch (error) {
       console.warn('[AdminDashboardSyncService] Failed to trigger module sync:', error);
+    }
+  }
+
+  private async handlePendingSyncOperations(operations: PendingSyncOperation[]): Promise<void> {
+    if (!Array.isArray(operations) || operations.length === 0) return;
+
+    // Surface pending operations to renderer for diagnostics/UI visibility.
+    this.notifyRenderer('sync:pending-operations', {
+      count: operations.length,
+      operations
+    });
+
+    // menu_sync_queue items represent menu state changes; trigger an immediate menu refresh.
+    const menuTables = new Set([
+      'menu_categories',
+      'subcategories',
+      'ingredients',
+      'branch_menu_overrides',
+      'branch_overrides'
+    ]);
+    const hasMenuOperations = operations.some((op) =>
+      menuTables.has(String(op.table_name || '').toLowerCase())
+    );
+
+    if (!hasMenuOperations || this.syncInProgress) return;
+
+    try {
+      await this.syncMenuData();
+      this.notifyRenderer('sync:menu-refresh', {
+        source: 'heartbeat_pending_sync_operations',
+        count: operations.length
+      });
+    } catch (error) {
+      console.warn('[AdminDashboardSyncService] Failed to process pending menu sync operations', error);
     }
   }
 
@@ -962,7 +1019,9 @@ export class AdminDashboardSyncService {
 
   async getSyncStatus(): Promise<AdminDashboardSyncStatus> {
     this.pendingItems = await this.getPendingItemsCount();
-    this.terminalHealth = this.calculateHealthScore();
+    const cpuUsage = this.getCpuUsage();
+    const memoryUsage = this.getMemoryUsage();
+    this.terminalHealth = this.calculateHealthScore(cpuUsage, memoryUsage, this.pendingItems);
 
     return {
       isOnline: this.isOnline,
@@ -1013,28 +1072,91 @@ export class AdminDashboardSyncService {
 
   // Helper methods
   private async getPendingItemsCount(): Promise<number> {
-    // TODO: Get actual pending items count from database
-    return 0;
+    try {
+      const dbSvc = this.dbManager?.getDatabaseService?.();
+      if (!dbSvc?.sync) return 0;
+
+      const stats = dbSvc.sync.getSyncStats();
+      const pending = Number(stats?.pending ?? 0);
+      return Number.isFinite(pending) && pending > 0 ? pending : 0;
+    } catch (error) {
+      console.warn('[AdminDashboardSyncService] Failed to read pending sync queue count', error);
+      return 0;
+    }
   }
 
-  private calculateHealthScore(): number {
-    // TODO: Calculate actual health score based on system metrics
-    return this.isOnline ? 85 : 0;
+  private calculateHealthScore(cpuUsage: number = this.lastCpuUsage, memoryUsage: number = this.lastMemoryUsage, pendingItems: number = this.pendingItems): number {
+    if (!this.isOnline) return 0;
+
+    let score = 100;
+
+    if (cpuUsage >= 90) score -= 25;
+    else if (cpuUsage >= 75) score -= 15;
+    else if (cpuUsage >= 60) score -= 8;
+
+    if (memoryUsage >= 90) score -= 25;
+    else if (memoryUsage >= 80) score -= 15;
+    else if (memoryUsage >= 70) score -= 8;
+
+    if (pendingItems >= 100) score -= 20;
+    else if (pendingItems >= 50) score -= 10;
+    else if (pendingItems >= 20) score -= 5;
+
+    if (this.error) score -= 10;
+
+    if (score < 0) return 0;
+    if (score > 100) return 100;
+    return Math.round(score);
   }
 
   private getCpuUsage(): number {
-    // TODO: Get actual CPU usage
-    return Math.random() * 30 + 10; // Mock: 10-40%
+    const now = Date.now();
+    const elapsedMicros = Math.max(1, (now - this.cpuSampleTimestamp) * 1000);
+    const currentUsage = process.cpuUsage();
+    const userDelta = currentUsage.user - this.cpuSample.user;
+    const systemDelta = currentUsage.system - this.cpuSample.system;
+
+    this.cpuSample = currentUsage;
+    this.cpuSampleTimestamp = now;
+
+    const cpuCoreCount = Math.max(1, os.cpus().length);
+    const processCpuPercent = ((userDelta + systemDelta) / elapsedMicros / cpuCoreCount) * 100;
+    const boundedCpuPercent = Math.max(0, Math.min(100, Number.isFinite(processCpuPercent) ? processCpuPercent : 0));
+
+    this.lastCpuUsage = Math.round(boundedCpuPercent * 10) / 10;
+    return this.lastCpuUsage;
   }
 
   private getMemoryUsage(): number {
-    // TODO: Get actual memory usage
-    return Math.random() * 40 + 40; // Mock: 40-80%
+    const totalMemory = os.totalmem();
+    if (!totalMemory) {
+      this.lastMemoryUsage = 0;
+      return 0;
+    }
+
+    const usedMemory = totalMemory - os.freemem();
+    const memoryPercent = (usedMemory / totalMemory) * 100;
+    const boundedMemoryPercent = Math.max(0, Math.min(100, Number.isFinite(memoryPercent) ? memoryPercent : 0));
+
+    this.lastMemoryUsage = Math.round(boundedMemoryPercent * 10) / 10;
+    return this.lastMemoryUsage;
   }
 
   private async getLastOrderTime(): Promise<string | null> {
-    // TODO: Get actual last order time from database
-    return new Date().toISOString();
+    try {
+      const dbSvc = this.dbManager?.getDatabaseService?.();
+      const db = (dbSvc as unknown as {
+        db?: { prepare: (sql: string) => { get: () => { last_order_time?: string | null } | undefined } }
+      })?.db;
+
+      if (!db?.prepare) return null;
+
+      const row = db.prepare('SELECT MAX(created_at) as last_order_time FROM orders').get();
+      return row?.last_order_time || null;
+    } catch (error) {
+      console.warn('[AdminDashboardSyncService] Failed to resolve last order time', error);
+      return null;
+    }
   }
 
   private async measureLatency(): Promise<number> {

@@ -204,11 +204,10 @@ async function resolveTerminalSettings(db: DatabaseManager): Promise<{
     // ignore, treat as missing API key
   }
 
-  // SECURITY: Do not log API key content - only log presence and length
+  // SECURITY: Do not log API key content.
   console.log(`[POS API Sync] resolveTerminalSettings:`, {
     terminalId,
     hasApiKey: !!apiKey,
-    apiKeyLength: apiKey?.length || 0,
   });
 
   return { terminalId, apiKey };
@@ -429,13 +428,12 @@ export async function fetchOrdersFromAdmin(
   const queryString = buildQueryString(options || {});
   const url = `${base}/api/pos/orders${queryString}`;
 
-  // SECURITY: Do not log API key content - only log presence and length
+  // SECURITY: Do not log API key content.
   console.log(`[POS API Sync] fetchOrdersFromAdmin: Fetching orders`, {
     terminalId,
     url,
     options,
     hasApiKey: !!apiKey,
-    apiKeyLength: apiKey?.length || 0,
   });
 
   const response = await fetchWithTimeout(url, { method: 'GET', headers }, 'fetchOrdersFromAdmin');

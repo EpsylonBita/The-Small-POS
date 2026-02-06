@@ -14,6 +14,10 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { DeliveryZoneValidator } from '../../services/DeliveryZoneValidator';
 import { useShift } from '../contexts/shift-context';
 import { supabase } from '../lib/supabase';
+import {
+  getCachedTerminalCredentials,
+  updateTerminalCredentialCache,
+} from '../services/terminal-credentials';
 import type {
   DeliveryBoundaryValidationResponse,
   DeliveryOverrideResponse
@@ -67,12 +71,7 @@ export function useDeliveryValidation(
   useEffect(() => {
     if (!shift.activeShift) return;
 
-    // Get API key from localStorage (synced from settings)
-    const apiKey = typeof window !== 'undefined' 
-      ? (localStorage.getItem('pos_api_key') || '') 
-      : '';
-
-    console.log('[useDeliveryValidation] Initializing with API key from localStorage:', apiKey ? `${apiKey.substring(0, 8)}...` : '(none)');
+    const apiKey = getCachedTerminalCredentials().apiKey || '';
 
     try {
       validatorRef.current = new DeliveryZoneValidator({
@@ -89,12 +88,8 @@ export function useDeliveryValidation(
       if (typeof window !== 'undefined' && (window as any).electronAPI?.getTerminalApiKey) {
         (window as any).electronAPI.getTerminalApiKey().then((ipcApiKey: string) => {
           if (ipcApiKey && validatorRef.current) {
-            console.log('[useDeliveryValidation] Got API key from IPC:', ipcApiKey ? `${ipcApiKey.substring(0, 8)}...` : '(none)');
             validatorRef.current.updateAuth(undefined, ipcApiKey);
-            // Also sync to localStorage for future use
-            if (ipcApiKey) {
-              localStorage.setItem('pos_api_key', ipcApiKey);
-            }
+            updateTerminalCredentialCache({ apiKey: ipcApiKey });
           }
         }).catch((err: Error) => {
           console.warn('[useDeliveryValidation] Failed to get API key from IPC:', err);

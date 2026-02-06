@@ -13,6 +13,7 @@ import { useModules } from '../../../contexts/module-context';
 import { useRooms } from '../../../hooks/useRooms';
 import { formatDate } from '../../../utils/format';
 import { reservationsService } from '../../../services/ReservationsService';
+import { OrderService } from '../../../../services/OrderService';
 import { 
   Bed, RefreshCw, Users, Wrench, Sparkles, Calendar, X, 
   CreditCard, Receipt, Clock, User, Phone, Mail, DollarSign,
@@ -53,6 +54,16 @@ interface ReservationData {
   checkOutDate: string;
   notes: string;
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const formatIsoDate = (date: Date): string => date.toISOString().split('T')[0];
+
+const mapPaymentMethod = (method: 'cash' | 'card' | 'transfer'): 'cash' | 'card' | 'digital' => {
+  if (method === 'cash') return 'cash';
+  if (method === 'card') return 'card';
+  return 'digital';
+};
 
 export const RoomsView: React.FC = memo(() => {
   const { t } = useTranslation();
@@ -200,22 +211,74 @@ export const RoomsView: React.FC = memo(() => {
 
   const handleCheckin = async () => {
     if (!checkinData.roomId || !checkinData.guestInfo.name) return;
-    
-    // Update room status to occupied
-    await updateStatus(checkinData.roomId, 'occupied');
-    
-    // TODO: Create booking record, generate receipt
-    console.log('Check-in completed:', checkinData);
-    
-    // Reset and close
-    setCheckinData({
-      guestInfo: { name: '', phone: '', email: '', idNumber: '' },
-      roomId: '',
-      nights: 1,
-      paymentMethod: 'cash',
-      totalAmount: 0,
-    });
-    setModalType('none');
+
+    try {
+      if (!branchId || !effectiveOrgId) {
+        toast.error('Missing branch or organization context');
+        return;
+      }
+
+      const selectedRoom = rooms.find((room) => room.id === checkinData.roomId);
+      if (!selectedRoom) {
+        toast.error('Selected room not found');
+        return;
+      }
+
+      const now = new Date();
+      const checkInDate = formatIsoDate(now);
+      const checkOutDate = formatIsoDate(new Date(now.getTime() + (checkinData.nights * DAY_MS)));
+      const reservationTime = now.toTimeString().slice(0, 5);
+
+      reservationsService.setContext(branchId, effectiveOrgId);
+      const reservation = await reservationsService.createReservation({
+        customerName: checkinData.guestInfo.name,
+        customerPhone: checkinData.guestInfo.phone || '',
+        customerEmail: checkinData.guestInfo.email || undefined,
+        partySize: selectedRoom.capacity || 1,
+        reservationDate: checkInDate,
+        reservationTime,
+        roomId: selectedRoom.id,
+        roomNumber: selectedRoom.roomNumber,
+        checkInDate,
+        checkOutDate,
+        notes: checkinData.guestInfo.idNumber
+          ? `ID: ${checkinData.guestInfo.idNumber}`
+          : undefined,
+      });
+      await reservationsService.updateStatus(reservation.id, 'seated');
+      const checkinStatusUpdated = await updateStatus(checkinData.roomId, 'occupied');
+      if (!checkinStatusUpdated) {
+        throw new Error('Failed to update room status to occupied');
+      }
+
+      try {
+        await createHotelBillingOrder({
+          room: selectedRoom,
+          guestName: checkinData.guestInfo.name,
+          guestPhone: checkinData.guestInfo.phone || undefined,
+          description: `Room ${selectedRoom.roomNumber} check-in (${checkinData.nights} night${checkinData.nights > 1 ? 's' : ''})`,
+          amount: Number(checkinData.totalAmount) || 0,
+          paymentMethod: checkinData.paymentMethod,
+          notes: checkinData.guestInfo.idNumber ? `Guest ID: ${checkinData.guestInfo.idNumber}` : undefined,
+        });
+      } catch (billingError) {
+        console.error('Check-in billing/receipt failed:', billingError);
+        toast.error('Check-in completed, but billing receipt failed');
+      }
+
+      setCheckinData({
+        guestInfo: { name: '', phone: '', email: '', idNumber: '' },
+        roomId: '',
+        nights: 1,
+        paymentMethod: 'cash',
+        totalAmount: 0,
+      });
+      setModalType('none');
+      toast.success('Check-in completed successfully');
+    } catch (error) {
+      console.error('Failed to complete check-in:', error);
+      toast.error('Failed to complete check-in');
+    }
   };
 
   const handleReservation = async () => {
@@ -265,10 +328,63 @@ export const RoomsView: React.FC = memo(() => {
 
   const handleCheckout = async () => {
     if (!actionRoom) return;
-    await updateStatus(actionRoom.id, 'cleaning');
-    // TODO: Generate final bill, process payment
-    setModalType('none');
-    setActionRoom(null);
+
+    try {
+      if (!branchId || !effectiveOrgId) {
+        toast.error('Missing branch or organization context');
+        return;
+      }
+
+      reservationsService.setContext(branchId, effectiveOrgId);
+      const today = formatIsoDate(new Date());
+      const reservations = await reservationsService.fetchReservations({
+        dateFrom: today,
+        dateTo: today,
+      });
+
+      const activeReservation = reservations
+        .filter((reservation) =>
+          reservation.roomId === actionRoom.id &&
+          ['pending', 'confirmed', 'seated'].includes(reservation.status)
+        )
+        .sort((a, b) => new Date(b.checkInDate || b.createdAt).getTime() - new Date(a.checkInDate || a.createdAt).getTime())[0];
+
+      if (activeReservation) {
+        await reservationsService.updateStatus(activeReservation.id, 'completed');
+      }
+
+      const checkInDate = activeReservation?.checkInDate ? new Date(activeReservation.checkInDate) : null;
+      const checkoutDate = new Date();
+      const nightsStayed = checkInDate
+        ? Math.max(1, Math.ceil((checkoutDate.getTime() - checkInDate.getTime()) / DAY_MS))
+        : 1;
+      const checkoutAmount = (actionRoom.ratePerNight || 0) * nightsStayed;
+
+      if (checkoutAmount > 0) {
+        await createHotelBillingOrder({
+          room: actionRoom,
+          guestName: activeReservation?.customerName || actionRoom.currentGuestName || `Room ${actionRoom.roomNumber} Guest`,
+          guestPhone: activeReservation?.customerPhone || undefined,
+          description: `Room ${actionRoom.roomNumber} checkout (${nightsStayed} night${nightsStayed > 1 ? 's' : ''})`,
+          amount: checkoutAmount,
+          paymentMethod: 'cash',
+          notes: activeReservation?.reservationNumber
+            ? `Reservation ${activeReservation.reservationNumber}`
+            : undefined,
+        });
+      }
+
+      const checkoutStatusUpdated = await updateStatus(actionRoom.id, 'cleaning');
+      if (!checkoutStatusUpdated) {
+        throw new Error('Failed to update room status to cleaning');
+      }
+      setModalType('none');
+      setActionRoom(null);
+      toast.success(`Checkout completed${checkoutAmount > 0 ? ` - $${checkoutAmount.toFixed(2)}` : ''}`);
+    } catch (error) {
+      console.error('Failed to checkout room:', error);
+      toast.error('Failed to complete checkout');
+    }
   };
 
   const getStatusLabel = (status: RoomStatus) => {
@@ -276,6 +392,49 @@ export const RoomsView: React.FC = memo(() => {
   };
 
   const availableRooms = rooms.filter(r => r.status === 'available');
+
+  const createHotelBillingOrder = useCallback(async (params: {
+    room: Room;
+    guestName: string;
+    guestPhone?: string;
+    description: string;
+    amount: number;
+    paymentMethod: 'cash' | 'card' | 'transfer';
+    notes?: string;
+  }) => {
+    if (params.amount <= 0) {
+      return null;
+    }
+
+    const orderService = OrderService.getInstance();
+    const order = await orderService.createOrder({
+      customer_name: params.guestName,
+      customer_phone: params.guestPhone || undefined,
+      items: [
+        {
+          id: `hotel-${params.room.id}-${Date.now()}`,
+          name: params.description,
+          quantity: 1,
+          price: params.amount,
+          notes: params.notes || undefined,
+        } as any,
+      ],
+      total_amount: params.amount,
+      subtotal: params.amount,
+      status: 'completed',
+      order_type: 'pickup',
+      payment_status: 'completed',
+      payment_method: mapPaymentMethod(params.paymentMethod),
+      notes: params.notes || params.description,
+    } as any);
+
+    const printApi: any = (window as any).electronAPI;
+    if (order?.id && printApi?.printReceipt) {
+      await printApi.printReceipt(order.id, 'customer');
+    }
+
+    return order;
+  }, []);
 
   // Calculate total for check-in
   const updateCheckinTotal = useCallback((nights: number, roomId: string) => {

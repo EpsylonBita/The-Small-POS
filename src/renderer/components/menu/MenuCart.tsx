@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatCurrency } from '../../utils/format';
@@ -31,6 +31,14 @@ interface CartItem {
   notes?: string;
 }
 
+export interface AppliedCoupon {
+  id: string;
+  code: string;
+  discount_type: 'percentage' | 'fixed_amount';
+  discount_value: number;
+  minimum_order_amount?: number;
+}
+
 interface MenuCartProps {
   cartItems: CartItem[];
   onCheckout: () => void;
@@ -44,6 +52,15 @@ interface MenuCartProps {
   isSaving?: boolean; // When true, shows loading state on save button
   orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
+  // Coupon props
+  appliedCoupon?: AppliedCoupon | null;
+  onApplyCoupon?: (code: string) => void;
+  onRemoveCoupon?: () => void;
+  couponDiscount?: number;
+  isValidatingCoupon?: boolean;
+  couponError?: string | null;
+  // Manual item props
+  onAddManualItem?: (price: number, name?: string) => void;
 }
 
 export const MenuCart: React.FC<MenuCartProps> = ({
@@ -58,7 +75,14 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   editMode = false,
   isSaving = false,
   orderType,
-  minimumOrderAmount = 0
+  minimumOrderAmount = 0,
+  appliedCoupon,
+  onApplyCoupon,
+  onRemoveCoupon,
+  couponDiscount = 0,
+  isValidatingCoupon = false,
+  couponError,
+  onAddManualItem,
 }) => {
   const { t } = useTranslation();
 
@@ -79,6 +103,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const { language } = useI18n();
 
   const discountDebounceRef = React.useRef<number | null>(null);
+  const [couponInput, setCouponInput] = React.useState('');
+  const [showManualInput, setShowManualInput] = React.useState(false);
+  const [manualPrice, setManualPrice] = React.useState('');
+  const [manualName, setManualName] = React.useState('');
 
   // Helper function to get localized ingredient name
   const getIngredientName = (ingredient: {
@@ -106,7 +134,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   const subtotal = getSubtotal();
   const discountAmount = subtotal * (discountPercentage / 100);
-  const totalAfterDiscount = subtotal - discountAmount;
+  const totalAfterDiscount = subtotal - discountAmount - couponDiscount;
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
@@ -120,12 +148,97 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       }`}
     >
       {/* Header - flex-shrink-0 keeps it fixed size */}
-      <div className={`flex-shrink-0 p-4 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
-        <h3 className={`text-lg font-semibold ${
-          resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-        }`}>
-          {t('menu.cart.header', { count: uniqueCartItems.length })}
-        </h3>
+      <div className={`flex-shrink-0 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
+        <div className="flex items-center justify-between p-4">
+          <h3 className={`text-lg font-semibold ${
+            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
+          }`}>
+            {t('menu.cart.header', { count: uniqueCartItems.length })}
+          </h3>
+          {onAddManualItem && !editMode && (
+            <button
+              onClick={() => setShowManualInput((prev) => !prev)}
+              className={`p-1.5 rounded-lg transition-colors ${
+                showManualInput
+                  ? resolvedTheme === 'dark'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-blue-500 text-white'
+                  : resolvedTheme === 'dark'
+                    ? 'hover:bg-gray-700 text-gray-400'
+                    : 'hover:bg-gray-200 text-gray-500'
+              }`}
+              title={t('menu.cart.addManualItem', 'Manual Item')}
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+        {/* Manual item inline form */}
+        {showManualInput && onAddManualItem && (
+          <div className={`px-4 pb-3 space-y-2`}>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={manualName}
+                onChange={(e) => setManualName(e.target.value)}
+                placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
+                className={`flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased ${
+                  resolvedTheme === 'dark'
+                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
+                    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
+                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+              />
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                value={manualPrice}
+                onChange={(e) => setManualPrice(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const price = parseFloat(manualPrice);
+                    if (price > 0) {
+                      onAddManualItem(price, manualName.trim() || undefined);
+                      setManualPrice('');
+                      setManualName('');
+                      setShowManualInput(false);
+                    }
+                  }
+                }}
+                min="0.01"
+                step="0.01"
+                placeholder={t('menu.cart.manualPricePlaceholder', 'Price')}
+                className={`flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased ${
+                  resolvedTheme === 'dark'
+                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
+                    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
+                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                autoFocus
+              />
+              <button
+                onClick={() => {
+                  const price = parseFloat(manualPrice);
+                  if (price > 0) {
+                    onAddManualItem(price, manualName.trim() || undefined);
+                    setManualPrice('');
+                    setManualName('');
+                    setShowManualInput(false);
+                  }
+                }}
+                disabled={!manualPrice || parseFloat(manualPrice) <= 0}
+                className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                  !manualPrice || parseFloat(manualPrice) <= 0
+                    ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+                    : resolvedTheme === 'dark'
+                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                      : 'bg-blue-500 text-white hover:bg-blue-600'
+                }`}
+              >
+                {t('common.add', 'Add')}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
@@ -360,6 +473,100 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           resolvedTheme === 'dark' ? 'border-gray-700 bg-gray-900' : 'border-gray-200 bg-gray-50'
         }`}
       >
+        {/* Coupon Input */}
+        {onApplyCoupon && !editMode && (
+          <div className="space-y-2">
+            {appliedCoupon ? (
+              /* Applied coupon badge */
+              <div className={`flex items-center justify-between rounded-lg px-3 py-2 ${
+                resolvedTheme === 'dark'
+                  ? 'bg-emerald-500/20 border border-emerald-500/30'
+                  : 'bg-emerald-50 border border-emerald-200'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <Ticket className={`w-4 h-4 ${resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'}`} />
+                  <div>
+                    <span className={`text-sm font-semibold antialiased ${
+                      resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-700'
+                    }`}>
+                      {appliedCoupon.code}
+                    </span>
+                    <span className={`text-xs ml-2 antialiased ${
+                      resolvedTheme === 'dark' ? 'text-emerald-300/70' : 'text-emerald-600/70'
+                    }`}>
+                      {appliedCoupon.discount_type === 'percentage'
+                        ? `${appliedCoupon.discount_value}%`
+                        : formatCurrency(appliedCoupon.discount_value)
+                      } {t('menu.cart.couponOff', 'off')}
+                    </span>
+                  </div>
+                </div>
+                {onRemoveCoupon && (
+                  <button
+                    onClick={onRemoveCoupon}
+                    className={`p-1 rounded-full transition-colors ${
+                      resolvedTheme === 'dark' ? 'hover:bg-emerald-500/30 text-emerald-400' : 'hover:bg-emerald-100 text-emerald-600'
+                    }`}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ) : (
+              /* Coupon input field */
+              <div className="space-y-1">
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Ticket className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 ${
+                      resolvedTheme === 'dark' ? 'text-gray-500' : 'text-gray-400'
+                    }`} />
+                    <input
+                      type="text"
+                      value={couponInput}
+                      onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && couponInput.trim()) {
+                          onApplyCoupon(couponInput.trim());
+                        }
+                      }}
+                      placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
+                      className={`w-full pl-9 pr-3 py-1.5 text-sm border rounded-lg antialiased ${
+                        resolvedTheme === 'dark'
+                          ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
+                          : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
+                      } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (couponInput.trim()) {
+                        onApplyCoupon(couponInput.trim());
+                      }
+                    }}
+                    disabled={!couponInput.trim() || isValidatingCoupon}
+                    className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
+                      !couponInput.trim() || isValidatingCoupon
+                        ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+                        : resolvedTheme === 'dark'
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : 'bg-blue-500 text-white hover:bg-blue-600'
+                    }`}
+                  >
+                    {isValidatingCoupon ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      t('menu.cart.applyCoupon', 'Apply')
+                    )}
+                  </button>
+                </div>
+                {couponError && (
+                  <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Discount Input */}
         {onDiscountChange && (
           <div className="space-y-2">
@@ -423,6 +630,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               resolvedTheme === 'dark' ? 'text-green-400' : 'text-green-600'
             }`}>
               -{formatCurrency(discountAmount)}
+            </span>
+          </div>
+        )}
+
+        {/* Coupon Discount Display */}
+        {couponDiscount > 0 && appliedCoupon && (
+          <div className="flex justify-between items-center text-sm font-medium antialiased">
+            <span className={`flex items-center gap-1 ${
+              resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+            }`}>
+              <Ticket className="w-3.5 h-3.5" />
+              {t('menu.cart.couponDiscount', 'Coupon')} ({appliedCoupon.code}):
+            </span>
+            <span className={`${
+              resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
+            }`}>
+              -{formatCurrency(couponDiscount)}
             </span>
           </div>
         )}

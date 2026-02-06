@@ -156,7 +156,7 @@ export function registerReportHandlers() {
 
             logStep(2, 'Checking preconditions (canExecuteZReport)');
             // Preconditions: all checkouts executed (no active shifts, cash drawers closed)
-            const can = await db.reports.canExecuteZReport(reportDate);
+            const can = await db.reports.canExecuteZReport(reportDate, branchId);
             if (!can?.ok) {
                 throw new IPCError(can?.reason || 'All checkouts must be executed before running the Z report.', 'VALIDATION_ERROR');
             }
@@ -256,8 +256,6 @@ export function registerReportHandlers() {
             console.log('🔑 [Z-Report] Auth debug:', {
                 hasApiKey: !!apiKey,
                 apiKeySource: 'terminal_settings',
-                apiKeyLength: apiKey.length,
-                apiKeyLast4: apiKey ? apiKey.slice(-4) : 'NONE',
                 terminalId: terminalId,
                 adminUrl: adminBase,
                 terminalType: termTypeNow,
@@ -285,32 +283,40 @@ export function registerReportHandlers() {
             // If main terminal, attempt to aggregate child terminals
             let childTerminalIds: string[] = [];
             let isAggregated = false;
-            if (termTypeNow === 'main' && validBranchId) {
+            if (termTypeNow === 'main') {
                 try {
-                    // Fetch terminals in branch
-                    const tRes = await fetch(`${adminBase}/api/pos/terminals?branchId=${encodeURIComponent(validBranchId)}`, {
+                    // Fetch branch-scoped terminals via POS-auth endpoint
+                    const tRes = await fetch(`${adminBase}/api/pos/terminals/list`, {
                         method: 'GET',
                         headers,
                         signal: AbortSignal.timeout(15000)
                     });
                     if (tRes.ok) {
                         const tJson: any = await tRes.json();
-                        const terms = Array.isArray(tJson?.terminals) ? tJson.terminals : [];
-                        const children = terms.filter((t: any) => (t.parent_terminal_id === terminalId || t.parent_terminal_id === terminalId.trim()) && (t.terminal_type === 'mobile_waiter'));
-                        childTerminalIds = children.map((c: any) => c.terminal_id);
+                        const terms = Array.isArray(tJson?.data?.terminals)
+                            ? tJson.data.terminals
+                            : (Array.isArray(tJson?.terminals) ? tJson.terminals : []);
+                        const children = terms.filter((t: any) => {
+                            const childId = t.terminal_id || t.id;
+                            if (!childId) {return false;}
+                            return (t.parent_terminal_id === terminalId || t.parent_terminal_id === terminalId.trim()) && (t.terminal_type === 'mobile_waiter');
+                        });
+                        childTerminalIds = children.map((c: any) => (c.terminal_id || c.id)).filter(Boolean);
                         const childReports: Array<{ terminalId: string; terminalName?: string; type?: string; report: any }> = [];
                         for (const child of children) {
+                            const childTerminalId = child.terminal_id || child.id;
+                            if (!childTerminalId) {continue;}
                             try {
-                                const r = await fetch(`${adminBase}/api/pos/z-report?terminal_id=${encodeURIComponent(child.terminal_id)}&report_date=${encodeURIComponent(reportDate)}`, {
+                                const r = await fetch(`${adminBase}/api/pos/z-report?terminal_id=${encodeURIComponent(childTerminalId)}&report_date=${encodeURIComponent(reportDate)}`, {
                                     method: 'GET', headers, signal: AbortSignal.timeout(15000)
                                 });
-                                if (!r.ok) { console.warn('[Z-Report] Child report fetch failed', child.terminal_id, r.status); continue; }
+                                if (!r.ok) { console.warn('[Z-Report] Child report fetch failed', childTerminalId, r.status); continue; }
                                 const rJson: any = await r.json();
                                 if (rJson?.report_data) {
-                                    childReports.push({ terminalId: child.terminal_id, terminalName: child.name, type: child.terminal_type, report: rJson.report_data });
+                                    childReports.push({ terminalId: childTerminalId, terminalName: child.name, type: child.terminal_type, report: rJson.report_data });
                                 }
                             } catch (e) {
-                                console.warn('[Z-Report] Failed to fetch child Z-report', child.terminal_id, (e as any)?.message);
+                                console.warn('[Z-Report] Failed to fetch child Z-report', childTerminalId, (e as any)?.message);
                             }
                         }
                         if (childReports.length > 0 && (db.reports as any)?.aggregateZReports) {

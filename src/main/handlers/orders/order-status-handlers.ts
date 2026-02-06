@@ -33,8 +33,7 @@ function getTerminalCredentials(): { terminalId: string; apiKey: string } {
   const settingsService = serviceRegistry.get('settingsService');
   const terminalId = (settingsService?.getSetting?.('terminal', 'terminal_id', '') as string) || '';
   const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-  const envApiKey = (process.env['POS_API_KEY'] || process.env['POS_API_SHARED_KEY'] || '').trim();
-  return { terminalId, apiKey: terminalApiKey || envApiKey };
+  return { terminalId, apiKey: terminalApiKey };
 }
 
 export function registerOrderStatusHandlers(): void {
@@ -48,7 +47,7 @@ export function registerOrderStatusHandlers(): void {
   handlers.forEach(handler => ipcMain.removeHandler(handler));
 
   // Update order status
-  ipcMain.handle('order:update-status', async (_event, { orderId, status }) => {
+  ipcMain.handle('order:update-status', async (_event, { orderId, status, estimatedTime }) => {
     console.log('[IPC order:update-status] 📨 Received', { orderId, status, timestamp: new Date().toISOString() });
 
     try {
@@ -65,14 +64,16 @@ export function registerOrderStatusHandlers(): void {
         (authService && await authService.hasPermission('update_order_status'));
 
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
 
       const desiredStatus = String(status || '').toLowerCase();
       // Map POS-local statuses to Supabase-compatible statuses
       let coercedStatus = desiredStatus;
       if (desiredStatus === 'out_for_delivery') coercedStatus = 'completed';
       if (desiredStatus === 'delivered') coercedStatus = 'completed';
+      const normalizedEstimatedTime = Number.isFinite(Number(estimatedTime))
+        ? Math.max(1, Math.round(Number(estimatedTime)))
+        : undefined;
       const allowByStatus = coercedStatus === 'cancelled' || coercedStatus === 'canceled';
 
       console.log('[IPC order:update-status] 🔐 Permission check', {
@@ -115,6 +116,28 @@ export function registerOrderStatusHandlers(): void {
       }
 
       if (success) {
+        // Persist estimated prep time when provided by renderer.
+        if (normalizedEstimatedTime !== undefined) {
+          try {
+            let targetOrder = await dbManager.getOrderById(orderId as any);
+            if (!targetOrder) {
+              targetOrder = await dbManager.getOrderBySupabaseId(orderId as any);
+            }
+            if (targetOrder?.id) {
+              await withTimeout(
+                dbManager.executeQuery(
+                  `UPDATE orders SET estimated_time = ?, updated_at = ? WHERE id = ?`,
+                  [normalizedEstimatedTime, new Date().toISOString(), targetOrder.id]
+                ),
+                TIMING.DATABASE_QUERY_TIMEOUT,
+                'Update order estimated time'
+              );
+            }
+          } catch (etaError) {
+            console.warn('[IPC order:update-status] Failed to persist estimated_time (continuing):', etaError);
+          }
+        }
+
         // Update activity for session management
         authService?.updateActivity();
 
@@ -209,7 +232,11 @@ export function registerOrderStatusHandlers(): void {
 
         // Notify renderer
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('order-status-updated', { orderId, status: coercedStatus });
+          mainWindow.webContents.send('order-status-updated', {
+            orderId,
+            status: coercedStatus,
+            estimatedTime: normalizedEstimatedTime,
+          });
         }
 
         console.log('[IPC order:update-status] 📤 Returning success', { orderId, status: coercedStatus });
@@ -252,8 +279,7 @@ export function registerOrderStatusHandlers(): void {
 
       const currentSession = staffAuthService?.getCurrentSession();
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
 
       if (!hasPerm && !currentSession && !terminalTrusted) {
         console.warn('[IPC order:update-type] Permission denied');

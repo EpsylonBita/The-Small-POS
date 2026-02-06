@@ -252,6 +252,32 @@ const splitOrdersForState = (orders: Order[]): { orders: Order[]; pendingExterna
   return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
 };
 
+const invokeElectronIpc = async (channel: string, ...args: any[]): Promise<any> => {
+  if (typeof window === 'undefined') {
+    throw new Error('Electron IPC is unavailable outside renderer context');
+  }
+
+  const electronAPI = (window as any).electronAPI;
+  if (typeof electronAPI?.invoke === 'function') {
+    return electronAPI.invoke(channel, ...args);
+  }
+  if (typeof electronAPI?.ipcRenderer?.invoke === 'function') {
+    return electronAPI.ipcRenderer.invoke(channel, ...args);
+  }
+
+  const electron = (window as any).electron;
+  if (typeof electron?.ipcRenderer?.invoke === 'function') {
+    return electron.ipcRenderer.invoke(channel, ...args);
+  }
+
+  throw new Error(`Electron IPC channel not available: ${channel}`);
+};
+
+const findOrderInState = (state: Pick<OrderStore, 'orders' | 'pendingExternalOrders'>, orderId: string): Order | null => {
+  const combined = [...state.orders, ...state.pendingExternalOrders];
+  return combined.find((order) => order.id === orderId) || null;
+};
+
 const findOrderIndex = (orders: Order[], incoming: any): number => {
   return orders.findIndex((order) =>
     order.id === incoming.id ||
@@ -979,35 +1005,50 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       }
     },
 
-         updatePaymentStatus: async (orderId: string, paymentStatus: NonNullable<Order['paymentStatus']>, paymentMethod?: Order['paymentMethod'], transactionId?: string) => {
-       try {
-         // Update local state optimistically
-           set((state) => {
-             const combined = [...state.orders, ...state.pendingExternalOrders];
-             const updatedOrders = combined.map(order =>
-               order.id === orderId
-                 ? {
-                     ...order,
-                     paymentStatus,
-                     paymentMethod: paymentMethod || order.paymentMethod,
-                     paymentTransactionId: transactionId || order.paymentTransactionId,
-                     updatedAt: new Date().toISOString()
-                   }
-                 : order
-             );
-             return splitOrdersForState(updatedOrders as Order[]);
-           });
+    updatePaymentStatus: async (orderId: string, paymentStatus: NonNullable<Order['paymentStatus']>, paymentMethod?: Order['paymentMethod'], transactionId?: string) => {
+      try {
+        // Update local state optimistically
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updatedOrders = combined.map(order =>
+            order.id === orderId
+              ? {
+                  ...order,
+                  paymentStatus,
+                  paymentMethod: paymentMethod || order.paymentMethod,
+                  paymentTransactionId: transactionId || order.paymentTransactionId,
+                  updatedAt: new Date().toISOString()
+                }
+              : order
+          );
+          return splitOrdersForState(updatedOrders as Order[]);
+        });
 
 
-         get()._invalidateCache();
+        get()._invalidateCache();
 
-         // TODO: Sync with backend when payment API is available
-         return true;
-       } catch (error) {
-         console.error('Failed to update payment status:', error);
-         return false;
-       }
-     },
+        const response = await invokeElectronIpc('payment:update-payment-status', {
+          orderId,
+          paymentStatus,
+          paymentMethod,
+          transactionId,
+        });
+
+        if (!response?.success) {
+          throw new Error(response?.error || 'Failed to persist payment status');
+        }
+
+        return true;
+      } catch (error) {
+        console.error('Failed to update payment status:', error);
+        try {
+          await get().silentRefresh();
+        } catch (refreshError) {
+          console.debug('Silent refresh after payment update failure also failed:', refreshError);
+        }
+        return false;
+      }
+    },
 
      processPayment: async (orderId: string, paymentData: { method: Order['paymentMethod']; amount: number; [key: string]: any }) => {
        try {
@@ -1025,16 +1066,36 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       return await get().updateOrderStatus(orderId, status);
     },
 
-         printKitchenTicket: async (orderId: string) => {
-       try {
-         // Simulate printing for now - TODO: implement kitchen printing API
-         // Kitchen ticket printing would be implemented here
-         return { success: true };
-       } catch (error) {
-         console.error('Failed to print kitchen ticket:', error);
-         return { success: false, error: 'Printing failed' };
-       }
-     },
+    printKitchenTicket: async (orderId: string) => {
+      try {
+        const order = findOrderInState(get(), orderId);
+        if (!order) {
+          throw new Error('Order not found');
+        }
+
+        const result = await invokeElectronIpc('kitchen:print-ticket', {
+          id: order.id,
+          orderId: order.id,
+          orderNumber: order.orderNumber || (order as any).order_number,
+          customerName: order.customerName || (order as any).customer_name || 'Walk-in',
+          orderType: order.orderType || (order as any).order_type || 'pickup',
+          tableNumber: order.tableNumber || (order as any).table_number || null,
+          notes: order.notes || (order as any).special_instructions || null,
+          createdAt: order.createdAt || (order as any).created_at || new Date().toISOString(),
+          estimatedTime: order.estimatedTime || (order as any).estimated_time || null,
+          items: order.items || [],
+        });
+
+        if (!result?.success) {
+          throw new Error(result?.error || 'Kitchen print failed');
+        }
+
+        return { success: true };
+      } catch (error) {
+        console.error('Failed to print kitchen ticket:', error);
+        return { success: false, error: error instanceof Error ? error.message : 'Printing failed' };
+      }
+    },
 
     getKitchenOrders: () => {
       const state = get();
@@ -1043,29 +1104,49 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       );
     },
 
-         updateEstimatedTime: async (orderId: string, estimatedTime: number) => {
-       try {
-         // Update local state optimistically
-           set((state) => {
-             const combined = [...state.orders, ...state.pendingExternalOrders];
-             const updatedOrders = combined.map(order =>
-               order.id === orderId
-                 ? { ...order, estimatedTime, updatedAt: new Date().toISOString() }
-                 : order
-             );
-             return splitOrdersForState(updatedOrders as Order[]);
-           });
+    updateEstimatedTime: async (orderId: string, estimatedTime: number) => {
+      try {
+        // Update local state optimistically
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updatedOrders = combined.map(order =>
+            order.id === orderId
+              ? { ...order, estimatedTime, updatedAt: new Date().toISOString() }
+              : order
+          );
+          return splitOrdersForState(updatedOrders as Order[]);
+        });
 
 
-         get()._invalidateCache();
+        get()._invalidateCache();
 
-         // TODO: Sync with backend when estimated time API is available
-         return true;
-       } catch (error) {
-         console.error('Failed to update estimated time:', error);
-         return false;
-       }
-     },
+        const order = findOrderInState(get(), orderId);
+        if (!order) {
+          throw new Error('Order not found');
+        }
+
+        const currentStatus = mapStatusForPOS(order.status as any);
+        const response = await invokeElectronIpc('order:update-status', {
+          orderId,
+          status: currentStatus,
+          estimatedTime,
+        });
+
+        if (!response?.success) {
+          throw new Error(response?.error || 'Failed to persist estimated time');
+        }
+
+        return true;
+      } catch (error) {
+        console.error('Failed to update estimated time:', error);
+        try {
+          await get().silentRefresh();
+        } catch (refreshError) {
+          console.debug('Silent refresh after estimated time update failure also failed:', refreshError);
+        }
+        return false;
+      }
+    },
 
     // Order approval methods
     approveOrder: async (orderId: string, estimatedTime?: number) => {

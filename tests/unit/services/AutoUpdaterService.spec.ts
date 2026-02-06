@@ -131,7 +131,13 @@ describe('AutoUpdaterService', () => {
                 eventMap['update-downloaded']({ version: '1.0.1' });
             }
 
-            service.installUpdate();
+            jest.useFakeTimers();
+            try {
+                service.installUpdate();
+                jest.runAllTimers();
+            } finally {
+                jest.useRealTimers();
+            }
             // Service calls: autoUpdater.quitAndInstall(); (no args in original code? Wait, checked code earlier.)
             // Original code: "autoUpdater.quitAndInstall();" (lines 177).
             // Wait, my comment in test says "CalledWith(false, true)".

@@ -95,7 +95,7 @@ export class ModuleSyncService {
 
   constructor(config: ModuleSyncServiceConfig) {
     this.config = {
-      adminDashboardUrl: config.adminDashboardUrl.replace(/\/$/, ''),
+      adminDashboardUrl: config.adminDashboardUrl ? config.adminDashboardUrl.replace(/\/$/, '') : '',
       syncIntervalMs: config.syncIntervalMs ?? 120000, // 2 minutes
       fetchTimeoutMs: config.fetchTimeoutMs ?? 30000, // 30 seconds
       maxReconnectAttempts: config.maxReconnectAttempts ?? 5,
@@ -205,6 +205,21 @@ export class ModuleSyncService {
   }
 
   /**
+   * Update admin dashboard URL dynamically (e.g., after pairing)
+   */
+  setAdminDashboardUrl(url: string): void {
+    const normalized = (url || '').trim().replace(/\/$/, '');
+    if (!normalized) {
+      console.warn('[ModuleSyncService] Ignoring empty admin dashboard URL update');
+      return;
+    }
+    if (this.config.adminDashboardUrl !== normalized) {
+      this.config.adminDashboardUrl = normalized;
+      console.log(`[ModuleSyncService] Admin dashboard URL updated: ${normalized}`);
+    }
+  }
+
+  /**
    * Fetch enabled modules from admin dashboard API
    *
    * @param terminalId - The terminal identifier
@@ -220,6 +235,10 @@ export class ModuleSyncService {
     // Validate inputs
     if (!terminalId || !apiKey) {
       console.warn('[ModuleSyncService] Missing terminalId or apiKey, skipping fetch');
+      return null;
+    }
+    if (!this.config.adminDashboardUrl) {
+      console.warn('[ModuleSyncService] Missing admin dashboard URL, skipping fetch');
       return null;
     }
 
@@ -414,13 +433,29 @@ export class ModuleSyncService {
     }
 
     try {
-      // Get terminal credentials from settings with fallback to environment variables
+      // Refresh admin dashboard URL from settings if available (pairing can happen after startup)
+      try {
+        const storedUrl = (await dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', '')) as string;
+        if (storedUrl) {
+          this.setAdminDashboardUrl(storedUrl);
+        }
+      } catch (e) {
+        console.warn('[ModuleSyncService] Failed to refresh admin URL from settings:', e);
+      }
+
+      if (!this.config.adminDashboardUrl) {
+        return {
+          success: false,
+          modules: null,
+          error: 'Admin dashboard URL not configured',
+        };
+      }
+
+      // Get terminal credentials from persisted terminal pairing config
       const terminalId = (await dbSvc.settings.getSetting('terminal', 'terminal_id', '') as string) 
         || process.env.TERMINAL_ID 
         || '';
       const apiKey = (await dbSvc.settings.getSetting('terminal', 'pos_api_key', '') as string)
-        || process.env.POS_API_KEY
-        || process.env.POS_API_SHARED_KEY
         || '';
 
       if (!terminalId || !apiKey) {

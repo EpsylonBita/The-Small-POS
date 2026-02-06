@@ -4,6 +4,7 @@ import { posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import toast from 'react-hot-toast';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../services/terminal-credentials';
 import {
   Users,
   Search,
@@ -115,13 +116,12 @@ const UsersPage: React.FC = () => {
 
       // Resolve POS API key and terminal id like AddCustomerModal
       const ls = typeof window !== 'undefined' ? window.localStorage : null
-      const posKey =
-        (ls?.getItem('pos_api_key') || '').trim() ||
-        (ls?.getItem('POS_API_KEY') || '').trim()
+      const refreshed = await refreshTerminalCredentialCache()
+      const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim()
       let termId = ''
       try {
         const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined)
-        termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '')
+        termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '')
       } catch {}
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -179,11 +179,12 @@ const UsersPage: React.FC = () => {
   // Helper to get POS auth headers
   const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
     const ls = typeof window !== 'undefined' ? window.localStorage : null;
-    const posKey = (ls?.getItem('pos_api_key') || '').trim() || (ls?.getItem('POS_API_KEY') || '').trim();
+    const refreshed = await refreshTerminalCredentialCache();
+    const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
     let termId = '';
     try {
       const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
-      termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '');
+      termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '');
     } catch {}
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (posKey) headers['x-pos-api-key'] = String(posKey);

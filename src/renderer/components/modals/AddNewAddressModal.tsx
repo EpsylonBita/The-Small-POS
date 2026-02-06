@@ -3,15 +3,17 @@ import { useTranslation } from 'react-i18next';
 import { MapPin, Home, User, Phone, Mail } from 'lucide-react';
 import { getApiUrl } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 
 // Helper to get POS auth headers
 const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
   const ls = typeof window !== 'undefined' ? window.localStorage : null;
-  const posKey = (ls?.getItem('pos_api_key') || '').trim() || (ls?.getItem('POS_API_KEY') || '').trim();
+  const refreshed = await refreshTerminalCredentialCache();
+  const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
   let termId = '';
   try {
     const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
-    termId = (await electron?.getTerminalId?.()) || (ls?.getItem('terminal_id') || '');
+    termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '');
   } catch {}
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (posKey) headers['x-pos-api-key'] = String(posKey);

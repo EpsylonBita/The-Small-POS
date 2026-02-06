@@ -13,6 +13,7 @@ import { CustomerCacheService } from './CustomerCacheService';
 import { CustomerDataService } from './CustomerDataService';
 import { DataIntegrityService } from './DataIntegrityService';
 import { OrphanedRecordCleanup } from './OrphanedRecordCleanup';
+import { deleteTerminalApiKey } from '../lib/secure-credentials';
 
 // Import error handling utilities
 import { ErrorFactory, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
@@ -1579,6 +1580,7 @@ export class DatabaseService {
       safeClearTable('pos_local_config');
       safeClearTable('local_settings');
       safeClearTable('terminal_settings');
+      deleteTerminalApiKey();
 
       // Clear cash drawer sessions
       safeClearTable('cash_drawer_sessions');

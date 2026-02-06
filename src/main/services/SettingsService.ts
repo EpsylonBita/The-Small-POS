@@ -1,6 +1,11 @@
 import Database from 'better-sqlite3';
 import { BaseService } from './BaseService';
 import type { PrinterManager } from '../printer/services/PrinterManager';
+import {
+  deleteTerminalApiKey,
+  getTerminalApiKey,
+  storeTerminalApiKey,
+} from '../lib/secure-credentials';
 
 // Database row interfaces
 interface SettingsRow {
@@ -62,11 +67,14 @@ export type SettingCategory =
 
 export class SettingsService extends BaseService {
   private printerManager: PrinterManager | null = null;
+  private static readonly SENSITIVE_TERMINAL_CATEGORY: SettingCategory = 'terminal';
+  private static readonly SENSITIVE_TERMINAL_API_KEY = 'pos_api_key';
 
   constructor(database: Database.Database) {
     super(database);
     this.initializeDefaultSettings();
     this.cleanupDeprecatedSettings();
+    this.migrateLegacyTerminalApiKeyToSecureStorage();
   }
 
   /**
@@ -77,6 +85,70 @@ export class SettingsService extends BaseService {
    */
   setPrinterManager(printerManager: PrinterManager | null): void {
     this.printerManager = printerManager;
+  }
+
+  private isSensitiveTerminalApiKey(category: SettingCategory, key: string): boolean {
+    return (
+      category === SettingsService.SENSITIVE_TERMINAL_CATEGORY &&
+      key === SettingsService.SENSITIVE_TERMINAL_API_KEY
+    );
+  }
+
+  private normalizeSensitiveValue(value: unknown): string {
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+    if (value === null || value === undefined) {
+      return '';
+    }
+    return String(value).trim();
+  }
+
+  private clearPlaintextTerminalApiKeyRow(): void {
+    const stmt = this.db.prepare(`
+      DELETE FROM local_settings
+      WHERE setting_category = ? AND setting_key = ?
+    `);
+    stmt.run(
+      SettingsService.SENSITIVE_TERMINAL_CATEGORY,
+      SettingsService.SENSITIVE_TERMINAL_API_KEY
+    );
+  }
+
+  private migrateLegacyTerminalApiKeyToSecureStorage(): void {
+    try {
+      const stmt = this.db.prepare(`
+        SELECT setting_value FROM local_settings
+        WHERE setting_category = ? AND setting_key = ?
+      `);
+      const row = stmt.get(
+        SettingsService.SENSITIVE_TERMINAL_CATEGORY,
+        SettingsService.SENSITIVE_TERMINAL_API_KEY
+      ) as SettingsRow | undefined;
+
+      if (!row) {
+        return;
+      }
+
+      let parsedValue: unknown = null;
+      try {
+        parsedValue = JSON.parse(row.setting_value);
+      } catch {
+        parsedValue = null;
+      }
+
+      const normalized = this.normalizeSensitiveValue(parsedValue);
+      if (normalized) {
+        storeTerminalApiKey(normalized);
+      } else {
+        deleteTerminalApiKey();
+      }
+
+      this.clearPlaintextTerminalApiKeyRow();
+      console.log('[SettingsService] Migrated terminal.pos_api_key to secure storage');
+    } catch (error) {
+      console.error('[SettingsService] Failed to migrate terminal.pos_api_key:', error);
+    }
   }
 
   // Initialize default settings on first run
@@ -121,6 +193,17 @@ export class SettingsService extends BaseService {
 
   // Local Settings Management
   setSetting(category: SettingCategory, key: string, value: unknown): void {
+    if (this.isSensitiveTerminalApiKey(category, key)) {
+      const normalized = this.normalizeSensitiveValue(value);
+      if (normalized) {
+        storeTerminalApiKey(normalized);
+      } else {
+        deleteTerminalApiKey();
+      }
+      this.clearPlaintextTerminalApiKeyRow();
+      return;
+    }
+
     this.executeTransaction(() => {
       const setting: LocalSettings = {
         id: this.generateId(),
@@ -148,6 +231,37 @@ export class SettingsService extends BaseService {
   }
 
   getSetting<T = unknown>(category: SettingCategory, key: string, defaultValue?: T): T | null {
+    if (this.isSensitiveTerminalApiKey(category, key)) {
+      const secureValue = getTerminalApiKey();
+      if (secureValue) {
+        return secureValue as T;
+      }
+
+      const legacyStmt = this.db.prepare(`
+        SELECT setting_value FROM local_settings
+        WHERE setting_category = ? AND setting_key = ?
+      `);
+      const legacyRow = legacyStmt.get(category, key) as SettingsRow | undefined;
+      if (!legacyRow) {
+        return defaultValue !== undefined ? defaultValue : null;
+      }
+
+      try {
+        const parsed = JSON.parse(legacyRow.setting_value);
+        const normalized = this.normalizeSensitiveValue(parsed);
+        if (normalized) {
+          storeTerminalApiKey(normalized);
+        } else {
+          deleteTerminalApiKey();
+        }
+        this.clearPlaintextTerminalApiKeyRow();
+        return (normalized || (defaultValue !== undefined ? defaultValue : null)) as T | null;
+      } catch (error) {
+        console.error('Error parsing sensitive terminal setting value:', error);
+        return defaultValue !== undefined ? defaultValue : null;
+      }
+    }
+
     const stmt = this.db.prepare(`
       SELECT setting_value FROM local_settings 
       WHERE setting_category = ? AND setting_key = ?
@@ -181,10 +295,16 @@ export class SettingsService extends BaseService {
     const stmt = this.db.prepare(query);
     const rows = stmt.all(...params) as SettingsRow[];
 
-    return rows.map(row => this.mapRowToSetting(row));
+    return rows
+      .filter(row => !this.isSensitiveTerminalApiKey(row.setting_category, row.setting_key))
+      .map(row => this.mapRowToSetting(row));
   }
 
   deleteSetting(category: SettingCategory, key: string): boolean {
+    if (this.isSensitiveTerminalApiKey(category, key)) {
+      deleteTerminalApiKey();
+    }
+
     const stmt = this.db.prepare(`
       DELETE FROM local_settings 
       WHERE setting_category = ? AND setting_key = ?
@@ -306,6 +426,17 @@ export class SettingsService extends BaseService {
       const now = this.getCurrentTimestamp();
 
       for (const setting of settings) {
+        if (this.isSensitiveTerminalApiKey(setting.category, setting.key)) {
+          const normalized = this.normalizeSensitiveValue(setting.value);
+          if (normalized) {
+            storeTerminalApiKey(normalized);
+          } else {
+            deleteTerminalApiKey();
+          }
+          this.clearPlaintextTerminalApiKeyRow();
+          continue;
+        }
+
         stmt.run(
           this.generateId(),
           setting.category,
@@ -360,6 +491,11 @@ export class SettingsService extends BaseService {
       } catch (error) {
         result[key] = setting.setting_value;
       }
+    }
+
+    const terminalApiKey = this.getSetting<string>('terminal', 'pos_api_key', '');
+    if (terminalApiKey) {
+      result['terminal.pos_api_key'] = terminalApiKey;
     }
 
     return result;
@@ -804,6 +940,17 @@ export class SettingsService extends BaseService {
       const now = this.getCurrentTimestamp();
 
       for (const setting of settings) {
+        if (this.isSensitiveTerminalApiKey(setting.category, setting.key)) {
+          const normalized = this.normalizeSensitiveValue(setting.value);
+          if (normalized) {
+            storeTerminalApiKey(normalized);
+          } else {
+            deleteTerminalApiKey();
+          }
+          this.clearPlaintextTerminalApiKeyRow();
+          continue;
+        }
+
         stmt.run(
           this.generateId(),
           setting.category,

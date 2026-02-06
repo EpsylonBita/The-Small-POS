@@ -20,8 +20,6 @@ export interface EnvironmentConfig {
   PAYMENT_MODE: 'test' | 'production';
   PAYMENT_TEST_CARDS_ENABLED: boolean;
   DEBUG_LOGGING: boolean;
-  POS_API_SHARED_KEY: string;
-  POS_API_KEY: string;
   TERMINAL_ID: string;
 }
 
@@ -60,8 +58,6 @@ function initializeEnvironment(): EnvironmentConfig {
     PAYMENT_MODE: getEnvVar('PAYMENT_MODE', 'test') as 'test' | 'production',
     PAYMENT_TEST_CARDS_ENABLED: getEnvVar('PAYMENT_TEST_CARDS_ENABLED', 'true') === 'true',
     DEBUG_LOGGING: getEnvVar('DEBUG_LOGGING', 'true') === 'true',
-    POS_API_SHARED_KEY: getEnvVar('POS_API_SHARED_KEY', getEnvVar('POS_SYNC_SHARED_KEY', '')),
-    POS_API_KEY: getEnvVar('POS_API_KEY', ''),
     TERMINAL_ID: getEnvVar('TERMINAL_ID', '')
   };
 }

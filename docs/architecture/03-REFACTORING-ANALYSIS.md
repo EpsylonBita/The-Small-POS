@@ -32,7 +32,7 @@ pos-system/
 │   │   ├── database.ts          # SQLite manager
 │   │   ├── auth-service.ts      # Authentication
 │   │   ├── sync-service.ts      # Supabase sync ⚠️ DUPLICATE
-│   │   ├── admin-dashboard-sync-service.ts  # Admin sync ⚠️ DUPLICATE
+│   │   ├── (deleted) AdminDashboardSyncService.ts  # Removed: superseded by services/AdminDashboardSyncService.ts
 │   │   ├── preload.ts           # ⚠️ DUPLICATE (old)
 │   │   └── services/            # Service layer
 │   ├── preload/
@@ -74,7 +74,7 @@ pos-system/
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  POS System - Sync Services                                 │
-│  • admin-dashboard-sync-service.ts  (Menu, Settings)        │
+│  • AdminDashboardSyncService.ts     (Menu, Settings)        │
 │  • sync-service.ts                  (Orders, Customers)     │
 └─────────────────────────────────────────────────────────────┘
                            │
@@ -132,7 +132,7 @@ pos-system/
 
 **Location:**
 - `src/main/sync-service.ts` (Supabase direct sync)
-- `src/main/admin-dashboard-sync-service.ts` (Admin API sync)
+- `src/main/services/AdminDashboardSyncService.ts` (Admin API sync — legacy basic file removed)
 
 **Impact:**
 - Unclear separation of concerns
@@ -401,7 +401,7 @@ mv interact-with-pos.js tests/utilities/interact-with-pos.js
 ```
 Admin Dashboard (Supabase)
   ↓ HTTP GET /api/pos/menu-sync
-admin-dashboard-sync-service.ts
+AdminDashboardSyncService.ts
   ↓ Store in SQLite
 Local Database (menu_categories, menu_items)
   ↓ IPC invoke('menu:get-all')
@@ -412,7 +412,7 @@ React Components (MenuPage, MenuCategoryTabs)
 ```
 Admin Dashboard (pos_configurations table)
   ↓ HTTP GET /api/pos/settings/:terminal_id
-admin-dashboard-sync-service.ts
+AdminDashboardSyncService.ts
   ↓ Store in SQLite
 Local Database (local_settings, pos_local_config)
   ↓ IPC invoke('settings:get-local')

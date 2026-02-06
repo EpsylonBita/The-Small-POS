@@ -1,8 +1,8 @@
 import type { Database } from '../types/database';
-import { getSupabaseClient } from '../../shared/supabase-config';
+import { supabase as sharedSupabase } from '../../shared/supabase';
 
-// Use centralized shared configuration for Supabase
-export const supabase = getSupabaseClient() as any as import('@supabase/supabase-js').SupabaseClient<Database>;
+// Use centralized shared configuration for Supabase (lazy proxy)
+export const supabase = sharedSupabase as any as import('@supabase/supabase-js').SupabaseClient<Database>;
 
 // Optional: simple connection test (can be invoked manually during diagnostics)
 export const testSupabaseConnection = async (): Promise<boolean> => {

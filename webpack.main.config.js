@@ -75,15 +75,13 @@ module.exports = (env, argv) => {
       },
       {
         'better-sqlite3': 'commonjs better-sqlite3',
-      // Database encryption dependencies (optional - for production)
-      '@journeyapps/sqlcipher': 'commonjs @journeyapps/sqlcipher',
-      'node-machine-id': 'commonjs node-machine-id',
-      'bufferutil': 'commonjs bufferutil',
-      'utf-8-validate': 'commonjs utf-8-validate',
-      // Native printer modules - optional dependencies
-      'bluetooth-serial-port': 'commonjs bluetooth-serial-port',
-      'usb': 'commonjs usb',
-      'serialport': 'commonjs serialport'
+        'node-machine-id': 'commonjs node-machine-id',
+        'bufferutil': 'commonjs bufferutil',
+        'utf-8-validate': 'commonjs utf-8-validate',
+        // Native printer modules - optional dependencies
+        'bluetooth-serial-port': 'commonjs bluetooth-serial-port',
+        'usb': 'commonjs usb',
+        'serialport': 'commonjs serialport'
       }
     ],
     optimization: {

@@ -35,8 +35,7 @@ function getTerminalCredentials(): { terminalId: string; apiKey: string } {
   const settingsService = serviceRegistry.get('settingsService');
   const terminalId = (settingsService?.getSetting?.('terminal', 'terminal_id', '') as string) || '';
   const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-  const envApiKey = (process.env['POS_API_KEY'] || process.env['POS_API_SHARED_KEY'] || '').trim();
-  return { terminalId, apiKey: terminalApiKey || envApiKey };
+  return { terminalId, apiKey: terminalApiKey };
 }
 
 export function registerOrderWorkflowHandlers(): void {
@@ -66,8 +65,7 @@ export function registerOrderWorkflowHandlers(): void {
 
       const currentSession = staffAuthService?.getCurrentSession();
       const terminalApiKey = (settingsService?.getSetting?.('terminal', 'pos_api_key', '') as string) || '';
-      const envApiKey = (process.env.POS_API_KEY || process.env.POS_API_SHARED_KEY || '').trim();
-      const terminalTrusted = !!terminalApiKey || !!envApiKey;
+      const terminalTrusted = !!terminalApiKey;
 
       if (!hasPerm && !currentSession && !terminalTrusted) {
         return { success: false, error: 'Insufficient permissions' };

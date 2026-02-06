@@ -1051,7 +1051,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const deliveries = freshSummary?.driverDeliveries || [];
       const completedDeliveries = deliveries.filter((d: any) => {
         const status = (d.status || d.order_status || '').toLowerCase();
-        return status !== 'cancelled' && status !== 'canceled';
+        return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
       });
       const totalCashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
@@ -1370,7 +1370,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const getStatusSymbol = (delivery: any): React.ReactNode => {
     const rawStatus = delivery.status || delivery.order_status || '';
     const normalizedStatus = rawStatus.toLowerCase();
-    const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled';
+    const isCanceled = normalizedStatus === 'cancelled' || normalizedStatus === 'canceled' || normalizedStatus === 'refunded';
     return isCanceled
       ? <XCircle className="w-4 h-4 text-red-400" />
       : <CheckCircle className="w-4 h-4 text-green-400" />;
@@ -1545,7 +1545,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             <div className="space-y-4">
               {/* Step 1: Select Staff */}
               {checkInStep === 'select-staff' && (
-                <div className="space-y-4">
+                <div className="space-y-4" data-testid="staff-select-section">
                   <h3 className="text-xl font-bold liquid-glass-modal-text mb-4">{t('modals.staffShift.selectStaff')}</h3>
                   {loading ? (
                     <div className="text-center py-12">
@@ -1969,7 +1969,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
           {effectiveMode === 'checkout' && (
             // Check-out Form - SIMPLIFIED
-            <div className="space-y-4">
+            <div className="space-y-4" data-testid="staff-checkout-section">
               {/* Shift Summary */}
               {localMode === 'checkout' && (
                 <button
@@ -2300,7 +2300,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                 const canceledOrders = deliveries.filter((d: any) => {
                   const s = (d.status || d.order_status || '').toLowerCase();
-                  return s === 'cancelled' || s === 'canceled';
+                  return s === 'cancelled' || s === 'canceled' || s === 'refunded';
                 });
                 const canceledCount = canceledOrders.length;
 
@@ -3292,7 +3292,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 const deliveries = shiftSummary?.driverDeliveries || [];
                 const completedDeliveries = deliveries.filter((d: any) => {
                   const status = (d.status || d.order_status || '').toLowerCase();
-                  return status !== 'cancelled' && status !== 'canceled';
+                  return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
                 });
 
                 // Calculate cash collected from completed deliveries only

@@ -1493,8 +1493,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       setIsBulkActionLoading(false);
     }
 
-    // Handle other bulk actions here
-    // TODO: Implement other bulk actions (map, etc.)
   };
 
   // Handle clearing selection

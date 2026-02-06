@@ -874,21 +874,19 @@ class MenuService {
   // Method to check ingredient availability and update stock
   async checkIngredientAvailability(ingredientId: string): Promise<boolean> {
     try {
-      // TODO: Ingredients table not yet created in database schema
-      // const { data, error } = await supabase
-      //   .from('ingredients')
-      //   .select('is_available, stock_quantity, min_stock_level')
-      //   .eq('id', ingredientId)
-      //   .single();
+      const { data, error } = await supabase
+        .from('ingredients')
+        .select('is_available, stock_quantity, min_stock_level, current_stock, minimum_stock')
+        .eq('id', ingredientId)
+        .single();
 
-      // if (error || !data) {
-      //   return false;
-      // }
+      if (error || !data) {
+        return false;
+      }
 
-      // return data.is_available && data.stock_quantity > data.min_stock_level;
-      
-      // Temporary: return true for all ingredients until ingredients table is created
-      return true;
+      const stockQuantity = Number(data.stock_quantity ?? data.current_stock ?? 0);
+      const minStockLevel = Number(data.min_stock_level ?? data.minimum_stock ?? 0);
+      return (data.is_available ?? true) && stockQuantity > minStockLevel;
     } catch (error) {
       console.error('Error checking ingredient availability:', error);
       return false;
@@ -960,6 +958,92 @@ class MenuService {
         preparation_time_buffer: 5,
         auto_categorize: true
       };
+    }
+  }
+
+  /**
+   * Fetch active menu combos/offers with their items
+   * Includes combo_type, BOGO fields, and category_choice items
+   */
+  async getMenuCombos(): Promise<any[]> {
+    const cacheKey = 'menu_combos';
+
+    // Return cached data if valid
+    if (this.isCacheValid(cacheKey)) {
+      return this.cache.get(cacheKey);
+    }
+
+    this.loadingStates.set(cacheKey, 'loading');
+
+    try {
+      const { data, error } = await withRetry(async () => {
+        return await withTimeout(
+          (async () => {
+            return await supabase
+              .from('menu_combos')
+              .select(`
+                *,
+                items:menu_combo_items(
+                  *,
+                  subcategory:subcategories(id, name, name_en, name_el, base_price, pickup_price, delivery_price, dine_in_price, image_url, is_customizable, max_ingredients, category_id),
+                  category:menu_categories(id, name, name_en, name_el)
+                )
+              `)
+              .eq('is_active', true)
+              .order('display_order', { ascending: true });
+          })(),
+          TIMING.MENU_LOAD_TIMEOUT,
+          'Fetch menu combos'
+        );
+      }, RETRY.MAX_RETRY_ATTEMPTS, RETRY.RETRY_DELAY_MS) as any;
+
+      if (error) {
+        throw ErrorFactory.network('Failed to fetch menu combos');
+      }
+
+      // Filter combos that are currently available (time restrictions)
+      const now = new Date();
+      const availableCombos = (data || []).filter((combo: any) => {
+        if (!combo.has_time_restriction) return true;
+
+        // Check valid_from/valid_until
+        if (combo.valid_from && new Date(combo.valid_from) > now) return false;
+        if (combo.valid_until && new Date(combo.valid_until) < now) return false;
+
+        // Check day of week
+        const dayOfWeek = now.getDay();
+        if (combo.available_days && !combo.available_days.includes(dayOfWeek)) return false;
+
+        // Check time of day
+        const currentTime = now.toTimeString().slice(0, 5);
+        if (combo.start_time && currentTime < combo.start_time) return false;
+        if (combo.end_time && currentTime > combo.end_time) return false;
+
+        return true;
+      });
+
+      // Sort items within each combo by display_order
+      for (const combo of availableCombos) {
+        if (combo.items) {
+          combo.items.sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0));
+        }
+      }
+
+      this.setCache(cacheKey, availableCombos);
+      this.loadingStates.set(cacheKey, 'loaded');
+      return availableCombos;
+    } catch (error) {
+      this.loadingStates.set(cacheKey, 'error');
+      const posError = this.errorHandler.handle(error);
+      console.error('Error fetching menu combos:', posError);
+
+      // Return cached data if available
+      if (this.cache.has(cacheKey)) {
+        console.warn('Returning cached menu combos due to error');
+        return this.cache.get(cacheKey);
+      }
+
+      return [];
     }
   }
 

@@ -67,8 +67,6 @@
     "buffer": "^6.0.3",
     "compression-webpack-plugin": "^11.1.0",
     "concurrently": "^8.2.2",
-    "crypto": "^1.0.1",
-    "crypto-browserify": "^3.3.0",
     "css-loader": "^6.8.1",
     "dotenv": "^17.2.3",
     "electron": "^39.0.0",
@@ -99,14 +97,13 @@
   },
   "dependencies": {
     "@emotion/is-prop-valid": "^1.4.0",
-    "@journeyapps/sqlcipher": "^5.3.1",
     "@point-of-sale/network-receipt-printer": "^2.0.1",
     "@point-of-sale/receipt-printer-encoder": "^3.0.3",
     "@supabase/supabase-js": "^2.50.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/dompurify": "^3.0.5",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
-    "@types/dompurify": "^3.0.5",
     "@types/react-virtualized-auto-sizer": "^1.0.4",
     "@types/react-window": "^1.8.8",
     "autoprefixer": "^10.4.16",
@@ -135,7 +132,6 @@
     "tailwindcss": "^3.3.6",
     "usb": "^2.16.0",
     "uuid": "^11.1.0",
-    "webbluetooth": "^3.3.2",
     "zod": "^4.2.1",
     "zustand": "^4.4.7"
   },
@@ -172,7 +168,6 @@
     "asarUnpack": [
       "**/*.node",
       "**/better-sqlite3/**/*",
-      "**/@journeyapps/sqlcipher/**/*",
       "**/serialport/**/*",
       "**/usb/**/*",
       "**/node-machine-id/**/*"
@@ -189,7 +184,7 @@
       ],
       "icon": "public/icon.ico",
       "verifyUpdateCodeSignature": true,
-      "signAndEditExecutable": false
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,
@@ -240,6 +235,7 @@
     ]
   },
   "overrides": {
-    "lucide-react": "$lucide-react"
+    "lucide-react": "$lucide-react",
+    "lodash": "^4.17.23"
   }
 }

@@ -10,7 +10,7 @@
  */
 
 import { supabase } from '../../shared/supabase';
-import { isSupabaseConfigured } from '../../shared/supabase-config';
+import { isSupabaseConfigured, setSupabaseContext } from '../../shared/supabase-config';
 import { DatabaseManager } from '../database';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import type { BusinessType } from '../../shared/types/organization';
@@ -31,6 +31,33 @@ export class TerminalConfigService {
   private currentSettings: TerminalSettings | null = null;
   private realtimeChannel: RealtimeChannel | null = null;
   private onUpdate?: (settings: TerminalSettings) => void;
+
+  private syncTerminalSettingsToLocalSettings(settings: TerminalSettings): void {
+    try {
+      const dbSvc = this.db.getDatabaseService?.();
+      const settingsSvc = dbSvc?.settings;
+      if (!settingsSvc) return;
+
+      if (settings.terminal_id) {
+        settingsSvc.setSetting('terminal', 'terminal_id', settings.terminal_id);
+      }
+      if (settings.branch_id) {
+        settingsSvc.setSetting('terminal', 'branch_id', settings.branch_id);
+      }
+      if (settings.organization_id) {
+        settingsSvc.setSetting('terminal', 'organization_id', settings.organization_id);
+      }
+
+      setSupabaseContext({
+        terminalId: settings.terminal_id,
+        organizationId: settings.organization_id || undefined,
+        branchId: settings.branch_id || undefined,
+        clientType: 'desktop',
+      });
+    } catch (error) {
+      console.warn('[TerminalConfigService] Failed to sync terminal settings to local settings:', error);
+    }
+  }
 
   constructor(terminalId: string, dbManager: DatabaseManager) {
     this.terminalId = terminalId;
@@ -140,6 +167,7 @@ export class TerminalConfigService {
 
         // Cache in local DB, but only update business_type if resolution succeeded
         await this.cacheSettings(settings, businessTypeResolutionFailed);
+        this.syncTerminalSettingsToLocalSettings(settings);
 
         console.log('[TerminalConfigService] Settings loaded successfully');
       } else {
@@ -171,6 +199,7 @@ export class TerminalConfigService {
           version: cached.version || 1,
           last_updated: cached.updated_at
         };
+        this.syncTerminalSettingsToLocalSettings(this.currentSettings);
         console.log('[TerminalConfigService] Loaded settings from local cache');
       }
     } catch (error) {

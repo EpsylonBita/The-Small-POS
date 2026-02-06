@@ -16,8 +16,14 @@
 
 import { getSupabaseClient, handleSupabaseError, isSupabaseConfigured } from './supabase-config';
 
-// Re-export the client for backward compatibility
-export const supabase = getSupabaseClient();
+// Re-export the client for backward compatibility (lazy via Proxy to keep headers fresh)
+export const supabase = new Proxy({} as ReturnType<typeof getSupabaseClient>, {
+  get(_target, prop) {
+    const client = getSupabaseClient() as any;
+    const value = client[prop as keyof typeof client];
+    return typeof value === 'function' ? value.bind(client) : value;
+  }
+}) as ReturnType<typeof getSupabaseClient>;
 
 // Export configuration check
 export { isSupabaseConfigured };

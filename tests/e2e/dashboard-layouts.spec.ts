@@ -13,6 +13,31 @@ import { test, expect, Page } from '@playwright/test';
 // Test configuration
 const DASHBOARD_LOAD_TIMEOUT = 5000;
 const METRICS_UPDATE_TIMEOUT = 35000; // 30s polling + buffer
+const MODULE_CACHE_KEY = 'pos-modules-cache';
+
+type E2EBusinessType =
+  | 'restaurant'
+  | 'salon'
+  | 'retail';
+
+async function setBusinessTypeForTest(page: Page, businessType: E2EBusinessType) {
+  const cache = {
+    enabledModuleIds: ['dashboard'],
+    lockedModuleIds: [],
+    lockedModulePlans: {},
+    businessType,
+    organizationId: 'org-e2e',
+    timestamp: Date.now(),
+  };
+
+  await page.goto('/');
+  await page.evaluate(
+    ({ key, value }) => localStorage.setItem(key, value),
+    { key: MODULE_CACHE_KEY, value: JSON.stringify(cache) }
+  );
+  await page.reload();
+  await waitForDashboardLoad(page);
+}
 
 // Helper function to wait for dashboard load
 async function waitForDashboardLoad(page: Page) {
@@ -88,9 +113,8 @@ test.describe('Food Dashboard Layout', () => {
 
 test.describe('Service Dashboard Layout', () => {
   test.beforeEach(async ({ page }) => {
-    // TODO: Set business type to service (salon/hotel) in test environment
-    await page.goto('/');
-    await waitForDashboardLoad(page);
+    // Force service vertical context via module cache so dashboard routing is deterministic.
+    await setBusinessTypeForTest(page, 'salon');
   });
 
   test('should display appropriate header for service business', async ({ page }) => {
@@ -112,9 +136,8 @@ test.describe('Service Dashboard Layout', () => {
 
 test.describe('Product Dashboard Layout', () => {
   test.beforeEach(async ({ page }) => {
-    // TODO: Set business type to product (retail) in test environment
-    await page.goto('/');
-    await waitForDashboardLoad(page);
+    // Force product vertical context via module cache so dashboard routing is deterministic.
+    await setBusinessTypeForTest(page, 'retail');
   });
 
   test('should display retail dashboard header', async ({ page }) => {
