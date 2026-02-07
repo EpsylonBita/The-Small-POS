@@ -44,17 +44,32 @@ export function formatNumber(value: number, options: Intl.NumberFormatOptions = 
 export function formatDate(value: Date | string | number, options: Intl.DateTimeFormatOptions = {}, locale?: string): string {
   const resolvedLocale = resolveLocale(locale)
   const date = value instanceof Date ? value : new Date(value)
-  return date.toLocaleDateString(resolvedLocale, options)
+  if (Number.isNaN(date.getTime())) return '-'
+  try {
+    return date.toLocaleDateString(resolvedLocale, options)
+  } catch {
+    return '-'
+  }
 }
 
 export function formatTime(value: Date | string | number, options: Intl.DateTimeFormatOptions = {}, locale?: string): string {
   const resolvedLocale = resolveLocale(locale)
   const date = value instanceof Date ? value : new Date(value)
-  return date.toLocaleTimeString(resolvedLocale, options)
+  if (Number.isNaN(date.getTime())) return '-'
+  try {
+    return date.toLocaleTimeString(resolvedLocale, options)
+  } catch {
+    return '-'
+  }
 }
 
 export function formatDateTime(value: Date | string | number, options: Intl.DateTimeFormatOptions = {}, locale?: string): string {
   const resolvedLocale = resolveLocale(locale)
   const date = value instanceof Date ? value : new Date(value)
-  return date.toLocaleString(resolvedLocale, options)
+  if (Number.isNaN(date.getTime())) return '-'
+  try {
+    return date.toLocaleString(resolvedLocale, options)
+  } catch {
+    return '-'
+  }
 }

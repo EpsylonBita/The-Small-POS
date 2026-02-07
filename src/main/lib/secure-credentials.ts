@@ -15,6 +15,11 @@ import * as path from 'path';
 
 const CREDENTIALS_FILE = 'credentials.enc';
 
+type KeytarLike = {
+  getPassword: (service: string, account: string) => Promise<string | null>;
+  deletePassword: (service: string, account: string) => Promise<boolean>;
+};
+
 interface CredentialsStore {
   'supabase-url'?: string;
   'supabase-anon-key'?: string;
@@ -33,6 +38,25 @@ export interface SupabaseCredentials {
  */
 function getCredentialsPath(): string {
   return path.join(app.getPath('userData'), CREDENTIALS_FILE);
+}
+
+/**
+ * Load optional modules without triggering static bundler resolution.
+ * Used for one-time migrations where the dependency may be absent.
+ */
+function loadOptionalModule<T>(moduleName: string): T | null {
+  try {
+    const nonWebpackRequire = (globalThis as { __non_webpack_require__?: (name: string) => unknown }).__non_webpack_require__;
+    if (typeof nonWebpackRequire === 'function') {
+      return nonWebpackRequire(moduleName) as T;
+    }
+
+    // eslint-disable-next-line no-new-func
+    const dynamicRequire = Function('return require')() as (name: string) => unknown;
+    return dynamicRequire(moduleName) as T;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -133,11 +157,8 @@ export async function migrateFromKeytar(): Promise<void> {
     }
 
     // Try to import keytar dynamically (may not be available after removal)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let keytar: any = null;
-    try {
-      keytar = require('keytar');
-    } catch {
+    const keytar = loadOptionalModule<KeytarLike>('keytar');
+    if (!keytar) {
       console.log('[SecureCredentials] keytar not available, skipping migration');
       // Mark as migrated even if keytar not available
       store._migrated = true;

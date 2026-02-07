@@ -178,6 +178,34 @@ export interface CustomizationPreset {
   display_order: number;
 }
 
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 class MenuService {
   private static instance: MenuService;
   private cache: Map<string, any> = new Map();
@@ -201,6 +229,19 @@ class MenuService {
   private setCache(key: string, data: any): void {
     this.cache.set(key, data);
     this.lastFetch.set(key, Date.now());
+  }
+
+  private async fetchViaIpc<T>(channel: string): Promise<T | null> {
+    const invoke = getIpcInvoke();
+    if (!invoke) return null;
+
+    try {
+      const result = await invoke(channel);
+      return (Array.isArray(result) ? result : null) as T | null;
+    } catch (error) {
+      console.warn(`[MenuService] IPC fetch failed for ${channel}:`, formatError(error));
+      return null;
+    }
   }
 
   getLoadingStatus(): {
@@ -227,6 +268,20 @@ class MenuService {
     this.loadingStates.set(cacheKey, 'loading');
 
     try {
+      const ipcCategories = await this.fetchViaIpc<any[]>('menu:get-categories');
+      if (ipcCategories) {
+        const filteredData = ipcCategories.filter((item: any) => {
+          const name = (item.name || item.name_en || '').toLowerCase();
+          if (name.includes('rls') || name.startsWith('test ')) return false;
+          return item.is_active !== false;
+        });
+
+        const normalized = filteredData.map((item: any) => this.normalizeMenuCategory(item));
+        this.setCache(cacheKey, normalized);
+        this.loadingStates.set(cacheKey, 'loaded');
+        return normalized;
+      }
+
       // Wrap Supabase query with timeout and retry
       const { data, error } = await withRetry(async () => {
         return await withTimeout(
@@ -262,7 +317,7 @@ class MenuService {
 
       // Log error
       const posError = this.errorHandler.handle(error);
-      console.error('Error fetching menu categories:', posError);
+      console.error('Error fetching menu categories:', formatError(posError));
 
       // Check if cached data exists and return it with warning
       if (this.cache.has(cacheKey)) {
@@ -610,6 +665,20 @@ class MenuService {
     this.loadingStates.set(cacheKey, 'loading');
 
     try {
+      const ipcItems = await this.fetchViaIpc<any[]>('menu:get-subcategories');
+      if (ipcItems) {
+        const filteredData = ipcItems.filter((item: any) => {
+          const name = (item.name || '').toLowerCase();
+          if (name.includes('rls') || name.startsWith('test ')) return false;
+          return item.is_available !== false;
+        });
+
+        const normalized = filteredData.map((item: any) => this.normalizeMenuItem(item));
+        this.setCache(cacheKey, normalized);
+        this.loadingStates.set(cacheKey, 'loaded');
+        return normalized;
+      }
+
       // Wrap Supabase query with timeout and retry
       const { data, error } = await withRetry(async () => {
         return await withTimeout(
@@ -650,7 +719,7 @@ class MenuService {
 
       // Log error
       const posError = this.errorHandler.handle(error);
-      console.error('Error fetching menu items:', posError);
+      console.error('Error fetching menu items:', formatError(posError));
 
       // Check if cached data exists and return it with warning
       if (this.cache.has(cacheKey)) {
@@ -723,34 +792,15 @@ class MenuService {
     }
 
     try {
-      // Wrap Supabase query with timeout
-      const { data, error } = await withTimeout(
-        (async () => {
-          return await supabase
-            .from('subcategories')
-            .select(`
-              *,
-              category:menu_categories(*)
-            `)
-            .eq('category_id', categoryId)
-            .eq('is_available', true)
-            .order('display_order', { ascending: true });
-        })(),
-        TIMING.MENU_LOAD_TIMEOUT,
-        'Fetch menu items by category'
-      ) as any;
-
-      if (error) {
-        throw ErrorFactory.network('Failed to fetch menu items by category');
-      }
-
-      const normalized = (data || []).map((item: any) => this.normalizeMenuItem(item));
+      // Reuse cached menu items source (IPC in Electron, Supabase fallback otherwise).
+      const allItems = await this.getMenuItems();
+      const normalized = allItems.filter((item) => item.category_id === categoryId);
       this.setCache(cacheKey, normalized);
       return normalized;
     } catch (error) {
       // Log error
       const posError = this.errorHandler.handle(error);
-      console.error('Error fetching menu items by category:', posError);
+      console.error('Error fetching menu items by category:', formatError(posError));
 
       // Check if cached data exists and return it with warning
       if (this.cache.has(cacheKey)) {
@@ -772,34 +822,14 @@ class MenuService {
     }
 
     try {
-      // Wrap Supabase query with timeout
-      const { data, error } = await withTimeout(
-        (async () => {
-          return await supabase
-            .from('subcategories')
-            .select(`
-              *,
-              category:menu_categories(*)
-            `)
-            .eq('is_customizable', true)
-            .eq('is_available', true)
-            .order('display_order', { ascending: true });
-        })(),
-        TIMING.MENU_LOAD_TIMEOUT,
-        'Fetch customizable items'
-      ) as any;
-
-      if (error) {
-        throw ErrorFactory.network('Failed to fetch customizable items');
-      }
-
-      const normalized = (data || []).map((item: any) => this.normalizeMenuItem(item));
+      const allItems = await this.getMenuItems();
+      const normalized = allItems.filter((item) => item.is_customizable === true);
       this.setCache(cacheKey, normalized);
       return normalized;
     } catch (error) {
       // Log error
       const posError = this.errorHandler.handle(error);
-      console.error('Error fetching customizable items:', posError);
+      console.error('Error fetching customizable items:', formatError(posError));
 
       // Check if cached data exists and return it with warning
       if (this.cache.has(cacheKey)) {
@@ -976,6 +1006,37 @@ class MenuService {
     this.loadingStates.set(cacheKey, 'loading');
 
     try {
+      const ipcCombos = await this.fetchViaIpc<any[]>('menu:get-combos');
+      if (ipcCombos) {
+        const now = new Date();
+        const availableCombos = ipcCombos.filter((combo: any) => {
+          if (combo?.is_active === false) return false;
+          if (!combo.has_time_restriction) return true;
+
+          if (combo.valid_from && new Date(combo.valid_from) > now) return false;
+          if (combo.valid_until && new Date(combo.valid_until) < now) return false;
+
+          const dayOfWeek = now.getDay();
+          if (combo.available_days && !combo.available_days.includes(dayOfWeek)) return false;
+
+          const currentTime = now.toTimeString().slice(0, 5);
+          if (combo.start_time && currentTime < combo.start_time) return false;
+          if (combo.end_time && currentTime > combo.end_time) return false;
+
+          return true;
+        });
+
+        for (const combo of availableCombos) {
+          if (combo.items) {
+            combo.items.sort((a: any, b: any) => (a.display_order || 0) - (b.display_order || 0));
+          }
+        }
+
+        this.setCache(cacheKey, availableCombos);
+        this.loadingStates.set(cacheKey, 'loaded');
+        return availableCombos;
+      }
+
       const { data, error } = await withRetry(async () => {
         return await withTimeout(
           (async () => {
@@ -1035,7 +1096,7 @@ class MenuService {
     } catch (error) {
       this.loadingStates.set(cacheKey, 'error');
       const posError = this.errorHandler.handle(error);
-      console.error('Error fetching menu combos:', posError);
+      console.error('Error fetching menu combos:', formatError(posError));
 
       // Return cached data if available
       if (this.cache.has(cacheKey)) {

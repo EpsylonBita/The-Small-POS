@@ -17,10 +17,9 @@ import {
   Edit3
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
-import { getApiUrl } from '../../config/environment';
 import { formatCurrency } from '../utils/format';
+import { posApiGet, posApiPatch } from '../utils/api-helpers';
 
 interface InventoryItem {
   id: string;
@@ -35,11 +34,59 @@ interface InventoryItem {
 }
 
 type StockStatus = 'all' | 'critical' | 'low' | 'good';
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function normalizeInventoryItem(item: any): InventoryItem {
+  const nameEn = typeof item?.name_en === 'string' && item.name_en.trim()
+    ? item.name_en
+    : (typeof item?.name === 'string' && item.name.trim() ? item.name : 'Unnamed item');
+
+  const nameEl = typeof item?.name_el === 'string' && item.name_el.trim()
+    ? item.name_el
+    : nameEn;
+
+  return {
+    id: String(item?.id || ''),
+    name_en: nameEn,
+    name_el: nameEl,
+    category_name: typeof item?.category_name === 'string' ? item.category_name : undefined,
+    stock_quantity: asNumber(item?.stock_quantity, 0),
+    min_stock_level: asNumber(item?.min_stock_level, 0),
+    cost_per_unit: asNumber(item?.cost_per_unit, 0),
+    unit_of_measurement: typeof item?.unit_of_measurement === 'string' && item.unit_of_measurement.trim()
+      ? item.unit_of_measurement
+      : 'pcs',
+    is_active: item?.is_active !== false,
+  };
+}
 
 const InventoryPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
   const [loading, setLoading] = useState(true);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -55,34 +102,35 @@ const InventoryPage: React.FC = () => {
   const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchInventory = useCallback(async () => {
-    if (!staff?.organizationId) return;
     setLoading(true);
     try {
-      const apiUrl = getApiUrl(`analytics/inventory?organization_id=${staff.organizationId}`);
-      const response = await fetch(apiUrl, {
-        headers: { 'Content-Type': 'application/json' }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setInventory(data.data?.ingredients || []);
-      } else {
-        // Mock data for demo
-        setInventory([
-          { id: '1', name_en: 'Flour', name_el: 'Αλεύρι', category_name: 'Dry Goods', stock_quantity: 50, min_stock_level: 20, cost_per_unit: 1.5, unit_of_measurement: 'kg', is_active: true },
-          { id: '2', name_en: 'Sugar', name_el: 'Ζάχαρη', category_name: 'Dry Goods', stock_quantity: 15, min_stock_level: 15, cost_per_unit: 1.2, unit_of_measurement: 'kg', is_active: true },
-          { id: '3', name_en: 'Butter', name_el: 'Βούτυρο', category_name: 'Dairy', stock_quantity: 5, min_stock_level: 10, cost_per_unit: 8.0, unit_of_measurement: 'kg', is_active: true },
-          { id: '4', name_en: 'Eggs', name_el: 'Αυγά', category_name: 'Dairy', stock_quantity: 0, min_stock_level: 30, cost_per_unit: 0.25, unit_of_measurement: 'pcs', is_active: true },
-          { id: '5', name_en: 'Milk', name_el: 'Γάλα', category_name: 'Dairy', stock_quantity: 25, min_stock_level: 10, cost_per_unit: 1.8, unit_of_measurement: 'L', is_active: true },
-          { id: '6', name_en: 'Chocolate', name_el: 'Σοκολάτα', category_name: 'Sweets', stock_quantity: 8, min_stock_level: 5, cost_per_unit: 12.0, unit_of_measurement: 'kg', is_active: true },
-        ]);
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', '/api/pos/sync/inventory_items?limit=2000');
+        if (result?.success && result?.data?.success !== false) {
+          const rows = Array.isArray(result?.data?.data) ? result.data.data : [];
+          const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
+          setInventory(normalized.filter((item: InventoryItem) => item.is_active));
+          return;
+        }
+        throw new Error(result?.error || result?.data?.error || 'Failed to fetch inventory');
       }
+
+      const result = await posApiGet<any>('pos/sync/inventory_items?limit=2000');
+      if (!result.success || result.data?.success === false) {
+        throw new Error(result.error || result.data?.error || 'Failed to fetch inventory');
+      }
+      const rows = Array.isArray(result.data?.data) ? result.data.data : [];
+      const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
+      setInventory(normalized.filter((item: InventoryItem) => item.is_active));
     } catch (error) {
       console.error('Failed to fetch inventory:', error);
       toast.error(t('inventory.errors.loadFailed', 'Failed to load inventory'));
+      setInventory([]);
     } finally {
       setLoading(false);
     }
-  }, [staff?.organizationId, t]);
+  }, [t]);
 
   useEffect(() => {
     fetchInventory();
@@ -119,27 +167,41 @@ const InventoryPage: React.FC = () => {
   const handleAdjustStock = async () => {
     if (!selectedItem || adjustmentQty === 0) return;
 
-    try {
-      const electron = (window as any).electronAPI;
-      const result = await electron?.fetchFromApi?.(
-        `/api/pos/inventory`,
-        {
-          method: 'PATCH',
-          body: JSON.stringify({
-            product_id: selectedItem.id,
-            adjustment: adjustmentQty,
-            reason: adjustmentReason,
-            notes: adjustmentNotes || undefined,
-          }),
-        }
-      );
+    const nextQuantity = selectedItem.stock_quantity + adjustmentQty;
+    if (nextQuantity < 0) {
+      toast.error(t('inventory.errors.adjustmentNegative', 'Adjustment would result in negative stock'));
+      return;
+    }
 
-      if (result?.success) {
-        toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
-        fetchInventory(); // Refresh data
+    try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke(
+          'api:fetch-from-admin',
+          `/api/pos/sync/inventory_items/${selectedItem.id}`,
+          {
+            method: 'PATCH',
+            body: {
+              stock_quantity: nextQuantity,
+            },
+          }
+        );
+
+        if (!result?.success || result?.data?.success === false) {
+          throw new Error(result?.error || result?.data?.error || 'Failed to adjust stock');
+        }
       } else {
-        toast.error(result?.error || t('inventory.errors.adjustmentFailed', 'Failed to adjust stock'));
+        const result = await posApiPatch<any>(`pos/sync/inventory_items/${selectedItem.id}`, {
+          stock_quantity: nextQuantity,
+        });
+
+        if (!result.success || result.data?.success === false) {
+          throw new Error(result.error || result.data?.error || 'Failed to adjust stock');
+        }
       }
+
+      toast.success(t('inventory.adjustmentSaved', 'Stock adjusted successfully'));
+      await fetchInventory();
     } catch (error) {
       console.error('Failed to adjust stock:', error);
       toast.error(t('inventory.errors.adjustmentFailed', 'Failed to adjust stock'));
@@ -390,4 +452,3 @@ const InventoryPage: React.FC = () => {
 };
 
 export default InventoryPage;
-

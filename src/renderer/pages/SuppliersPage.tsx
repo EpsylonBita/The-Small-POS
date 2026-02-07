@@ -17,7 +17,6 @@ import {
   Package
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency, formatDate } from '../utils/format';
 import { posApiGet } from '../utils/api-helpers';
@@ -47,10 +46,26 @@ interface Invoice {
   created_at: string;
 }
 
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
 const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
   const [loading, setLoading] = useState(true);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -62,12 +77,34 @@ const SuppliersPage: React.FC = () => {
   const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchSuppliers = useCallback(async () => {
-    if (!staff?.organizationId || !staff?.branchId) return;
     setLoading(true);
     try {
-      const result = await posApiGet<{ suppliers?: Supplier[]; invoices?: Invoice[] }>(
-        `pos/suppliers?organization_id=${staff.organizationId}&branch_id=${staff.branchId}`
-      );
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const syncResult = await invoke('sync:fetch-suppliers');
+        if (syncResult?.success) {
+          setSuppliers(Array.isArray(syncResult.suppliers) ? syncResult.suppliers : []);
+          setInvoices([]);
+          return;
+        }
+
+        // Fallback to generic sync endpoint if the dedicated POS suppliers route fails.
+        const fallbackResult = await invoke('api:fetch-from-admin', '/api/pos/sync/suppliers?limit=1000');
+        if (fallbackResult?.success && fallbackResult?.data?.success !== false) {
+          setSuppliers(Array.isArray(fallbackResult?.data?.data) ? fallbackResult.data.data : []);
+          setInvoices([]);
+          return;
+        }
+
+        throw new Error(
+          syncResult?.error ||
+          fallbackResult?.error ||
+          fallbackResult?.data?.error ||
+          'Failed to load suppliers'
+        );
+      }
+
+      const result = await posApiGet<{ suppliers?: Supplier[]; invoices?: Invoice[] }>('pos/suppliers');
       if (!result.success) {
         throw new Error(result.error || 'Failed to load suppliers');
       }
@@ -79,7 +116,7 @@ const SuppliersPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [staff?.organizationId, staff?.branchId, t]);
+  }, [t]);
 
   useEffect(() => {
     fetchSuppliers();

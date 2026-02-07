@@ -1,8 +1,8 @@
 /**
  * useTables Hook
- * 
- * Provides real-time table data with Supabase subscriptions.
- * Requirements: 1.6 - Update counts and lists on data changes within 2 seconds
+ *
+ * Provides real-time table data with authenticated POS sync APIs in Electron
+ * and Supabase fallback for non-Electron contexts.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -10,6 +10,8 @@ import type { RestaurantTable, TableAPIResponse, TableStatus } from '../types/ta
 import { transformTableFromAPI } from '../types/tables';
 import { supabase } from '../lib/supabase';
 import { reservationsService } from '../services/ReservationsService';
+
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
 
 interface UseTablesOptions {
   branchId: string;
@@ -25,8 +27,34 @@ interface UseTablesReturn {
   updateTableStatus: (tableId: string, status: TableStatus) => Promise<boolean>;
 }
 
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 /**
- * Hook for managing restaurant tables with real-time sync
+ * Hook for managing restaurant tables
  */
 export function useTables({ branchId, organizationId, enabled = true }: UseTablesOptions): UseTablesReturn {
   const [tables, setTables] = useState<RestaurantTable[]>([]);
@@ -34,7 +62,6 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
   const [error, setError] = useState<Error | null>(null);
   const subscriptionRef = useRef<(() => void) | null>(null);
 
-  // Fetch tables from the database
   const fetchTables = useCallback(async () => {
     if (!branchId || !organizationId || !enabled) {
       setTables([]);
@@ -46,7 +73,20 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
     setError(null);
 
     try {
-      // Fetch directly from Supabase
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('sync:fetch-tables');
+        if (!result?.success) {
+          throw new Error(result?.error || 'Failed to fetch tables via sync IPC');
+        }
+
+        const tableRows = Array.isArray(result.tables) ? result.tables : [];
+        const transformedTables = tableRows.map((t: any) => transformTableFromAPI(t as TableAPIResponse));
+        setTables(transformedTables);
+        return;
+      }
+
+      // Fallback for non-Electron contexts
       const { data, error: fetchError } = await (supabase as any)
         .from('restaurant_tables')
         .select('*')
@@ -55,17 +95,15 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
         .order('table_number', { ascending: true });
 
       if (fetchError) {
-        console.error('Failed to fetch tables from Supabase:', fetchError);
-        setError(new Error(fetchError.message));
-        setTables([]);
-      } else if (data && Array.isArray(data)) {
-        const transformedTables = data.map((t: any) => transformTableFromAPI(t as TableAPIResponse));
-        setTables(transformedTables);
-      } else {
-        setTables([]);
+        throw new Error(fetchError.message);
       }
+
+      const transformedTables = Array.isArray(data)
+        ? data.map((t: any) => transformTableFromAPI(t as TableAPIResponse))
+        : [];
+      setTables(transformedTables);
     } catch (err) {
-      console.error('Failed to fetch tables:', err);
+      console.error('[useTables] Failed to fetch tables:', formatError(err));
       setError(err instanceof Error ? err : new Error('Failed to fetch tables'));
       setTables([]);
     } finally {
@@ -73,18 +111,20 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
     }
   }, [branchId, organizationId, enabled]);
 
-  // Set up real-time subscription
   const setupRealtimeSubscription = useCallback(() => {
     if (!branchId || !organizationId || !enabled) return;
 
-    // Clean up existing subscription
     if (subscriptionRef.current) {
       subscriptionRef.current();
       subscriptionRef.current = null;
     }
 
+    // In Electron, realtime updates are coordinated by main-process sync and polling.
+    if (getIpcInvoke()) {
+      return;
+    }
+
     try {
-      // Subscribe directly to Supabase realtime
       const channel = supabase
         .channel(`tables-${branchId}`)
         .on(
@@ -96,27 +136,24 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
             filter: `branch_id=eq.${branchId}`,
           },
           (payload) => {
-            console.log('📡 Table realtime event:', payload.eventType, payload.new);
-            
-            setTables(prevTables => {
+            console.log('[useTables] Table realtime event:', payload.eventType);
+
+            setTables((prevTables) => {
               switch (payload.eventType) {
                 case 'INSERT': {
                   const newTable = transformTableFromAPI(payload.new as TableAPIResponse);
-                  // Check if table already exists
-                  if (prevTables.some(t => t.id === newTable.id)) {
+                  if (prevTables.some((t) => t.id === newTable.id)) {
                     return prevTables;
                   }
                   return [...prevTables, newTable];
                 }
                 case 'UPDATE': {
                   const updatedTable = transformTableFromAPI(payload.new as TableAPIResponse);
-                  return prevTables.map(t => 
-                    t.id === updatedTable.id ? updatedTable : t
-                  );
+                  return prevTables.map((t) => (t.id === updatedTable.id ? updatedTable : t));
                 }
                 case 'DELETE': {
                   const deletedId = (payload.old as any)?.id;
-                  return prevTables.filter(t => t.id !== deletedId);
+                  return prevTables.filter((t) => t.id !== deletedId);
                 }
                 default:
                   return prevTables;
@@ -129,68 +166,71 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
       subscriptionRef.current = () => {
         supabase.removeChannel(channel);
       };
-      console.log('✅ Table realtime subscription set up via Supabase');
+      console.log('[useTables] Table realtime subscription set up via Supabase');
     } catch (err) {
-      console.error('Failed to set up table subscription:', err);
+      console.error('[useTables] Failed to set up table subscription:', formatError(err));
     }
   }, [branchId, organizationId, enabled]);
 
-  // Update table status
   const updateTableStatus = useCallback(async (tableId: string, status: TableStatus): Promise<boolean> => {
     try {
-      // Optimistic update
-      setTables(prevTables =>
-        prevTables.map(t =>
+      setTables((prevTables) =>
+        prevTables.map((t) =>
           t.id === tableId
             ? { ...t, status, updatedAt: new Date().toISOString() }
             : t
         )
       );
 
-      // Update directly in Supabase
-      // Use type assertion since restaurant_tables may not be in generated types yet
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', `/api/pos/tables/${tableId}`, {
+          method: 'PATCH',
+          body: { status },
+        });
+
+        if (!result?.success || result?.data?.success === false) {
+          throw new Error(result?.error || result?.data?.error || 'Failed to update table status via API');
+        }
+
+        return true;
+      }
+
+      // Fallback for non-Electron contexts
       const { error: updateError } = await (supabase as any)
         .from('restaurant_tables')
-        .update({ 
-          status, 
-          updated_at: new Date().toISOString() 
+        .update({
+          status,
+          updated_at: new Date().toISOString(),
         })
         .eq('id', tableId);
 
       if (updateError) {
-        console.error('Failed to update table status:', updateError);
-        // Revert on failure
-        await fetchTables();
-        return false;
+        throw updateError;
       }
 
       return true;
     } catch (err) {
-      console.error('Failed to update table status:', err);
-      // Revert on error
+      console.error('[useTables] Failed to update table status:', formatError(err));
       await fetchTables();
       return false;
     }
   }, [fetchTables]);
 
-  // Initial fetch and sync table statuses for today's reservations
   useEffect(() => {
     const initializeTables = async () => {
       await fetchTables();
-      
-      // Sync table statuses based on today's reservations
+
       if (branchId && organizationId) {
         reservationsService.setContext(branchId, organizationId);
         await reservationsService.syncTableStatusesForToday();
-        // Refetch to get updated statuses
         await fetchTables();
       }
     };
-    
+
     initializeTables();
   }, [fetchTables, branchId, organizationId]);
 
-  // Set up realtime subscription
   useEffect(() => {
     setupRealtimeSubscription();
 
@@ -202,12 +242,11 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
     };
   }, [setupRealtimeSubscription]);
 
-  // Auto-refresh every 30 seconds as backup
   useEffect(() => {
     if (!enabled) return;
 
     const intervalId = setInterval(() => {
-      console.log('🔄 Auto-refreshing tables...');
+      console.log('[useTables] Auto-refreshing tables');
       fetchTables();
     }, 30000);
 

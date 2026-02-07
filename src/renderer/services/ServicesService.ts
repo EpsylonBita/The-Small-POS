@@ -2,12 +2,41 @@
  * ServicesService - POS Services Service
  * 
  * Provides service catalog management functionality for the POS system (Salon Vertical).
- * Uses direct Supabase connection for real-time data.
+ * In Electron, uses admin dashboard API via main-process IPC (terminal-authenticated).
+ * Falls back to direct Supabase only in non-Electron contexts.
  * 
  * Follows the same pattern as AppointmentsService.
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { supabase, subscribeToTable, unsubscribeFromChannel, isSupabaseConfigured } from '../../shared/supabase';
+
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
 
 // Types
 export interface Service {
@@ -90,6 +119,65 @@ class ServicesService {
   private organizationId: string = '';
   private realtimeChannel: any = null;
 
+  private hasElectronIpc(): boolean {
+    if (typeof window === 'undefined') return false;
+    const w = window as any;
+    return Boolean(
+      typeof w?.electronAPI?.invoke === 'function' ||
+      typeof w?.electronAPI?.ipcRenderer?.invoke === 'function' ||
+      typeof w?.electron?.ipcRenderer?.invoke === 'function'
+    );
+  }
+
+  private canUseSupabaseFallback(): boolean {
+    return !this.hasElectronIpc() && isSupabaseConfigured();
+  }
+
+  private buildServicesApiPath(filters?: ServiceFilters): string {
+    const params = new URLSearchParams();
+
+    if (filters?.categoryFilter && filters.categoryFilter !== 'all') {
+      params.set('category_id', filters.categoryFilter);
+    }
+    if (filters?.activeFilter !== undefined && filters.activeFilter !== 'all') {
+      params.set('is_active', String(filters.activeFilter));
+    }
+    if (filters?.searchTerm) {
+      params.set('search', filters.searchTerm);
+    }
+
+    const query = params.toString();
+    return `/api/pos/services${query ? `?${query}` : ''}`;
+  }
+
+  private applyServiceFilters(services: any[], filters?: ServiceFilters): any[] {
+    const activeFilter: boolean | 'all' = filters?.activeFilter ?? true;
+
+    const search = typeof filters?.searchTerm === 'string' ? filters.searchTerm.trim().toLowerCase() : '';
+
+    return services
+      .filter((service) => {
+        // Mirror server behavior: include branch-specific records and org-wide records.
+        const belongsToBranch = !service?.branch_id || service.branch_id === this.branchId;
+        if (!belongsToBranch) return false;
+
+        if (activeFilter !== 'all' && service?.is_active !== activeFilter) return false;
+
+        if (filters?.categoryFilter && filters.categoryFilter !== 'all') {
+          if (service?.category_id !== filters.categoryFilter) return false;
+        }
+
+        if (search) {
+          const name = String(service?.name || '').toLowerCase();
+          const description = String(service?.description || '').toLowerCase();
+          if (!name.includes(search) && !description.includes(search)) return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || '')));
+  }
+
   /**
    * Set the current branch and organization context
    */
@@ -110,6 +198,67 @@ class ServicesService {
     console.log('[ServicesService] Fetching services for branch:', this.branchId);
 
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const path = this.buildServicesApiPath(filters);
+        const result = await invoke('api:fetch-from-admin', path);
+
+        if (result?.success && result?.data?.success !== false) {
+          const apiServices = Array.isArray(result?.data?.services) ? result.data.services : [];
+          return apiServices.map((service: any) => {
+            const mapped = transformFromAPI(service);
+            if (service?.category_name && !mapped.category) {
+              mapped.category = {
+                id: mapped.categoryId || '',
+                organizationId: mapped.organizationId,
+                branchId: mapped.branchId,
+                name: service.category_name,
+                description: null,
+                sortOrder: 0,
+                isActive: true,
+                createdAt: mapped.createdAt,
+                updatedAt: mapped.updatedAt,
+              };
+            }
+            return mapped;
+          });
+        }
+
+        console.warn(
+          '[ServicesService] /api/pos/services failed, falling back to /api/pos/sync/services:',
+          formatError(result?.error || result?.data?.error || result)
+        );
+
+        const fallback = await invoke('api:fetch-from-admin', '/api/pos/sync/services?limit=1000');
+        if (!fallback?.success || fallback?.data?.success === false) {
+          console.error(
+            '[ServicesService] Fallback sync API error fetching services:',
+            formatError(fallback?.error || fallback?.data?.error || fallback)
+          );
+          return [];
+        }
+
+        const syncRows = Array.isArray(fallback?.data?.data) ? fallback.data.data : [];
+        const filteredRows = this.applyServiceFilters(syncRows, filters);
+        return filteredRows.map((service: any) => {
+          const mapped = transformFromAPI(service);
+          if (service?.category_name && !mapped.category) {
+            mapped.category = {
+              id: mapped.categoryId || '',
+              organizationId: mapped.organizationId,
+              branchId: mapped.branchId,
+              name: service.category_name,
+              description: null,
+              sortOrder: 0,
+              isActive: true,
+              createdAt: mapped.createdAt,
+              updatedAt: mapped.updatedAt,
+            };
+          }
+          return mapped;
+        });
+      }
+
       let query = supabase
         .from('services')
         .select(`
@@ -134,7 +283,7 @@ class ServicesService {
       const { data, error } = await query;
 
       if (error) {
-        console.error('[ServicesService] Error fetching services:', error);
+        console.error('[ServicesService] Error fetching services:', formatError(error));
         // Handle table not existing gracefully
         if (error.code === '42P01' || error.message?.includes('does not exist')) {
           console.warn('[ServicesService] services table does not exist');
@@ -145,7 +294,7 @@ class ServicesService {
 
       return (data || []).map(transformFromAPI);
     } catch (error) {
-      console.error('[ServicesService] Failed to fetch services:', error);
+      console.error('[ServicesService] Failed to fetch services:', formatError(error));
       return [];
     }
   }
@@ -160,6 +309,24 @@ class ServicesService {
     }
 
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', '/api/pos/sync/service_categories?limit=500');
+        if (!result?.success || result?.data?.success === false) {
+          console.error(
+            '[ServicesService] API error fetching categories:',
+            formatError(result?.error || result?.data?.error || result)
+          );
+          return [];
+        }
+
+        const rows = Array.isArray(result?.data?.data) ? result.data.data : [];
+        return rows
+          .filter((row: any) => row?.is_active !== false)
+          .sort((a: any, b: any) => Number(a?.sort_order || 0) - Number(b?.sort_order || 0))
+          .map(transformCategoryFromAPI);
+      }
+
       const { data, error } = await supabase
         .from('service_categories')
         .select('*')
@@ -176,7 +343,7 @@ class ServicesService {
 
       return (data || []).map(transformCategoryFromAPI);
     } catch (error) {
-      console.error('[ServicesService] Failed to fetch categories:', error);
+      console.error('[ServicesService] Failed to fetch categories:', formatError(error));
       return [];
     }
   }
@@ -203,6 +370,12 @@ class ServicesService {
   subscribeToUpdates(callback: (service: Service) => void): void {
     if (this.realtimeChannel) {
       this.unsubscribeFromUpdates();
+    }
+
+    // In Electron/API mode, avoid direct Supabase realtime subscriptions.
+    // This prevents placeholder websocket attempts and keeps auth context consistent.
+    if (!this.canUseSupabaseFallback()) {
+      return;
     }
 
     this.realtimeChannel = subscribeToTable(

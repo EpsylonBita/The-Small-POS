@@ -41,8 +41,9 @@ import {
   Receipt,
   Lock,
 } from 'lucide-react';
-import { posApiGet, posApiPost } from '../utils/api-helpers';
+import { getPosAuthHeaders, posApiGet, posApiPost } from '../utils/api-helpers';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
+import { getApiUrl } from '../../config/environment';
 
 // ============================================================
 // TYPES
@@ -189,6 +190,13 @@ interface TerminalOption {
   location?: string | null;
 }
 
+interface MyDataConfigFetchResult {
+  ok: boolean;
+  status: number;
+  config?: Record<string, any>;
+  error?: string;
+}
+
 // ============================================================
 // HELPER FUNCTIONS
 // ============================================================
@@ -199,6 +207,44 @@ const calculateStats = (integrations: IntegrationWithStatus[]): IntegrationStats
   disconnected: integrations.filter(i => i.status === 'disconnected').length,
   pending: integrations.filter(i => i.status === 'pending').length,
 });
+
+async function fetchMyDataConfigQuietly(): Promise<MyDataConfigFetchResult> {
+  try {
+    const url = getApiUrl('/pos/mydata/config');
+    const headers = await getPosAuthHeaders();
+    const response = await fetch(url, {
+      method: 'GET',
+      headers,
+    });
+
+    let payload: any = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: payload?.error || payload?.message || `HTTP ${response.status}`,
+      };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      config: payload?.config,
+    };
+  } catch (error: any) {
+    return {
+      ok: false,
+      status: 0,
+      error: error?.message || 'Network error',
+    };
+  }
+}
 
 // ============================================================
 // INTEGRATION CARD COMPONENT
@@ -541,6 +587,28 @@ export const IntegrationsPage: React.FC = () => {
     });
   }, [hasModule]);
 
+    const fetchMyDataConfig = useCallback(async () => {
+      try {
+        const myDataResult = await fetchMyDataConfigQuietly();
+        if (myDataResult.ok && myDataResult.config) {
+          setMyDataConfig(myDataResult.config);
+          setMyDataConfigError(null);
+          return;
+        }
+
+        if (myDataResult.status === 404) {
+          setMyDataConfig({});
+          setMyDataConfigError('MyData not configured');
+          return;
+        }
+
+        setMyDataConfigError(myDataResult.error || 'Failed to fetch MyData config');
+      } catch (err) {
+        console.warn('Failed to fetch MyData config:', err);
+        setMyDataConfigError('Failed to fetch MyData config');
+      }
+    }, []);
+
     // Fetch integration statuses
   const fetchIntegrations = useCallback(async () => {
       try {
@@ -550,29 +618,6 @@ export const IntegrationsPage: React.FC = () => {
         const integrationsResult = await posApiGet<{ integrations?: any[] }>('/pos/integrations');
         const remoteIntegrations = integrationsResult.success ? (integrationsResult.data?.integrations || []) : [];
         const remoteMap = new Map(remoteIntegrations.map((item: any) => [item.provider, item]));
-
-        let myDataStatus: IntegrationWithStatus['status'] = 'disconnected';
-        try {
-          const myDataResult = await posApiGet<{ config?: Record<string, any> }>('/pos/mydata/config');
-          if (myDataResult.success && myDataResult.data?.config) {
-            const config = myDataResult.data.config;
-            setMyDataConfig(config);
-            setMyDataConfigError(null);
-            if (config.status === 'connected') {
-              myDataStatus = 'connected';
-            } else if (config.status === 'pending' || config.status === 'error') {
-              myDataStatus = 'pending';
-            }
-          } else if (myDataResult.status === 404) {
-            setMyDataConfig({});
-            setMyDataConfigError('MyData not configured');
-          } else if (myDataResult.error) {
-            setMyDataConfigError(myDataResult.error);
-          }
-        } catch (err) {
-          console.warn('Failed to fetch MyData config:', err);
-          setMyDataConfigError('Failed to fetch MyData config');
-        }
 
         // Map to IntegrationWithStatus
         const integrationsWithStatus: IntegrationWithStatus[] = filteredIntegrations.map(integration => {
@@ -588,12 +633,10 @@ export const IntegrationsPage: React.FC = () => {
 
           return {
             ...integration,
-            status: integration.id === 'mydata'
-              ? myDataStatus
-              : integration.requiresPartnerCredentials
+            status: integration.requiresPartnerCredentials
               ? 'pending'
               : mappedStatus,
-            lastSyncedAt: remote?.last_sync_at || undefined,
+            lastSyncedAt: typeof remote?.last_sync_at === 'string' ? remote.last_sync_at : undefined,
             settings: remote?.settings || undefined,
           };
         });
@@ -613,6 +656,18 @@ export const IntegrationsPage: React.FC = () => {
   useEffect(() => {
     fetchIntegrations();
   }, [fetchIntegrations]);
+
+  // Lazy-load MyData config only when MyData modal is open.
+  useEffect(() => {
+    if (!myDataModalOpen) return;
+    const myDataIntegration = integrations.find((item) => item.id === 'mydata');
+    if (!myDataIntegration || myDataIntegration.status === 'disconnected') {
+      setMyDataConfig({});
+      setMyDataConfigError('MyData not configured');
+      return;
+    }
+    fetchMyDataConfig();
+  }, [myDataModalOpen, fetchMyDataConfig, integrations]);
 
   // Handle refresh
   const handleRefresh = useCallback(async () => {

@@ -9,7 +9,7 @@
  * Updated: Multi-service appointment support
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { supabase, subscribeToTable, unsubscribeFromChannel, isSupabaseConfigured } from '../../shared/supabase';
 import { posApiGet, posApiPost, posApiPatch } from '../utils/api-helpers';
 
 // Types
@@ -229,6 +229,20 @@ class AppointmentsService {
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private useApiPrimary: boolean = true; // Use API as primary, fallback to Supabase
 
+  private hasElectronIpc(): boolean {
+    if (typeof window === 'undefined') return false;
+    const w = window as any;
+    return Boolean(
+      typeof w?.electronAPI?.invoke === 'function' ||
+      typeof w?.electronAPI?.ipcRenderer?.invoke === 'function' ||
+      typeof w?.electron?.ipcRenderer?.invoke === 'function'
+    );
+  }
+
+  private canUseSupabaseFallback(): boolean {
+    return !this.hasElectronIpc() && isSupabaseConfigured();
+  }
+
   /**
    * Set the current branch and organization context
    */
@@ -258,6 +272,11 @@ class AppointmentsService {
         return apiResult;
       }
       console.warn('[AppointmentsService] API fetch failed, falling back to Supabase');
+    }
+
+    if (!this.canUseSupabaseFallback()) {
+      console.warn('[AppointmentsService] Skipping Supabase fallback (IPC mode or Supabase not configured)');
+      return [];
     }
 
     // Fallback to direct Supabase
@@ -390,6 +409,10 @@ class AppointmentsService {
       console.warn('[AppointmentsService] API status update failed, falling back to Supabase');
     }
 
+    if (!this.canUseSupabaseFallback()) {
+      throw new Error('Unable to update appointment status: API unavailable and Supabase fallback disabled');
+    }
+
     // Fallback to direct Supabase
     return this.updateStatusViaSupabase(appointmentId, status);
   }
@@ -487,6 +510,10 @@ class AppointmentsService {
         return apiResult;
       }
       console.warn('[AppointmentsService] API create failed, falling back to Supabase');
+    }
+
+    if (!this.canUseSupabaseFallback()) {
+      throw new Error('Unable to create appointment: API unavailable and Supabase fallback disabled');
     }
 
     // Fallback to direct Supabase (single-service only)
@@ -713,16 +740,18 @@ class AppointmentsService {
       }
     }, intervalMs);
 
-    // Also subscribe to Supabase realtime as a backup for faster updates
-    this.realtimeChannel = subscribeToTable(
-      'appointments',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
+    // Use Supabase realtime backup only in non-Electron environments with valid Supabase config.
+    if (this.canUseSupabaseFallback()) {
+      this.realtimeChannel = subscribeToTable(
+        'appointments',
+        (payload: any) => {
+          if (payload.new) {
+            callback(transformFromAPI(payload.new));
+          }
+        },
+        `branch_id=eq.${this.branchId}`
+      );
+    }
   }
 
   /**

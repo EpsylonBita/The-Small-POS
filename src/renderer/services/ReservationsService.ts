@@ -14,6 +14,34 @@
 
 import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
 
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null;
+
+  const w = window as any;
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI);
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
+  }
+  return null;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 // Re-export utility functions for convenience
 export { 
   generateReservationNumber, 
@@ -148,6 +176,46 @@ class ReservationsService {
    */
   async fetchReservations(filters?: ReservationFilters): Promise<Reservation[]> {
     try {
+      const invoke = getIpcInvoke();
+      const hasIpc = !!invoke;
+      if (invoke && this.branchId) {
+        const dateFrom = filters?.dateFrom ? String(filters.dateFrom).split('T')[0] : undefined;
+        const dateTo = filters?.dateTo ? String(filters.dateTo).split('T')[0] : undefined;
+        const useSingleDayFilter = !!dateFrom && (!dateTo || dateTo === dateFrom);
+
+        const options: Record<string, unknown> = {};
+        if (useSingleDayFilter && dateFrom) {
+          options.date = dateFrom;
+        }
+        if (filters?.statusFilter && filters.statusFilter !== 'all') {
+          options.status = filters.statusFilter;
+        }
+        if (filters?.searchTerm) {
+          options.search = filters.searchTerm;
+        }
+
+        const result = await invoke('sync:fetch-reservations', options);
+        if (result?.success) {
+          const reservations = Array.isArray(result.reservations) ? result.reservations : [];
+          return reservations
+            .map(transformFromAPI)
+            .sort(
+              (a: Reservation, b: Reservation) =>
+                new Date(a.reservationDatetime || a.checkInDate || '').getTime() -
+                new Date(b.reservationDatetime || b.checkInDate || '').getTime()
+            );
+        }
+
+        console.warn('[ReservationsService] IPC reservations fetch failed:', result?.error || 'Unknown error');
+        return [];
+      }
+
+      if (hasIpc) {
+        // In Electron, avoid direct renderer Supabase fallback when IPC is available but unavailable for this branch/context.
+        return [];
+      }
+
+      // Fallback: direct Supabase queries
       // Fetch table reservations (filtered by reservation_date)
       let tableQuery = supabase
         .from('reservations')
@@ -209,10 +277,10 @@ class ReservationsService {
       const [tableResult, roomResult] = await Promise.all([tableQuery, roomQuery]);
 
       if (tableResult.error) {
-        console.error('Error fetching table reservations:', tableResult.error);
+        console.error('[ReservationsService] Error fetching table reservations:', formatError(tableResult.error));
       }
       if (roomResult.error) {
-        console.error('Error fetching room reservations:', roomResult.error);
+        console.error('[ReservationsService] Error fetching room reservations:', formatError(roomResult.error));
       }
 
       // Combine results
@@ -226,7 +294,7 @@ class ReservationsService {
         new Date(b.reservationDatetime || b.checkInDate || '').getTime()
       );
     } catch (error) {
-      console.error('Failed to fetch reservations:', error);
+      console.error('[ReservationsService] Failed to fetch reservations:', formatError(error));
       return [];
     }
   }
@@ -471,26 +539,12 @@ class ReservationsService {
       // Only update if reservation is in the future and within threshold
       // Also allow slightly past reservations (up to 5 minutes) for edge cases
       if (diffMinutes >= -5 && diffMinutes <= minutesThreshold) {
-        const { error } = await supabase
-          .from('restaurant_tables')
-          .update({
-            status: 'reserved',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', tableId)
-          .eq('branch_id', this.branchId);
-
-        if (error) {
-          console.error('Error updating table status:', error);
-          return false;
-        }
-
-        return true;
+        return await this.updateTableStatusToReserved(tableId);
       }
 
       return false;
     } catch (error) {
-      console.error('Failed to update table status for near-time reservation:', error);
+      console.error('[ReservationsService] Failed to update table status for near-time reservation:', formatError(error));
       return false;
     }
   }
@@ -524,6 +578,24 @@ class ReservationsService {
    */
   async updateTableStatusToReserved(tableId: string): Promise<boolean> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', `/api/pos/tables/${tableId}`, {
+          method: 'PATCH',
+          body: { status: 'reserved' },
+        });
+
+        if (!result?.success || result?.data?.success === false) {
+          console.error(
+            '[ReservationsService] Error updating table status to reserved via API:',
+            result?.error || result?.data?.error || 'Unknown error'
+          );
+          return false;
+        }
+
+        return true;
+      }
+
       const { error } = await supabase
         .from('restaurant_tables')
         .update({
@@ -534,13 +606,13 @@ class ReservationsService {
         .eq('branch_id', this.branchId);
 
       if (error) {
-        console.error('Error updating table status to reserved:', error);
+        console.error('[ReservationsService] Error updating table status to reserved:', formatError(error));
         return false;
       }
 
       return true;
     } catch (error) {
-      console.error('Failed to update table status to reserved:', error);
+      console.error('[ReservationsService] Failed to update table status to reserved:', formatError(error));
       return false;
     }
   }
@@ -661,39 +733,64 @@ class ReservationsService {
   async syncTableStatusesForToday(): Promise<void> {
     try {
       const today = new Date().toISOString().split('T')[0];
-      
-      // Get all today's active reservations with table assignments
-      const { data: reservations, error } = await supabase
-        .from('reservations')
-        .select('table_id')
-        .eq('branch_id', this.branchId)
-        .eq('reservation_date', today)
-        .in('status', ['pending', 'confirmed'])
-        .not('table_id', 'is', null);
 
-      if (error) {
-        console.error('Error fetching today reservations:', error);
+      let tableReservations: Array<{ table_id: string }> = [];
+
+      const invoke = getIpcInvoke();
+      const hasIpc = !!invoke;
+      if (invoke && this.branchId) {
+        const result = await invoke('sync:fetch-reservations', { date: today });
+        if (result?.success) {
+          tableReservations = (Array.isArray(result.reservations) ? result.reservations : [])
+            .filter((reservation: any) =>
+              reservation?.table_id &&
+              reservation?.reservation_date === today &&
+              ['pending', 'confirmed'].includes(reservation?.status)
+            )
+            .map((reservation: any) => ({ table_id: reservation.table_id as string }));
+        } else {
+          console.warn(
+            '[ReservationsService] IPC fetch for today reservations failed:',
+            result?.error || 'Unknown error'
+          );
+          return;
+        }
+      }
+
+      if (!hasIpc && tableReservations.length === 0) {
+        const { data: reservations, error } = await supabase
+          .from('reservations')
+          .select('table_id')
+          .eq('branch_id', this.branchId)
+          .eq('reservation_date', today)
+          .in('status', ['pending', 'confirmed'])
+          .not('table_id', 'is', null);
+
+        if (error) {
+          console.error('[ReservationsService] Error fetching today reservations:', formatError(error));
+          return;
+        }
+
+        tableReservations = (reservations || []) as Array<{ table_id: string }>;
+      }
+
+      if (tableReservations.length === 0) {
         return;
       }
 
-      if (!reservations || reservations.length === 0) {
-        return;
-      }
+      const tableIds = [...new Set(tableReservations.map((r) => r.table_id))];
 
-      // Get unique table IDs
-      const tableIds = [...new Set(reservations.map((r: any) => r.table_id))];
-
-      // Update all these tables to 'reserved' status
       for (const tableId of tableIds) {
         await this.updateTableStatusToReserved(tableId as string);
       }
 
-      console.log(`✅ Synced ${tableIds.length} table(s) to reserved status for today's reservations`);
+      console.log(`[ReservationsService] Synced ${tableIds.length} table(s) to reserved status for today's reservations`);
     } catch (error) {
-      console.error('Failed to sync table statuses for today:', error);
+      console.error('[ReservationsService] Failed to sync table statuses for today:', formatError(error));
     }
   }
 }
 
 // Export singleton instance
 export const reservationsService = new ReservationsService();
+

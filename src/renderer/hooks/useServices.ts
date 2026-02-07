@@ -86,7 +86,14 @@ export function useServices({
       console.log('[useServices] Fetched services:', servicesData.length);
       console.log('[useServices] Fetched categories:', categoriesData.length);
 
-      setServices(servicesData);
+      const categoryById = new Map(categoriesData.map((category) => [category.id, category]));
+      const normalizedServices = servicesData.map((service) => {
+        if (service.category || !service.categoryId) return service;
+        const category = categoryById.get(service.categoryId);
+        return category ? { ...service, category } : service;
+      });
+
+      setServices(normalizedServices);
       setCategories(categoriesData);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load services';

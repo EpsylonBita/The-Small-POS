@@ -476,8 +476,19 @@ export class AdminDashboardSyncService {
       }
 
     } catch (error) {
-      console.error('❌ Heartbeat failed:', error);
-      this.error = error instanceof Error ? error.message : 'Heartbeat failed';
+      const message = error instanceof Error ? error.message : String(error);
+      const name = error instanceof Error ? error.name : 'UnknownError';
+      const isTimeout =
+        name === 'TimeoutError' ||
+        /aborted due to timeout|timeout/i.test(message);
+
+      if (isTimeout) {
+        console.warn('[Heartbeat] Request timed out, will retry on next interval');
+      } else {
+        console.error('[Heartbeat] Request failed:', error);
+      }
+
+      this.error = message || 'Heartbeat failed';
     }
   }
 

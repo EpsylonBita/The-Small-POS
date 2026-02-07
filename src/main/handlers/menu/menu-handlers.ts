@@ -110,6 +110,16 @@ export function registerMenuHandlers(): void {
   // Get menu categories
   ipcMain.handle('menu:get-categories', async () => {
     try {
+      // Prefer admin dashboard menu sync (uses terminal auth, bypasses RLS)
+      const menuData = await fetchMenuSyncData({ includeInactive: true });
+      const categories = Array.isArray(menuData?.categories) ? menuData.categories : null;
+      if (categories) {
+        return categories.filter((item: any) => {
+          const name = (item.name || item.name_en || '').toLowerCase();
+          return !name.includes('rls') && !name.startsWith('test ') && item.is_active !== false;
+        });
+      }
+
       const supabase = getSupabaseClient();
       const { data, error } = await supabase
         .from('menu_categories')
@@ -134,6 +144,16 @@ export function registerMenuHandlers(): void {
   // Get subcategories (menu items) - returns ALL items including inactive for management
   ipcMain.handle('menu:get-subcategories', async () => {
     try {
+      // Prefer admin dashboard menu sync (uses terminal auth, bypasses RLS)
+      const menuData = await fetchMenuSyncData({ includeInactive: true });
+      const subcategories = Array.isArray(menuData?.subcategories) ? menuData.subcategories : null;
+      if (subcategories) {
+        return subcategories.filter((item: any) => {
+          const name = (item.name || '').toLowerCase();
+          return !name.includes('rls') && !name.startsWith('test ');
+        });
+      }
+
       const supabase = getSupabaseClient();
       const { data, error } = await supabase
         .from('subcategories')
