@@ -380,10 +380,16 @@ export class OrderSyncService {
 
             // Query Supabase to find which orders still exist (by client_order_id)
             const orderClient = this.getOrderClient();
-            const { data: remoteOrders, error } = await orderClient
+            const organizationId = this.getOrganizationId();
+            let remoteQuery = orderClient
                 .from('orders')
                 .select('id, client_order_id')
                 .in('client_order_id', localOrderIds);
+            if (organizationId) {
+                remoteQuery = remoteQuery.eq('organization_id', organizationId);
+            }
+
+            const { data: remoteOrders, error } = await remoteQuery;
 
             if (error) {
                 // If client_order_id column doesn't exist, try fallback approach
@@ -768,7 +774,7 @@ export class OrderSyncService {
         const tryUpsert = async (p: any) =>
             orderClient
                 .from('orders')
-                .upsert(p, { onConflict: 'client_order_id' })
+                .upsert(p, { onConflict: 'organization_id,client_order_id' })
                 .select()
                 .single();
         const tryInsert = async (p: any) =>
@@ -1249,7 +1255,7 @@ export class OrderSyncService {
 
                     const upsertResp = await orderClient
                         .from('orders')
-                        .upsert(upsertPayload, { onConflict: 'client_order_id' })
+                        .upsert(upsertPayload, { onConflict: 'organization_id,client_order_id' })
                         .select()
                         .single();
 
@@ -1266,11 +1272,18 @@ export class OrderSyncService {
         const orderClient = this.getOrderClient();
         try {
             let remoteMatch: any = null;
+            const organizationId = this.getOrganizationId();
             // Try by client_order_id first (if the column exists remotely)
-            let tryClient = await orderClient
+            let tryClientQuery = orderClient
                 .from('orders')
                 .select('id, version')
-                .eq('client_order_id', recordId)
+                .eq('client_order_id', recordId);
+
+            if (organizationId) {
+                tryClientQuery = tryClientQuery.eq('organization_id', organizationId);
+            }
+
+            let tryClient = await tryClientQuery
                 .limit(1)
                 .single();
             if (!tryClient.error && tryClient.data) {

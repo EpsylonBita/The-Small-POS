@@ -89,6 +89,7 @@ export class SyncService {
   private lastSync: string | null = null;
   private terminalId: string;
   private branchId: string | null = null;
+  private organizationId: string | null = null;
 
   // Sub-services
   private networkMonitor: NetworkMonitor;
@@ -129,6 +130,7 @@ export class SyncService {
     const persistedTerminalId = dbSvc.settings.getSetting('terminal', 'terminal_id', '');
     this.terminalId = terminalId || persistedTerminalId || process.env.TERMINAL_ID || 'terminal-001';
     this.branchId = dbSvc.settings.getSetting('terminal', 'branch_id', null) as string | null;
+    this.organizationId = dbSvc.settings.getSetting('terminal', 'organization_id', null) as string | null;
 
     // Initialize sub-services
     this.networkMonitor = new NetworkMonitor(dbManager);
@@ -171,6 +173,7 @@ export class SyncService {
    * This should be called when terminal settings are loaded.
    */
   public setOrganizationId(orgId: string | null): void {
+    this.organizationId = orgId;
     this.orderSyncService.setOrganizationId(orgId);
   }
 
@@ -544,11 +547,17 @@ export class SyncService {
 
         // If not found locally, look up in Supabase by client_order_id
         if (!supabaseOrderId) {
-          const { data: existingOrder } = await this.supabase
+          // Prefer tenant-scoped lookup so Postgres can use uq_orders_org_client_order_id efficiently.
+          let lookup = this.supabase
             .from('orders')
             .select('id')
-            .eq('client_order_id', localOrderId)
-            .maybeSingle();
+            .eq('client_order_id', localOrderId);
+
+          if (this.organizationId) {
+            lookup = lookup.eq('organization_id', this.organizationId);
+          }
+
+          const { data: existingOrder } = await lookup.maybeSingle();
           
           if (existingOrder) {
             supabaseOrderId = existingOrder.id;
