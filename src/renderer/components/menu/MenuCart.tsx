@@ -102,11 +102,73 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const { resolvedTheme } = useTheme();
   const { language } = useI18n();
 
-  const discountDebounceRef = React.useRef<number | null>(null);
   const [couponInput, setCouponInput] = React.useState('');
   const [showManualInput, setShowManualInput] = React.useState(false);
   const [manualPrice, setManualPrice] = React.useState('');
   const [manualName, setManualName] = React.useState('');
+  const [isDiscountModalOpen, setIsDiscountModalOpen] = React.useState(false);
+  const [discountDraft, setDiscountDraft] = React.useState<number>(discountPercentage || 0);
+  const [discountManualInput, setDiscountManualInput] = React.useState<string>('');
+
+  const discountPresetValues = React.useMemo(() => (
+    Array.from({ length: 10 }, (_, index) => (index + 1) * 10)
+  ), []);
+
+  React.useEffect(() => {
+    setDiscountDraft(discountPercentage || 0);
+    setDiscountManualInput(discountPercentage ? String(discountPercentage) : '');
+  }, [discountPercentage]);
+
+  React.useEffect(() => {
+    if (!isDiscountModalOpen) {
+      return;
+    }
+
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsDiscountModalOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, [isDiscountModalOpen]);
+
+  const parseDiscountInput = (value: string): number => {
+    const normalized = value.replace(',', '.').trim();
+    const parsed = Number.parseFloat(normalized);
+    if (!Number.isFinite(parsed)) {
+      return 0;
+    }
+    return Math.max(0, Math.min(parsed, 100));
+  };
+
+  const openDiscountModal = () => {
+    const current = discountPercentage || 0;
+    setDiscountDraft(current);
+    setDiscountManualInput(current > 0 ? String(current) : '');
+    setIsDiscountModalOpen(true);
+  };
+
+  const applyDraftDiscount = () => {
+    if (!onDiscountChange) {
+      return;
+    }
+    const nextValue = Math.max(0, Math.min(discountDraft, maxDiscountPercentage));
+    onDiscountChange(nextValue);
+    setIsDiscountModalOpen(false);
+  };
+
+  const clearDiscount = () => {
+    setDiscountDraft(0);
+    setDiscountManualInput('');
+    onDiscountChange?.(0);
+    setIsDiscountModalOpen(false);
+  };
+
+  const isDraftOverMax = discountDraft > maxDiscountPercentage;
 
   // Helper function to get localized ingredient name
   const getIngredientName = (ingredient: {
@@ -576,30 +638,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               }`}>
                 {t('menu.cart.discountLabel')}
               </label>
-              <input
-                type="number"
-                min="0"
-                max={maxDiscountPercentage}
-                step="0.1"
-                value={discountPercentage || ''}
-                onChange={(e) => {
-                  if (!onDiscountChange) return;
-                  const v = parseFloat(e.target.value) || 0;
-                  if (discountDebounceRef.current) {
-                    clearTimeout(discountDebounceRef.current);
-                  }
-                  discountDebounceRef.current = window.setTimeout(() => {
-                    onDiscountChange(v);
-                  }, 150);
-                }}
-                className={`w-20 px-2 py-1 text-sm font-medium border rounded antialiased ${
+              <button
+                type="button"
+                onClick={openDiscountModal}
+                className={`min-w-[88px] px-3 py-1.5 text-sm font-semibold border rounded-lg antialiased transition-colors ${
                   resolvedTheme === 'dark'
-                    ? 'bg-gray-700 border-gray-600 text-white'
-                    : 'bg-white border-gray-300 text-gray-900'
+                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700'
+                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
                 } focus:outline-none focus:ring-2 focus:ring-blue-500`}
-                placeholder=""
-              />
+              >
+                {discountPercentage > 0 ? `${discountPercentage}%` : '0%'}
+              </button>
             </div>
+            <p className={`text-xs text-right font-medium antialiased ${
+              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+            }`}>
+              {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
+            </p>
             {discountPercentage > maxDiscountPercentage && (
               <p className="text-xs text-red-500 text-right font-medium antialiased">
                 {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
@@ -718,6 +773,174 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           )}
         </button>
       </div>
+
+      {onDiscountChange && isDiscountModalOpen && (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label={t('common.close', 'Close')}
+            onClick={() => setIsDiscountModalOpen(false)}
+            className="absolute inset-0 bg-black/70"
+          />
+          <div className={`relative w-full max-w-xl rounded-2xl border shadow-2xl ${
+            resolvedTheme === 'dark'
+              ? 'bg-gray-900 border-gray-700'
+              : 'bg-white border-gray-200'
+          }`}>
+            <div className={`flex items-center justify-between px-6 py-4 border-b ${
+              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+            }`}>
+              <div>
+                <h4 className={`text-xl font-bold antialiased ${
+                  resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
+                }`}>
+                  {t('menu.cart.discountPickerTitle', 'Apply Discount')}
+                </h4>
+                <p className={`text-sm antialiased ${
+                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
+                }`}>
+                  {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDiscountModalOpen(false)}
+                className={`w-10 h-10 rounded-lg border flex items-center justify-center ${
+                  resolvedTheme === 'dark'
+                    ? 'border-gray-600 text-gray-300 hover:bg-gray-800'
+                    : 'border-gray-300 text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5">
+              <div>
+                <p className={`text-sm font-semibold mb-3 antialiased ${
+                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
+                }`}>
+                  {t('menu.cart.quickDiscounts', 'Quick discounts')}
+                </p>
+                <div className="grid grid-cols-5 gap-2">
+                  {discountPresetValues.map((value) => {
+                    const disabled = value > maxDiscountPercentage;
+                    const selected = Math.abs(discountDraft - value) < 0.001;
+
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => {
+                          if (disabled) {
+                            return;
+                          }
+                          setDiscountDraft(value);
+                          setDiscountManualInput(String(value));
+                        }}
+                        className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                          disabled
+                            ? 'opacity-45 cursor-not-allowed'
+                            : selected
+                              ? resolvedTheme === 'dark'
+                                ? 'bg-blue-600 border-blue-500 text-white'
+                                : 'bg-blue-500 border-blue-400 text-white'
+                              : resolvedTheme === 'dark'
+                                ? 'bg-gray-800 border-gray-700 text-gray-200 hover:bg-gray-700'
+                                : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                        }`}
+                      >
+                        {value}%
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className={`text-sm font-semibold mb-2 block antialiased ${
+                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
+                }`}>
+                  {t('menu.cart.manualDiscount', 'Manual discount')}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={discountManualInput}
+                    onChange={(e) => {
+                      const rawValue = e.target.value;
+                      setDiscountManualInput(rawValue);
+                      setDiscountDraft(parseDiscountInput(rawValue));
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !isDraftOverMax) {
+                        applyDraftDiscount();
+                      }
+                    }}
+                    placeholder={t('menu.cart.discountLabel')}
+                    className={`w-full px-4 py-3 rounded-lg text-base border ${
+                      resolvedTheme === 'dark'
+                        ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500'
+                        : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
+                    } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                  />
+                  <span className={`text-base font-semibold ${
+                    resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
+                  }`}>%</span>
+                </div>
+                {isDraftOverMax && (
+                  <p className="text-xs text-red-500 mt-2 font-medium antialiased">
+                    {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className={`flex items-center justify-between gap-3 px-6 py-4 border-t ${
+              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
+            }`}>
+              <button
+                type="button"
+                onClick={clearDiscount}
+                className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                  resolvedTheme === 'dark'
+                    ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                }`}
+              >
+                {t('menu.cart.removeDiscount', 'Remove discount')}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDiscountModalOpen(false)}
+                  className={`px-4 py-2 rounded-lg text-sm font-semibold ${
+                    resolvedTheme === 'dark'
+                      ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  {t('common.cancel', 'Cancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={applyDraftDiscount}
+                  disabled={isDraftOverMax}
+                  className={`px-5 py-2 rounded-lg text-sm font-semibold ${
+                    isDraftOverMax
+                      ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }`}
+                >
+                  {t('menu.cart.applyDiscount', 'Apply discount')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

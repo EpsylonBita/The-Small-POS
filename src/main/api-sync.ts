@@ -7,23 +7,114 @@
 
 import { DatabaseManager } from './database';
 
-// Configuration - reads from local settings first, then env, then fallback
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+
+  let normalized = trimmed;
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.search = '';
+    parsed.hash = '';
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    parsed.pathname = cleanPath || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+}
+
+function extractAdminUrlFromConnectionString(posApiKey: string): string {
+  const trimmed = (posApiKey || '').trim();
+  if (!trimmed || trimmed.length < 20) return '';
+
+  try {
+    const base64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+    const parsed = JSON.parse(decoded);
+    return normalizeAdminDashboardUrl((parsed?.url || '').toString());
+  } catch {
+    return '';
+  }
+}
+
+function isLocalhostAdminUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname);
+  } catch {
+    return /(?:^|\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i.test(url);
+  }
+}
+
+// Configuration - reads from terminal settings first, then env (explicit), then fallback
 const getBaseUrl = (db?: DatabaseManager): string => {
-  // Try to get stored URL from local settings
+  let storedAdminUrl = '';
+  let legacyAdminUrl = '';
+  let terminalId = '';
+  let apiKey = '';
+  let dbSvc: ReturnType<DatabaseManager['getDatabaseService']> | undefined;
+
   if (db) {
     try {
-      const dbSvc = db.getDatabaseService?.();
+      dbSvc = db.getDatabaseService?.();
       if (dbSvc?.settings) {
-        const storedUrl = dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', null) as string | null;
-        if (storedUrl) {
-          return storedUrl.replace(/\/$/, '');
-        }
+        storedAdminUrl = (dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', '') || '').toString();
+        legacyAdminUrl = (dbSvc.settings.getSetting('terminal', 'admin_url', '') || '').toString();
+        terminalId = (dbSvc.settings.getSetting('terminal', 'terminal_id', '') || '').toString();
+        apiKey = (dbSvc.settings.getSetting('terminal', 'pos_api_key', '') || '').toString();
       }
     } catch (e) {
-      console.warn('[api-sync] Failed to load stored admin URL:', e);
+      console.warn('[api-sync] Failed to load terminal settings for admin URL resolution:', e);
     }
   }
-  return (process.env.ADMIN_DASHBOARD_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+  let adminUrl = normalizeAdminDashboardUrl(storedAdminUrl) || normalizeAdminDashboardUrl(legacyAdminUrl);
+
+  if (!adminUrl && apiKey) {
+    const decodedUrl = extractAdminUrlFromConnectionString(apiKey);
+    if (decodedUrl) {
+      adminUrl = decodedUrl;
+      try {
+        dbSvc?.settings?.setSetting?.('terminal', 'admin_dashboard_url', decodedUrl);
+      } catch (persistError) {
+        console.warn('[api-sync] Failed to persist decoded admin dashboard URL:', persistError);
+      }
+    }
+  }
+
+  const rawEnvAdminUrl = (process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || '').trim();
+  const envAdminUrl = normalizeAdminDashboardUrl(rawEnvAdminUrl);
+
+  if (!adminUrl && envAdminUrl) {
+    const hasTerminalCredentials = !!apiKey && !!terminalId && terminalId !== 'terminal-001';
+    if (hasTerminalCredentials && isLocalhostAdminUrl(envAdminUrl)) {
+      throw new Error(
+        'Admin dashboard URL is missing for this terminal. Update terminal.admin_dashboard_url in Connection Settings.'
+      );
+    }
+    adminUrl = envAdminUrl;
+  }
+
+  if (adminUrl) {
+    return adminUrl;
+  }
+
+  // Development bootstrap fallback only (before terminal credentials are configured)
+  const hasTerminalCredentials = !!apiKey && !!terminalId && terminalId !== 'terminal-001';
+  if (hasTerminalCredentials) {
+    throw new Error(
+      'Admin dashboard URL is not configured for this terminal. Save a valid Admin Dashboard URL and retry sync.'
+    );
+  }
+
+  return 'http://localhost:3001';
 };
 
 // Types for API responses
@@ -833,4 +924,3 @@ export async function updateDriveThruOrderStatusFromAdmin(
 
   return data.drive_through_order;
 }
-

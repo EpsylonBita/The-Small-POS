@@ -32,6 +32,52 @@ function getWriteClient(): SupabaseClient {
 const MENU_SYNC_CACHE_TTL_MS = 60_000;
 const menuSyncCache = new Map<string, { fetchedAt: number; data: any }>();
 
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+
+  let normalized = trimmed;
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.search = '';
+    parsed.hash = '';
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    parsed.pathname = cleanPath || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+}
+
+function extractAdminUrlFromConnectionString(posApiKey: string): string {
+  const trimmed = (posApiKey || '').trim();
+  if (!trimmed || trimmed.length < 20) return '';
+
+  try {
+    const base64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+    const parsed = JSON.parse(decoded);
+    return normalizeAdminDashboardUrl((parsed?.url || '').toString());
+  } catch {
+    return '';
+  }
+}
+
+function isLocalhostAdminUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname);
+  } catch {
+    return /(?:^|\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i.test(url);
+  }
+}
+
 type MenuSyncFetchOptions = {
   includeInactive?: boolean;
 };
@@ -48,9 +94,35 @@ async function fetchMenuSyncData(options: MenuSyncFetchOptions = {}): Promise<an
     const dbSvc = serviceRegistry.dbManager?.getDatabaseService?.();
     const terminalId = (dbSvc?.settings?.getSetting?.('terminal', 'terminal_id', '') || '').toString();
     const apiKey = (dbSvc?.settings?.getSetting?.('terminal', 'pos_api_key', '') || '').toString();
-    const adminUrl = (dbSvc?.settings?.getSetting?.('terminal', 'admin_dashboard_url', '') ||
-      dbSvc?.settings?.getSetting?.('terminal', 'admin_url', '') ||
-      process.env.ADMIN_DASHBOARD_URL || '').toString();
+    const storedAdminUrl = (dbSvc?.settings?.getSetting?.('terminal', 'admin_dashboard_url', '') || '').toString();
+    const legacyAdminUrl = (dbSvc?.settings?.getSetting?.('terminal', 'admin_url', '') || '').toString();
+    const envAdminUrl = (process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || '').toString();
+
+    let adminUrl = normalizeAdminDashboardUrl(storedAdminUrl) || normalizeAdminDashboardUrl(legacyAdminUrl);
+    if (!adminUrl) {
+      const decodedUrl = extractAdminUrlFromConnectionString(apiKey);
+      if (decodedUrl) {
+        adminUrl = decodedUrl;
+        try {
+          dbSvc?.settings?.setSetting?.('terminal', 'admin_dashboard_url', decodedUrl);
+        } catch (persistError) {
+          console.warn('[menu-handlers] Failed to persist decoded admin dashboard URL:', persistError);
+        }
+      }
+    }
+    if (!adminUrl) {
+      const normalizedEnvAdminUrl = normalizeAdminDashboardUrl(envAdminUrl);
+      if (normalizedEnvAdminUrl) {
+        const hasTerminalCredentials = terminalId !== 'terminal-001' && !!apiKey;
+        if (hasTerminalCredentials && isLocalhostAdminUrl(normalizedEnvAdminUrl)) {
+          console.warn(
+            '[menu-handlers] Admin dashboard URL not configured for terminal; refusing localhost fallback'
+          );
+          return null;
+        }
+        adminUrl = normalizedEnvAdminUrl;
+      }
+    }
 
     if (!terminalId || !apiKey || !adminUrl) {
       return null;
@@ -89,7 +161,12 @@ async function fetchMenuSyncData(options: MenuSyncFetchOptions = {}): Promise<an
     menuSyncCache.set(cacheKey, cacheEntry);
     return cacheEntry.data;
   } catch (error) {
-    console.warn('[menu-handlers] Menu sync fallback failed:', error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (/ECONNREFUSED|fetch failed/i.test(message)) {
+      console.warn('[menu-handlers] Menu sync fallback skipped: admin API is unreachable');
+    } else {
+      console.warn('[menu-handlers] Menu sync fallback failed:', message);
+    }
     return null;
   }
 }

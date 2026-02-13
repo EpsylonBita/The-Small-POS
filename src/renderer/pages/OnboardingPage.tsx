@@ -60,10 +60,12 @@ const OnboardingPage: React.FC = () => {
             }
 
             // Call the backend to update credentials and sync
+            const normalizedAdminUrl = decoded.adminUrl.replace(/\/+$/, '').replace(/\/api$/i, '');
+            localStorage.setItem('admin_dashboard_url', normalizedAdminUrl);
             const result = await window.electron?.ipcRenderer.invoke('settings:update-terminal-credentials', {
                 terminalId: decoded.terminalId,
                 apiKey: decoded.apiKey,
-                adminDashboardUrl: decoded.adminUrl
+                adminDashboardUrl: normalizedAdminUrl
             });
 
             if (result && result.success) {

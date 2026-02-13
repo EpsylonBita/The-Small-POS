@@ -20,6 +20,52 @@ import {
   type RoomStatus,
 } from '../../api-sync';
 
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+
+  let normalized = trimmed;
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.search = '';
+    parsed.hash = '';
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    parsed.pathname = cleanPath || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+}
+
+function extractAdminUrlFromConnectionString(posApiKey: string): string {
+  const trimmed = (posApiKey || '').trim();
+  if (!trimmed || trimmed.length < 20) return '';
+
+  try {
+    const base64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+    const parsed = JSON.parse(decoded);
+    return normalizeAdminDashboardUrl((parsed?.url || '').toString());
+  } catch {
+    return '';
+  }
+}
+
+function isLocalhostAdminUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname);
+  } catch {
+    return /(?:^|\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i.test(url);
+  }
+}
+
 /**
  * Registers core sync-related IPC handlers.
  */
@@ -536,10 +582,51 @@ export function setupAdminSyncHandlers(): void {
       const db = dbManager.getDatabaseService();
       const terminalId = (db?.settings?.getSetting?.('terminal', 'terminal_id', '') || '').toString();
       const apiKey = (db?.settings?.getSetting?.('terminal', 'pos_api_key', '') || '').toString();
-      const adminUrl = (db?.settings?.getSetting?.('terminal', 'admin_dashboard_url', '') || process.env.ADMIN_DASHBOARD_URL || 'http://localhost:3001').toString();
+      const storedAdminUrl = (db?.settings?.getSetting?.('terminal', 'admin_dashboard_url', '') || '').toString();
+      const legacyAdminUrl = (db?.settings?.getSetting?.('terminal', 'admin_url', '') || '').toString();
+      const envAdminUrl = (process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || '').toString();
 
       if (!terminalId || !apiKey) {
         return { success: false, error: 'Terminal credentials not configured' };
+      }
+
+      let adminUrl = normalizeAdminDashboardUrl(storedAdminUrl) || normalizeAdminDashboardUrl(legacyAdminUrl);
+
+      if (!adminUrl) {
+        const decodedUrl = extractAdminUrlFromConnectionString(apiKey);
+        if (decodedUrl) {
+          adminUrl = decodedUrl;
+          try {
+            db?.settings?.setSetting?.('terminal', 'admin_dashboard_url', decodedUrl);
+          } catch (persistError) {
+            console.warn('[api:fetch-from-admin] Failed to persist decoded admin dashboard URL:', persistError);
+          }
+        }
+      }
+
+      if (!adminUrl) {
+        const serviceAdminUrl = normalizeAdminDashboardUrl(
+          typeof adminSyncService.getAdminDashboardUrl === 'function'
+            ? adminSyncService.getAdminDashboardUrl()
+            : ''
+        );
+        if (serviceAdminUrl) {
+          adminUrl = serviceAdminUrl;
+        }
+      }
+
+      if (!adminUrl) {
+        const normalizedEnvAdminUrl = normalizeAdminDashboardUrl(envAdminUrl);
+        if (normalizedEnvAdminUrl) {
+          const hasTerminalCredentials = terminalId !== 'terminal-001' && !!apiKey;
+          if (hasTerminalCredentials && isLocalhostAdminUrl(normalizedEnvAdminUrl)) {
+            return {
+              success: false,
+              error: 'Admin dashboard URL is missing for this terminal. Open Connection Settings and set a valid Admin Dashboard URL.',
+            };
+          }
+          adminUrl = normalizedEnvAdminUrl;
+        }
       }
 
       if (!adminUrl) {

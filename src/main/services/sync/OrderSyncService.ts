@@ -68,6 +68,52 @@ function getServiceRoleClient(): SupabaseClient | null {
     return serviceRoleClient;
 }
 
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+    const trimmed = (rawUrl || '').trim();
+    if (!trimmed) return '';
+
+    let normalized = trimmed;
+    if (!/^https?:\/\//i.test(normalized)) {
+        const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+        normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+    }
+
+    try {
+        const parsed = new URL(normalized);
+        parsed.search = '';
+        parsed.hash = '';
+        const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+        parsed.pathname = cleanPath || '/';
+        return parsed.toString().replace(/\/$/, '');
+    } catch {
+        return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+    }
+}
+
+function extractAdminUrlFromConnectionString(posApiKey: string): string {
+    const trimmed = (posApiKey || '').trim();
+    if (!trimmed || trimmed.length < 20) return '';
+
+    try {
+        const base64 = trimmed.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+        const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+        const parsed = JSON.parse(decoded);
+        return normalizeAdminDashboardUrl((parsed?.url || '').toString());
+    } catch {
+        return '';
+    }
+}
+
+function isLocalhostAdminUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        return ['localhost', '127.0.0.1', '0.0.0.0'].includes(parsed.hostname);
+    } catch {
+        return /(?:^|\/\/)(localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/|$)/i.test(url);
+    }
+}
+
 export class OrderSyncService {
     private organizationId: string | null = null;
     private interTerminalService: InterTerminalCommunicationService | null = null;
@@ -159,16 +205,54 @@ export class OrderSyncService {
      * Get the admin dashboard base URL from settings or environment
      */
     private getAdminDashboardUrl(): string {
+        let storedAdminUrl = '';
+        let legacyAdminUrl = '';
+        let terminalId = this.terminalId || 'terminal-001';
+        let apiKey = '';
+
         try {
             const dbSvc = this.dbManager.getDatabaseService();
-            const storedUrl = dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', null) as string | null;
-            if (storedUrl) {
-                return storedUrl.replace(/\/$/, '');
-            }
+            storedAdminUrl = (dbSvc.settings.getSetting('terminal', 'admin_dashboard_url', '') || '').toString();
+            legacyAdminUrl = (dbSvc.settings.getSetting('terminal', 'admin_url', '') || '').toString();
+            terminalId = (dbSvc.settings.getSetting('terminal', 'terminal_id', terminalId) || terminalId).toString();
+            apiKey = (dbSvc.settings.getSetting('terminal', 'pos_api_key', '') || '').toString();
         } catch {
-            // Fall back to env
+            // Fall back to env resolution below
         }
-        return (process.env.ADMIN_DASHBOARD_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+        let adminUrl = normalizeAdminDashboardUrl(storedAdminUrl) || normalizeAdminDashboardUrl(legacyAdminUrl);
+        if (!adminUrl && apiKey) {
+            adminUrl = extractAdminUrlFromConnectionString(apiKey);
+            if (adminUrl) {
+                try {
+                    this.dbManager.getDatabaseService().settings.setSetting('terminal', 'admin_dashboard_url', adminUrl);
+                } catch {
+                    // Non-fatal
+                }
+            }
+        }
+
+        if (!adminUrl) {
+            const rawEnvUrl = (process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || '').trim();
+            const envAdminUrl = normalizeAdminDashboardUrl(rawEnvUrl);
+            if (envAdminUrl) {
+                const hasTerminalCredentials = !!apiKey && !!terminalId && terminalId !== 'terminal-001';
+                if (!(hasTerminalCredentials && isLocalhostAdminUrl(envAdminUrl))) {
+                    adminUrl = envAdminUrl;
+                }
+            }
+        }
+
+        if (!adminUrl) {
+            const hasTerminalCredentials = !!apiKey && !!terminalId && terminalId !== 'terminal-001';
+            if (hasTerminalCredentials) {
+                console.warn('[OrderSyncService] Admin dashboard URL not configured for terminal; skipping API sync');
+                return '';
+            }
+            return 'http://localhost:3001';
+        }
+
+        return adminUrl;
     }
 
     /**
@@ -240,6 +324,9 @@ export class OrderSyncService {
         if (!apiKey) {
             console.warn('[OrderSyncService] No API key configured, cannot use API sync');
             return { success: false, error: 'No API key configured' };
+        }
+        if (!baseUrl) {
+            return { success: false, error: 'Admin dashboard URL not configured' };
         }
 
         const headers = this.buildApiHeaders(terminalId, apiKey);

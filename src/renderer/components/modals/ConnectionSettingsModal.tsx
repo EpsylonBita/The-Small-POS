@@ -21,12 +21,35 @@ interface Props {
   onClose: () => void
 }
 
+const normalizeAdminDashboardUrl = (rawUrl: string): string => {
+  const trimmed = (rawUrl || '').trim()
+  if (!trimmed) return ''
+
+  let normalized = trimmed
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized)
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    parsed.search = ''
+    parsed.hash = ''
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '')
+    parsed.pathname = cleanPath || '/'
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '')
+  }
+}
+
 const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
   const [terminalId, setTerminalId] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [adminDashboardUrl, setAdminDashboardUrl] = useState('')
   const [pin, setPin] = useState('')
   const [confirmPin, setConfirmPin] = useState('')
   const [showConnectionSettings, setShowConnectionSettings] = useState(false)
@@ -59,11 +82,25 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     const lsPin = localStorage.getItem('staff.simple_pin') || ''
     setTerminalId(lsTerminal)
     setApiKey(lsApiKey)
+    setAdminDashboardUrl(normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || ''))
     setPin(lsPin)
     void refreshTerminalCredentialCache().then((resolved) => {
       if (resolved.terminalId) setTerminalId(resolved.terminalId)
       if (resolved.apiKey) setApiKey(resolved.apiKey)
     })
+
+    void (async () => {
+      try {
+        const stored = await window.electron?.ipcRenderer?.invoke('settings:get-admin-url')
+        const normalized = normalizeAdminDashboardUrl((stored || '').toString())
+        if (normalized) {
+          setAdminDashboardUrl(normalized)
+          localStorage.setItem('admin_dashboard_url', normalized)
+        }
+      } catch (e) {
+        console.warn('[ConnectionSettings] Failed to load admin dashboard URL:', e)
+      }
+    })()
 
     // Load session timeout settings from main process
     const loadSecuritySettings = async () => {
@@ -85,19 +122,32 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       return
     }
 
+    const normalizedAdminDashboardUrl = normalizeAdminDashboardUrl(adminDashboardUrl)
+    if (!normalizedAdminDashboardUrl) {
+      toast.error(t('modals.connectionSettings.enterAdminUrl', { defaultValue: 'Enter a valid Admin Dashboard URL' }))
+      return
+    }
+
     // Check if terminal ID or API key changed
     const oldTerminalId = localStorage.getItem('terminal_id')
     const oldApiKey = getCachedTerminalCredentials().apiKey
+    const oldAdminDashboardUrl = normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || '')
     const hasChanged = oldTerminalId !== terminalId || oldApiKey !== apiKey
+    const hasAdminUrlChanged = oldAdminDashboardUrl !== normalizedAdminDashboardUrl
 
     localStorage.setItem('terminal_id', terminalId)
+    localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
     updateTerminalCredentialCache({ terminalId, apiKey })
 
     try {
       // Persist under the correct category ('terminal'), not 'pos'
       await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-local', {
         settingType: 'terminal',
-        settings: { terminal_id: terminalId, pos_api_key: apiKey }
+        settings: {
+          terminal_id: terminalId,
+          pos_api_key: apiKey,
+          admin_dashboard_url: normalizedAdminDashboardUrl,
+        }
       })
     } catch (e) {
       console.warn('Failed to persist connection settings to main process:', e)
@@ -125,7 +175,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       console.warn('[ConnectionSettings] Branch resolution failed:', e)
     }
 
-    // If terminal ID or API key changed, trigger full sync from Admin Dashboard
+    // If terminal credentials changed, trigger full sync from Admin Dashboard
     if (hasChanged) {
       try {
         console.log('[ConnectionSettings] Terminal ID or API key changed, clearing shifts and updating credentials...')
@@ -134,10 +184,19 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         localStorage.removeItem('activeShift')
         localStorage.removeItem('staff')
 
+        let resolvedAdminDashboardUrl = ''
+        try {
+          resolvedAdminDashboardUrl =
+            ((await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:get-admin-url')) || '').toString()
+        } catch (resolveError) {
+          console.warn('[ConnectionSettings] Failed to resolve admin dashboard URL before credential update:', resolveError)
+        }
+
         // Update terminal credentials in the sync service
         await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-terminal-credentials', {
           terminalId,
-          apiKey
+          apiKey,
+          adminDashboardUrl: normalizeAdminDashboardUrl(resolvedAdminDashboardUrl) || normalizedAdminDashboardUrl
         })
 
         toast.success(t('modals.connectionSettings.connectionSaved') + ' - Syncing data...')
@@ -145,6 +204,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         console.warn('Failed to update credentials or trigger sync:', e)
         toast.success(t('modals.connectionSettings.connectionSaved'))
       }
+    } else if (hasAdminUrlChanged) {
+      toast.success(t('modals.connectionSettings.connectionSaved', { defaultValue: 'Connection settings saved' }))
+      console.log('[ConnectionSettings] Admin dashboard URL updated without credential reset:', normalizedAdminDashboardUrl)
     } else {
       toast.success(t('modals.connectionSettings.connectionSaved'))
     }
@@ -395,6 +457,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   onChange={e => setTerminalId(e.target.value)}
                   className="liquid-glass-modal-input"
                   placeholder={t('modals.connectionSettings.terminalPlaceholder')}
+                />
+              </div>
+              <div>
+                <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
+                  {t('modals.connectionSettings.adminDashboardUrl', { defaultValue: 'Admin Dashboard URL' })}
+                </label>
+                <input
+                  value={adminDashboardUrl}
+                  onChange={e => setAdminDashboardUrl(e.target.value)}
+                  className="liquid-glass-modal-input"
+                  placeholder={t('modals.connectionSettings.adminDashboardUrlPlaceholder', { defaultValue: 'https://admin-dashboard.example.com' })}
                 />
               </div>
               <div>

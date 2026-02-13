@@ -5,6 +5,55 @@
 
 import { getApiUrl } from '../../config/environment';
 
+function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
+  if (!headers) return {};
+
+  const normalized: Record<string, string> = {};
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      normalized[key] = value;
+    });
+    return normalized;
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      normalized[String(key)] = String(value);
+    }
+    return normalized;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value !== 'undefined') {
+      normalized[key] = String(value);
+    }
+  }
+  return normalized;
+}
+
+function toAdminApiPath(endpoint: string): string {
+  const trimmed = (endpoint || '').trim();
+  if (!trimmed) return '/api';
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const clean = trimmed.replace(/^\/+/, '').replace(/^api\/+/, '');
+  return `/api/${clean}`;
+}
+
+type ElectronApiBridge = {
+  fetchFromApi?: (
+    path: string,
+    options?: {
+      method?: string;
+      body?: unknown;
+      headers?: Record<string, string>;
+    }
+  ) => Promise<{ success: boolean; data?: unknown; error?: string; status?: number }>;
+};
+
 /**
  * Get POS authentication headers for API calls
  * Fetches terminal ID and API key from the main process via IPC
@@ -62,14 +111,44 @@ export async function posApiFetch<T = any>(
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   try {
     const authHeaders = await getPosAuthHeaders();
+    const callerHeaders = normalizeHeaders(options.headers);
+    const mergedHeaders = {
+      ...authHeaders,
+      ...callerHeaders,
+    };
+    const method = (options.method || 'GET').toUpperCase();
+    const windowWithElectron = typeof window !== 'undefined' ? (window as any) : undefined;
+    const electronAPI: ElectronApiBridge | undefined = windowWithElectron
+      ? windowWithElectron.electronAPI || windowWithElectron.electron
+      : undefined;
+
+    if (electronAPI?.fetchFromApi) {
+      const ipcResult = await electronAPI.fetchFromApi(toAdminApiPath(endpoint), {
+        method,
+        body: options.body,
+        headers: mergedHeaders,
+      });
+
+      if (!ipcResult?.success) {
+        return {
+          success: false,
+          error: ipcResult?.error || 'Failed to fetch from admin API',
+          status: ipcResult?.status,
+        };
+      }
+
+      return {
+        success: true,
+        data: ipcResult.data as T,
+        status: ipcResult.status,
+      };
+    }
+
     const url = getApiUrl(endpoint);
 
     const response = await fetch(url, {
       ...options,
-      headers: {
-        ...authHeaders,
-        ...(options.headers || {}),
-      },
+      headers: mergedHeaders,
     });
 
     if (!response.ok) {
@@ -134,4 +213,3 @@ export async function posApiDelete<T = any>(
 ): Promise<{ success: boolean; data?: T; error?: string }> {
   return posApiFetch<T>(endpoint, { method: 'DELETE' });
 }
-

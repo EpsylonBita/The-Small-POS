@@ -23,6 +23,44 @@ export interface EnvironmentConfig {
   TERMINAL_ID: string;
 }
 
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+
+  let normalized = trimmed;
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.search = '';
+    parsed.hash = '';
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    parsed.pathname = cleanPath || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+}
+
+function applyAdminDashboardUrl(adminUrl: string): void {
+  const normalized = normalizeAdminDashboardUrl(adminUrl);
+  if (!normalized) return;
+
+  environment.ADMIN_DASHBOARD_URL = normalized;
+  environment.ADMIN_API_BASE_URL = `${normalized}/api`;
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem('admin_dashboard_url', normalized);
+    } catch {
+      // Ignore localStorage errors (private mode/disabled storage)
+    }
+  }
+}
+
 // Get environment variable with fallback
 function getEnvVar(key: string, fallback: string = ''): string {
   // Check process.env first (main process)
@@ -41,18 +79,20 @@ function getEnvVar(key: string, fallback: string = ''): string {
   return fallback;
 }
 
-// Mutable environment configuration that can be updated at runtime
-let runtimeEnvironment: EnvironmentConfig | null = null;
-
 // Initialize environment configuration
 function initializeEnvironment(): EnvironmentConfig {
-  const envUrl = getEnvVar('ADMIN_DASHBOARD_URL', 'http://localhost:3001');
-  const envApiUrl = getEnvVar('ADMIN_API_BASE_URL', 'http://localhost:3001/api');
+  const envDashboardUrl = normalizeAdminDashboardUrl(getEnvVar('ADMIN_DASHBOARD_URL', ''));
+  const envApiBaseUrl = normalizeAdminDashboardUrl(getEnvVar('ADMIN_API_BASE_URL', ''));
+  const persistedDashboardUrl =
+    typeof window !== 'undefined'
+      ? normalizeAdminDashboardUrl(window.localStorage.getItem('admin_dashboard_url') || '')
+      : '';
+  const adminDashboardUrl = envDashboardUrl || envApiBaseUrl || persistedDashboardUrl || 'http://localhost:3001';
 
   return {
     NODE_ENV: getEnvVar('NODE_ENV', 'development'),
-    ADMIN_DASHBOARD_URL: envUrl,
-    ADMIN_API_BASE_URL: envApiUrl,
+    ADMIN_DASHBOARD_URL: adminDashboardUrl,
+    ADMIN_API_BASE_URL: `${adminDashboardUrl}/api`,
     SUPABASE_URL: getEnvVar('SUPABASE_URL', SUPABASE_CONFIG.url),
     SUPABASE_ANON_KEY: getEnvVar('SUPABASE_ANON_KEY', SUPABASE_CONFIG.anonKey),
     PAYMENT_MODE: getEnvVar('PAYMENT_MODE', 'test') as 'test' | 'production',
@@ -71,14 +111,21 @@ export async function updateAdminUrlFromSettings(): Promise<void> {
 
   try {
     const windowWithElectron = window as WindowWithElectronAPI & Window;
+    let resolvedAdminUrl = '';
+
     // Use window.electron.ipcRenderer which is exposed by preload script
     if (windowWithElectron.electron?.ipcRenderer) {
       const adminUrl = await windowWithElectron.electron.ipcRenderer.invoke('settings:get-admin-url');
-      if (adminUrl && adminUrl !== environment.ADMIN_DASHBOARD_URL) {
-        console.log(`[environment] Updating admin URL from ${environment.ADMIN_DASHBOARD_URL} to ${adminUrl}`);
-        environment.ADMIN_DASHBOARD_URL = adminUrl;
-        environment.ADMIN_API_BASE_URL = adminUrl.replace(/\/$/, '') + '/api';
-      }
+      resolvedAdminUrl = normalizeAdminDashboardUrl((adminUrl || '').toString());
+    }
+
+    if (!resolvedAdminUrl) {
+      resolvedAdminUrl = normalizeAdminDashboardUrl(window.localStorage.getItem('admin_dashboard_url') || '');
+    }
+
+    if (resolvedAdminUrl && resolvedAdminUrl !== environment.ADMIN_DASHBOARD_URL) {
+      console.log(`[environment] Updating admin URL from ${environment.ADMIN_DASHBOARD_URL} to ${resolvedAdminUrl}`);
+      applyAdminDashboardUrl(resolvedAdminUrl);
     }
   } catch (error) {
     console.warn('[environment] Failed to update admin URL from settings:', error);

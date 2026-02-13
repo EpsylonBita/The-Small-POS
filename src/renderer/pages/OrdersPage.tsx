@@ -3,22 +3,16 @@ import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingBag,
-  Clock,
-  CheckCircle,
-  XCircle,
   RefreshCw,
   Search,
   Filter,
   ChevronLeft,
   ChevronRight,
   User,
-  MapPin,
   Phone,
   Package,
   Truck,
   Store,
-  Calendar,
-  DollarSign,
   X
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
@@ -104,8 +98,8 @@ const OrdersPage: React.FC = () => {
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 20;
-
   const isDark = resolvedTheme === 'dark';
+
   const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchOrders = useCallback(async () => {
@@ -191,34 +185,31 @@ const OrdersPage: React.FC = () => {
 
   if (loading && orders.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full">
+      <div className={`flex items-center justify-center h-full ${isDark ? 'bg-black text-zinc-200' : 'bg-gray-50 text-gray-800'}`}>
         <div className="text-center">
-          <RefreshCw className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
-          <p className={isDark ? 'text-gray-300' : 'text-gray-700'}>Loading orders...</p>
+          <RefreshCw className={`w-12 h-12 animate-spin mx-auto mb-4 ${isDark ? 'text-cyan-500' : 'text-blue-500'}`} />
+          <p className={isDark ? 'text-zinc-300' : 'text-gray-700'}>Loading orders...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className={`h-full flex flex-col ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`h-full flex flex-col ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header */}
-      <div className={`border-b ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
-        <div className="p-6">
+      <div className={`border-b ${isDark ? 'border-zinc-800 bg-gradient-to-br from-zinc-950 via-slate-950 to-zinc-900' : 'border-gray-200 bg-white'}`}>
+        <div className="p-6 md:p-8">
           <div className="flex items-center justify-between mb-6">
             <div>
-              <h1 className="text-2xl font-bold mb-1">{t('orders.title', 'Orders')}</h1>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+              <h1 className={`text-3xl font-bold tracking-tight mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>{t('orders.title', 'Orders')}</h1>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
                 {total} {total === 1 ? 'order' : 'orders'} total
               </p>
             </div>
             <button
               onClick={fetchOrders}
               disabled={syncing}
-              className={`px-4 py-2 rounded-lg flex items-center gap-2 transition-colors ${isDark
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'bg-blue-500 hover:bg-blue-600 text-white'
-                } ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
+              className={`px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all text-white ${isDark ? 'border border-blue-500/50 bg-blue-600/90 hover:bg-blue-500' : 'bg-blue-500 hover:bg-blue-600'} ${syncing ? 'opacity-50 cursor-not-allowed' : ''}`}
             >
               <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
               {syncing ? 'Syncing...' : 'Refresh'}
@@ -227,17 +218,17 @@ const OrdersPage: React.FC = () => {
 
           {/* Search and Filters */}
           <div className="space-y-3">
-            <div className={`flex items-center gap-2 px-4 py-3 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
-              <Search className="w-5 h-5 text-gray-400" />
+            <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${isDark ? 'bg-zinc-900/90 border-zinc-800 focus-within:border-cyan-500/50' : 'bg-gray-100 border-gray-200 focus-within:border-blue-400'}`}>
+              <Search className={`w-5 h-5 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
               <input
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 placeholder="Search by order number, customer name, or phone..."
-                className="flex-1 bg-transparent outline-none"
+                className={`flex-1 bg-transparent outline-none ${isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-500'}`}
               />
               {searchTerm && (
-                <button onClick={() => setSearchTerm('')} className="text-gray-400 hover:text-gray-600">
+                <button onClick={() => setSearchTerm('')} className={`${isDark ? 'text-zinc-500 hover:text-zinc-200' : 'text-gray-400 hover:text-gray-700'} transition-colors`}>
                   <X className="w-4 h-4" />
                 </button>
               )}
@@ -246,8 +237,7 @@ const OrdersPage: React.FC = () => {
             {/* Filter Toggle */}
             <button
               onClick={() => setShowFilters(!showFilters)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
-                }`}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm border transition-colors ${isDark ? 'bg-zinc-900 border-zinc-800 hover:border-zinc-600' : 'bg-gray-100 border-gray-200 hover:border-gray-300'}`}
             >
               <Filter className="w-4 h-4" />
               {showFilters ? 'Hide Filters' : 'Show Filters'}
@@ -262,13 +252,13 @@ const OrdersPage: React.FC = () => {
                   exit={{ height: 0, opacity: 0 }}
                   className="overflow-hidden"
                 >
-                  <div className={`grid grid-cols-3 gap-3 p-4 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                  <div className={`grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-gray-100 border-gray-200'}`}>
                     <div>
                       <label className="text-xs mb-1 block opacity-70">Status</label>
                       <select
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                       >
                         <option value="all">All Statuses</option>
                         <option value="pending">Pending</option>
@@ -284,7 +274,7 @@ const OrdersPage: React.FC = () => {
                       <select
                         value={orderTypeFilter}
                         onChange={(e) => setOrderTypeFilter(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                       >
                         <option value="all">All Types</option>
                         <option value="dine-in">Dine-In</option>
@@ -298,13 +288,13 @@ const OrdersPage: React.FC = () => {
                         type="date"
                         value={dateFrom}
                         onChange={(e) => setDateFrom(e.target.value)}
-                        className={`w-full px-3 py-2 rounded-lg text-sm ${isDark ? 'bg-gray-600' : 'bg-white'}`}
+                        className={`w-full px-3 py-2 rounded-lg text-sm border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                       />
                     </div>
                   </div>
                   <button
                     onClick={handleClearFilters}
-                    className="mt-2 text-sm text-blue-500 hover:text-blue-600"
+                    className={`mt-2 text-sm transition-colors ${isDark ? 'text-cyan-400 hover:text-cyan-300' : 'text-blue-600 hover:text-blue-700'}`}
                   >
                     Clear all filters
                   </button>
@@ -316,12 +306,12 @@ const OrdersPage: React.FC = () => {
       </div>
 
       {/* Orders List */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className={`flex-1 overflow-y-auto p-6 ${isDark ? 'bg-gradient-to-b from-black via-black to-zinc-950/80' : 'bg-gray-50'}`}>
         {orders.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
-            <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
+            <ShoppingBag className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-700' : 'text-gray-400'}`} />
             <h3 className="text-lg font-semibold mb-2">No Orders Found</h3>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-500' : 'text-gray-600'}`}>
               No orders match your current filters.
             </p>
           </div>
@@ -332,10 +322,7 @@ const OrdersPage: React.FC = () => {
                 key={order.id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className={`p-4 rounded-lg border cursor-pointer transition-all ${isDark
-                  ? 'bg-gray-800 border-gray-700 hover:border-blue-500'
-                  : 'bg-white border-gray-200 hover:border-blue-400 hover:shadow-md'
-                  }`}
+                className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 hover:border-cyan-500/50 hover:bg-zinc-900' : 'border-gray-200 bg-white hover:border-blue-400 hover:shadow-md'}`}
                 onClick={() => setSelectedOrder(order)}
               >
                 <div className="flex items-start justify-between">
@@ -345,26 +332,26 @@ const OrdersPage: React.FC = () => {
                       <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(order.status)}`}>
                         {order.status}
                       </span>
-                      <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                      <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isDark ? 'bg-zinc-800 border border-zinc-700 text-zinc-200' : 'bg-gray-100 border border-gray-200 text-gray-700'}`}>
                         {getOrderTypeIcon(order.order_type)}
                         <span>{order.order_type}</span>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
                       {order.customer_name && (
-                        <div className="flex items-center gap-2">
+                        <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
                           <User className="w-4 h-4 opacity-50" />
                           <span>{order.customer_name}</span>
                         </div>
                       )}
                       {order.customer_phone && (
-                        <div className="flex items-center gap-2">
+                        <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
                           <Phone className="w-4 h-4 opacity-50" />
                           <span>{order.customer_phone}</span>
                         </div>
                       )}
-                      <div className="flex items-center gap-2">
+                      <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                         <Package className="w-4 h-4 opacity-50" />
                         <span>{order.order_items?.length || 0} items</span>
                       </div>
@@ -372,10 +359,10 @@ const OrdersPage: React.FC = () => {
                   </div>
 
                   <div className="text-right">
-                    <div className="text-2xl font-bold mb-1">
+                    <div className={`text-3xl font-bold mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>
                       {formatMoney(order.total_amount)}
                     </div>
-                    <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                    <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                       {new Date(order.created_at).toLocaleString()}
                     </div>
                   </div>
@@ -388,18 +375,18 @@ const OrdersPage: React.FC = () => {
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className={`border-t p-4 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+        <div className={`border-t p-4 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-gray-200 bg-white'}`}>
           <div className="flex items-center justify-between">
-            <div className="text-sm opacity-70">
+            <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               Page {currentPage} of {totalPages}
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
                 disabled={currentPage === 1}
-                className={`px-3 py-2 rounded-lg ${currentPage === 1
-                  ? 'opacity-50 cursor-not-allowed'
-                  : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                className={`px-3 py-2 rounded-lg border ${currentPage === 1
+                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-gray-100 border-gray-300'
+                  : isDark ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
                   }`}
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -407,9 +394,9 @@ const OrdersPage: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
                 disabled={currentPage === totalPages}
-                className={`px-3 py-2 rounded-lg ${currentPage === totalPages
-                  ? 'opacity-50 cursor-not-allowed'
-                  : isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                className={`px-3 py-2 rounded-lg border ${currentPage === totalPages
+                  ? isDark ? 'opacity-40 cursor-not-allowed bg-zinc-900 border-zinc-700' : 'opacity-40 cursor-not-allowed bg-gray-100 border-gray-300'
+                  : isDark ? 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700' : 'bg-gray-100 hover:bg-gray-200 border-gray-300'
                   }`}
               >
                 <ChevronRight className="w-4 h-4" />

@@ -4,6 +4,28 @@ import { getSupabaseClient } from '../../../shared/supabase-config';
 import { initializeMainLanguageFromSettings } from '../../lib/main-i18n';
 import type { SettingCategory } from '../../../shared/types/database';
 
+function normalizeAdminDashboardUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+
+  let normalized = trimmed;
+  if (!/^https?:\/\//i.test(normalized)) {
+    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized);
+    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.search = '';
+    parsed.hash = '';
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '');
+    parsed.pathname = cleanPath || '/';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '');
+  }
+}
+
 /**
  * Registers settings-related IPC handlers (general settings, terminal config,
  * discounts, tax, and version/sync metadata).
@@ -68,23 +90,34 @@ export function registerSettingsHandlers(): void {
       }
 
       if (storedUrl) {
-        // Ensure URL has protocol prefix
-        if (!storedUrl.startsWith('http://') && !storedUrl.startsWith('https://')) {
-          storedUrl = 'https://' + storedUrl;
-          console.log(`[settings:get-admin-url] Added https:// prefix to URL: ${storedUrl}`);
-          // Store the corrected URL
-          settingsService.setSetting('terminal', 'admin_dashboard_url', storedUrl);
+        const normalized = normalizeAdminDashboardUrl(storedUrl);
+        if (normalized && normalized !== storedUrl) {
+          settingsService.setSetting('terminal', 'admin_dashboard_url', normalized);
         }
-        console.log(`[settings:get-admin-url] Returning stored admin URL: ${storedUrl}`);
-        return storedUrl;
+        console.log(`[settings:get-admin-url] Returning stored admin URL: ${normalized}`);
+        return normalized;
       }
+
+      // Legacy fallback
+      const legacyUrl = settingsService.getSetting<string>('terminal', 'admin_url', '');
+      if (legacyUrl) {
+        const normalized = normalizeAdminDashboardUrl(legacyUrl);
+        if (normalized) {
+          settingsService.setSetting('terminal', 'admin_dashboard_url', normalized);
+          console.log(`[settings:get-admin-url] Returning legacy admin URL: ${normalized}`);
+          return normalized;
+        }
+      }
+
       // Fallback to env
-      const envUrl = process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || 'http://localhost:3001';
-      console.log(`[settings:get-admin-url] Returning env admin URL: ${envUrl}`);
+      const envUrl = normalizeAdminDashboardUrl(process.env.ADMIN_DASHBOARD_URL || process.env.ADMIN_API_BASE_URL || '');
+      if (envUrl) {
+        console.log(`[settings:get-admin-url] Returning env admin URL: ${envUrl}`);
+      }
       return envUrl;
     } catch (error) {
       console.error('Get admin URL error:', error);
-      return 'http://localhost:3001';
+      return '';
     }
   });
 

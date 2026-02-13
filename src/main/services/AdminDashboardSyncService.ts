@@ -111,6 +111,10 @@ export class AdminDashboardSyncService {
     this.adminDashboardUrl = url;
   }
 
+  getAdminDashboardUrl(): string {
+    return this.adminDashboardUrl;
+  }
+
   setMainWindow(window: BrowserWindow): void {
     this.mainWindow = window;
   }
@@ -663,7 +667,20 @@ export class AdminDashboardSyncService {
         }
 
         if (!response.ok) {
-          throw new Error(`Menu sync failed: HTTP ${response.status}`);
+          let errorText = '';
+          try {
+            errorText = await response.text();
+          } catch {
+            errorText = '';
+          }
+
+          if (errorText) {
+            console.error('[Menu Sync] Non-200 response body:', errorText);
+          }
+
+          throw new Error(
+            `Menu sync failed: HTTP ${response.status}${errorText ? ` - ${errorText}` : ''}`
+          );
         }
 
         const menuData = await response.json();
@@ -827,7 +844,22 @@ export class AdminDashboardSyncService {
       }
 
       if (!res || !res.ok) {
-        throw new Error(`Failed to fetch settings: HTTP ${res?.status ?? 'unknown'} from ${endpoint}`);
+        let responseBody = '';
+        if (res) {
+          try {
+            responseBody = await res.text();
+          } catch {
+            responseBody = '';
+          }
+        }
+
+        if (responseBody) {
+          console.error('[Settings Sync] Non-200 response body:', responseBody);
+        }
+
+        throw new Error(
+          `Failed to fetch settings: HTTP ${res?.status ?? 'unknown'} from ${endpoint}${responseBody ? ` - ${responseBody}` : ''}`
+        );
       }
 
       const settingsPayload = await res.json();
