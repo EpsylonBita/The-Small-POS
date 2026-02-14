@@ -79,7 +79,8 @@ export function registerTerminalConfigHandlers(): void {
       }
 
       const persistedTerminalId = settingsService?.getSetting<string>('terminal', 'terminal_id', '');
-      const terminalId = process.env.TERMINAL_ID || persistedTerminalId || null;
+      const rawTerminalId = (process.env.TERMINAL_ID || persistedTerminalId || '').toString().trim();
+      const terminalId = rawTerminalId && rawTerminalId !== 'terminal-001' ? rawTerminalId : null;
 
       // 3) Try Admin Dashboard POS Settings API (authoritative source created by Admin)
       if (terminalId) {

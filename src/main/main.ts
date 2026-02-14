@@ -40,6 +40,83 @@ import { initializeAutoUpdater } from './auto-updater';
 import { createApplicationMenu } from './app-menu';
 // ASAR integrity now handled by Electron 39's built-in fuses (enableEmbeddedAsarIntegrityValidation)
 
+const DEV_SERVER_WATCHDOG_URL = process.env.POS_DEV_SERVER_URL || 'http://localhost:3002';
+const DEV_SERVER_WATCHDOG_INTERVAL_MS = 2000;
+const DEV_SERVER_WATCHDOG_FAILURE_THRESHOLD = 3;
+const DEV_SERVER_WATCHDOG_REQUEST_TIMEOUT_MS = 1200;
+
+function startDevServerShutdownWatchdog(): void {
+  if (app.isPackaged) {
+    return;
+  }
+
+  let consecutiveFailures = 0;
+  let stopped = false;
+
+  const stop = () => {
+    stopped = true;
+  };
+
+  const checkDevServer = async () => {
+    if (stopped) {
+      return;
+    }
+
+    try {
+      const response = await fetch(DEV_SERVER_WATCHDOG_URL, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(DEV_SERVER_WATCHDOG_REQUEST_TIMEOUT_MS),
+      });
+
+      if (response.ok || response.status >= 400) {
+        consecutiveFailures = 0;
+        return;
+      }
+
+      consecutiveFailures += 1;
+    } catch {
+      consecutiveFailures += 1;
+    }
+
+    if (consecutiveFailures >= DEV_SERVER_WATCHDOG_FAILURE_THRESHOLD) {
+      console.warn(
+        `[DevWatchdog] Dev server is unreachable (${DEV_SERVER_WATCHDOG_URL}). Exiting Electron.`,
+      );
+      serviceRegistry.setIsQuitting(true);
+      app.exit(0);
+    }
+  };
+
+  // Start immediately so orphaned dev Electron processes exit quickly after Ctrl+C.
+  void checkDevServer();
+
+  const timer = setInterval(() => {
+    void checkDevServer();
+  }, DEV_SERVER_WATCHDOG_INTERVAL_MS);
+  timer.unref();
+
+  app.on('before-quit', stop);
+  app.on('will-quit', stop);
+}
+
+function registerProcessSignalHandlers(): void {
+  const shutdownFromSignal = (signal: string) => {
+    console.log(`[Main] Received ${signal}, shutting down...`);
+    serviceRegistry.setIsQuitting(true);
+    app.quit();
+
+    // Fallback in case quit hooks are blocked.
+    setTimeout(() => {
+      app.exit(0);
+    }, 2000).unref();
+  };
+
+  process.on('SIGINT', () => shutdownFromSignal('SIGINT'));
+  process.on('SIGTERM', () => shutdownFromSignal('SIGTERM'));
+  process.on('SIGHUP', () => shutdownFromSignal('SIGHUP'));
+}
+
 // Configure Google API key for geolocation BEFORE app is ready
 try {
   const googleApiKey = (process.env.GOOGLE_MAPS_API_KEY || '').trim();
@@ -59,6 +136,9 @@ if (process.platform === 'win32') {
 // App ready handler
 app.whenReady().then(async () => {
   try {
+    registerProcessSignalHandlers();
+    startDevServerShutdownWatchdog();
+
     // SECURITY: ASAR integrity verification is now handled automatically by Electron 39's
     // built-in fuses (enableEmbeddedAsarIntegrityValidation + onlyLoadAppFromAsar).
     // If integrity check fails, the app will refuse to load before reaching this point.

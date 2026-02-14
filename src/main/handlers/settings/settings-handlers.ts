@@ -268,7 +268,8 @@ export function registerSettingsHandlers(): void {
       } catch { }
 
       const persistedTerminalId = settingsService.getSetting<string>('terminal', 'terminal_id', '');
-      const terminalId = process.env.TERMINAL_ID || persistedTerminalId || null;
+      const rawTerminalId = (process.env.TERMINAL_ID || persistedTerminalId || '').toString().trim();
+      const terminalId = rawTerminalId && rawTerminalId !== 'terminal-001' ? rawTerminalId : null;
 
       if (terminalId) {
         try {
@@ -593,7 +594,19 @@ export function registerSettingsHandlers(): void {
     'settings:update-terminal-credentials',
     async (
       _event,
-      { terminalId, apiKey, adminDashboardUrl }: { terminalId: string; apiKey: string; adminDashboardUrl?: string },
+      {
+        terminalId,
+        apiKey,
+        adminDashboardUrl,
+        supabaseUrl,
+        supabaseAnonKey,
+      }: {
+        terminalId: string;
+        apiKey: string;
+        adminDashboardUrl?: string;
+        supabaseUrl?: string;
+        supabaseAnonKey?: string;
+      },
     ) => {
       try {
         if (!adminDashboardSyncService) {
@@ -608,7 +621,10 @@ export function registerSettingsHandlers(): void {
 
         // 1) Tell AdminDashboardSyncService to update credentials and perform factory reset
         // Pass adminDashboardUrl so it can be saved AFTER the factory reset clears old data
-        await adminDashboardSyncService.updateTerminalCredentials(terminalId, apiKey, adminDashboardUrl);
+        await adminDashboardSyncService.updateTerminalCredentials(terminalId, apiKey, adminDashboardUrl, {
+          supabaseUrl,
+          supabaseAnonKey,
+        });
 
         // 2) Ensure TerminalConfigService switches to the new terminal ID so all
         //    config/branch lookups and realtime subscriptions use the new terminal

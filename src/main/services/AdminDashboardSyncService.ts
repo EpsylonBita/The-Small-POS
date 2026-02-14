@@ -8,6 +8,7 @@ import { DatabaseManager } from '../database';
 import { BrowserWindow } from 'electron';
 import os from 'os';
 import { serviceRegistry } from '../service-registry';
+import { configureSupabaseRuntime } from '../../shared/supabase-config';
 
 
 export interface AdminDashboardSyncStatus {
@@ -124,12 +125,38 @@ export class AdminDashboardSyncService {
    * This ensures the sync service uses the latest credentials
    * Performs a factory reset to clear old branch data
    */
-  async updateTerminalCredentials(terminalId: string, apiKey: string, adminDashboardUrl?: string): Promise<void> {
+  async updateTerminalCredentials(
+    terminalId: string,
+    apiKey: string,
+    adminDashboardUrl?: string,
+    options?: {
+      supabaseUrl?: string;
+      supabaseAnonKey?: string;
+    }
+  ): Promise<void> {
     console.log(`[AdminDashboardSyncService] Updating terminal credentials: ${terminalId}`);
 
     // Store the admin URL before factory reset (if provided)
     const urlToStore = adminDashboardUrl || this.adminDashboardUrl;
     console.log(`[AdminDashboardSyncService] Admin URL to preserve: ${urlToStore}`);
+
+    // Preserve existing Supabase runtime credentials so reconnect/rotation
+    // cannot accidentally downgrade the terminal into onboarding mode.
+    let preservedSupabaseUrl = '';
+    let preservedSupabaseAnonKey = '';
+    try {
+      const dbSvcBeforeReset = this.dbManager?.getDatabaseService?.();
+      if (dbSvcBeforeReset?.settings) {
+        preservedSupabaseUrl = String(
+          dbSvcBeforeReset.settings.getSetting('terminal', 'supabase_url', '') || ''
+        ).trim();
+        preservedSupabaseAnonKey = String(
+          dbSvcBeforeReset.settings.getSetting('terminal', 'supabase_anon_key', '') || ''
+        ).trim();
+      }
+    } catch (readError) {
+      console.warn('[AdminDashboardSyncService] Could not read preserved Supabase settings before reset:', readError);
+    }
 
     // 1. Perform factory reset FIRST to clear everything (including old ID)
     try {
@@ -151,6 +178,19 @@ export class AdminDashboardSyncService {
     if (adminDashboardUrl) {
       this.adminDashboardUrl = adminDashboardUrl;
     }
+
+    const incomingSupabaseUrl = (options?.supabaseUrl || '').trim();
+    const incomingSupabaseAnonKey = (options?.supabaseAnonKey || '').trim();
+    const resolvedSupabaseUrl = incomingSupabaseUrl || preservedSupabaseUrl;
+    const resolvedSupabaseAnonKey = incomingSupabaseAnonKey || preservedSupabaseAnonKey;
+
+    // If onboarding already provided Supabase runtime credentials, apply immediately.
+    if (resolvedSupabaseUrl && resolvedSupabaseAnonKey) {
+      configureSupabaseRuntime(resolvedSupabaseUrl, resolvedSupabaseAnonKey);
+      console.log('[AdminDashboardSyncService] Applied Supabase runtime credentials', {
+        source: incomingSupabaseUrl && incomingSupabaseAnonKey ? 'incoming' : 'preserved',
+      });
+    }
     // Ensure ModuleSyncService uses the latest admin URL
     const moduleSyncService = serviceRegistry.moduleSyncService;
     if (moduleSyncService && adminDashboardUrl) {
@@ -167,6 +207,10 @@ export class AdminDashboardSyncService {
         if (urlToStore) {
           dbSvc.settings.setSetting('terminal', 'admin_dashboard_url', urlToStore);
           console.log(`[AdminDashboardSyncService] Admin URL persisted: ${urlToStore}`);
+        }
+        if (resolvedSupabaseUrl && resolvedSupabaseAnonKey) {
+          dbSvc.settings.setSetting('terminal', 'supabase_url', resolvedSupabaseUrl);
+          dbSvc.settings.setSetting('terminal', 'supabase_anon_key', resolvedSupabaseAnonKey);
         }
         console.log('[AdminDashboardSyncService] New credentials persisted to local settings');
       }
@@ -348,13 +392,14 @@ export class AdminDashboardSyncService {
       });
 
       if (!response.ok) {
-        // Log the error but don't trigger factory reset for connection/auth issues
-        // Factory reset should ONLY happen via explicit command from admin dashboard
         let responseBody: any = null;
+        let bodyText = '';
         try {
-          const bodyText = await response.text();
+          bodyText = await response.text();
+          if (bodyText.trim()) {
+            responseBody = JSON.parse(bodyText);
+          }
           console.warn(`[Heartbeat] Server returned HTTP ${response.status}${bodyText ? ` - ${bodyText}` : ''}`);
-          responseBody = JSON.parse(bodyText);
         } catch {
           console.warn(`[Heartbeat] Server returned HTTP ${response.status} (could not parse body)`);
         }
@@ -376,8 +421,10 @@ export class AdminDashboardSyncService {
                 const dbSvc = this.dbManager?.getDatabaseService?.();
                 if (dbSvc) {
                   await dbSvc.factoryReset();
-                  this.notifyRenderer('app:reset', { reason: 'terminal_deleted', commandId: cmd.id });
+                } else {
+                  console.warn('[Heartbeat] Database service unavailable during factory reset command handling');
                 }
+                this.notifyRenderer('app:reset', { reason: 'terminal_deleted', commandId: cmd.id });
               } catch (resetError) {
                 console.error('[Heartbeat] Factory reset failed:', resetError);
               }
@@ -386,11 +433,35 @@ export class AdminDashboardSyncService {
           }
         }
 
-        // For 401/404, just log and continue - terminal may be temporarily unreachable
-        // or credentials may need to be re-entered via settings
+        // Defensive fallback: if auth explicitly reports terminal deletion/inactive state,
+        // reset locally even when no pending command was returned.
+        if (response.status === 401) {
+          const authError = typeof responseBody?.error === 'string' ? responseBody.error.toLowerCase() : '';
+          const isTerminalDeleted =
+            authError.includes('terminal not found') ||
+            authError.includes('terminal not found or inactive') ||
+            authError.includes('inactive');
+
+          if (isTerminalDeleted) {
+            console.warn('[Heartbeat] Server reported terminal missing/inactive. Triggering local factory reset.');
+            try {
+              const dbSvc = this.dbManager?.getDatabaseService?.();
+              if (dbSvc) {
+                await dbSvc.factoryReset();
+              } else {
+                console.warn('[Heartbeat] Database service unavailable while handling terminal deletion signal');
+              }
+              this.notifyRenderer('app:reset', { reason: 'terminal_deleted' });
+            } catch (resetError) {
+              console.error('[Heartbeat] Factory reset failed after terminal deletion signal:', resetError);
+            }
+            return;
+          }
+        }
+
+        // For 401/404 without terminal-deleted signal, allow offline operation.
         if (response.status === 401 || response.status === 404) {
           console.warn('[Heartbeat] Terminal authentication failed or not found. Check terminal configuration.');
-          // Don't throw - allow offline operation
           return;
         }
 
@@ -424,8 +495,10 @@ export class AdminDashboardSyncService {
               const dbSvc = this.dbManager?.getDatabaseService?.();
               if (dbSvc) {
                 await dbSvc.factoryReset();
-                this.notifyRenderer('app:reset', { reason: 'admin_command', commandId: cmd.id });
+              } else {
+                console.warn('[Heartbeat] Database service unavailable during explicit factory reset command');
               }
+              this.notifyRenderer('app:reset', { reason: 'admin_command', commandId: cmd.id });
             } catch (resetError) {
               console.error('[Heartbeat] Factory reset command failed:', resetError);
             }
@@ -441,8 +514,10 @@ export class AdminDashboardSyncService {
           const dbSvc = this.dbManager?.getDatabaseService?.();
           if (dbSvc) {
             await dbSvc.factoryReset();
-            this.notifyRenderer('app:reset', { reason: 'remote_command' });
+          } else {
+            console.warn('[Heartbeat] Database service unavailable during legacy reset command');
           }
+          this.notifyRenderer('app:reset', { reason: 'remote_command' });
         } catch (resetError) {
           console.error('[Heartbeat] Remote reset command failed:', resetError);
         }
@@ -535,7 +610,21 @@ export class AdminDashboardSyncService {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Sync menu data (now terminal exists with api_key_hash)
-      await this.syncMenuData();
+      try {
+        await this.syncMenuData();
+      } catch (menuSyncError) {
+        const menuSyncMsg = menuSyncError instanceof Error
+          ? `${menuSyncError.name}: ${menuSyncError.message}`
+          : String(menuSyncError);
+        const isTransientMenuSyncError =
+          /timeout|fetch failed|network|econnreset|enotfound|eai_again|socket hang up/i.test(menuSyncMsg);
+
+        if (!isTransientMenuSyncError) {
+          throw menuSyncError;
+        }
+
+        console.warn('[AdminDashboardSyncService] Menu sync failed transiently; continuing with settings sync:', menuSyncMsg);
+      }
 
       // Small delay between sync calls to avoid rate limiting
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -622,6 +711,21 @@ export class AdminDashboardSyncService {
   private async syncMenuData(): Promise<void> {
     const maxRetries = 3;
     let retryCount = 0;
+    const isRetryableMenuSyncError = (error: unknown): boolean => {
+      if (!(error instanceof Error)) return false;
+      const msg = `${error.name}: ${error.message}`.toLowerCase();
+      return (
+        msg.includes('429') ||
+        msg.includes('timeout') ||
+        msg.includes('aborted due to timeout') ||
+        msg.includes('fetch failed') ||
+        msg.includes('network') ||
+        msg.includes('econnreset') ||
+        msg.includes('enotfound') ||
+        msg.includes('eai_again') ||
+        msg.includes('socket hang up')
+      );
+    };
 
     while (retryCount < maxRetries) {
       try {
@@ -651,7 +755,8 @@ export class AdminDashboardSyncService {
         const response = await fetch(`${base}/api/pos/menu-sync?terminal_id=${encodeURIComponent(storedTid as string)}&last_sync=${this.lastSync || ''}`, {
           method: 'GET',
           headers,
-          signal: AbortSignal.timeout(30000) // 30 second timeout
+          cache: 'no-store',
+          signal: AbortSignal.timeout(45000) // 45 second timeout
         });
 
         // Handle rate limiting with exponential backoff
@@ -778,12 +883,12 @@ export class AdminDashboardSyncService {
         return;
 
       } catch (error) {
-        // If it's a rate limit error and we have retries left, the while loop will continue
-        if (retryCount >= maxRetries - 1 || !(error instanceof Error && error.message.includes('429'))) {
+        const shouldRetry = isRetryableMenuSyncError(error) && retryCount < maxRetries - 1;
+        if (!shouldRetry) {
           console.error('❌ Menu sync failed:', error);
           throw error;
         }
-        // Otherwise, increment and let the while loop retry
+
         retryCount++;
         const backoffMs = Math.min(5000 * Math.pow(2, retryCount), 30000);
         console.warn(`⏳ Menu sync error, retrying in ${backoffMs / 1000}s... (attempt ${retryCount}/${maxRetries})`);
@@ -803,7 +908,11 @@ export class AdminDashboardSyncService {
 
       // Use the correct settings endpoint: /api/pos/settings/{terminal_id}
       const dbSvc = this.dbManager?.getDatabaseService?.();
-      const storedTid = (await (dbSvc?.settings?.getSetting?.('terminal', 'terminal_id', this.terminalId))) || this.terminalId;
+      const storedTid = ((await (dbSvc?.settings?.getSetting?.('terminal', 'terminal_id', this.terminalId))) || this.terminalId || '').toString().trim();
+      if (!storedTid || storedTid === 'terminal-001') {
+        console.warn('[Settings Sync] Skipping settings sync: terminal_id is not configured', { terminalId: storedTid || '(empty)' });
+        return;
+      }
       const endpoint = `${urlBase}/api/pos/settings/${encodeURIComponent(storedTid as string)}`;
 
       const token = process.env.ADMIN_API_TOKEN || process.env.ADMIN_DASHBOARD_TOKEN;
@@ -863,6 +972,30 @@ export class AdminDashboardSyncService {
       }
 
       const settingsPayload = await res.json();
+
+      const payloadSupabase = settingsPayload?.supabase && typeof settingsPayload.supabase === 'object'
+        ? settingsPayload.supabase
+        : null;
+      const resolvedSupabaseUrl = (
+        settingsPayload?.supabase_url
+        || payloadSupabase?.url
+        || ''
+      ).toString().trim();
+      const resolvedSupabaseAnonKey = (
+        settingsPayload?.supabase_anon_key
+        || payloadSupabase?.anon_key
+        || ''
+      ).toString().trim();
+
+      if (resolvedSupabaseUrl && resolvedSupabaseAnonKey) {
+        const dbSvcForSupabase = this.dbManager?.getDatabaseService?.();
+        if (dbSvcForSupabase?.settings) {
+          dbSvcForSupabase.settings.setSetting('terminal', 'supabase_url', resolvedSupabaseUrl);
+          dbSvcForSupabase.settings.setSetting('terminal', 'supabase_anon_key', resolvedSupabaseAnonKey);
+        }
+        configureSupabaseRuntime(resolvedSupabaseUrl, resolvedSupabaseAnonKey);
+        console.log('[Settings Sync] Applied Supabase runtime configuration from Admin API');
+      }
 
       // Normalize possible payload shapes
       const normalize = (payload: any) => {
@@ -1017,7 +1150,10 @@ export class AdminDashboardSyncService {
     try {
       const base = this.adminDashboardUrl.replace(/\/$/, '')
       const dbSvc = this.dbManager?.getDatabaseService?.()
-      const storedTid = (await (dbSvc?.settings?.getSetting?.('terminal', 'terminal_id', this.terminalId))) || this.terminalId
+      const storedTid = ((await (dbSvc?.settings?.getSetting?.('terminal', 'terminal_id', this.terminalId))) || this.terminalId || '').toString().trim()
+      if (!storedTid || storedTid === 'terminal-001') {
+        return { success: false, error: 'Terminal ID not configured' }
+      }
       const apiKey = ((await (dbSvc?.settings?.getSetting?.('terminal', 'pos_api_key', ''))) || '').toString()
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',

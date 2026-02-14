@@ -578,6 +578,12 @@ export class ModuleSyncService {
    */
   subscribeToRealtimeChanges(orgId: string): void {
     if (!this.supabaseClient) {
+      // Runtime Supabase config can be applied after service construction
+      // (e.g., right after terminal pairing). Retry lazy initialization here.
+      this.initializeSupabaseClient();
+    }
+
+    if (!this.supabaseClient) {
       console.warn('[ModuleSyncService] Supabase client not initialized, cannot subscribe to realtime');
       return;
     }

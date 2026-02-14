@@ -423,7 +423,15 @@ export function registerShiftHandlers(): void {
                 role_id: s.role_id,
                 role_name: s.role_name || s.roles?.name || 'staff',
                 role_display_name: s.role_display_name || s.roles?.display_name || 'Staff',
-                roles: [], // Will be loaded separately by renderer
+                roles: Array.isArray(s.roles)
+                    ? s.roles.map((role: any) => ({
+                        role_id: role?.role_id || role?.id || s.role_id,
+                        role_name: role?.role_name || role?.name || s.role_name || 'staff',
+                        role_display_name: role?.role_display_name || role?.display_name || s.role_display_name || 'Staff',
+                        role_color: role?.role_color || role?.color || '#6B7280',
+                        is_primary: !!role?.is_primary
+                    }))
+                    : [], // Will be loaded separately when absent
                 can_login_pos: (s.can_login_pos ?? true),
                 is_active: (s.is_active ?? true),
                 hourly_rate: s.hourly_rate
@@ -442,6 +450,9 @@ export function registerShiftHandlers(): void {
         return handleIPCError(async () => {
             const supabaseUrl = SUPABASE_CONFIG.url;
             const supabaseKey = SUPABASE_CONFIG.anonKey;
+            const settingsService = serviceRegistry.get('settingsService');
+            const organizationId = (settingsService?.getSetting<string>('terminal', 'organization_id', '') || '').trim();
+            const branchId = (settingsService?.getSetting<string>('terminal', 'branch_id', '') || '').trim();
 
             if (!supabaseUrl || !supabaseKey) {
                 throw new IPCError('Supabase configuration missing', 'SERVICE_UNAVAILABLE');
@@ -451,6 +462,10 @@ export function registerShiftHandlers(): void {
                 return {};
             }
 
+            const scopedHeaders: Record<string, string> = {};
+            if (organizationId) scopedHeaders['x-organization-id'] = organizationId;
+            if (branchId) scopedHeaders['x-branch-id'] = branchId;
+
             // First, fetch all roles for lookup
             const rolesLookupUrl = `${supabaseUrl}/rest/v1/roles?select=id,name,display_name,color&is_active=eq.true`;
             const rolesLookupRes = await fetch(rolesLookupUrl, {
@@ -459,6 +474,7 @@ export function registerShiftHandlers(): void {
                     'apikey': supabaseKey,
                     'Authorization': `Bearer ${supabaseKey}`,
                     'Content-Type': 'application/json',
+                    ...scopedHeaders
                 }
             });
 
@@ -474,35 +490,74 @@ export function registerShiftHandlers(): void {
                 });
             }
 
-            // Fetch staff_roles for the given staff IDs
-            const fetchUrl = `${supabaseUrl}/rest/v1/staff_roles?staff_id=in.(${staffIds.join(',')})&select=staff_id,role_id,is_primary`;
-            const rolesRes = await fetch(fetchUrl, {
-                method: 'GET',
+            const rolesByStaff: Record<string, any[]> = {};
+            let rolesData: any[] = [];
+
+            // Prefer SECURITY DEFINER RPC for stable multi-role access across RLS variants.
+            const rolesRpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_get_staff_roles_by_ids`, {
+                method: 'POST',
                 headers: {
                     'apikey': supabaseKey,
                     'Authorization': `Bearer ${supabaseKey}`,
                     'Content-Type': 'application/json',
-                }
+                    ...scopedHeaders
+                },
+                body: JSON.stringify({ p_staff_ids: staffIds })
             });
 
-            const rolesByStaff: Record<string, any[]> = {};
-
-            if (rolesRes.ok) {
-                const rolesData = await rolesRes.json();
-                rolesData.forEach((sr: any) => {
-                    if (!rolesByStaff[sr.staff_id]) {
-                        rolesByStaff[sr.staff_id] = [];
-                    }
-                    const roleDetails = rolesMap.get(sr.role_id);
-                    rolesByStaff[sr.staff_id].push({
-                        role_id: sr.role_id,
-                        role_name: roleDetails?.name || 'staff',
-                        role_display_name: roleDetails?.display_name || 'Staff',
-                        role_color: roleDetails?.color || '#6B7280',
-                        is_primary: sr.is_primary || false
-                    });
+            if (rolesRpcRes.ok) {
+                rolesData = await rolesRpcRes.json();
+                console.log('[shift:get-staff-roles] RPC returned role rows:', rolesData.length);
+            } else {
+                const rpcErr = await rolesRpcRes.text().catch(() => '');
+                console.warn('[shift:get-staff-roles] RPC unavailable, falling back to direct staff_roles query', {
+                    status: rolesRpcRes.status,
+                    rpcErr
                 });
+
+                // Fallback for environments where the RPC migration is not applied yet.
+                const fetchUrl = `${supabaseUrl}/rest/v1/staff_roles?staff_id=in.(${staffIds.join(',')})&select=staff_id,role_id,is_primary`;
+                const rolesRes = await fetch(fetchUrl, {
+                    method: 'GET',
+                    headers: {
+                        'apikey': supabaseKey,
+                        'Authorization': `Bearer ${supabaseKey}`,
+                        'Content-Type': 'application/json',
+                        ...scopedHeaders
+                    }
+                });
+
+                if (rolesRes.ok) {
+                    rolesData = await rolesRes.json();
+                    console.log('[shift:get-staff-roles] Fallback returned role rows:', rolesData.length);
+                } else {
+                    const fallbackErr = await rolesRes.text().catch(() => '');
+                    console.warn('[shift:get-staff-roles] Fallback staff_roles query failed', {
+                        status: rolesRes.status,
+                        fallbackErr
+                    });
+                }
             }
+
+            rolesData.forEach((sr: any) => {
+                if (!rolesByStaff[sr.staff_id]) {
+                    rolesByStaff[sr.staff_id] = [];
+                }
+
+                const roleDetails = rolesMap.get(sr.role_id);
+                const normalizedRole = {
+                    role_id: sr.role_id,
+                    role_name: sr.role_name || roleDetails?.name || 'staff',
+                    role_display_name: sr.role_display_name || roleDetails?.display_name || 'Staff',
+                    role_color: sr.role_color || roleDetails?.color || '#6B7280',
+                    is_primary: sr.is_primary || false
+                };
+
+                const alreadyExists = rolesByStaff[sr.staff_id].some((existing) => existing.role_id === normalizedRole.role_id);
+                if (!alreadyExists) {
+                    rolesByStaff[sr.staff_id].push(normalizedRole);
+                }
+            });
 
             return rolesByStaff;
         }, 'shift:get-staff-roles');

@@ -22,7 +22,7 @@ import { ScreenCaptureService } from '../services/ScreenCaptureService';
 import { CustomerService } from '../services/CustomerService';
 import { WindowManager } from '../window-manager';
 import { ModuleSyncService } from '../services/ModuleSyncService';
-import { getSupabaseClient, isSupabaseConfigured, setSupabaseContext } from '../../shared/supabase-config';
+import { configureSupabaseRuntime, getSupabaseClient, isSupabaseConfigured, setSupabaseContext } from '../../shared/supabase-config';
 import { setupRealtimeHandlers } from '../index';
 import {
   initializePrinterManager,
@@ -116,6 +116,14 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
     const settingsService = new SettingsService(dbManager.db);
     serviceRegistry.register('settingsService', settingsService);
 
+    // Restore Supabase runtime credentials from terminal settings before creating Supabase-backed services.
+    const persistedSupabaseUrl = (settingsService.getSetting<string>('terminal', 'supabase_url', '') || '').trim();
+    const persistedSupabaseAnonKey = (settingsService.getSetting<string>('terminal', 'supabase_anon_key', '') || '').trim();
+    if (persistedSupabaseUrl && persistedSupabaseAnonKey) {
+      configureSupabaseRuntime(persistedSupabaseUrl, persistedSupabaseAnonKey);
+      console.log('[initializeServices] Restored Supabase runtime config from terminal settings');
+    }
+
     // Initialize auth services
     const authService = new AuthService(dbManager, settingsService);
     const staffAuthService = new StaffAuthService();
@@ -169,7 +177,7 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
 
     // SECURITY: Only use anon key in Electron app - service role key bypasses RLS
     // and would allow any terminal to access ALL organizations' data
-    const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
+    const supabaseKey = process.env.SUPABASE_ANON_KEY || persistedSupabaseAnonKey || '';
 
     // SECURITY: Service role key must never be present in Electron runtime
     if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -192,7 +200,7 @@ export async function initializeServices(dbManager: DatabaseManager): Promise<bo
     // Initialize CustomerService with terminal ID and API key
     const customerService = new CustomerService(
       dbManager.db,
-      process.env.SUPABASE_URL || '',
+      process.env.SUPABASE_URL || persistedSupabaseUrl || '',
       supabaseKey,
       adminApiBaseUrl,
       terminalId,

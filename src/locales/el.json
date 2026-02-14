@@ -17,6 +17,7 @@
       "filter": "Φίλτρο",
       "clear": "Καθαρισμός",
       "refresh": "Ανανέωση",
+      "retry": "Επανάληψη",
       "view": "Προβολή",
       "print": "Εκτύπωση",
       "export": "Εξαγωγή",
@@ -48,6 +49,20 @@
     "show": "Εμφάνιση",
     "continue": "Συνέχεια",
     "minutes": "λεπτά",
+    "pending": "Σε αναμονή",
+    "on": "Ενεργό",
+    "off": "Ανενεργό",
+    "name": "Όνομα",
+    "description": "Περιγραφή",
+    "edit": "Επεξεργασία",
+    "delete": "Διαγραφή",
+    "save": "Αποθήκευση",
+    "create": "Δημιουργία",
+    "active": "Ενεργό",
+    "inactive": "Ανενεργό",
+    "activate": "Ενεργοποίηση",
+    "deactivate": "Απενεργοποίηση",
+    "unlimited": "Απεριόριστο",
     "presets": "Προεπιλογές",
     "status": {
       "active": "Ενεργό",
@@ -788,6 +803,34 @@
   "delivery": {
     "title": "Διανομή",
     "subtitle": "Διαχείριση διανομών",
+    "loading": "Φόρτωση διανομών...",
+    "search": "Αναζήτηση διανομών...",
+    "pending": "σε αναμονή",
+    "inTransit": "σε διαδρομή",
+    "refreshed": "Οι διανομές ανανεώθηκαν",
+    "noDeliveries": "Δεν βρέθηκαν διανομές",
+    "noDeliveriesHint": "Οι διανομές θα εμφανιστούν εδώ όταν καταχωρούνται παραγγελίες",
+    "assignDriver": "Ανάθεση οδηγού",
+    "assignSelected": "Ανάθεση επιλεγμένου οδηγού",
+    "noDriversAvailable": "Δεν υπάρχουν διαθέσιμοι οδηγοί",
+    "noDriversHint": "Όλοι οι οδηγοί είναι απασχολημένοι ή εκτός βάρδιας",
+    "driverAssigned": "Ο οδηγός ανατέθηκε",
+    "assignFailed": "Αποτυχία ανάθεσης οδηγού",
+    "statusUpdated": "Η κατάσταση ενημερώθηκε",
+    "statusUpdateFailed": "Αποτυχία ενημέρωσης κατάστασης",
+    "stats": {
+      "total": "Σύνολο",
+      "pending": "Σε αναμονή",
+      "inTransit": "Σε διαδρομή",
+      "availableDrivers": "Διαθέσιμοι οδηγοί"
+    },
+    "filter": {
+      "all": "Όλα",
+      "active": "Ενεργά",
+      "pending": "Σε αναμονή",
+      "in_transit": "Σε διαδρομή",
+      "delivered": "Ολοκληρωμένα"
+    },
     "activeDeliveries": "Ενεργές Διανομές",
     "deliveryHistory": "Ιστορικό Διανομών",
     "deliveryDetails": "Λεπτομέρειες Διανομής",
@@ -795,7 +838,9 @@
       "pending": "Εκκρεμεί",
       "assigned": "Ανατέθηκε",
       "pickedUp": "Παραλήφθηκε",
+      "picked_up": "Παραλήφθηκε",
       "enRoute": "Σε Δρομολόγιο",
+      "in_transit": "Σε διαδρομή",
       "delivered": "Παραδόθηκε",
       "failed": "Απέτυχε",
       "cancelled": "Ακυρώθηκε"
@@ -2637,6 +2682,30 @@
     "lowStock": "Χαμηλό Απόθεμα",
     "outOfStock": "Εξαντλημένο",
     "inStock": "Σε Απόθεμα",
+    "critical": "Κρίσιμο",
+    "totalItems": "Σύνολο Ειδών",
+    "totalValue": "Συνολική Αξία",
+    "status": "Κατάσταση",
+    "ingredient": "Συστατικό",
+    "category": "Κατηγορία",
+    "stock": "Απόθεμα",
+    "minLevel": "Ελάχιστο Επίπεδο",
+    "value": "Αξία",
+    "tableActions": "Ενέργειες",
+    "searchPlaceholder": "Αναζήτηση συστατικών...",
+    "noItems": "Δεν βρέθηκαν είδη αποθέματος",
+    "adjustStock": "Προσαρμογή Αποθέματος",
+    "reason": "Αιτία",
+    "notes": "Σημειώσεις",
+    "notesPlaceholder": "Προσθέστε σημειώσεις για αυτή την προσαρμογή...",
+    "reasons": {
+      "count": "Καταμέτρηση Αποθέματος",
+      "received": "Παραλαβή Προμήθειας",
+      "damaged": "Κατεστραμμένο",
+      "expired": "Ληγμένο",
+      "theft": "Κλοπή/Απώλεια",
+      "other": "Άλλο"
+    },
     "reorderLevel": "Επίπεδο Επαναπαραγγελίας",
     "reorderQuantity": "Ποσότητα Επαναπαραγγελίας",
     "currentStock": "Τρέχον Απόθεμα",
@@ -2690,7 +2759,9 @@
       "expiryWarning": "{{count}} προϊόντα λήγουν σύντομα"
     },
     "errors": {
-      "loadFailed": "Αποτυχία φόρτωσης αποθέματος"
+      "loadFailed": "Αποτυχία φόρτωσης αποθέματος",
+      "adjustmentNegative": "Η προσαρμογή θα οδηγούσε σε αρνητικό απόθεμα",
+      "adjustmentFailed": "Αποτυχία προσαρμογής αποθέματος"
     }
   },
   "theme": {
@@ -3241,10 +3312,11 @@
   },
   "onboarding": {
     "connectionString": "Κωδικός Σύνδεσης",
-    "connectionStringHelp": "Επικολλήστε τον κωδικό σύνδεσης από το Admin Dashboard (Καταστήματα → Δημιουργία Τερματικού)",
+    "connectionStringHelp": "Επικολλήστε τον κωδικό σύνδεσης από το Admin Dashboard (Καταστήματα → POS → Ανανέωση διαπιστευτηρίων).",
     "connectionStringPlaceholder": "Επικολλήστε τον κωδικό σύνδεσης εδώ...",
     "validationError": "Παρακαλώ εισάγετε τον κωδικό σύνδεσης",
     "invalidConnectionString": "Μη έγκυρος κωδικός σύνδεσης. Παρακαλώ αντιγράψτε τον ξανά από το admin dashboard.",
+    "rawApiKeyDetected": "Αυτό μοιάζει με απλό κλειδί API. Χρησιμοποιήστε τον πλήρη κωδικό σύνδεσης από το Admin Dashboard (Ανανέωση διαπιστευτηρίων).",
     "success": "Το τερματικό ρυθμίστηκε με επιτυχία!",
     "connect": "Σύνδεση & Συγχρονισμός"
   },
@@ -3354,10 +3426,35 @@
     "usedUp": "Εξαντλήθηκε",
     "minOrder": "Ελάχ. Παραγγελία",
     "usage": "Χρήση",
+    "usageLimit": "Όριο χρήσης",
     "expires": "Λήγει",
+    "code": "Κωδικός",
     "codeCopied": "Ο κωδικός αντιγράφηκε!",
+    "create": "Νέο Κουπόνι",
+    "createCoupon": "Δημιουργία Κουπονιού",
+    "editCoupon": "Επεξεργασία Κουπονιού",
+    "created": "Το κουπόνι δημιουργήθηκε",
+    "updated": "Το κουπόνι ενημερώθηκε",
+    "deleted": "Το κουπόνι διαγράφηκε",
+    "activated": "Το κουπόνι ενεργοποιήθηκε",
+    "deactivated": "Το κουπόνι απενεργοποιήθηκε",
+    "confirmDelete": "Να διαγραφεί αυτό το κουπόνι; Η ενέργεια δεν αναιρείται.",
+    "discountType": "Τύπος έκπτωσης",
+    "discountValue": "Τιμή έκπτωσης",
+    "percentage": "Ποσοστό",
+    "fixed": "Σταθερό ποσό",
     "errors": {
-      "loadFailed": "Αποτυχία φόρτωσης κουπονιών"
+      "loadFailed": "Αποτυχία φόρτωσης κουπονιών",
+      "saveFailed": "Αποτυχία αποθήκευσης κουπονιού",
+      "updateFailed": "Αποτυχία ενημέρωσης κουπονιού",
+      "deleteFailed": "Αποτυχία διαγραφής κουπονιού",
+      "copyFailed": "Αποτυχία αντιγραφής κωδικού",
+      "codeRequired": "Ο κωδικός κουπονιού είναι υποχρεωτικός",
+      "invalidDiscount": "Η τιμή έκπτωσης δεν είναι έγκυρη",
+      "invalidPercentage": "Το ποσοστό δεν μπορεί να είναι μεγαλύτερο από 100",
+      "invalidUsageLimit": "Το όριο χρήσης πρέπει να είναι ακέραιος μεγαλύτερος από 0",
+      "invalidMinOrder": "Το ελάχιστο ποσό παραγγελίας δεν είναι έγκυρο",
+      "invalidExpiry": "Η ημερομηνία λήξης δεν είναι έγκυρη"
     }
   },
   "loyalty": {
@@ -3445,6 +3542,7 @@
     }
   },
   "serviceCatalog": {
+    "selectBranch": "Παρακαλώ επιλέξτε υποκατάστημα για να δείτε υπηρεσίες",
     "stats": {
       "totalServices": "Σύνολο Υπηρεσιών",
       "activeServices": "Ενεργές",
@@ -3460,11 +3558,17 @@
     "noServices": "Δεν βρέθηκαν υπηρεσίες"
   },
   "appointments": {
+    "selectBranch": "Παρακαλώ επιλέξτε υποκατάστημα για να δείτε ραντεβού",
     "stats": {
       "total": "Σύνολο",
       "confirmed": "Επιβεβαιωμένα",
       "inProgress": "Σε Εξέλιξη",
       "completed": "Ολοκληρωμένα"
+    },
+    "actions": {
+      "checkIn": "Άφιξη",
+      "complete": "Ολοκλήρωση",
+      "noShow": "Δεν προσήλθε"
     },
     "filters": {
       "today": "Σήμερα",
@@ -3477,7 +3581,35 @@
       "list": "Λίστα"
     },
     "searchPlaceholder": "Αναζήτηση...",
-    "loading": "Φόρτωση ραντεβού..."
+    "loading": "Φόρτωση ραντεβού...",
+    "modal": {
+      "title": "Νέο Ραντεβού",
+      "phoneSearchLabel": "Αναζήτηση Πελάτη με Τηλέφωνο",
+      "phonePlaceholder": "Εισάγετε αριθμό τηλεφώνου...",
+      "search": "Αναζήτηση",
+      "customerNotFound": "Ο πελάτης δεν βρέθηκε. Προσθέστε νέο πελάτη:",
+      "customerNamePlaceholder": "Όνομα Πελάτη *",
+      "customerEmailPlaceholder": "Email (προαιρετικό)",
+      "staffLabel": "Προσωπικό *",
+      "serviceLabel": "Υπηρεσία *",
+      "selectPlaceholder": "Επιλογή...",
+      "periods": {
+        "morning": "Πρωί",
+        "afternoon": "Απόγευμα",
+        "evening": "Βράδυ"
+      },
+      "selectStaffAvailability": "Επιλέξτε προσωπικό για να δείτε διαθεσιμότητα",
+      "loadingSlots": "Φόρτωση...",
+      "availability": {
+        "available": "Διαθέσιμο",
+        "booked": "Κλεισμένο"
+      },
+      "notesLabel": "Σημειώσεις",
+      "notesPlaceholder": "Προαιρετικές σημειώσεις...",
+      "cancel": "Ακύρωση",
+      "create": "Δημιουργία",
+      "creating": "Δημιουργία..."
+    }
   },
   "filters": {
     "all": "Όλα"
@@ -3906,8 +4038,12 @@
     "loading": "Φόρτωση προσθέτων...",
     "error": "Σφάλμα φόρτωσης προσθέτων",
     "connected": "συνδεδεμένα",
+    "togglePlugin": "Εναλλαγή πρόσθετου",
     "lastSync": "Συγχρονίστηκε",
     "configure": "Ρύθμιση",
+    "configuration": "Ρύθμιση",
+    "pluginConfiguration": "Ρύθμιση πρόσθετου",
+    "credentialsHelp": "Εισαγάγετε τα διαπιστευτήρια που παρέχει η πλατφόρμα. Αφήστε κενά τα πεδία για να διατηρηθούν οι υπάρχουσες τιμές.",
     "partnerRequired": "Απαιτείται συνεργάτης",
     "partnerRequiredInfo": "Αυτό το πρόσθετο απαιτεί διαπιστευτήρια συνεργάτη. Επικοινωνήστε με την υποστήριξη για ενεργοποίηση.",
     "refreshSuccess": "Τα πρόσθετα ανανεώθηκαν",
@@ -3919,6 +4055,56 @@
     "autoAccept": "Αυτόματη αποδοχή παραγγελιών",
     "prepMinutes": "Χρόνος προετοιμασίας (λεπτά)",
     "syncOptions": "Επιλογές συγχρονισμού",
+    "category": {
+      "food": "Πλατφόρμες φαγητού",
+      "hotel": "Πλατφόρμες ξενοδοχείων",
+      "government": "Κυβερνητικά & Συμμόρφωση"
+    },
+    "fields": {
+      "storeUrl": "Διεύθυνση καταστήματος",
+      "apiKey": "API Key",
+      "apiSecret": "API Secret",
+      "merchantId": "Merchant ID",
+      "storeId": "Store ID",
+      "commission": "Προμήθεια (%)"
+    },
+    "placeholders": {
+      "storeUrl": "https://your-store.com",
+      "apiKey": "Εισαγάγετε API key",
+      "apiSecret": "Εισαγάγετε API secret",
+      "merchantId": "Merchant ID",
+      "storeId": "Store ID"
+    },
+    "sync": {
+      "menu": "Συγχρονισμός μενού",
+      "availability": "Συγχρονισμός διαθεσιμότητας",
+      "products": "Συγχρονισμός προϊόντων",
+      "orders": "Συγχρονισμός παραγγελιών",
+      "inventory": "Συγχρονισμός αποθέματος"
+    },
+    "plugins": {
+      "efood": {
+        "description": "Η κορυφαία πλατφόρμα διανομής φαγητού στην Ελλάδα"
+      },
+      "wolt": {
+        "description": "Πλατφόρμα διανομής και ανακάλυψης φαγητού"
+      },
+      "box": {
+        "description": "Πλατφόρμα διανομής για εστιατόρια"
+      },
+      "booking": {
+        "description": "Η κορυφαία πλατφόρμα κρατήσεων ξενοδοχείων"
+      },
+      "airbnb": {
+        "description": "Ενοικιάσεις καταλυμάτων και εμπειρίες"
+      },
+      "expedia": {
+        "description": "Πλατφόρμα ταξιδιωτικών και ξενοδοχειακών κρατήσεων"
+      },
+      "mydata": {
+        "description": "Συμμόρφωση ηλεκτρονικής τιμολόγησης ΑΑΔΕ"
+      }
+    },
     "empty": {
       "title": "Δεν υπάρχουν διαθέσιμα πρόσθετα",
       "description": "Ενεργοποιήστε ενότητες για να ξεκλειδώσετε πρόσθετα"
@@ -3940,7 +4126,24 @@
       "disconnected": "Μη συνδεδεμένο"
     },
     "mydata": {
-      "title": "Ρυθμίσεις MyData"
+      "title": "Ρυθμίσεις MyData",
+      "saveToCreate": "Αποθηκεύστε τις ρυθμίσεις για να δημιουργηθεί διαμόρφωση MyData για αυτό το κατάστημα.",
+      "currentSetup": "Τρέχουσα ρύθμιση",
+      "mode": "Λειτουργία",
+      "notConfigured": "Δεν έχει ρυθμιστεί",
+      "status": "Κατάσταση",
+      "unknown": "Άγνωστο",
+      "environment": "Περιβάλλον",
+      "deviceSettingsHelp": "Οι ρυθμίσεις σύνδεσης συσκευής απαιτούνται μόνο όταν χρησιμοποιείται φορολογικός μηχανισμός.",
+      "fiscalDeviceConnection": "Σύνδεση φορολογικού μηχανισμού",
+      "connectionType": "Τύπος σύνδεσης",
+      "connectionTypes": {
+        "usbSerial": "USB σειριακή",
+        "bluetooth": "Bluetooth"
+      },
+      "serialPort": "Σειριακή θύρα",
+      "bluetoothAddress": "Διεύθυνση Bluetooth",
+      "baudRate": "Ρυθμός baud"
     },
     "routingTitle": "Δρομολόγηση παραγγελιών",
     "routingHelp": "Δρομολόγηση παραγγελιών εξωτερικών προσθέτων σε συγκεκριμένο τερματικό. Ισχύει μόνο για παραγγελίες προσθέτων.",

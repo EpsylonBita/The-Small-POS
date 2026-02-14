@@ -7,9 +7,15 @@ type SupportedLanguage = 'en' | 'el';
 
 /**
  * Decode the connection string from admin dashboard
- * Format: base64url(JSON({ key, url, tid }))
+ * Format: base64url(JSON({ key, url, tid, surl?, skey? }))
  */
-function decodeConnectionString(connectionString: string): { apiKey: string; adminUrl: string; terminalId: string } | null {
+function decodeConnectionString(connectionString: string): {
+    apiKey: string;
+    adminUrl: string;
+    terminalId: string;
+    supabaseUrl?: string;
+    supabaseAnonKey?: string;
+} | null {
     try {
         // Handle base64url encoding (replace - with + and _ with /)
         const base64 = connectionString.replace(/-/g, '+').replace(/_/g, '/');
@@ -18,10 +24,19 @@ function decodeConnectionString(connectionString: string): { apiKey: string; adm
         const parsed = JSON.parse(decoded);
 
         if (parsed.key && parsed.url && parsed.tid) {
+            const supabaseUrl = typeof parsed.surl === 'string'
+                ? parsed.surl
+                : (typeof parsed.supabaseUrl === 'string' ? parsed.supabaseUrl : undefined);
+            const supabaseAnonKey = typeof parsed.skey === 'string'
+                ? parsed.skey
+                : (typeof parsed.supabaseAnonKey === 'string' ? parsed.supabaseAnonKey : undefined);
+
             return {
                 apiKey: parsed.key,
                 adminUrl: parsed.url,
-                terminalId: parsed.tid
+                terminalId: parsed.tid,
+                supabaseUrl,
+                supabaseAnonKey,
             };
         }
         return null;
@@ -29,6 +44,17 @@ function decodeConnectionString(connectionString: string): { apiKey: string; adm
         console.error('Failed to decode connection string:', e);
         return null;
     }
+}
+
+function looksLikeRawApiKey(value: string): boolean {
+    const input = value.trim();
+    if (!input || input.length < 24 || input.length > 80) {
+        return false;
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(input)) {
+        return false;
+    }
+    return !input.startsWith('eyJ');
 }
 
 const OnboardingPage: React.FC = () => {
@@ -49,13 +75,21 @@ const OnboardingPage: React.FC = () => {
         setError(null);
 
         try {
-            if (!connectionString) {
+            const input = connectionString.trim();
+            if (!input) {
                 throw new Error(t('onboarding.validationError', { defaultValue: 'Please enter the connection string' }));
             }
 
             // Decode the connection string to extract all credentials
-            const decoded = decodeConnectionString(connectionString.trim());
+            const decoded = decodeConnectionString(input);
             if (!decoded) {
+                if (looksLikeRawApiKey(input)) {
+                    throw new Error(
+                        t('onboarding.rawApiKeyDetected', {
+                            defaultValue: 'This looks like a raw API key. Use the full connection code from Admin Dashboard (Regenerate credentials).',
+                        })
+                    );
+                }
                 throw new Error(t('onboarding.invalidConnectionString', { defaultValue: 'Invalid connection string. Please copy it again from the admin dashboard.' }));
             }
 
@@ -65,7 +99,9 @@ const OnboardingPage: React.FC = () => {
             const result = await window.electron?.ipcRenderer.invoke('settings:update-terminal-credentials', {
                 terminalId: decoded.terminalId,
                 apiKey: decoded.apiKey,
-                adminDashboardUrl: normalizedAdminUrl
+                adminDashboardUrl: normalizedAdminUrl,
+                supabaseUrl: decoded.supabaseUrl,
+                supabaseAnonKey: decoded.supabaseAnonKey,
             });
 
             if (result && result.success) {
@@ -138,7 +174,7 @@ const OnboardingPage: React.FC = () => {
                                 {t('onboarding.connectionString', { defaultValue: 'Connection String' })}
                             </label>
                             <p className="text-xs text-slate-400 mb-3">
-                                {t('onboarding.connectionStringHelp', { defaultValue: 'Paste the connection string from the Admin Dashboard (Branches -> Create Terminal)' })}
+                                {t('onboarding.connectionStringHelp', { defaultValue: 'Paste the connection code from the Admin Dashboard (Branches -> POS -> Regenerate credentials).' })}
                             </p>
                             <textarea
                                 value={connectionString}

@@ -21,11 +21,13 @@ const DESKTOP_OPTIONS = {
 
 // Get Supabase configuration from environment
 export function getSupabaseConfig(platform: string = 'desktop') {
-  const envUrl = process.env['SUPABASE_URL'] || 
+  const envUrl = runtimeSupabaseUrlOverride ||
+                 process.env['SUPABASE_URL'] || 
                  process.env['VITE_SUPABASE_URL'] ||
                  process.env['NEXT_PUBLIC_SUPABASE_URL'];
                  
-  const envAnonKey = process.env['SUPABASE_ANON_KEY'] || 
+  const envAnonKey = runtimeSupabaseAnonKeyOverride ||
+                     process.env['SUPABASE_ANON_KEY'] || 
                      process.env['VITE_SUPABASE_ANON_KEY'] ||
                      process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
 
@@ -44,11 +46,22 @@ export function getSupabaseConfig(platform: string = 'desktop') {
 
 // Lazy-load configuration to avoid crash at module load time
 let _config: ReturnType<typeof getSupabaseConfig> | null = null;
+let runtimeSupabaseUrlOverride: string | null = null;
+let runtimeSupabaseAnonKeyOverride: string | null = null;
+
 function getConfig() {
   if (!_config) {
     _config = getSupabaseConfig('desktop');
   }
   return _config;
+}
+
+function setRuntimeEnv(url: string, anonKey: string): void {
+  // IMPORTANT: Do not mutate process.env here.
+  // In webpack Electron bundles, DefinePlugin can inline selected process.env keys
+  // (e.g. process.env.SUPABASE_URL) as literals, which breaks assignment expressions.
+  runtimeSupabaseUrlOverride = url;
+  runtimeSupabaseAnonKeyOverride = anonKey;
 }
 
 // Lazy SUPABASE_CONFIG getter
@@ -123,6 +136,38 @@ export function isSupabaseConfigured(): boolean {
 }
 
 let supabaseClient: SupabaseClient | null = null;
+
+/**
+ * Configure Supabase runtime credentials after startup.
+ * Used when credentials are received from admin API during onboarding/sync.
+ */
+export function configureSupabaseRuntime(url: string, anonKey: string): boolean {
+  const normalizedUrl = (url || '').trim();
+  const normalizedAnonKey = (anonKey || '').trim();
+  if (!normalizedUrl || !normalizedAnonKey) {
+    return false;
+  }
+
+  setRuntimeEnv(normalizedUrl, normalizedAnonKey);
+  _config = null;
+
+  if (supabaseClient) {
+    const config = getConfig();
+    hydrateContextFromLocalStorage();
+    supabaseClient = createClient(
+      config.url || normalizedUrl,
+      config.anonKey || normalizedAnonKey,
+      {
+        ...config.options,
+        global: {
+          headers: buildGlobalHeaders(),
+        }
+      }
+    );
+  }
+
+  return true;
+}
 
 /**
  * Get or create the singleton Supabase client instance

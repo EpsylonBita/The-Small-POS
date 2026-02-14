@@ -159,9 +159,9 @@ const InventoryPage: React.FC = () => {
   };
 
   const StatusIcon = ({ status }: { status: 'critical' | 'low' | 'good' }) => {
-    if (status === 'critical') return <XCircle className="w-5 h-5 text-red-500" />;
-    if (status === 'low') return <AlertTriangle className="w-5 h-5 text-yellow-500" />;
-    return <CheckCircle className="w-5 h-5 text-green-500" />;
+    if (status === 'critical') return <XCircle className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-red-500'}`} />;
+    if (status === 'low') return <AlertTriangle className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-yellow-500'}`} />;
+    return <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-green-500'}`} />;
   };
 
   const handleAdjustStock = async () => {
@@ -215,23 +215,23 @@ const InventoryPage: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`min-h-screen p-6 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className={`flex items-center justify-between mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex items-center gap-3">
-          <div className={`p-3 rounded-xl ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}>
-            <Package className="w-8 h-8 text-blue-500" />
+          <div className={`p-3 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
+            <Package className={`w-8 h-8 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
           </div>
           <div>
             <h1 className="text-2xl font-bold">{t('inventory.title', 'Inventory')}</h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('inventory.subtitle', 'Track stock levels and adjustments')}
             </p>
           </div>
         </div>
         <button
           onClick={fetchInventory}
-          className={`p-3 rounded-xl transition-all ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'} shadow-lg`}
+          className={`p-3 rounded-xl transition-all border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -239,47 +239,47 @@ const InventoryPage: React.FC = () => {
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-500/20"><Boxes className="w-5 h-5 text-blue-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}><Boxes className={`w-5 h-5 ${isDark ? 'text-blue-300' : 'text-blue-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.totalItems', 'Total Items')}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalItems', 'Total Items')}</p>
               <p className="text-xl font-bold">{stats.total}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-red-400' : 'bg-white border-gray-200 border-t-red-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-red-500/20"><XCircle className="w-5 h-5 text-red-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}><XCircle className={`w-5 h-5 ${isDark ? 'text-red-300' : 'text-red-500'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.critical', 'Critical')}</p>
-              <p className="text-xl font-bold text-red-500">{stats.critical}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.critical', 'Critical')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-red-300' : 'text-red-500'}`}>{stats.critical}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-yellow-500/20"><AlertTriangle className="w-5 h-5 text-yellow-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-amber-500/20' : 'bg-yellow-100'}`}><AlertTriangle className={`w-5 h-5 ${isDark ? 'text-amber-300' : 'text-yellow-500'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.lowStock', 'Low Stock')}</p>
-              <p className="text-xl font-bold text-yellow-500">{stats.low}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.lowStock', 'Low Stock')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-yellow-500'}`}>{stats.low}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-500/20"><CheckCircle className="w-5 h-5 text-green-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-emerald-500/20' : 'bg-green-100'}`}><CheckCircle className={`w-5 h-5 ${isDark ? 'text-emerald-300' : 'text-green-500'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.inStock', 'In Stock')}</p>
-              <p className="text-xl font-bold text-green-500">{stats.good}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.inStock', 'In Stock')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-green-500'}`}>{stats.good}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-cyan-400' : 'bg-white border-gray-200 border-t-cyan-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-cyan-500/20"><BarChart3 className="w-5 h-5 text-cyan-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-cyan-500/20' : 'bg-cyan-100'}`}><BarChart3 className={`w-5 h-5 ${isDark ? 'text-cyan-300' : 'text-cyan-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('inventory.totalValue', 'Total Value')}</p>
               <p className="text-lg font-bold">{formatMoney(stats.totalValue)}</p>
             </div>
           </div>
@@ -288,14 +288,14 @@ const InventoryPage: React.FC = () => {
 
       {/* Filters */}
       <div className="flex flex-col md:flex-row gap-4 mb-6">
-        <div className={`relative flex-1 ${isDark ? 'bg-gray-800' : 'bg-white'} rounded-xl shadow-lg`}>
+        <div className={`relative flex-1 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
           <input
             type="text"
             placeholder={t('inventory.searchPlaceholder', 'Search ingredients...')}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 focus:ring-cyan-500`}
+            className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 ${isDark ? 'focus:ring-zinc-600' : 'focus:ring-gray-300'}`}
           />
         </div>
         <div className="flex gap-2">
@@ -303,7 +303,33 @@ const InventoryPage: React.FC = () => {
             <button
               key={status}
               onClick={() => setStatusFilter(status)}
-              className={`px-4 py-2 rounded-lg font-medium transition-all ${statusFilter === status ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'} shadow-lg`}
+              className={`px-4 py-2 rounded-lg font-medium transition-all border ${
+                status === 'all'
+                  ? statusFilter === status
+                    ? isDark
+                      ? 'bg-zinc-100 text-black border-zinc-200'
+                      : 'bg-black text-white border-black'
+                    : isDark
+                    ? 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                    : 'bg-white text-gray-600 border-gray-300'
+                  : status === 'critical'
+                  ? statusFilter === status
+                    ? 'bg-red-500 text-white border-red-500'
+                    : isDark
+                    ? 'bg-zinc-900 text-red-300 border-red-500/40 hover:bg-red-500/10'
+                    : 'bg-white text-red-600 border-red-300 hover:bg-red-50'
+                  : status === 'low'
+                  ? statusFilter === status
+                    ? 'bg-amber-500 text-black border-amber-500'
+                    : isDark
+                    ? 'bg-zinc-900 text-amber-300 border-amber-500/40 hover:bg-amber-500/10'
+                    : 'bg-white text-amber-600 border-amber-300 hover:bg-amber-50'
+                  : statusFilter === status
+                  ? 'bg-emerald-500 text-black border-emerald-500'
+                  : isDark
+                  ? 'bg-zinc-900 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/10'
+                  : 'bg-white text-emerald-600 border-emerald-300 hover:bg-emerald-50'
+              }`}
             >
               {t(`inventory.filter.${status}`, status.charAt(0).toUpperCase() + status.slice(1))}
             </button>
@@ -313,17 +339,17 @@ const InventoryPage: React.FC = () => {
 
       {/* Inventory Table */}
       {loading ? (
-        <div className={`rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg p-8`}>
+        <div className={`rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} p-8`}>
           <div className="animate-pulse space-y-4">
             {[1, 2, 3, 4, 5].map(i => (
-              <div key={i} className="h-12 bg-gray-600 rounded" />
+              <div key={i} className={`h-12 rounded ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
             ))}
           </div>
         </div>
       ) : (
-        <div className={`rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <div className={`rounded-xl overflow-hidden border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <table className="w-full">
-            <thead className={isDark ? 'bg-gray-700' : 'bg-gray-100'}>
+            <thead className={isDark ? 'bg-zinc-900' : 'bg-gray-100'}>
               <tr>
                 <th className="px-4 py-3 text-left text-sm font-medium">{t('inventory.status', 'Status')}</th>
                 <th className="px-4 py-3 text-left text-sm font-medium">{t('inventory.ingredient', 'Ingredient')}</th>
@@ -331,10 +357,10 @@ const InventoryPage: React.FC = () => {
                 <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.stock', 'Stock')}</th>
                 <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.minLevel', 'Min Level')}</th>
                 <th className="px-4 py-3 text-right text-sm font-medium">{t('inventory.value', 'Value')}</th>
-                <th className="px-4 py-3 text-center text-sm font-medium">{t('inventory.actions', 'Actions')}</th>
+                <th className="px-4 py-3 text-center text-sm font-medium">{t('inventory.tableActions', isGreek ? 'Ενέργειες' : 'Actions')}</th>
               </tr>
             </thead>
-            <tbody className={`divide-y ${isDark ? 'divide-gray-700' : 'divide-gray-200'}`}>
+            <tbody className={`divide-y ${isDark ? 'divide-zinc-800' : 'divide-gray-200'}`}>
               {filteredInventory.map((item, index) => {
                 const status = getStockStatus(item);
                 const name = isGreek ? item.name_el : item.name_en;
@@ -344,22 +370,22 @@ const InventoryPage: React.FC = () => {
                     initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: index * 0.03 }}
-                    className={`${isDark ? 'hover:bg-gray-750' : 'hover:bg-gray-50'} transition-colors`}
+                    className={`${isDark ? 'hover:bg-zinc-900' : 'hover:bg-gray-50'} transition-colors`}
                   >
                     <td className="px-4 py-3"><StatusIcon status={status} /></td>
                     <td className="px-4 py-3 font-medium">{name}</td>
-                    <td className="px-4 py-3 text-gray-400">{item.category_name || '-'}</td>
+                    <td className={`px-4 py-3 ${isDark ? 'text-zinc-400' : 'text-gray-400'}`}>{item.category_name || '-'}</td>
                     <td className="px-4 py-3 text-right">
-                      <span className={status === 'critical' ? 'text-red-500 font-bold' : status === 'low' ? 'text-yellow-500' : ''}>
+                      <span className={status === 'critical' ? (isDark ? 'text-zinc-200 font-bold' : 'text-red-500 font-bold') : status === 'low' ? (isDark ? 'text-zinc-300' : 'text-yellow-500') : ''}>
                         {item.stock_quantity} {item.unit_of_measurement}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right text-gray-400">{item.min_stock_level}</td>
+                    <td className={`px-4 py-3 text-right ${isDark ? 'text-zinc-400' : 'text-gray-400'}`}>{item.min_stock_level}</td>
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(item.stock_quantity * item.cost_per_unit)}</td>
                     <td className="px-4 py-3 text-center">
                       <button
                         onClick={() => { setSelectedItem(item); setShowAdjustModal(true); }}
-                        className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-200'}`}
+                        className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}`}
                         title={t('inventory.adjustStock', 'Adjust Stock')}
                       >
                         <Edit3 className="w-4 h-4" />
@@ -385,7 +411,7 @@ const InventoryPage: React.FC = () => {
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`p-6 rounded-2xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-2xl w-full max-w-md`}
+            className={`p-6 rounded-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} shadow-2xl w-full max-w-md`}
             onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
             <h3 className="text-xl font-bold mb-4">{t('inventory.adjustStock', 'Adjust Stock')}</h3>
@@ -400,7 +426,7 @@ const InventoryPage: React.FC = () => {
               <select
                 value={adjustmentReason}
                 onChange={(e) => setAdjustmentReason(e.target.value as typeof adjustmentReason)}
-                className={`w-full px-3 py-2 rounded-lg ${isDark ? 'bg-gray-700 text-white' : 'bg-gray-100 text-gray-900'}`}
+                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100' : 'bg-gray-100 border-gray-300 text-gray-900'}`}
               >
                 <option value="count">{t('inventory.reasons.count', 'Stock Count')}</option>
                 <option value="received">{t('inventory.reasons.received', 'Received Delivery')}</option>
@@ -411,16 +437,16 @@ const InventoryPage: React.FC = () => {
               </select>
             </div>
             <div className="flex items-center gap-4 mb-4">
-              <button onClick={() => setAdjustmentQty(q => q - 1)} className="p-3 rounded-xl bg-red-500/20 text-red-500 hover:bg-red-500/30">
+              <button onClick={() => setAdjustmentQty(q => q - 1)} className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
                 <Minus className="w-5 h-5" />
               </button>
               <input
                 type="number"
                 value={adjustmentQty}
                 onChange={(e) => setAdjustmentQty(Number(e.target.value))}
-                className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}
+                className={`flex-1 text-center text-2xl font-bold py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-100 border-gray-300'}`}
               />
-              <button onClick={() => setAdjustmentQty(q => q + 1)} className="p-3 rounded-xl bg-green-500/20 text-green-500 hover:bg-green-500/30">
+              <button onClick={() => setAdjustmentQty(q => q + 1)} className={`p-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-200 border-gray-300 text-gray-700 hover:bg-gray-300'}`}>
                 <Plus className="w-5 h-5" />
               </button>
             </div>
@@ -433,14 +459,16 @@ const InventoryPage: React.FC = () => {
                 onChange={(e) => setAdjustmentNotes(e.target.value)}
                 placeholder={t('inventory.notesPlaceholder', 'Add notes about this adjustment...')}
                 rows={2}
-                className={`w-full px-3 py-2 rounded-lg resize-none ${isDark ? 'bg-gray-700 text-white placeholder-gray-500' : 'bg-gray-100 text-gray-900 placeholder-gray-400'}`}
+                className={`w-full px-3 py-2 rounded-lg resize-none border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-100 placeholder-zinc-500' : 'bg-gray-100 border-gray-300 text-gray-900 placeholder-gray-400'}`}
               />
             </div>
             <div className="flex gap-3">
-              <button onClick={() => { setShowAdjustModal(false); setAdjustmentReason('count'); setAdjustmentNotes(''); }} className={`flex-1 py-3 rounded-xl ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
+              <button onClick={() => { setShowAdjustModal(false); setAdjustmentReason('count'); setAdjustmentNotes(''); }} className={`flex-1 py-3 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-gray-200 border-gray-300'}`}>
                 {t('common.cancel', 'Cancel')}
               </button>
-              <button onClick={handleAdjustStock} disabled={adjustmentQty === 0} className="flex-1 py-3 rounded-xl bg-cyan-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+              <button onClick={handleAdjustStock} disabled={adjustmentQty === 0} className={`flex-1 py-3 rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+                isDark ? 'bg-zinc-100 text-black hover:bg-white' : 'bg-black text-white hover:bg-zinc-800'
+              }`}>
                 {t('common.save', 'Save')}
               </button>
             </div>

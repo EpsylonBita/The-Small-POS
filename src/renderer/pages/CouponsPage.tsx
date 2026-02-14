@@ -436,21 +436,22 @@ const CouponsPage: React.FC = () => {
   if (loading && coupons.length === 0) {
     return (
       <div className="flex items-center justify-center h-full">
-        <RefreshCw className="w-8 h-8 animate-spin text-cyan-500" />
+        <RefreshCw className={`w-8 h-8 animate-spin ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
       </div>
     );
   }
 
   return (
-    <div className={`h-full overflow-auto p-4 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
-      <div className="flex items-center justify-between mb-6">
+    <div className={`h-full overflow-auto p-4 md:p-5 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
+      <div className={`rounded-2xl border mb-5 px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+      <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl bg-cyan-500/20">
-            <Ticket className="w-6 h-6 text-cyan-500" />
+          <div className={`p-2 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
+            <Ticket className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
           </div>
           <div>
             <h1 className="text-xl font-bold">{t('coupons.title', 'Coupons')}</h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('coupons.subtitle', 'Manage discount codes for this branch')}
             </p>
           </div>
@@ -458,42 +459,48 @@ const CouponsPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={openCreateModal}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium bg-cyan-500 text-white hover:bg-cyan-600 transition-colors inline-flex items-center gap-2"
+            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors inline-flex items-center gap-2 ${
+              isDark
+                ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'
+                : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
+            }`}
           >
             <Plus className="w-4 h-4" />
             {t('coupons.create', 'New Coupon')}
           </button>
           <button
             onClick={() => setShowActiveOnly((prev) => !prev)}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`h-10 px-4 rounded-xl text-sm font-semibold transition-colors ${
               showActiveOnly
-                ? 'bg-cyan-500 text-white'
-                : isDark ? 'bg-gray-800 text-gray-300' : 'bg-white text-gray-700'
+                ? isDark
+                  ? 'bg-zinc-100 text-black border border-zinc-200'
+                  : 'bg-black text-white border border-black'
+                : isDark ? 'bg-zinc-900 text-zinc-300 border border-zinc-700' : 'bg-white text-gray-700 border border-gray-300'
             }`}
           >
             {t('coupons.activeOnly', 'Active Only')}
           </button>
           <button
             onClick={fetchCoupons}
-            className={`p-2 rounded-lg ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'}`}
+            className={`h-10 w-10 inline-flex items-center justify-center rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 mb-6">
+      <div className="grid grid-cols-2 gap-3 mb-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'} border`}
+          className={`p-4 rounded-xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
         >
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-500/20">
-              <CheckCircle className="w-5 h-5 text-green-500" />
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
             </div>
             <div>
-              <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                 {t('coupons.activeCoupons', 'Active Coupons')}
               </p>
               <p className="text-xl font-bold">{activeCoupons.length}</p>
@@ -504,14 +511,14 @@ const CouponsPage: React.FC = () => {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
-          className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'} border`}
+          className={`p-4 rounded-xl ${isDark ? 'bg-black border-zinc-800' : 'bg-white border-gray-200'} border`}
         >
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-500/20">
-              <Ticket className="w-5 h-5 text-blue-500" />
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-zinc-800' : 'bg-gray-100'}`}>
+              <Ticket className={`w-5 h-5 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
             </div>
             <div>
-              <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
                 {t('coupons.totalCoupons', 'Total Coupons')}
               </p>
               <p className="text-xl font-bold">{coupons.length}</p>
@@ -519,8 +526,9 @@ const CouponsPage: React.FC = () => {
           </div>
         </motion.div>
       </div>
+      </div>
 
-      <div className={`flex items-center gap-2 px-3 py-2 rounded-lg mb-4 ${isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border`}>
+      <div className={`flex items-center gap-2 px-4 h-12 rounded-xl mb-4 border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <Search className="w-4 h-4 text-gray-400" />
         <input
           type="text"
@@ -532,15 +540,15 @@ const CouponsPage: React.FC = () => {
       </div>
 
       {filteredCoupons.length === 0 ? (
-        <div className={`p-8 rounded-xl text-center ${isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'} border`}>
+        <div className={`p-8 rounded-xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <Ticket className="w-12 h-12 mx-auto mb-4 text-gray-400" />
           <h3 className="text-lg font-semibold mb-2">{t('coupons.noCoupons', 'No Coupons Found')}</h3>
-          <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+          <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
             {t('coupons.noCouponsDesc', 'Create your first coupon to start offering discounts.')}
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="space-y-3">
           {filteredCoupons.map((coupon, idx) => {
             const expired = isExpired(coupon.expires_at);
             const usedUp = isUsedUp(coupon);
@@ -553,124 +561,122 @@ const CouponsPage: React.FC = () => {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: idx * 0.04 }}
-                className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50 border-gray-700' : 'bg-white border-gray-200'} border ${!isValid ? 'opacity-70' : ''}`}
+                className={`rounded-xl border p-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} ${!isValid ? 'opacity-70' : ''}`}
               >
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono font-bold text-lg text-cyan-500">{coupon.code}</span>
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`font-mono font-extrabold text-xl tracking-wide ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{coupon.code}</span>
                       <button
                         onClick={() => copyCode(coupon.code, coupon.id)}
-                        className={`p-1 rounded ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+                        className={`p-1.5 rounded-lg ${isDark ? 'hover:bg-zinc-800' : 'hover:bg-gray-100'}`}
                       >
                         {copiedId === coupon.id ? (
-                          <Check className="w-4 h-4 text-green-500" />
+                          <Check className={`w-4 h-4 ${isDark ? 'text-zinc-200' : 'text-green-500'}`} />
                         ) : (
                           <Copy className="w-4 h-4 text-gray-400" />
                         )}
                       </button>
+                      {isValid ? (
+                        <span className={`px-2 py-0.5 text-xs rounded-lg inline-flex items-center gap-1 ${
+                          isDark ? 'bg-zinc-900 text-zinc-200 border border-zinc-700' : 'bg-gray-100 text-gray-900 border border-gray-300'
+                        }`}>
+                          <CheckCircle className="w-3 h-3" />
+                          {t('common.active', 'Active')}
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 text-xs bg-red-500/20 text-red-400 rounded-lg inline-flex items-center gap-1">
+                          <XCircle className="w-3 h-3" />
+                          {expired ? t('coupons.expired', 'Expired') : usedUp ? t('coupons.usedUp', 'Used Up') : t('common.inactive', 'Inactive')}
+                        </span>
+                      )}
                     </div>
                     {coupon.name && (
-                      <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <p className={`text-sm mt-1 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
                         {coupon.name}
                       </p>
                     )}
+                    {coupon.description && (
+                      <p className={`text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
+                        {coupon.description}
+                      </p>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1">
+
+                  <div className={`grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                      <div className="text-[11px] text-zinc-400">{t('coupons.discountValue', 'Discount')}</div>
+                      <div className="font-semibold mt-0.5 flex items-center gap-1">
+                        {coupon.discount_type === 'percentage' ? (
+                          <Percent className={`w-3.5 h-3.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                        ) : (
+                          <DollarSign className={`w-3.5 h-3.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
+                        )}
+                        {coupon.discount_type === 'percentage'
+                          ? `${coupon.discount_value}%`
+                          : formatMoney(coupon.discount_value)}
+                      </div>
+                    </div>
+                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                      <div className="text-[11px] text-zinc-400">{t('coupons.minOrder', 'Min Order')}</div>
+                      <div className="font-semibold mt-0.5">
+                        {(coupon.min_order_amount ?? 0) > 0 ? formatMoney(coupon.min_order_amount || 0) : '-'}
+                      </div>
+                    </div>
+                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                      <div className="text-[11px] text-zinc-400">{t('coupons.usage', 'Usage')}</div>
+                      <div className="font-semibold mt-0.5">
+                        {coupon.usage_limit ? `${coupon.usage_count} / ${coupon.usage_limit}` : t('common.unlimited', 'Unlimited')}
+                      </div>
+                    </div>
+                    <div className={`rounded-lg px-3 py-2 ${isDark ? 'bg-black border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+                      <div className="text-[11px] text-zinc-400">{t('coupons.expires', 'Expires')}</div>
+                      <div className={`font-semibold mt-0.5 flex items-center gap-1 ${expired ? 'text-red-400' : ''}`}>
+                        <Calendar className="w-3 h-3" />
+                        {coupon.expires_at ? formatDate(coupon.expires_at) : '-'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-end gap-2">
                     <button
                       onClick={() => openEditModal(coupon)}
                       disabled={busy}
-                      className={`p-1.5 rounded ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} disabled:opacity-50`}
+                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
+                        isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800' : 'bg-white border border-gray-300 hover:bg-gray-100'
+                      }`}
                       title={t('common.edit', 'Edit')}
                     >
                       <Edit3 className="w-4 h-4" />
+                      {t('common.edit', 'Edit')}
                     </button>
                     <button
                       onClick={() => handleToggleActive(coupon)}
                       disabled={busy}
-                      className={`p-1.5 rounded ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} disabled:opacity-50`}
+                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
+                        coupon.is_active
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                          : isDark
+                            ? 'bg-zinc-900 text-zinc-100 border border-zinc-700 hover:bg-zinc-800'
+                            : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
+                      }`}
                       title={coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate')}
                     >
-                      {coupon.is_active ? (
-                        <XCircle className="w-4 h-4 text-yellow-500" />
-                      ) : (
-                        <CheckCircle className="w-4 h-4 text-green-500" />
-                      )}
+                      {coupon.is_active ? <XCircle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
+                      {coupon.is_active ? t('common.deactivate', 'Deactivate') : t('common.activate', 'Activate')}
                     </button>
                     <button
                       onClick={() => handleDelete(coupon)}
                       disabled={busy}
-                      className={`p-1.5 rounded ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'} disabled:opacity-50`}
+                      className={`h-9 px-3 rounded-lg text-sm inline-flex items-center gap-1.5 disabled:opacity-50 ${
+                        isDark ? 'bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 text-red-400' : 'bg-white border border-gray-300 hover:bg-gray-100 text-red-600'
+                      }`}
                       title={t('common.delete', 'Delete')}
                     >
-                      <Trash2 className="w-4 h-4 text-red-500" />
+                      <Trash2 className="w-4 h-4" />
+                      {t('common.delete', 'Delete')}
                     </button>
                   </div>
-                </div>
-
-                <div className="mb-3">
-                  {isValid ? (
-                    <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-500 rounded inline-flex items-center gap-1">
-                      <CheckCircle className="w-3 h-3" />
-                      {t('common.active', 'Active')}
-                    </span>
-                  ) : (
-                    <span className="px-2 py-0.5 text-xs bg-red-500/20 text-red-500 rounded inline-flex items-center gap-1">
-                      <XCircle className="w-3 h-3" />
-                      {expired ? t('coupons.expired', 'Expired') : usedUp ? t('coupons.usedUp', 'Used Up') : t('common.inactive', 'Inactive')}
-                    </span>
-                  )}
-                </div>
-
-                {coupon.description && (
-                  <p className={`text-sm mb-3 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
-                    {coupon.description}
-                  </p>
-                )}
-
-                <div className="flex items-center gap-4 mb-3">
-                  <div className="flex items-center gap-1">
-                    {coupon.discount_type === 'percentage' ? (
-                      <Percent className="w-4 h-4 text-cyan-500" />
-                    ) : (
-                      <DollarSign className="w-4 h-4 text-cyan-500" />
-                    )}
-                    <span className="font-bold text-lg">
-                      {coupon.discount_type === 'percentage'
-                        ? `${coupon.discount_value}%`
-                        : formatMoney(coupon.discount_value)}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="space-y-2 text-sm">
-                  {(coupon.min_order_amount ?? 0) > 0 && (
-                    <div className="flex justify-between">
-                      <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
-                        {t('coupons.minOrder', 'Min Order')}
-                      </span>
-                      <span>{formatMoney(coupon.min_order_amount || 0)}</span>
-                    </div>
-                  )}
-                  {coupon.usage_limit && (
-                    <div className="flex justify-between">
-                      <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
-                        {t('coupons.usage', 'Usage')}
-                      </span>
-                      <span>{coupon.usage_count} / {coupon.usage_limit}</span>
-                    </div>
-                  )}
-                  {coupon.expires_at && (
-                    <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-400' : 'text-gray-500'}>
-                        {t('coupons.expires', 'Expires')}
-                      </span>
-                      <span className={`flex items-center gap-1 ${expired ? 'text-red-500' : ''}`}>
-                        <Calendar className="w-3 h-3" />
-                        {formatDate(coupon.expires_at)}
-                      </span>
-                    </div>
-                  )}
                 </div>
               </motion.div>
             );
@@ -683,10 +689,10 @@ const CouponsPage: React.FC = () => {
           <motion.div
             initial={{ opacity: 0, scale: 0.96 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`w-full max-w-lg rounded-2xl shadow-2xl ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}`}
+            className={`w-full max-w-lg rounded-2xl shadow-2xl border ${isDark ? 'bg-zinc-950 border-zinc-800 text-white' : 'bg-white border-gray-200 text-gray-900'}`}
             onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
-            <div className="p-5 border-b border-gray-700/30">
+            <div className={`p-5 border-b ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
               <h3 className="text-lg font-semibold">
                 {editingCoupon ? t('coupons.editCoupon', 'Edit Coupon') : t('coupons.createCoupon', 'Create Coupon')}
               </h3>
@@ -699,7 +705,7 @@ const CouponsPage: React.FC = () => {
                   <input
                     value={form.code}
                     onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="SAVE10"
                   />
                 </label>
@@ -708,7 +714,7 @@ const CouponsPage: React.FC = () => {
                   <select
                     value={form.discount_type}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_type: e.target.value as 'percentage' | 'fixed' }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   >
                     <option value="percentage">{t('coupons.percentage', 'Percentage')}</option>
                     <option value="fixed">{t('coupons.fixed', 'Fixed Amount')}</option>
@@ -725,7 +731,7 @@ const CouponsPage: React.FC = () => {
                     min="0"
                     value={form.discount_value}
                     onChange={(e) => setForm((prev) => ({ ...prev, discount_value: e.target.value }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
                 <label className="text-sm">
@@ -736,7 +742,7 @@ const CouponsPage: React.FC = () => {
                     min="0"
                     value={form.min_order_amount}
                     onChange={(e) => setForm((prev) => ({ ...prev, min_order_amount: e.target.value }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder="0"
                   />
                 </label>
@@ -751,7 +757,7 @@ const CouponsPage: React.FC = () => {
                     step="1"
                     value={form.usage_limit}
                     onChange={(e) => setForm((prev) => ({ ...prev, usage_limit: e.target.value }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                     placeholder={t('common.optional', 'Optional')}
                   />
                 </label>
@@ -761,7 +767,7 @@ const CouponsPage: React.FC = () => {
                     type="datetime-local"
                     value={form.expires_at}
                     onChange={(e) => setForm((prev) => ({ ...prev, expires_at: e.target.value }))}
-                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                    className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                   />
                 </label>
               </div>
@@ -771,7 +777,7 @@ const CouponsPage: React.FC = () => {
                 <input
                   value={form.name}
                   onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
-                  className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                  className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
 
@@ -781,7 +787,7 @@ const CouponsPage: React.FC = () => {
                   rows={3}
                   value={form.description}
                   onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
-                  className={`w-full px-3 py-2 rounded-lg border resize-none ${isDark ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-300'}`}
+                  className={`w-full px-3 py-2 rounded-lg border resize-none ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-300'}`}
                 />
               </label>
 
@@ -797,18 +803,22 @@ const CouponsPage: React.FC = () => {
               )}
             </div>
 
-            <div className="p-5 border-t border-gray-700/30 flex justify-end gap-2">
+            <div className={`p-5 border-t flex justify-end gap-2 ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
               <button
                 onClick={closeModal}
                 disabled={saving}
-                className={`px-4 py-2 rounded-lg ${isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'} disabled:opacity-50`}
+                className={`px-4 py-2 rounded-lg ${isDark ? 'bg-zinc-800 hover:bg-zinc-700' : 'bg-gray-200 hover:bg-gray-300'} disabled:opacity-50`}
               >
                 {t('common.cancel', 'Cancel')}
               </button>
               <button
                 onClick={handleSaveCoupon}
                 disabled={saving}
-                className="px-4 py-2 rounded-lg bg-cyan-500 text-white hover:bg-cyan-600 disabled:opacity-50 inline-flex items-center gap-2"
+                className={`px-4 py-2 rounded-lg disabled:opacity-50 inline-flex items-center gap-2 font-semibold ${
+                  isDark
+                    ? 'bg-zinc-100 text-black border border-zinc-200 hover:bg-white'
+                    : 'bg-white text-black border border-gray-300 hover:bg-gray-100'
+                }`}
               >
                 {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : null}
                 {editingCoupon ? t('common.save', 'Save') : t('common.create', 'Create')}

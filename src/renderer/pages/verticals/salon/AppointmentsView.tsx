@@ -132,6 +132,7 @@ export const AppointmentsView: React.FC = memo(() => {
   });
 
   const isDark = resolvedTheme === 'dark';
+  const effectiveOrgId = organizationId || localOrgId || '';
   
   // Search customer by phone number
   const searchCustomerByPhone = async (phone: string) => {
@@ -239,47 +240,156 @@ export const AppointmentsView: React.FC = memo(() => {
   // Load staff and services for the create modal
   useEffect(() => {
     const loadDropdownData = async () => {
-      if (!branchId) {
-        console.warn('[AppointmentsView] No branchId for loading dropdown data');
-        return;
-      }
-      
-      console.log('[AppointmentsView] Loading staff and services for branch:', branchId);
-      
+      console.log('[AppointmentsView] Loading staff and services for branch:', branchId, 'org:', effectiveOrgId);
+
       try {
-        // Load staff (cast to any to bypass limited type definitions)
+        let resolvedStaff: { id: string; name: string }[] = [];
+        let resolvedServices: { id: string; name: string; duration: number }[] = [];
+
+        const invoke =
+          (window as any)?.electronAPI?.invoke ||
+          (window as any)?.electronAPI?.ipcRenderer?.invoke ||
+          (window as any)?.electron?.ipcRenderer?.invoke ||
+          null;
+
+        // Prefer terminal-authenticated admin APIs in Electron.
+        if (invoke) {
+          let staffRows: any[] = [];
+
+          // Primary: existing IPC handler used by shift check-in (very stable path).
+          if (branchId) {
+            const staffRpc = await invoke('shift:list-staff-for-checkin', branchId);
+            if (staffRpc?.success && Array.isArray(staffRpc?.data)) {
+              staffRows = staffRpc.data;
+            } else {
+              console.warn('[AppointmentsView] shift:list-staff-for-checkin failed:', staffRpc?.error || staffRpc);
+            }
+          }
+
+          // Secondary: POS sync API (requires admin route whitelist).
+          if (!staffRows.length) {
+            const staffResp = await invoke('api:fetch-from-admin', '/api/pos/sync/staff?limit=1000');
+            if (staffResp?.success && staffResp?.data?.success !== false) {
+              staffRows = Array.isArray(staffResp?.data?.data) ? staffResp.data.data : [];
+            } else {
+              console.warn('[AppointmentsView] Staff sync API failed:', staffResp?.error || staffResp?.data?.error || staffResp);
+            }
+          }
+
+          resolvedStaff = (staffRows || [])
+            .filter((s: any) => {
+              const active = s?.is_active ?? s?.isActive ?? s?.active;
+              const canPos = s?.can_login_pos ?? s?.canLoginPos ?? true;
+              return active !== false && canPos !== false;
+            })
+            .map((s: any) => {
+              const fullName =
+                `${s?.first_name ?? s?.firstName ?? ''} ${s?.last_name ?? s?.lastName ?? ''}`.trim() ||
+                s?.name ||
+                s?.full_name ||
+                s?.fullName ||
+                s?.display_name ||
+                '';
+              return {
+                id: String(s?.id ?? ''),
+                name: fullName || 'Staff',
+              };
+            })
+            .filter((s: { id: string; name: string }) => !!s.id);
+
+          if (resolvedStaff.length) {
+            setStaffList(resolvedStaff);
+          }
+
+          let serviceRows: any[] = [];
+          const servicesResp = await invoke('api:fetch-from-admin', '/api/pos/services?is_active=true');
+          if (servicesResp?.success && servicesResp?.data?.success !== false) {
+            serviceRows = Array.isArray(servicesResp?.data?.services) ? servicesResp.data.services : [];
+          } else {
+            const fallback = await invoke('api:fetch-from-admin', '/api/pos/sync/services?limit=1000');
+            if (fallback?.success && fallback?.data?.success !== false) {
+              serviceRows = Array.isArray(fallback?.data?.data) ? fallback.data.data : [];
+            } else {
+              console.warn('[AppointmentsView] Services API failed:', fallback?.error || fallback?.data?.error || fallback);
+            }
+          }
+
+          resolvedServices = (serviceRows || [])
+            .filter((s: any) => {
+              const active = s?.is_active ?? s?.isActive ?? s?.active;
+              const status = s?.status;
+              const rowBranch = s?.branch_id ?? s?.branchId ?? null;
+              return active !== false && status !== 'inactive' && (!rowBranch || !branchId || rowBranch === branchId);
+            })
+            .map((s: any) => ({
+              id: String(s?.id ?? ''),
+              name: s?.name || s?.title || 'Service',
+              duration: Number(s?.duration_minutes ?? s?.duration ?? s?.durationMinutes ?? 30) || 30,
+            }))
+            .filter((s: { id: string; name: string; duration: number }) => !!s.id);
+
+          if (resolvedServices.length) {
+            setServicesList(resolvedServices);
+          }
+
+          // If both loaded, we're done.
+          if (resolvedStaff.length > 0 && resolvedServices.length > 0) {
+            return;
+          }
+        }
+
+        // Fallback path (or fill missing lists) via direct Supabase.
         const { data: staffData, error: staffError } = await (supabase as any)
           .from('staff')
-          .select('id, first_name, last_name')
-          .eq('branch_id', branchId)
-          .eq('is_active', true);
-        
-        console.log('[AppointmentsView] Staff query result:', { staffData, staffError });
-        
-        if (staffData) {
-          setStaffList(staffData.map((s: { id: string; first_name: string; last_name: string }) => ({
-            id: s.id,
-            name: `${s.first_name} ${s.last_name}`.trim()
-          })));
+          .select('id, first_name, last_name, is_active, can_login_pos')
+          .eq('organization_id', effectiveOrgId);
+
+        console.log('[AppointmentsView] Staff query result:', { count: staffData?.length || 0, staffError });
+
+        if (resolvedStaff.length === 0) {
+          const fallbackStaff = (staffData || [])
+            .filter((s: any) => (s?.is_active ?? true) !== false && (s?.can_login_pos ?? true) !== false)
+            .map((s: any) => ({
+              id: String(s?.id ?? ''),
+              name: `${s?.first_name || ''} ${s?.last_name || ''}`.trim() || 'Staff',
+            }))
+            .filter((s: { id: string; name: string }) => !!s.id);
+          if (fallbackStaff.length) {
+            setStaffList(fallbackStaff);
+            resolvedStaff = fallbackStaff;
+          }
         }
-        
-        // Load services - don't filter by is_active to see all services
+
         const { data: servicesData, error: servicesError } = await (supabase as any)
           .from('services')
-          .select('id, name, duration_minutes, is_active')
-          .eq('branch_id', branchId);
-        
-        console.log('[AppointmentsView] Services query result:', { servicesData, servicesError });
-        
-        if (servicesData) {
-          // Filter active services in JS to debug
-          const activeServices = servicesData.filter((s: { is_active: boolean }) => s.is_active !== false);
-          console.log('[AppointmentsView] Active services:', activeServices);
-          setServicesList(activeServices.map((s: { id: string; name: string; duration_minutes: number | null }) => ({
-            id: s.id,
-            name: s.name,
-            duration: s.duration_minutes || 30
-          })));
+          .select('id, name, duration_minutes, is_active, status, branch_id')
+          .eq('organization_id', effectiveOrgId);
+
+        console.log('[AppointmentsView] Services query result:', { count: servicesData?.length || 0, servicesError });
+
+        if (resolvedServices.length === 0) {
+          const fallbackServices = (servicesData || [])
+            .filter((s: any) => {
+              const active = s?.is_active ?? true;
+              const rowBranch = s?.branch_id ?? null;
+              return active !== false && s?.status !== 'inactive' && (!rowBranch || !branchId || rowBranch === branchId);
+            })
+            .map((s: any) => ({
+              id: String(s?.id ?? ''),
+              name: s?.name || 'Service',
+              duration: Number(s?.duration_minutes ?? 30) || 30,
+            }))
+            .filter((s: { id: string; name: string; duration: number }) => !!s.id);
+          if (fallbackServices.length) {
+            setServicesList(fallbackServices);
+            resolvedServices = fallbackServices;
+          }
+        }
+
+        // Final fallback for staff from staff already discovered in loaded appointments.
+        if (resolvedStaff.length === 0 && staff.length > 0) {
+          setStaffList(staff);
+          resolvedStaff = staff;
         }
       } catch (err) {
         console.error('[AppointmentsView] Failed to load dropdown data:', err);
@@ -289,7 +399,7 @@ export const AppointmentsView: React.FC = memo(() => {
     if (showCreateModal) {
       loadDropdownData();
     }
-  }, [branchId, showCreateModal]);
+  }, [branchId, effectiveOrgId, showCreateModal]);
 
   // Build filters based on selected date
   const filters: AppointmentFilters = useMemo(() => {
@@ -323,9 +433,6 @@ export const AppointmentsView: React.FC = memo(() => {
     return baseFilters;
   }, [selectedDate, quickFilter, staffFilter, searchTerm]);
 
-  // Use localOrgId as fallback for organizationId from context
-  const effectiveOrgId = organizationId || localOrgId || '';
-  
   const {
     appointments,
     stats,
@@ -342,6 +449,7 @@ export const AppointmentsView: React.FC = memo(() => {
     filters,
     enableRealtime: true,
   });
+
 
   const handleQuickFilter = (filter: QuickFilter) => {
     setQuickFilter(filter);
@@ -433,7 +541,7 @@ export const AppointmentsView: React.FC = memo(() => {
 
     if (appointment.status === 'scheduled' || appointment.status === 'confirmed') {
       actions.push({
-        label: 'Check In',
+        label: t('appointments.actions.checkIn', 'Check In'),
         action: () => checkIn(appointment.id),
         variant: 'primary',
         icon: Play,
@@ -441,7 +549,7 @@ export const AppointmentsView: React.FC = memo(() => {
     }
     if (appointment.status === 'in_progress') {
       actions.push({
-        label: 'Complete',
+        label: t('appointments.actions.complete', 'Complete'),
         action: () => complete(appointment.id),
         variant: 'success',
         icon: CheckCircle,
@@ -449,7 +557,7 @@ export const AppointmentsView: React.FC = memo(() => {
     }
     if (['scheduled', 'confirmed'].includes(appointment.status)) {
       actions.push({
-        label: 'No Show',
+        label: t('appointments.actions.noShow', 'No Show'),
         action: () => updateStatus(appointment.id, 'no_show'),
         variant: 'danger',
         icon: XCircle,
@@ -477,30 +585,30 @@ export const AppointmentsView: React.FC = memo(() => {
 
   if (!branchId || !effectiveOrgId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-        Please select a branch to view appointments
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-gray-50 text-gray-500'}`}>
+        {t('appointments.selectBranch', 'Please select a branch to view appointments')}
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-4">
+    <div className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex gap-4">
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <div className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
             <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('appointments.stats.total', 'Total')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
           </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500 shadow-sm'}`}>
             <div className="text-sm text-green-500">{t('appointments.stats.confirmed', 'Confirmed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.confirmed}</div>
           </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500 shadow-sm'}`}>
             <div className="text-sm text-yellow-500">{t('appointments.stats.inProgress', 'In Progress')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.inProgress}</div>
           </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+          <div className={`px-4 py-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200 shadow-sm'}`}>
             <div className="text-sm text-gray-500">{t('appointments.stats.completed', 'Completed')}</div>
             <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.completed}</div>
           </div>
@@ -509,7 +617,7 @@ export const AppointmentsView: React.FC = memo(() => {
         <div className="flex gap-2">
           <button
             onClick={() => refetch()}
-            className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+            className={`p-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 hover:bg-gray-200'}`}
           >
             <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
@@ -520,7 +628,7 @@ export const AppointmentsView: React.FC = memo(() => {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder={t('appointments.searchPlaceholder', 'Search...')}
-              className={`pl-10 pr-4 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
+              className={`pl-10 pr-4 py-2 rounded-lg border ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
             />
           </div>
         </div>
@@ -535,7 +643,7 @@ export const AppointmentsView: React.FC = memo(() => {
               onClick={() => handleQuickFilter(filter)}
               className={`px-3 py-1.5 rounded-lg text-sm ${
                 quickFilter === filter
-                  ? 'bg-blue-600 text-white'
+                  ? 'bg-zinc-100 text-black border border-zinc-300'
                   : isDark ? 'bg-gray-800 text-gray-300 hover:bg-gray-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
@@ -581,7 +689,7 @@ export const AppointmentsView: React.FC = memo(() => {
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}
-                className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-blue-600 text-white' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
+                className={`px-3 py-2 text-sm ${viewMode === mode ? 'bg-zinc-100 text-black border border-zinc-300' : isDark ? 'text-gray-300' : 'text-gray-600'}`}
               >
                 {t(`appointments.view.${mode}`, mode.charAt(0).toUpperCase() + mode.slice(1))}
               </button>
@@ -639,7 +747,7 @@ export const AppointmentsView: React.FC = memo(() => {
                                       key={idx}
                                       onClick={action.action}
                                       className={`px-2 py-1 rounded text-xs font-medium flex items-center gap-1 ${
-                                        action.variant === 'primary' ? 'bg-blue-600 text-white' :
+                                        action.variant === 'primary' ? 'bg-zinc-100 text-black border border-zinc-300' :
                                         action.variant === 'success' ? 'bg-green-600 text-white' :
                                         action.variant === 'danger' ? 'bg-red-600 text-white' :
                                         isDark ? 'bg-gray-600 text-white' : 'bg-gray-200 text-gray-800'
@@ -700,7 +808,7 @@ export const AppointmentsView: React.FC = memo(() => {
                             key={idx}
                             onClick={action.action}
                             className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1 ${
-                              action.variant === 'primary' ? 'bg-blue-600 text-white hover:bg-blue-700' :
+                              action.variant === 'primary' ? 'bg-zinc-100 text-black border border-zinc-300 hover:bg-white' :
                               action.variant === 'success' ? 'bg-green-600 text-white hover:bg-green-700' :
                               action.variant === 'danger' ? 'bg-red-600 text-white hover:bg-red-700' :
                               isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
@@ -827,6 +935,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   branchId,
   organizationId,
 }) => {
+  const { t } = useTranslation();
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [timePeriod, setTimePeriod] = useState<'morning' | 'afternoon' | 'evening'>('morning');
@@ -944,49 +1053,63 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   const selectedService = servicesList.find(s => s.id === formData.serviceId);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className={`w-full max-w-lg mx-4 rounded-2xl shadow-xl max-h-[90vh] flex flex-col ${isDark ? 'bg-gray-800' : 'bg-white'}`}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-6">
+      <div className={`w-full max-w-6xl rounded-3xl border shadow-[0_30px_90px_rgba(0,0,0,0.55)] max-h-[94vh] flex flex-col overflow-hidden ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         {/* Header */}
-        <div className={`flex items-center justify-between p-4 border-b shrink-0 ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
-          <h2 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>New Appointment</h2>
-          <button onClick={onClose} className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}>
+        <div className={`flex items-start justify-between px-4 sm:px-6 py-4 border-b shrink-0 ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
+          <div>
+            <h2 className={`text-lg sm:text-xl font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>
+              {t('appointments.modal.title', 'New Appointment')}
+            </h2>
+            <p className={`text-xs sm:text-sm mt-1 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+              {selectedDay && formData.startTime
+                ? `${formatDate(selectedDay)} • ${formData.startTime}`
+                : t('appointments.modal.phoneSearchLabel', 'Search Customer by Phone')}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:bg-zinc-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-4 overflow-y-auto flex-1">
+        <div className="p-4 sm:p-6 overflow-y-auto flex-1">
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-5">
+            <div className="xl:col-span-5 space-y-4">
           {/* Phone Search */}
-          <div>
-            <label className={`block text-sm font-medium mb-1 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-              <Search className="w-4 h-4 inline mr-1" /> Search Customer by Phone
+          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+            <label className={`block text-sm font-medium mb-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+              <Search className="w-4 h-4 inline mr-1" /> {t('appointments.modal.phoneSearchLabel', 'Search Customer by Phone')}
             </label>
             <div className="flex gap-2">
               <input
                 type="tel"
                 value={formData.customerPhone}
                 onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
-                placeholder="Enter phone number..."
-                className={`flex-1 px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                placeholder={t('appointments.modal.phonePlaceholder', 'Enter phone number...')}
+                className={`flex-1 px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               />
               <button
                 type="button"
                 onClick={() => searchCustomerByPhone(formData.customerPhone)}
                 disabled={isSearching || !formData.customerPhone}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                className="px-4 py-2.5 rounded-xl font-medium text-sm bg-zinc-100 text-black border border-zinc-300 hover:bg-white disabled:opacity-50"
               >
-                {isSearching ? '...' : 'Search'}
+                {isSearching ? '...' : t('appointments.modal.search', 'Search')}
               </button>
             </div>
           </div>
 
           {/* Customer Found */}
           {customerFound && (
-            <div className={`p-3 rounded-lg border ${isDark ? 'bg-green-900/20 border-green-700' : 'bg-green-50 border-green-200'}`}>
+            <div className={`p-4 rounded-2xl border ${isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200'}`}>
               <div className="flex items-center justify-between">
                 <div>
-                  <p className={`font-medium ${isDark ? 'text-green-400' : 'text-green-700'}`}>{customerFound.name}</p>
-                  <p className={`text-sm ${isDark ? 'text-green-300' : 'text-green-600'}`}>{customerFound.phone}</p>
+                  <p className={`font-semibold ${isDark ? 'text-emerald-300' : 'text-emerald-700'}`}>{customerFound.name}</p>
+                  <p className={`text-sm ${isDark ? 'text-emerald-200/90' : 'text-emerald-600'}`}>{customerFound.phone}</p>
                 </div>
                 <CheckCircle className="w-5 h-5 text-green-500" />
               </div>
@@ -995,66 +1118,82 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
           {/* Add New Customer */}
           {showAddCustomer && !customerFound && (
-            <div className={`p-3 rounded-lg border space-y-3 ${isDark ? 'bg-amber-900/20 border-amber-700' : 'bg-amber-50 border-amber-200'}`}>
-              <p className={`text-sm ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>Customer not found. Add new customer:</p>
+            <div className={`p-4 rounded-2xl border space-y-3 ${isDark ? 'bg-amber-500/10 border-amber-500/30' : 'bg-amber-50 border-amber-200'}`}>
+              <p className={`text-sm ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
+                {t('appointments.modal.customerNotFound', 'Customer not found. Add new customer:')}
+              </p>
               <input
                 type="text"
                 value={formData.customerName}
                 onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
-                placeholder="Customer Name *"
-                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                placeholder={t('appointments.modal.customerNamePlaceholder', 'Customer Name *')}
+                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               />
               <input
                 type="email"
                 value={formData.customerEmail}
                 onChange={(e) => setFormData(prev => ({ ...prev, customerEmail: e.target.value }))}
-                placeholder="Email (optional)"
-                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                placeholder={t('appointments.modal.customerEmailPlaceholder', 'Email (optional)')}
+                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               />
             </div>
           )}
 
           {/* Staff & Service */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
             <div>
-              <label className={`block text-sm font-medium mb-1 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Staff *</label>
+              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                {t('appointments.modal.staffLabel', 'Staff *')}
+              </label>
               <select
                 value={formData.staffId}
                 onChange={(e) => setFormData(prev => ({ ...prev, staffId: e.target.value }))}
-                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               >
-                <option value="">Select...</option>
+                <option value="">{t('appointments.modal.selectPlaceholder', 'Select...')}</option>
                 {staffList.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             </div>
             <div>
-              <label className={`block text-sm font-medium mb-1 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Service *</label>
+              <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                {t('appointments.modal.serviceLabel', 'Service *')}
+              </label>
               <select
                 value={formData.serviceId}
                 onChange={(e) => setFormData(prev => ({ ...prev, serviceId: e.target.value }))}
-                className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
               >
-                <option value="">Select...</option>
-                {servicesList.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration}min)</option>)}
+                <option value="">{t('appointments.modal.selectPlaceholder', 'Select...')}</option>
+                {servicesList.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration}{t('common.minutes', 'min')})</option>)}
               </select>
             </div>
           </div>
 
+            </div>
+            <div className="xl:col-span-7 space-y-4">
           {/* Calendar */}
-          <div className={`p-3 rounded-lg border ${isDark ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
+          <div className={`p-4 rounded-2xl border ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
             <div className="flex items-center justify-between mb-3">
-              <button type="button" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))} className={`p-1 rounded ${isDark ? 'hover:bg-gray-600' : 'hover:bg-gray-200'}`}>
-                <ChevronLeft className="w-5 h-5" />
+              <button
+                type="button"
+                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() - 1))}
+                className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+              >
+                <ChevronLeft className="w-4 h-4" />
               </button>
-              <span className="font-medium">{formatDate(calendarDate, { month: 'long', year: 'numeric' })}</span>
-              <button type="button" onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))} className={`p-1 rounded ${isDark ? 'hover:bg-gray-600' : 'hover:bg-gray-200'}`}>
-                <ChevronRight className="w-5 h-5" />
+              <span className={`font-semibold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{formatDate(calendarDate, { month: 'long', year: 'numeric' })}</span>
+              <button
+                type="button"
+                onClick={() => setCalendarDate(new Date(calendarDate.getFullYear(), calendarDate.getMonth() + 1))}
+                className={`p-2 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
+              >
+                <ChevronRight className="w-4 h-4" />
               </button>
             </div>
-            <div className="grid grid-cols-7 gap-1 mb-1">
-              {weekDays.map((d, i) => <div key={i} className="text-center text-xs text-gray-500 py-1">{d}</div>)}
+            <div className="grid grid-cols-7 gap-1.5 mb-2">
+              {weekDays.map((d, i) => <div key={i} className={`text-center text-xs py-1 ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{d}</div>)}
             </div>
-            <div className="grid grid-cols-7 gap-1">
+            <div className="grid grid-cols-7 gap-1.5">
               {calendarDays.map((day, idx) => {
                 const isCurrentMonth = day.getMonth() === calendarDate.getMonth();
                 const isSelected = selectedDay?.toDateString() === day.toDateString();
@@ -1066,11 +1205,13 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     type="button"
                     disabled={isPast}
                     onClick={() => handleDateSelect(day)}
-                    className={`p-2 text-sm rounded-lg transition-all
-                      ${!isCurrentMonth ? 'text-gray-400' : ''}
-                      ${isPast ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-blue-100 dark:hover:bg-blue-900/30'}
-                      ${isSelected ? 'bg-blue-500 text-white' : ''}
-                      ${isToday && !isSelected ? 'ring-2 ring-blue-500 ring-inset' : ''}
+                    className={`h-10 rounded-xl text-sm transition-all border
+                      ${!isCurrentMonth ? (isDark ? 'text-zinc-600' : 'text-gray-400') : ''}
+                      ${isPast
+                        ? (isDark ? 'text-zinc-700 border-zinc-800 bg-zinc-900/40 cursor-not-allowed' : 'text-gray-300 border-gray-200 bg-gray-100 cursor-not-allowed')
+                        : (isDark ? 'border-zinc-800 hover:bg-zinc-800/80' : 'border-gray-200 hover:bg-gray-100')}
+                      ${isSelected ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black') : ''}
+                      ${isToday && !isSelected ? (isDark ? 'ring-1 ring-zinc-500' : 'ring-1 ring-gray-400') : ''}
                     `}
                   >
                     {day.getDate()}
@@ -1082,24 +1223,32 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
 
           {/* Time Slots */}
           {selectedDay && (
-            <div className={`p-3 rounded-lg border space-y-3 ${isDark ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-50 border-gray-200'}`}>
-              <div className="flex gap-2">
+            <div className={`p-4 rounded-2xl border space-y-3 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+              <div className="grid grid-cols-3 gap-2">
                 {(['morning', 'afternoon', 'evening'] as const).map(p => (
                   <button
                     key={p}
                     type="button"
                     onClick={() => setTimePeriod(p)}
-                    className={`flex-1 py-1.5 text-xs rounded-lg ${timePeriod === p ? 'bg-blue-500 text-white' : isDark ? 'bg-gray-600 hover:bg-gray-500' : 'bg-gray-200 hover:bg-gray-300'}`}
+                    className={`py-2 text-xs sm:text-sm rounded-xl border font-medium transition-all ${
+                      timePeriod === p
+                        ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black')
+                        : (isDark ? 'bg-zinc-950 text-zinc-300 border-zinc-700 hover:bg-zinc-800' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100')
+                    }`}
                   >
-                    {p === 'morning' ? 'Morning' : p === 'afternoon' ? 'Afternoon' : 'Evening'}
+                    {p === 'morning'
+                      ? t('appointments.modal.periods.morning', 'Morning')
+                      : p === 'afternoon'
+                        ? t('appointments.modal.periods.afternoon', 'Afternoon')
+                        : t('appointments.modal.periods.evening', 'Evening')}
                   </button>
                 ))}
               </div>
               
-              {!formData.staffId && <p className="text-xs text-amber-500">Select staff to see availability</p>}
-              {loadingSlots && <p className="text-xs text-gray-500">Loading...</p>}
+              {!formData.staffId && <p className="text-xs text-amber-500">{t('appointments.modal.selectStaffAvailability', 'Select staff to see availability')}</p>}
+              {loadingSlots && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>{t('appointments.modal.loadingSlots', 'Loading...')}</p>}
               
-              <div className="grid grid-cols-4 gap-1.5 max-h-28 overflow-y-auto">
+              <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 xl:grid-cols-5 gap-2 max-h-56 overflow-y-auto pr-1">
                 {timeSlots.map(slot => {
                   const booked = isTimeSlotBooked(slot);
                   const selected = formData.startTime === slot;
@@ -1109,8 +1258,12 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                       type="button"
                       disabled={booked}
                       onClick={() => handleTimeSelect(slot)}
-                      className={`py-1.5 px-2 text-sm rounded-lg relative
-                        ${selected ? 'bg-green-500 text-white' : booked ? 'bg-red-100 dark:bg-red-900/30 text-red-400 line-through cursor-not-allowed' : isDark ? 'bg-gray-600 hover:bg-green-600' : 'bg-gray-200 hover:bg-green-100'}
+                      className={`py-2 px-2 text-xs sm:text-sm rounded-xl border relative transition-all
+                        ${selected
+                          ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black')
+                          : booked
+                            ? (isDark ? 'bg-red-500/10 border-red-500/30 text-red-300 line-through cursor-not-allowed' : 'bg-red-50 border-red-200 text-red-500 line-through cursor-not-allowed')
+                            : (isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100')}
                       `}
                     >
                       {slot}
@@ -1120,21 +1273,21 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                 })}
               </div>
               
-              <div className="flex gap-4 text-xs text-gray-500">
-                <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded ${isDark ? 'bg-gray-600' : 'bg-gray-200'}`} /> Available</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 dark:bg-red-900/30 rounded" /> Booked</span>
+              <div className={`flex gap-4 text-xs ${isDark ? 'text-zinc-500' : 'text-gray-500'}`}>
+                <span className="flex items-center gap-1"><span className={`w-3 h-3 rounded border ${isDark ? 'bg-zinc-800 border-zinc-600' : 'bg-white border-gray-300'}`} /> {t('appointments.modal.availability.available', 'Available')}</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 bg-red-100 border border-red-200 rounded" /> {t('appointments.modal.availability.booked', 'Booked')}</span>
               </div>
             </div>
           )}
 
           {/* Summary */}
           {formData.startTime && selectedService && selectedDay && (
-            <div className={`p-3 rounded-lg ${isDark ? 'bg-gradient-to-r from-green-900/30 to-blue-900/30' : 'bg-gradient-to-r from-green-50 to-blue-50'}`}>
+            <div className={`p-4 rounded-2xl border ${isDark ? 'bg-zinc-900 border-zinc-700' : 'bg-white border-gray-200'}`}>
               <div className="flex items-center justify-between text-sm">
-                <span>{formatDate(selectedDay)}</span>
-                <span className="font-medium text-green-600">{formData.startTime}</span>
-                <span>→</span>
-                <span className="font-medium text-blue-600">
+                <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{formatDate(selectedDay)}</span>
+                <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{formData.startTime}</span>
+                <span className={isDark ? 'text-zinc-500' : 'text-gray-400'}>→</span>
+                <span className={`font-semibold ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>
                   {(() => {
                     const [h, m] = formData.startTime.split(':').map(Number);
                     const end = new Date(selectedDay);
@@ -1142,36 +1295,42 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
                     return formatTime(end, { hour: '2-digit', minute: '2-digit' });
                   })()}
                 </span>
-                <span className="text-gray-500">({selectedService.duration}min)</span>
+                <span className={isDark ? 'text-zinc-500' : 'text-gray-500'}>({selectedService.duration}{t('common.minutes', 'min')})</span>
               </div>
             </div>
           )}
 
           {/* Notes */}
-          <div>
-            <label className={`block text-sm font-medium mb-1 ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Notes</label>
+          <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
+            <label className={`block text-sm font-medium mb-1.5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+              {t('appointments.modal.notesLabel', 'Notes')}
+            </label>
             <textarea
               value={formData.notes}
               onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
-              placeholder="Optional notes..."
-              rows={2}
-              className={`w-full px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+              placeholder={t('appointments.modal.notesPlaceholder', 'Optional notes...')}
+              rows={3}
+              className={`w-full px-3.5 py-2.5 rounded-xl border text-sm resize-none ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
             />
+          </div>
+            </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className={`flex gap-3 p-4 border-t shrink-0 ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
-          <button onClick={onClose} className={`flex-1 px-4 py-2 rounded-lg font-medium ${isDark ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-100 hover:bg-gray-200'}`}>
-            Cancel
+        <div className={`px-4 sm:px-6 py-4 border-t shrink-0 ${isDark ? 'border-zinc-800 bg-zinc-950/90' : 'border-gray-200 bg-white/90'}`}>
+          <div className="flex flex-col-reverse sm:flex-row gap-3 sm:justify-end">
+          <button onClick={onClose} className={`px-5 py-2.5 rounded-xl font-medium border ${isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-gray-100 border-gray-300 text-gray-700 hover:bg-gray-200'}`}>
+            {t('appointments.modal.cancel', 'Cancel')}
           </button>
           <button
             onClick={handleCreateAppointment}
             disabled={isSubmitting || !formData.staffId || !formData.serviceId || !formData.startTime}
-            className="flex-1 px-4 py-2 rounded-lg font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-5 py-2.5 rounded-xl font-semibold bg-zinc-100 text-black border border-zinc-300 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? 'Creating...' : 'Create'}
+            {isSubmitting ? t('appointments.modal.creating', 'Creating...') : t('appointments.modal.create', 'Create')}
           </button>
+          </div>
         </div>
       </div>
     </div>

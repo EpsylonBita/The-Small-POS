@@ -4,7 +4,7 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useServices } from '../../../hooks/useServices';
 import { Scissors, Clock, Search, Plus, Edit2, Trash2, Loader2, RefreshCw } from 'lucide-react';
-import type { Service, ServiceCategory } from '../../../services/ServicesService';
+import type { Service } from '../../../services/ServicesService';
 import { formatCurrency } from '../../../utils/format';
 
 export const ServiceCatalogView: React.FC = memo(() => {
@@ -131,79 +131,87 @@ export const ServiceCatalogView: React.FC = memo(() => {
   // Show loading or error state
   if (!branchId || !effectiveOrgId) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black text-zinc-400' : 'bg-gray-50 text-gray-500'}`}>
         {t('serviceCatalog.selectBranch', { defaultValue: 'Please select a branch to view services' })}
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col p-4">
+    <div className={`h-full flex flex-col p-4 ${isDark ? 'bg-black text-zinc-100' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        {/* Stats */}
-        <div className="flex gap-4">
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('serviceCatalog.stats.totalServices', { defaultValue: 'Total Services' })}
+      <div className={`rounded-2xl border p-4 mb-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+          {/* Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-zinc-500' : 'bg-white border-gray-200 border-t-zinc-400'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                {t('serviceCatalog.stats.totalServices', { defaultValue: 'Total Services' })}
+              </div>
+              <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.totalServices}</div>
             </div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.totalServices}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('serviceCatalog.stats.activeServices', { defaultValue: 'Active' })}
+            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                {t('serviceCatalog.stats.activeServices', { defaultValue: 'Active' })}
+              </div>
+              <div className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`}>{stats.activeServices}</div>
             </div>
-            <div className={`text-xl font-bold text-green-500`}>{stats.activeServices}</div>
-          </div>
-          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-              {t('serviceCatalog.stats.avgPrice', { defaultValue: 'Avg Price' })}
+            <div className={`px-4 py-2 rounded-xl border border-t-2 ${isDark ? 'bg-black border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
+              <div className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                {t('serviceCatalog.stats.avgPrice', { defaultValue: 'Avg Price' })}
+              </div>
+              <div className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-600'}`}>{formatPrice(stats.avgPrice)}</div>
             </div>
-            <div className={`text-xl font-bold text-blue-500`}>{formatPrice(stats.avgPrice)}</div>
           </div>
-        </div>
 
-        {/* Actions */}
-        <div className="flex gap-2">
-          <button
-            onClick={() => refetch()}
-            disabled={isLoading}
-            className={`p-2 rounded-lg ${isDark ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-          >
-            <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
-          <div className="relative">
-            <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder={t('serviceCatalog.searchPlaceholder', { defaultValue: 'Search services...' })}
-              className={`pl-10 pr-4 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
-            />
+          {/* Actions */}
+          <div className="flex flex-wrap gap-2 items-center">
+            <button
+              onClick={() => refetch()}
+              disabled={isLoading}
+              className={`p-2 rounded-lg border ${isDark ? 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 text-gray-600 border-gray-300 hover:bg-gray-200'}`}
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <div className="relative">
+              <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder={t('serviceCatalog.searchPlaceholder', { defaultValue: 'Search services...' })}
+                className={`pl-10 pr-4 py-2 rounded-lg border min-w-[260px] ${isDark ? 'bg-zinc-900 text-zinc-100 border-zinc-700' : 'bg-white text-gray-900 border-gray-200'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+              />
+            </div>
+            <button className={`flex items-center gap-2 px-4 py-2 rounded-lg border font-medium ${
+              isDark
+                ? 'bg-zinc-100 text-black border-zinc-200 hover:bg-white'
+                : 'bg-black text-white border-black hover:bg-zinc-800'
+            }`}>
+              <Plus className="w-4 h-4" />
+              {t('serviceCatalog.addService', { defaultValue: 'Add Service' })}
+            </button>
           </div>
-          <button className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
-            <Plus className="w-4 h-4" />
-            {t('serviceCatalog.addService', { defaultValue: 'Add Service' })}
-          </button>
         </div>
       </div>
 
       {/* Category Tabs */}
-      <div className={`flex gap-1 p-1 rounded-xl mb-4 overflow-x-auto ${isDark ? 'bg-gray-800' : 'bg-gray-100'}`}>
+      <div className={`flex gap-1 p-1 rounded-xl mb-4 overflow-x-auto border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-100 border-gray-200'}`}>
         {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`flex-shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
               activeTab === tab.id
-                ? 'bg-blue-600 text-white shadow-sm'
-                : isDark ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-white'
+                ? isDark ? 'bg-zinc-100 text-black shadow-sm' : 'bg-black text-white shadow-sm'
+                : isDark ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800' : 'text-gray-600 hover:text-gray-900 hover:bg-white'
             }`}
           >
             {tab.name}
             <span className={`ml-2 px-1.5 py-0.5 rounded text-xs ${
-              activeTab === tab.id ? 'bg-white/20' : isDark ? 'bg-gray-700' : 'bg-gray-200'
+              activeTab === tab.id
+                ? isDark ? 'bg-black/15' : 'bg-white/20'
+                : isDark ? 'bg-zinc-800' : 'bg-gray-200'
             }`}>
               {getCategoryCount(tab.id)}
             </span>
@@ -222,8 +230,13 @@ export const ServiceCatalogView: React.FC = memo(() => {
       {error && !isLoading && (
         <div className={`flex-1 flex flex-col items-center justify-center ${isDark ? 'text-red-400' : 'text-red-500'}`}>
           <p>{error}</p>
-          <button onClick={() => refetch()} className="mt-2 text-blue-500 hover:underline">
-            {t('common.retry', { defaultValue: 'Retry' })}
+          <button
+            onClick={() => refetch()}
+            className={`mt-3 px-3 py-1.5 rounded-lg border text-sm ${
+              isDark ? 'bg-zinc-900 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'
+            }`}
+          >
+            {t('common.actions.retry', { defaultValue: 'Retry' })}
           </button>
         </div>
       )}
@@ -236,20 +249,20 @@ export const ServiceCatalogView: React.FC = memo(() => {
               <div
                 key={service.id}
                 onClick={() => setSelectedService(service)}
-                className={`p-4 rounded-xl cursor-pointer transition-all hover:scale-[1.02] ${
+                className={`p-4 rounded-xl cursor-pointer transition-all border ${
                   !service.isActive ? 'opacity-60' : ''
                 } ${
-                  selectedService?.id === service.id ? 'ring-2 ring-blue-500' : ''
-                } ${isDark ? 'bg-gray-800 hover:bg-gray-750' : 'bg-white shadow-sm hover:shadow-md'}`}
+                  selectedService?.id === service.id ? (isDark ? 'ring-2 ring-zinc-500' : 'ring-2 ring-gray-400') : ''
+                } ${isDark ? 'bg-zinc-950 border-zinc-800 hover:bg-zinc-900' : 'bg-white border-gray-200 hover:bg-gray-50'}`}
               >
                 <div className="flex items-start justify-between mb-3">
-                  <div className="p-2 rounded-lg bg-blue-500/10">
-                    <Scissors className="w-5 h-5 text-blue-500" />
+                  <div className={`p-2 rounded-lg border ${isDark ? 'bg-zinc-900 border-zinc-800' : 'bg-gray-100 border-gray-200'}`}>
+                    <Scissors className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
                   </div>
                   <span className={`px-2 py-1 rounded text-xs ${
                     service.isActive
-                      ? 'bg-green-500/10 text-green-500'
-                      : 'bg-gray-500/10 text-gray-500'
+                      ? isDark ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                      : isDark ? 'bg-zinc-800 text-zinc-400 border border-zinc-700' : 'bg-gray-100 text-gray-500 border border-gray-200'
                   }`}>
                     {service.isActive
                       ? t('serviceCatalog.status.active', { defaultValue: 'Active' })
@@ -265,7 +278,7 @@ export const ServiceCatalogView: React.FC = memo(() => {
 
                 {/* Category Badge */}
                 {service.category && (
-                  <div className={`inline-block px-2 py-0.5 rounded text-xs mb-2 ${isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+                  <div className={`inline-block px-2 py-0.5 rounded text-xs mb-2 ${isDark ? 'bg-zinc-900 text-zinc-300 border border-zinc-800' : 'bg-gray-100 text-gray-600 border border-gray-200'}`}>
                     {service.category.name}
                   </div>
                 )}
@@ -273,17 +286,17 @@ export const ServiceCatalogView: React.FC = memo(() => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3 text-sm">
                     <span className="flex items-center gap-1">
-                      <Clock className={`w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-                      <span className={isDark ? 'text-gray-300' : 'text-gray-600'}>{service.durationMinutes}min</span>
+                      <Clock className={`w-4 h-4 ${isDark ? 'text-zinc-500' : 'text-gray-400'}`} />
+                      <span className={isDark ? 'text-zinc-300' : 'text-gray-600'}>{service.durationMinutes}min</span>
                     </span>
                   </div>
-                  <span className="text-lg font-bold text-blue-500">{formatPrice(service.price)}</span>
+                  <span className={`text-lg font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{formatPrice(service.price)}</span>
                 </div>
 
                 {/* Quick Actions */}
-                <div className="flex gap-2 mt-3 pt-3 border-t" style={{ borderColor: isDark ? '#374151' : '#e5e7eb' }}>
+                <div className={`flex gap-2 mt-3 pt-3 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
                   <button className={`flex-1 py-1.5 rounded-lg text-sm flex items-center justify-center gap-1 ${
-                    isDark ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    isDark ? 'bg-zinc-900 text-zinc-300 border border-zinc-700 hover:bg-zinc-800' : 'bg-gray-100 text-gray-600 border border-gray-300 hover:bg-gray-200'
                   }`}>
                     <Edit2 className="w-3 h-3" />
                     {t('common.edit', { defaultValue: 'Edit' })}
@@ -299,8 +312,9 @@ export const ServiceCatalogView: React.FC = memo(() => {
           </div>
 
           {filteredServices.length === 0 && (
-            <div className={`text-center py-12 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-              {t('serviceCatalog.noServices', { defaultValue: 'No services found' })}
+            <div className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800 text-zinc-500' : 'bg-white border-gray-200 text-gray-400'}`}>
+              <Scissors className="w-10 h-10 mx-auto mb-3 opacity-60" />
+              <p>{t('serviceCatalog.noServices', { defaultValue: 'No services found' })}</p>
             </div>
           )}
         </div>

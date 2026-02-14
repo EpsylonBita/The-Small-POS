@@ -291,7 +291,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
     <div
       className={`relative p-4 rounded-xl border transition-all duration-200 hover:shadow-md ${
         isDark
-          ? 'bg-gray-800/50 border-white/10 hover:border-white/20'
+          ? 'bg-zinc-950 border-zinc-800 hover:border-zinc-600'
           : 'bg-white border-gray-200 hover:border-gray-300'
       }`}
     >
@@ -299,7 +299,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
         {/* Icon */}
         <div
           className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${
-            isDark ? 'bg-white/5' : 'bg-gray-100'
+            isDark ? 'bg-zinc-900 border border-zinc-800 text-zinc-100' : 'bg-gray-100 text-gray-700'
           }`}
         >
           {integration.icon}
@@ -311,7 +311,7 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             {integration.name}
           </h3>
           <p className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-            {integration.description}
+            {t(`integrations.plugins.${integration.id}.description`, integration.description)}
           </p>
 
           {/* Status Badge */}
@@ -358,19 +358,24 @@ const IntegrationCard = memo<IntegrationCardProps>(({
             type="button"
             role="switch"
             aria-checked={isEnabled}
+            aria-label={t('integrations.togglePlugin', 'Toggle plugin')}
             onClick={() => !isToggleDisabled && onToggle(integration.id)}
             disabled={isToggleDisabled}
-            className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${
-              isDark ? 'shadow-sm' : 'shadow-sm'
-            } ${isEnabled ? 'liquid-glass-modal-success' : 'liquid-glass-modal-secondary'} ${isToggleDisabled ? 'opacity-50 cursor-not-allowed' : ''} liquid-glass-modal-button min-h-0 min-w-0`}
+            className={`relative inline-flex h-6 w-14 shrink-0 items-center rounded-full border transition-all duration-200 ${
+              isEnabled
+                ? 'bg-[#67d75f] border-[#67d75f] shadow-[0_0_12px_rgba(103,215,95,0.45)]'
+                : 'bg-[#d7d7d9] border-[#d7d7d9]'
+            } ${isToggleDisabled ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer'}`}
           >
             <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-lg transition-transform ${
-                isEnabled ? 'translate-x-6' : 'translate-x-1'
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-[0_2px_6px_rgba(0,0,0,0.35)] transition-all duration-200 ${
+                isEnabled
+                  ? 'translate-x-8'
+                  : 'translate-x-0.5'
               }`}
             />
           </button>
-          <span className={`text-[10px] ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+          <span className={`text-[10px] font-medium ${isEnabled ? 'text-emerald-400' : isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
             {isLocked
               ? t('integrations.partnerRequired', 'Partner Required')
               : integration.status === 'pending'
@@ -419,30 +424,30 @@ const CategorySection = memo<CategorySectionProps>(({
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={`w-full flex items-center justify-between p-3 rounded-lg mb-3 transition-colors ${
-          isDark ? 'hover:bg-white/5' : 'hover:bg-gray-50'
+          isDark ? 'hover:bg-zinc-900/80' : 'hover:bg-gray-50'
         }`}
       >
         <div className="flex items-center gap-3">
           <div
             className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-              isDark ? 'bg-white/10' : 'bg-gray-100'
+              isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'
             }`}
           >
-            <Icon size={16} className={isDark ? 'text-gray-300' : 'text-gray-600'} />
+            <Icon size={16} className={isDark ? 'text-zinc-300' : 'text-gray-600'} />
           </div>
           <div className="text-left">
             <h2 className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t(`integrations.category.${category}`, config.label)}
             </h2>
-            <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <p className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
               {connectedCount}/{integrations.length} {t('integrations.connected', 'connected')}
             </p>
           </div>
         </div>
         {isExpanded ? (
-          <ChevronUp size={20} className={isDark ? 'text-gray-400' : 'text-gray-500'} />
+          <ChevronUp size={20} className={isDark ? 'text-zinc-400' : 'text-gray-500'} />
         ) : (
-          <ChevronDown size={20} className={isDark ? 'text-gray-400' : 'text-gray-500'} />
+          <ChevronDown size={20} className={isDark ? 'text-zinc-400' : 'text-gray-500'} />
         )}
       </button>
 
@@ -479,7 +484,7 @@ interface StatsCardProps {
 
 const StatsCard = memo<StatsCardProps>(({ label, value, icon: Icon, color, isDark }) => (
   <div
-    className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}
+    className={`p-4 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}
   >
     <div className="flex items-center gap-3">
       <div
@@ -967,9 +972,9 @@ export const IntegrationsPage: React.FC = () => {
   // Loading state
   if (loading || modulesLoading) {
     return (
-      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+      <div className={`min-h-screen flex items-center justify-center ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
         <div className="text-center">
-          <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />
+          <Loader2 className={`w-8 h-8 animate-spin mx-auto mb-3 ${isDark ? 'text-emerald-400' : 'text-blue-500'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
             {t('integrations.loading', 'Loading plugins...')}
           </p>
@@ -979,18 +984,18 @@ export const IntegrationsPage: React.FC = () => {
   }
 
   return (
-    <div className={`min-h-screen ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
       {/* Header */}
-      <div className={`sticky top-0 z-10 px-4 py-4 border-b ${isDark ? 'bg-gray-900/95 border-white/10' : 'bg-white/95 border-gray-200'} backdrop-blur-sm`}>
+      <div className={`sticky top-0 z-10 px-4 py-4 border-b ${isDark ? 'bg-black/95 border-zinc-800' : 'bg-white/95 border-gray-200'} backdrop-blur-sm`}>
         <div className="max-w-6xl mx-auto">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div
                 className={`w-12 h-12 rounded-xl flex items-center justify-center ${
-                  isDark ? 'bg-purple-500/20' : 'bg-purple-100'
+                  isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-purple-100'
                 }`}
               >
-                <Plug size={24} className="text-purple-500" />
+                <Plug size={24} className={isDark ? 'text-emerald-400' : 'text-purple-500'} />
               </div>
               <div>
                 <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -1021,7 +1026,7 @@ export const IntegrationsPage: React.FC = () => {
                 disabled={isRefreshing || !isOnline}
                 className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${
                   isDark
-                    ? 'hover:bg-white/10 text-gray-300'
+                    ? 'hover:bg-zinc-800 text-zinc-300'
                     : 'hover:bg-gray-100 text-gray-600'
                 }`}
               >
@@ -1043,7 +1048,7 @@ export const IntegrationsPage: React.FC = () => {
             label={t('integrations.stats.total', 'Total')}
             value={stats.total}
             icon={Plug}
-            color="#6366f1"
+            color="#a1a1aa"
             isDark={isDark}
           />
           <StatsCard
@@ -1088,12 +1093,12 @@ export const IntegrationsPage: React.FC = () => {
 
         {/* Empty State */}
         {groupedIntegrations.length === 0 && !error && (
-          <div className={`text-center py-12 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}>
-            <Plug size={48} className={`mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
+          <div className={`text-center py-12 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+            <Plug size={48} className={`mx-auto mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-400'}`} />
             <h3 className={`text-lg font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.empty.title', 'No plugins available')}
             </h3>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('integrations.empty.description', 'Enable modules to unlock plugins')}
             </p>
           </div>
@@ -1113,12 +1118,12 @@ export const IntegrationsPage: React.FC = () => {
 
         {/* Coming Soon Notice */}
         {groupedIntegrations.length > 0 && (
-          <div className={`p-6 rounded-xl text-center ${isDark ? 'bg-gray-800/50' : 'bg-white'}`}>
+          <div className={`p-6 rounded-xl text-center border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
             <AlertCircle size={32} className={`mx-auto mb-3 ${isDark ? 'text-amber-400' : 'text-amber-500'}`} />
             <h3 className={`font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('integrations.comingSoon.title', 'More plugins coming soon')}
             </h3>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('integrations.comingSoon.description', 'We\'re working on adding more plugins.')}
             </p>
           </div>
@@ -1144,7 +1149,7 @@ export const IntegrationsPage: React.FC = () => {
                 {myDataConfigError}
                 {isMyDataMissing && (
                   <div className={`mt-1 text-xs ${isDark ? 'text-amber-200/70' : 'text-amber-600'}`}>
-                    Save settings to create MyData configuration for this branch.
+                    {t('integrations.mydata.saveToCreate', 'Save settings to create MyData configuration for this branch.')}
                   </div>
                 )}
               </div>
@@ -1152,36 +1157,36 @@ export const IntegrationsPage: React.FC = () => {
 
           <div className={`rounded-lg p-3 ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
             <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              Current Setup
+              {t('integrations.mydata.currentSetup', 'Current setup')}
             </div>
             <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              Mode: {myDataConfig?.mode || 'Not configured'}
+              {t('integrations.mydata.mode', 'Mode')}: {myDataConfig?.mode || t('integrations.mydata.notConfigured', 'Not configured')}
             </div>
             <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              Status: {myDataConfig?.status || 'Unknown'}
+              {t('integrations.mydata.status', 'Status')}: {myDataConfig?.status || t('integrations.mydata.unknown', 'Unknown')}
             </div>
             {myDataConfig?.environment && (
               <div className={`text-xs mt-1 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                Environment: {myDataConfig.environment}
+                {t('integrations.mydata.environment', 'Environment')}: {myDataConfig.environment}
               </div>
             )}
           </div>
 
           {myDataConfig?.mode && myDataConfig.mode !== 'fiscal_device' && (
             <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-              Device connection settings are required only when using a fiscal device.
+              {t('integrations.mydata.deviceSettingsHelp', 'Device connection settings are required only when using a fiscal device.')}
             </div>
           )}
 
           <div className="space-y-3">
             <div className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
-              Fiscal Device Connection
+              {t('integrations.mydata.fiscalDeviceConnection', 'Fiscal device connection')}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="flex flex-col gap-2">
                 <label className={`text-sm font-medium ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
-                  Connection Type
+                  {t('integrations.mydata.connectionType', 'Connection type')}
                 </label>
                 <select
                   value={myDataConnectionType}
@@ -1189,21 +1194,21 @@ export const IntegrationsPage: React.FC = () => {
                   className="liquid-glass-modal-input"
                   disabled={!canSaveMyData}
                 >
-                  <option value="usb_serial">USB Serial</option>
-                  <option value="bluetooth">Bluetooth</option>
+                  <option value="usb_serial">{t('integrations.mydata.connectionTypes.usbSerial', 'USB serial')}</option>
+                  <option value="bluetooth">{t('integrations.mydata.connectionTypes.bluetooth', 'Bluetooth')}</option>
                 </select>
               </div>
 
               {myDataConnectionType === 'usb_serial' ? (
                 <POSGlassInput
-                  label="Serial Port"
+                  label={t('integrations.mydata.serialPort', 'Serial port')}
                   value={myDataSerialPort}
                   onChange={(event) => setMyDataSerialPort(event.target.value)}
                   placeholder="COM3 or /dev/ttyUSB0"
                 />
               ) : (
                 <POSGlassInput
-                  label="Bluetooth Address"
+                  label={t('integrations.mydata.bluetoothAddress', 'Bluetooth address')}
                   value={myDataBluetoothAddress}
                   onChange={(event) => setMyDataBluetoothAddress(event.target.value)}
                   placeholder="00:11:22:33:44:55"
@@ -1212,7 +1217,7 @@ export const IntegrationsPage: React.FC = () => {
 
               {myDataConnectionType === 'usb_serial' && (
                 <POSGlassInput
-                  label="Baud Rate"
+                  label={t('integrations.mydata.baudRate', 'Baud rate')}
                   value={myDataBaudRate}
                   onChange={(event) => setMyDataBaudRate(event.target.value)}
                   placeholder="9600"
@@ -1223,14 +1228,14 @@ export const IntegrationsPage: React.FC = () => {
 
           <div className="flex justify-end gap-3">
             <POSGlassButton variant="secondary" onClick={() => setMyDataModalOpen(false)} disabled={myDataSaving}>
-              Cancel
+              {t('common.actions.cancel', 'Cancel')}
             </POSGlassButton>
             <POSGlassButton
               onClick={handleSaveMyDataConfig}
               loading={myDataSaving}
               disabled={!canSaveMyData || myDataSaving}
             >
-              Save
+              {t('common.actions.save', 'Save')}
             </POSGlassButton>
           </div>
         </div>
@@ -1245,7 +1250,7 @@ export const IntegrationsPage: React.FC = () => {
               setActivePlugin(null);
             }
           }}
-          title={activePlugin ? `${activePlugin.name} Configuration` : 'Plugin Configuration'}
+          title={activePlugin ? `${activePlugin.name} ${t('integrations.configuration', 'Configuration')}` : t('integrations.pluginConfiguration', 'Plugin configuration')}
           size="lg"
           closeOnBackdrop={!pluginSaving}
           closeOnEscape={!pluginSaving}
@@ -1254,7 +1259,7 @@ export const IntegrationsPage: React.FC = () => {
             {activePlugin && (
               <>
                 <div className={`rounded-lg p-3 text-xs ${isDark ? 'bg-white/5 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
-                  Enter the credentials provided by the platform. Leave fields blank to keep existing values.
+                  {t('integrations.credentialsHelp', 'Enter the credentials provided by the platform. Leave fields blank to keep existing values.')}
                 </div>
 
                 {(() => {
@@ -1264,48 +1269,48 @@ export const IntegrationsPage: React.FC = () => {
                     <>
                       {(isRequired('store_url') || activePlugin.id === 'woocommerce' || activePlugin.id === 'shopify') && (
                         <POSGlassInput
-                          label={`Store URL${isRequired('store_url') ? ' *' : ''}`}
+                          label={`${t('integrations.fields.storeUrl', 'Store URL')}${isRequired('store_url') ? ' *' : ''}`}
                           value={pluginForm.store_url}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, store_url: event.target.value }))}
-                          placeholder="https://your-store.com"
+                          placeholder={t('integrations.placeholders.storeUrl', 'https://your-store.com')}
                         />
                       )}
                       <POSGlassInput
-                        label={`API Key${isRequired('api_key') ? ' *' : ''}`}
+                        label={`${t('integrations.fields.apiKey', 'API Key')}${isRequired('api_key') ? ' *' : ''}`}
                         value={pluginForm.api_key}
                         onChange={(event) => setPluginForm(prev => ({ ...prev, api_key: event.target.value }))}
-                        placeholder="Enter API key"
+                        placeholder={t('integrations.placeholders.apiKey', 'Enter API key')}
                         type="password"
                       />
                       {(isRequired('api_secret') || activePlugin.id !== 'google-analytics') && (
                         <POSGlassInput
-                          label={`API Secret${isRequired('api_secret') ? ' *' : ''}`}
+                          label={`${t('integrations.fields.apiSecret', 'API Secret')}${isRequired('api_secret') ? ' *' : ''}`}
                           value={pluginForm.api_secret}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, api_secret: event.target.value }))}
-                          placeholder="Enter API secret"
+                          placeholder={t('integrations.placeholders.apiSecret', 'Enter API secret')}
                           type="password"
                         />
                       )}
                       {(isRequired('merchant_id') || ['wolt', 'booking', 'expedia', 'viva'].includes(activePlugin.id)) && (
                         <POSGlassInput
-                          label={`Merchant ID${isRequired('merchant_id') ? ' *' : ''}`}
+                          label={`${t('integrations.fields.merchantId', 'Merchant ID')}${isRequired('merchant_id') ? ' *' : ''}`}
                           value={pluginForm.merchant_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, merchant_id: event.target.value }))}
-                          placeholder="Merchant ID"
+                          placeholder={t('integrations.placeholders.merchantId', 'Merchant ID')}
                         />
                       )}
                       {(isRequired('store_id') || ['efood', 'box'].includes(activePlugin.id)) && (
                         <POSGlassInput
-                          label={`Store ID${isRequired('store_id') ? ' *' : ''}`}
+                          label={`${t('integrations.fields.storeId', 'Store ID')}${isRequired('store_id') ? ' *' : ''}`}
                           value={pluginForm.store_id}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, store_id: event.target.value }))}
-                          placeholder="Store ID"
+                          placeholder={t('integrations.placeholders.storeId', 'Store ID')}
                         />
                       )}
 
                       {config.supportsCommission && (
                         <POSGlassInput
-                          label="Commission (%)"
+                          label={t('integrations.fields.commission', 'Commission (%)')}
                           value={String(pluginForm.commission_pct)}
                           onChange={(event) => setPluginForm(prev => ({ ...prev, commission_pct: Number(event.target.value || 0) }))}
                           type="number"
@@ -1396,7 +1401,7 @@ export const IntegrationsPage: React.FC = () => {
                                 checked={pluginForm.sync_menu}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_menu: event.target.checked }))}
                               />
-                              Sync menu
+                              {t('integrations.sync.menu', 'Sync menu')}
                             </label>
                           )}
                           {config.supportsAvailabilitySync && (
@@ -1406,7 +1411,7 @@ export const IntegrationsPage: React.FC = () => {
                                 checked={pluginForm.sync_availability}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_availability: event.target.checked }))}
                               />
-                              Sync availability
+                              {t('integrations.sync.availability', 'Sync availability')}
                             </label>
                           )}
                           {config.supportsProductSync && (
@@ -1416,7 +1421,7 @@ export const IntegrationsPage: React.FC = () => {
                                 checked={pluginForm.sync_products}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_products: event.target.checked }))}
                               />
-                              Sync products
+                              {t('integrations.sync.products', 'Sync products')}
                             </label>
                           )}
                           {config.supportsOrderSync && (
@@ -1426,7 +1431,7 @@ export const IntegrationsPage: React.FC = () => {
                                 checked={pluginForm.sync_orders}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_orders: event.target.checked }))}
                               />
-                              Sync orders
+                              {t('integrations.sync.orders', 'Sync orders')}
                             </label>
                           )}
                           {config.supportsInventorySync && (
@@ -1436,7 +1441,7 @@ export const IntegrationsPage: React.FC = () => {
                                 checked={pluginForm.sync_inventory}
                                 onChange={(event) => setPluginForm(prev => ({ ...prev, sync_inventory: event.target.checked }))}
                               />
-                              Sync inventory
+                              {t('integrations.sync.inventory', 'Sync inventory')}
                             </label>
                           )}
                         </div>
@@ -1447,10 +1452,10 @@ export const IntegrationsPage: React.FC = () => {
 
                 <div className="flex justify-end gap-2 pt-2">
                   <POSGlassButton variant="secondary" onClick={() => { setPluginModalOpen(false); setActivePlugin(null); }} disabled={pluginSaving}>
-                    Cancel
+                    {t('common.actions.cancel', 'Cancel')}
                   </POSGlassButton>
                   <POSGlassButton onClick={handleSavePluginConfig} loading={pluginSaving} disabled={pluginSaving}>
-                    Save
+                    {t('common.actions.save', 'Save')}
                   </POSGlassButton>
                 </div>
               </>

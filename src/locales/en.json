@@ -16,6 +16,7 @@
       "filter": "Filter",
       "clear": "Clear",
       "refresh": "Refresh",
+      "retry": "Retry",
       "view": "View",
       "print": "Print",
       "export": "Export",
@@ -50,6 +51,21 @@
     "show": "Show",
     "continue": "Continue",
     "minutes": "min",
+    "pending": "Pending",
+    "on": "On",
+    "off": "Off",
+    "name": "Name",
+    "description": "Description",
+    "edit": "Edit",
+    "delete": "Delete",
+    "save": "Save",
+    "create": "Create",
+    "active": "Active",
+    "inactive": "Inactive",
+    "activate": "Activate",
+    "deactivate": "Deactivate",
+    "optional": "Optional",
+    "unlimited": "Unlimited",
     "presets": "Presets",
     "status": {
       "active": "Active",
@@ -797,6 +813,34 @@
   "delivery": {
     "title": "Delivery",
     "subtitle": "Manage deliveries",
+    "loading": "Loading deliveries...",
+    "search": "Search deliveries...",
+    "pending": "pending",
+    "inTransit": "in transit",
+    "refreshed": "Deliveries refreshed",
+    "noDeliveries": "No deliveries found",
+    "noDeliveriesHint": "Deliveries will appear here when orders are placed",
+    "assignDriver": "Assign Driver",
+    "assignSelected": "Assign Selected Driver",
+    "noDriversAvailable": "No drivers available",
+    "noDriversHint": "All drivers are either busy or not clocked in",
+    "driverAssigned": "Driver assigned",
+    "assignFailed": "Failed to assign driver",
+    "statusUpdated": "Status updated",
+    "statusUpdateFailed": "Failed to update status",
+    "stats": {
+      "total": "Total",
+      "pending": "Pending",
+      "inTransit": "In Transit",
+      "availableDrivers": "Available Drivers"
+    },
+    "filter": {
+      "all": "All",
+      "active": "Active",
+      "pending": "Pending",
+      "in_transit": "In Transit",
+      "delivered": "Completed"
+    },
     "activeDeliveries": "Active Deliveries",
     "deliveryHistory": "Delivery History",
     "deliveryDetails": "Delivery Details",
@@ -804,7 +848,9 @@
       "pending": "Pending",
       "assigned": "Assigned",
       "pickedUp": "Picked Up",
+      "picked_up": "Picked Up",
       "enRoute": "En Route",
+      "in_transit": "In Transit",
       "delivered": "Delivered",
       "failed": "Failed",
       "cancelled": "Cancelled"
@@ -2634,6 +2680,31 @@
     "lowStock": "Low Stock",
     "outOfStock": "Out of Stock",
     "inStock": "In Stock",
+    "critical": "Critical",
+    "totalItems": "Total Items",
+    "totalValue": "Total Value",
+    "status": "Status",
+    "ingredient": "Ingredient",
+    "category": "Category",
+    "stock": "Stock",
+    "minLevel": "Min Level",
+    "value": "Value",
+    "tableActions": "Actions",
+    "searchPlaceholder": "Search ingredients...",
+    "noItems": "No inventory items found",
+    "adjustStock": "Adjust Stock",
+    "adjustmentSaved": "Stock adjusted successfully",
+    "reason": "Reason",
+    "notes": "Notes",
+    "notesPlaceholder": "Add notes about this adjustment...",
+    "reasons": {
+      "count": "Stock Count",
+      "received": "Received Delivery",
+      "damaged": "Damaged",
+      "expired": "Expired",
+      "theft": "Theft/Loss",
+      "other": "Other"
+    },
     "reorderLevel": "Reorder Level",
     "reorderQuantity": "Reorder Quantity",
     "currentStock": "Current Stock",
@@ -2684,6 +2755,11 @@
       "invalidQuantity": "Invalid quantity",
       "quantityRequired": "Quantity is required",
       "expiryWarning": "{{count}} items expiring soon"
+    },
+    "errors": {
+      "loadFailed": "Failed to load inventory",
+      "adjustmentNegative": "Adjustment would result in negative stock",
+      "adjustmentFailed": "Failed to adjust stock"
     }
   },
   "theme": {
@@ -3077,7 +3153,21 @@
   },
   "suppliers": {
     "title": "Suppliers",
-    "subtitle": "View supplier information",
+    "subtitle": "Manage suppliers and invoices",
+    "total": "Total",
+    "active": "Active",
+    "inactive": "Inactive",
+    "pending": "Pending",
+    "overdue": "Overdue",
+    "owed": "Total Owed",
+    "suppliers": "Suppliers",
+    "search": "Search suppliers...",
+    "orders": "Orders",
+    "spent": "Spent",
+    "invoice": "Invoice",
+    "supplier": "Supplier",
+    "amount": "Amount",
+    "dueDate": "Due Date",
     "viewAll": "View All Suppliers",
     "refresh": "Refresh Suppliers",
     "supplierDetails": "Supplier Details",
@@ -3135,6 +3225,9 @@
       "syncSuccess": "Suppliers synced successfully",
       "syncError": "Failed to sync suppliers",
       "lastSync": "Last synced: {{time}}"
+    },
+    "errors": {
+      "loadFailed": "Failed to load suppliers"
     },
     "stats": {
       "total": "Total Suppliers",
@@ -3217,10 +3310,11 @@
   },
   "onboarding": {
     "connectionString": "Connection String",
-    "connectionStringHelp": "Paste the connection string from the Admin Dashboard (Branches → Create Terminal)",
+    "connectionStringHelp": "Paste the connection code from the Admin Dashboard (Branches → POS → Regenerate credentials).",
     "connectionStringPlaceholder": "Paste connection string here...",
     "validationError": "Please enter the connection string",
     "invalidConnectionString": "Invalid connection string. Please copy it again from the admin dashboard.",
+    "rawApiKeyDetected": "This looks like a raw API key. Use the full connection code from Admin Dashboard (Regenerate credentials).",
     "success": "Terminal configured successfully!",
     "connect": "Connect & Sync"
   },
@@ -3616,6 +3710,50 @@
       "clickToView": "Click to view details"
     }
   },
+  "coupons": {
+    "title": "Coupons",
+    "subtitle": "Available discount codes",
+    "activeOnly": "Active Only",
+    "activeCoupons": "Active Coupons",
+    "totalCoupons": "Total Coupons",
+    "search": "Search coupons...",
+    "noCoupons": "No Coupons Found",
+    "noCouponsDesc": "Coupons are managed from the admin dashboard.",
+    "expired": "Expired",
+    "usedUp": "Used Up",
+    "minOrder": "Min Order",
+    "usage": "Usage",
+    "usageLimit": "Usage Limit",
+    "expires": "Expires",
+    "code": "Code",
+    "codeCopied": "Code copied!",
+    "create": "New Coupon",
+    "createCoupon": "Create Coupon",
+    "editCoupon": "Edit Coupon",
+    "created": "Coupon created",
+    "updated": "Coupon updated",
+    "deleted": "Coupon deleted",
+    "activated": "Coupon activated",
+    "deactivated": "Coupon deactivated",
+    "confirmDelete": "Delete this coupon? This cannot be undone.",
+    "discountType": "Discount Type",
+    "discountValue": "Discount Value",
+    "percentage": "Percentage",
+    "fixed": "Fixed Amount",
+    "errors": {
+      "loadFailed": "Failed to load coupons",
+      "saveFailed": "Failed to save coupon",
+      "updateFailed": "Failed to update coupon",
+      "deleteFailed": "Failed to delete coupon",
+      "copyFailed": "Failed to copy code",
+      "codeRequired": "Coupon code is required",
+      "invalidDiscount": "Discount value is invalid",
+      "invalidPercentage": "Percentage cannot be greater than 100",
+      "invalidUsageLimit": "Usage limit must be an integer greater than 0",
+      "invalidMinOrder": "Minimum order amount is invalid",
+      "invalidExpiry": "Expiration date is invalid"
+    }
+  },
   "ecr": {
     "title": "Payment Terminals",
     "subtitle": "Manage card payment terminals",
@@ -3722,14 +3860,88 @@
       "testFailed": "Test payment failed"
     }
   },
+  "serviceCatalog": {
+    "selectBranch": "Please select a branch to view services",
+    "stats": {
+      "totalServices": "Total Services",
+      "activeServices": "Active",
+      "avgPrice": "Avg Price"
+    },
+    "searchPlaceholder": "Search services...",
+    "addService": "Add Service",
+    "status": {
+      "active": "Active",
+      "inactive": "Inactive"
+    },
+    "noDescription": "No description",
+    "noServices": "No services found"
+  },
+  "appointments": {
+    "selectBranch": "Please select a branch to view appointments",
+    "stats": {
+      "total": "Total",
+      "confirmed": "Confirmed",
+      "inProgress": "In Progress",
+      "completed": "Completed"
+    },
+    "actions": {
+      "checkIn": "Check In",
+      "complete": "Complete",
+      "noShow": "No Show"
+    },
+    "filters": {
+      "today": "Today",
+      "tomorrow": "Tomorrow",
+      "week": "Week",
+      "allStaff": "All Staff"
+    },
+    "view": {
+      "timeline": "Timeline",
+      "list": "List"
+    },
+    "searchPlaceholder": "Search...",
+    "loading": "Loading appointments...",
+    "modal": {
+      "title": "New Appointment",
+      "phoneSearchLabel": "Search Customer by Phone",
+      "phonePlaceholder": "Enter phone number...",
+      "search": "Search",
+      "customerNotFound": "Customer not found. Add new customer:",
+      "customerNamePlaceholder": "Customer Name *",
+      "customerEmailPlaceholder": "Email (optional)",
+      "staffLabel": "Staff *",
+      "serviceLabel": "Service *",
+      "selectPlaceholder": "Select...",
+      "periods": {
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening"
+      },
+      "selectStaffAvailability": "Select staff to see availability",
+      "loadingSlots": "Loading...",
+      "availability": {
+        "available": "Available",
+        "booked": "Booked"
+      },
+      "notesLabel": "Notes",
+      "notesPlaceholder": "Optional notes...",
+      "cancel": "Cancel",
+      "create": "Create",
+      "creating": "Creating..."
+    }
+  },
   "integrations": {
     "title": "Plugins",
     "subtitle": "Connect third-party plugins",
     "loading": "Loading plugins...",
     "error": "Error loading plugins",
     "connected": "connected",
+    "togglePlugin": "Toggle plugin",
     "lastSync": "Synced",
     "configure": "Configure",
+    "configuration": "Configuration",
+    "pluginConfiguration": "Plugin configuration",
+    "credentialsHelp": "Enter the credentials provided by the platform. Leave fields blank to keep existing values.",
     "partnerRequired": "Partner Required",
     "partnerRequiredInfo": "This plugin requires partner credentials. Contact support to enable it.",
     "refreshSuccess": "Plugins refreshed",
@@ -3741,6 +3953,56 @@
     "autoAccept": "Auto-accept orders",
     "prepMinutes": "Preparation time (minutes)",
     "syncOptions": "Sync Options",
+    "category": {
+      "food": "Food Platforms",
+      "hotel": "Hotel Platforms",
+      "government": "Government & Compliance"
+    },
+    "fields": {
+      "storeUrl": "Store URL",
+      "apiKey": "API Key",
+      "apiSecret": "API Secret",
+      "merchantId": "Merchant ID",
+      "storeId": "Store ID",
+      "commission": "Commission (%)"
+    },
+    "placeholders": {
+      "storeUrl": "https://your-store.com",
+      "apiKey": "Enter API key",
+      "apiSecret": "Enter API secret",
+      "merchantId": "Merchant ID",
+      "storeId": "Store ID"
+    },
+    "sync": {
+      "menu": "Sync menu",
+      "availability": "Sync availability",
+      "products": "Sync products",
+      "orders": "Sync orders",
+      "inventory": "Sync inventory"
+    },
+    "plugins": {
+      "efood": {
+        "description": "Greece's leading food delivery platform"
+      },
+      "wolt": {
+        "description": "Food delivery and discovery platform"
+      },
+      "box": {
+        "description": "Delivery platform for restaurants"
+      },
+      "booking": {
+        "description": "World's leading hotel booking platform"
+      },
+      "airbnb": {
+        "description": "Vacation rentals and experiences"
+      },
+      "expedia": {
+        "description": "Travel booking and hotel reservations"
+      },
+      "mydata": {
+        "description": "Greek AADE e-invoicing compliance"
+      }
+    },
     "empty": {
       "title": "No plugins available",
       "description": "Enable modules to unlock plugins"
@@ -3762,7 +4024,24 @@
       "disconnected": "Not Connected"
     },
     "mydata": {
-      "title": "MyData Configuration"
+      "title": "MyData Configuration",
+      "saveToCreate": "Save settings to create MyData configuration for this branch.",
+      "currentSetup": "Current setup",
+      "mode": "Mode",
+      "notConfigured": "Not configured",
+      "status": "Status",
+      "unknown": "Unknown",
+      "environment": "Environment",
+      "deviceSettingsHelp": "Device connection settings are required only when using a fiscal device.",
+      "fiscalDeviceConnection": "Fiscal device connection",
+      "connectionType": "Connection type",
+      "connectionTypes": {
+        "usbSerial": "USB serial",
+        "bluetooth": "Bluetooth"
+      },
+      "serialPort": "Serial port",
+      "bluetoothAddress": "Bluetooth address",
+      "baudRate": "Baud rate"
     },
     "routingTitle": "Order routing",
     "routingHelp": "Route external plugin orders to a specific terminal. Applies only to plugin orders.",

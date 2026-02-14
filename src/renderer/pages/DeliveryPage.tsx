@@ -91,13 +91,13 @@ type FilterTab = 'all' | 'active' | 'pending' | 'in_transit' | 'delivered';
 // ============================================================
 
 const STATUS_CONFIG: Record<DeliveryStatus, { label: string; color: string; bgColor: string; icon: typeof Package }> = {
-  pending: { label: 'Pending', color: '#F59E0B', bgColor: '#FEF3C7', icon: Clock },
-  assigned: { label: 'Assigned', color: '#3B82F6', bgColor: '#DBEAFE', icon: User },
-  picked_up: { label: 'Picked Up', color: '#8B5CF6', bgColor: '#EDE9FE', icon: Package },
-  in_transit: { label: 'In Transit', color: '#10B981', bgColor: '#D1FAE5', icon: Truck },
-  delivered: { label: 'Delivered', color: '#059669', bgColor: '#A7F3D0', icon: CheckCircle },
-  failed: { label: 'Failed', color: '#EF4444', bgColor: '#FEE2E2', icon: XCircle },
-  cancelled: { label: 'Cancelled', color: '#6B7280', bgColor: '#F3F4F6', icon: XCircle },
+  pending: { label: 'Pending', color: '#E4E4E7', bgColor: '#3F3F46', icon: Clock },
+  assigned: { label: 'Assigned', color: '#E4E4E7', bgColor: '#52525B', icon: User },
+  picked_up: { label: 'Picked Up', color: '#E4E4E7', bgColor: '#52525B', icon: Package },
+  in_transit: { label: 'In Transit', color: '#F4F4F5', bgColor: '#71717A', icon: Truck },
+  delivered: { label: 'Delivered', color: '#18181B', bgColor: '#E4E4E7', icon: CheckCircle },
+  failed: { label: 'Failed', color: '#E4E4E7', bgColor: '#52525B', icon: XCircle },
+  cancelled: { label: 'Cancelled', color: '#D4D4D8', bgColor: '#3F3F46', icon: XCircle },
 };
 
 const FILTER_TABS: { id: FilterTab; label: string }[] = [
@@ -125,13 +125,13 @@ const getElapsedTime = (createdAt: string): string => {
 const getNextStatus = (currentStatus: DeliveryStatus): { label: string; status: DeliveryStatus; color: string } | null => {
   switch (currentStatus) {
     case 'pending':
-      return { label: 'Assign Driver', status: 'assigned', color: '#3B82F6' };
+      return { label: 'Assign Driver', status: 'assigned', color: '#E4E4E7' };
     case 'assigned':
-      return { label: 'Pick Up', status: 'picked_up', color: '#8B5CF6' };
+      return { label: 'Pick Up', status: 'picked_up', color: '#E4E4E7' };
     case 'picked_up':
-      return { label: 'Start Delivery', status: 'in_transit', color: '#10B981' };
+      return { label: 'Start Delivery', status: 'in_transit', color: '#E4E4E7' };
     case 'in_transit':
-      return { label: 'Mark Delivered', status: 'delivered', color: '#059669' };
+      return { label: 'Mark Delivered', status: 'delivered', color: '#E4E4E7' };
     default:
       return null;
   }
@@ -165,7 +165,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
   return (
     <div
       className={`rounded-xl border overflow-hidden ${
-        isDark ? 'bg-gray-800/50 border-white/10' : 'bg-white border-gray-200'
+        isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'
       }`}
     >
       {/* Status Bar */}
@@ -207,7 +207,7 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
 
         {/* Address */}
         <div className={`flex items-start gap-2 mb-3 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-          <MapPin className="w-4 h-4 text-blue-500 mt-0.5 flex-shrink-0" />
+          <MapPin className={`w-4 h-4 mt-0.5 flex-shrink-0 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
           <div className="flex-1 min-w-0">
             <p className="font-medium truncate">{delivery.address.street}</p>
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
@@ -227,12 +227,12 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
             <span>•</span>
             <span className="font-medium">€{delivery.orderTotal.toFixed(2)}</span>
             {delivery.paymentStatus === 'paid' && (
-              <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-600">
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-200' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 PAID
               </span>
             )}
             {delivery.paymentStatus === 'cod' && (
-              <span className="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-600">
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-300' : 'bg-gray-100 text-gray-700 border border-gray-300'}`}>
                 COD
               </span>
             )}
@@ -241,9 +241,9 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
 
         {/* Driver Info (if assigned) */}
         {delivery.driverName && (
-          <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-lg ${isDark ? 'bg-blue-500/10' : 'bg-blue-50'}`}>
-            <Truck className="w-4 h-4 text-blue-500" />
-            <span className="text-sm text-blue-600 font-medium">{delivery.driverName}</span>
+          <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-lg ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-50 border border-gray-200'}`}>
+            <Truck className={`w-4 h-4 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`} />
+            <span className={`text-sm font-medium ${isDark ? 'text-zinc-200' : 'text-gray-800'}`}>{delivery.driverName}</span>
           </div>
         )}
 
@@ -251,8 +251,11 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
         {nextAction && (
           <button
             onClick={handleAction}
-            className="w-full py-2.5 rounded-lg text-white font-medium transition-all hover:opacity-90 active:scale-[0.98]"
-            style={{ backgroundColor: nextAction.color }}
+            className={`w-full py-2.5 rounded-lg font-medium transition-all hover:opacity-90 active:scale-[0.98] ${
+              isDark
+                ? 'bg-zinc-100 text-black hover:bg-white'
+                : 'bg-black text-white hover:bg-zinc-800'
+            }`}
           >
             {nextAction.label}
           </button>
@@ -308,11 +311,11 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
       {/* Modal */}
       <div
         className={`relative w-full max-w-lg mx-4 rounded-2xl shadow-2xl max-h-[80vh] flex flex-col ${
-          isDark ? 'bg-gray-900 border border-white/10' : 'bg-white'
+          isDark ? 'bg-zinc-950 border border-zinc-800' : 'bg-white border border-gray-200'
         }`}
       >
         {/* Header */}
-        <div className={`flex items-center justify-between p-4 border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+        <div className={`flex items-center justify-between p-4 border-b ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
           <div>
             <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('delivery.assignDriver', 'Assign Driver')}
@@ -323,7 +326,7 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
           </div>
           <button
             onClick={onClose}
-            className={`p-2 rounded-lg ${isDark ? 'hover:bg-white/10 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+            className={`p-2 rounded-lg ${isDark ? 'hover:bg-zinc-800 text-zinc-400' : 'hover:bg-gray-100 text-gray-500'}`}
           >
             <X className="w-5 h-5" />
           </button>
@@ -345,15 +348,15 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
                   onClick={() => setSelectedDriverId(driver.id)}
                   className={`w-full p-3 rounded-xl border-2 transition-all text-left ${
                     selectedDriverId === driver.id
-                      ? 'border-blue-500 bg-blue-500/10'
+                      ? isDark ? 'border-zinc-500 bg-zinc-900' : 'border-gray-400 bg-gray-100'
                       : isDark
-                      ? 'border-white/10 hover:border-white/20 bg-gray-800/50'
+                      ? 'border-zinc-800 hover:border-zinc-700 bg-black'
                       : 'border-gray-200 hover:border-gray-300 bg-gray-50'
                   }`}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center">
-                      <User className="w-5 h-5 text-blue-500" />
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`}>
+                      <User className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
                     </div>
                     <div className="flex-1">
                       <p className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -364,7 +367,7 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
                       </p>
                     </div>
                     {selectedDriverId === driver.id && (
-                      <CheckCircle className="w-5 h-5 text-blue-500" />
+                      <CheckCircle className={`w-5 h-5 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
                     )}
                   </div>
                 </button>
@@ -374,15 +377,15 @@ const DriverAssignmentModal = memo<DriverAssignmentModalProps>(({
         </div>
 
         {/* Footer */}
-        <div className={`p-4 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+        <div className={`p-4 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'}`}>
           <button
             onClick={handleAssign}
             disabled={!selectedDriverId}
             className={`w-full py-3 rounded-xl font-medium transition-all ${
               selectedDriverId
-                ? 'bg-blue-500 text-white hover:bg-blue-600'
+                ? isDark ? 'bg-zinc-100 text-black hover:bg-white' : 'bg-black text-white hover:bg-zinc-800'
                 : isDark
-                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                 : 'bg-gray-200 text-gray-400 cursor-not-allowed'
             }`}
           >
@@ -597,9 +600,9 @@ const DeliveryPage: React.FC = () => {
   // Loading state
   if (isLoading) {
     return (
-      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+      <div className={`h-full flex items-center justify-center ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
         <div className="text-center">
-          <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4" />
+          <div className={`animate-spin w-12 h-12 border-4 border-t-transparent rounded-full mx-auto mb-4 ${isDark ? 'border-zinc-300' : 'border-gray-700'}`} />
           <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             {t('delivery.loading', 'Loading deliveries...')}
           </p>
@@ -609,12 +612,12 @@ const DeliveryPage: React.FC = () => {
   }
 
   return (
-    <div className={`h-full flex flex-col ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+    <div className={`h-full flex flex-col ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
       {/* Header */}
-      <div className="px-6 py-4 flex items-center justify-between">
+      <div className={`mx-6 mt-4 mb-4 px-4 py-4 rounded-2xl border flex items-center justify-between ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-green-500/20 flex items-center justify-center">
-            <Truck className="w-6 h-6 text-green-500" />
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
+            <Truck className={`w-6 h-6 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
           </div>
           <div>
             <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
@@ -629,15 +632,15 @@ const DeliveryPage: React.FC = () => {
         {/* Actions */}
         <div className="flex items-center gap-3">
           {/* Search */}
-          <div className={`relative ${isDark ? 'bg-white/10' : 'bg-white'} rounded-xl border ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
-            <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-gray-400' : 'text-gray-400'}`} />
+          <div className={`relative ${isDark ? 'bg-zinc-900' : 'bg-white'} rounded-xl border ${isDark ? 'border-zinc-700' : 'border-gray-200'}`}>
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input
               type="text"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
               placeholder={t('delivery.search', 'Search deliveries...')}
               className={`w-48 pl-9 pr-4 py-2 rounded-xl text-sm bg-transparent outline-none ${
-                isDark ? 'text-white placeholder:text-gray-500' : 'text-gray-900 placeholder:text-gray-400'
+                isDark ? 'text-zinc-100 placeholder:text-zinc-500' : 'text-gray-900 placeholder:text-gray-400'
               }`}
             />
           </div>
@@ -646,8 +649,8 @@ const DeliveryPage: React.FC = () => {
           <button
             onClick={handleRefresh}
             disabled={isRefreshing}
-            className={`p-2.5 rounded-xl ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-white hover:bg-gray-50'} border ${
-              isDark ? 'border-white/10' : 'border-gray-200'
+            className={`p-2.5 rounded-xl ${isDark ? 'bg-zinc-900 hover:bg-zinc-800' : 'bg-white hover:bg-gray-50'} border ${
+              isDark ? 'border-zinc-700' : 'border-gray-200'
             } transition-colors disabled:opacity-50`}
           >
             <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''} ${isDark ? 'text-gray-300' : 'text-gray-600'}`} />
@@ -658,37 +661,37 @@ const DeliveryPage: React.FC = () => {
       {/* Stats Row */}
       <div className="px-6 pb-4">
         <div className="flex gap-3 overflow-x-auto scrollbar-hide">
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-white/5' : 'bg-white'} border ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
-            <div className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('delivery.stats.total', 'Total')}</div>
-            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{stats.total}</div>
+          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+            <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.total', 'Total')}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.total}</div>
           </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-yellow-500/10' : 'bg-yellow-50'} border ${isDark ? 'border-yellow-500/20' : 'border-yellow-200'}`}>
-            <div className="text-xs text-yellow-500">{t('delivery.stats.pending', 'Pending')}</div>
-            <div className="text-xl font-bold text-yellow-500">{stats.pending}</div>
+          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+            <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.pending', 'Pending')}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.pending}</div>
           </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-green-500/10' : 'bg-green-50'} border ${isDark ? 'border-green-500/20' : 'border-green-200'}`}>
-            <div className="text-xs text-green-500">{t('delivery.stats.inTransit', 'In Transit')}</div>
-            <div className="text-xl font-bold text-green-500">{stats.inTransit}</div>
+          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+            <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.inTransit', 'In Transit')}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.inTransit}</div>
           </div>
-          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-blue-500/10' : 'bg-blue-50'} border ${isDark ? 'border-blue-500/20' : 'border-blue-200'}`}>
-            <div className="text-xs text-blue-500">{t('delivery.stats.availableDrivers', 'Available Drivers')}</div>
-            <div className="text-xl font-bold text-blue-500">{stats.availableDrivers}</div>
+          <div className={`px-4 py-2.5 rounded-xl ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'} border`}>
+            <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{t('delivery.stats.availableDrivers', 'Available Drivers')}</div>
+            <div className={`text-xl font-bold ${isDark ? 'text-zinc-100' : 'text-gray-900'}`}>{stats.availableDrivers}</div>
           </div>
         </div>
       </div>
 
       {/* Filter Tabs */}
       <div className="px-6 pb-4">
-        <div className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+        <div className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-800' : 'bg-gray-100'}`}>
           {FILTER_TABS.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
                 activeTab === tab.id
-                  ? 'bg-blue-500 text-white shadow'
+                  ? isDark ? 'bg-zinc-100 text-black shadow' : 'bg-black text-white shadow'
                   : isDark
-                  ? 'text-gray-400 hover:text-white hover:bg-white/10'
+                  ? 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
                   : 'text-gray-600 hover:text-gray-900 hover:bg-white'
               }`}
             >
@@ -710,11 +713,11 @@ const DeliveryPage: React.FC = () => {
       <div className="flex-1 overflow-auto px-6 pb-6">
         {filteredDeliveries.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16">
-            <Truck className={`w-16 h-16 mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+            <Truck className={`w-16 h-16 mb-4 ${isDark ? 'text-zinc-600' : 'text-gray-300'}`} />
             <p className={`text-lg font-medium mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`}>
               {t('delivery.noDeliveries', 'No deliveries found')}
             </p>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
               {t('delivery.noDeliveriesHint', 'Deliveries will appear here when orders are placed')}
             </p>
           </div>

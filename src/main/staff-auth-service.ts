@@ -124,57 +124,70 @@ export class StaffAuthService {
 
       const effectiveStaffId = rpcRow.staff_id
 
-      // Get full staff information
-      const { data: staffData, error: staffError } = await supabase
-        .from('staff')
-        .select(`
-          *,
-          role:roles(*)
-        `)
-        .eq('id', effectiveStaffId)
-        .eq('is_active', true)
-        .eq('can_login_pos', true)
-        .single()
-
-      if (staffError || !staffData) {
-        await this.logActivity(null, 'login', 'authentication', null, 'login', {
-          method: 'pin',
-          result: 'failed',
-          error: 'Staff not found or not active'
-        }, 'failed')
-
-        return {
-          success: false,
-          error: 'Staff member not found or access denied'
+      // Do not fail authentication if follow-up staff select is blocked by RLS.
+      // PIN/session creation is the source of truth and already succeeded above.
+      let staffData: { id: string; role_id?: string | null } | null = null
+      try {
+        const { data } = await supabase
+          .from('staff')
+          .select('id, role_id')
+          .eq('id', effectiveStaffId)
+          .maybeSingle()
+        if (data) {
+          staffData = data as { id: string; role_id?: string | null }
         }
+      } catch (staffLookupError) {
+        console.warn('[staff-auth] Non-fatal staff lookup error after successful PIN RPC:', staffLookupError)
       }
 
-      // Get staff permissions
-      const permissions = await this.getStaffPermissions(staffData.id)
+      // Prefer role from RPC response to avoid dependency on relation shape.
+      let resolvedRoleName = (rpcRow.role_name || '').toString().trim()
+      if (!resolvedRoleName && staffData?.role_id) {
+        try {
+          const { data: roleRow } = await supabase
+            .from('roles')
+            .select('name')
+            .eq('id', staffData.role_id)
+            .single()
+          resolvedRoleName = (roleRow?.name || '').toString().trim()
+        } catch (roleResolveError) {
+          console.warn('[staff-auth] Failed to resolve role name from role_id:', roleResolveError)
+        }
+      }
+      if (!resolvedRoleName) {
+        resolvedRoleName = 'staff'
+      }
+
+      // Get staff permissions (best effort)
+      const permissions = await this.getStaffPermissions(effectiveStaffId, staffData?.role_id, resolvedRoleName)
 
       // Use session created by RPC and compute local expiry
       const sessionId = rpcRow.session_id
       const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000) // 8 hours
 
       // Store session locally (hashing is handled inside DB service)
-      const localRole = this.mapRoleToLocal(staffData.role.name)
+      const localRole = this.mapRoleToLocal(resolvedRoleName)
       await this.db.createStaffSession(
-        staffData.id,
+        effectiveStaffId,
         pin,
         localRole
       )
 
       // Update last login
-      await supabase
-        .from('staff')
-        .update({ last_login_at: new Date().toISOString() })
-        .eq('id', staffData.id)
+      try {
+        await supabase
+          .from('staff')
+          .update({ last_login_at: new Date().toISOString() })
+          .eq('id', effectiveStaffId)
+      } catch (lastLoginError) {
+        console.warn('[staff-auth] Non-fatal last_login update error:', lastLoginError)
+      }
 
       // Set current session
       this.currentSession = {
         id: sessionId,
-        staff_id: staffData.id,
-        role: staffData.role.name,
+        staff_id: effectiveStaffId,
+        role: resolvedRoleName,
         organization_id: effectiveOrgId,
         permissions,
         terminal_id: terminalId,
@@ -183,17 +196,17 @@ export class StaffAuthService {
       }
 
       // Log successful login
-      await this.logActivity(staffData.id, 'pos.login', null, null, 'access', {
+      await this.logActivity(effectiveStaffId, 'pos.login', null, null, 'access', {
         method: 'pin',
         terminal_id: terminalId,
-        role: staffData.role.name
+        role: resolvedRoleName
       }, 'success')
 
       return {
         success: true,
         sessionId,
-        staffId: staffData.id,
-        role: staffData.role.name,
+        staffId: effectiveStaffId,
+        role: resolvedRoleName,
         permissions
       }
 
@@ -209,29 +222,36 @@ export class StaffAuthService {
   /**
    * Get staff permissions (role + individual overrides)
    */
-  async getStaffPermissions(staffId: string): Promise<string[]> {
+  async getStaffPermissions(
+    staffId: string,
+    roleId?: string | null,
+    roleName?: string | null
+  ): Promise<string[]> {
     try {
-      // Get role permissions
-      const { data: rolePermissions, error: roleError } = await supabase
-        .from('staff')
-        .select(`
-          role:roles(
-            role_permissions(
-              permission:permissions(name)
-            )
-          )
-        `)
-        .eq('id', staffId)
-        .single()
-
       let permissions: string[] = []
 
-      if (!roleError && rolePermissions?.role) {
-        const rolePerms = rolePermissions.role as any
-        if (rolePerms.role_permissions) {
-          permissions = rolePerms.role_permissions.map(
-            (rp: any) => rp.permission.name
-          )
+      let effectiveRoleId = roleId ?? null
+      if (!effectiveRoleId && roleName) {
+        const { data: roleByName } = await supabase
+          .from('roles')
+          .select('id')
+          .eq('name', roleName)
+          .single()
+        effectiveRoleId = roleByName?.id ?? null
+      }
+
+      if (effectiveRoleId) {
+        const { data: rolePermissionsRows } = await supabase
+          .from('role_permissions')
+          .select(`
+            permission:permissions(name)
+          `)
+          .eq('role_id', effectiveRoleId)
+
+        if (Array.isArray(rolePermissionsRows)) {
+          permissions = rolePermissionsRows
+            .map((rp: any) => rp?.permission?.name)
+            .filter((name: unknown): name is string => typeof name === 'string' && name.length > 0)
         }
       }
 
@@ -259,10 +279,17 @@ export class StaffAuthService {
         })
       }
 
+      if (permissions.length === 0 && roleName) {
+        permissions = this.getDefaultPermissionsForRole(roleName)
+      }
+
       return permissions
 
     } catch (error) {
       console.error('Error getting staff permissions:', error)
+      if (roleName) {
+        return this.getDefaultPermissionsForRole(roleName)
+      }
       return []
     }
   }
@@ -593,6 +620,60 @@ export class StaffAuthService {
     const r = (roleName || '').toLowerCase();
     if (['admin', 'owner', 'manager'].includes(r)) return 'admin';
     return 'staff';
+  }
+
+  /**
+   * Local fallback permissions if role-permission tables are unavailable due RLS/config.
+   */
+  private getDefaultPermissionsForRole(roleName: string): string[] {
+    const r = (roleName || '').toLowerCase();
+    if (['admin', 'owner'].includes(r)) {
+      return [
+        'view_orders',
+        'update_order_status',
+        'create_order',
+        'delete_order',
+        'view_reports',
+        'manage_staff',
+        'system_settings',
+        'force_sync',
+        'assign_driver',
+        'manage_delivery',
+        'edit_order'
+      ];
+    }
+    if (r === 'manager') {
+      return [
+        'view_orders',
+        'update_order_status',
+        'create_order',
+        'view_reports',
+        'manage_staff',
+        'assign_driver',
+        'manage_delivery',
+        'edit_order'
+      ];
+    }
+    if (r === 'driver') {
+      return [
+        'view_orders',
+        'update_order_status',
+        'assign_driver',
+        'manage_delivery'
+      ];
+    }
+    if (r === 'kitchen') {
+      return [
+        'view_orders',
+        'update_order_status'
+      ];
+    }
+    return [
+      'view_orders',
+      'create_order',
+      'update_order_status',
+      'edit_order'
+    ];
   }
 
 

@@ -400,18 +400,44 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
           // Assign roles to staff members
           staffList.forEach(staff => {
-            const staffRoles = rolesByStaff[staff.id] || [];
-            if (staffRoles.length > 0) {
-              staff.roles = staffRoles;
-            } else if (staff.role_id) {
-              // Fallback to primary role
-              staff.roles = [{
+            const roleCandidates = [
+              ...(Array.isArray(staff.roles) ? staff.roles : []),
+              ...(Array.isArray(rolesByStaff[staff.id]) ? rolesByStaff[staff.id] : [])
+            ];
+
+            if (roleCandidates.length === 0 && staff.role_id) {
+              roleCandidates.push({
                 role_id: staff.role_id,
                 role_name: staff.role_name || 'staff',
                 role_display_name: staff.role_display_name || 'Staff',
                 role_color: '#6B7280',
                 is_primary: true
-              }];
+              });
+            }
+
+            const seenRoleIds = new Set<string>();
+            const dedupedRoles: StaffRole[] = [];
+            roleCandidates.forEach((role: any) => {
+              const roleId = (role?.role_id || '').toString();
+              if (!roleId || seenRoleIds.has(roleId)) {
+                return;
+              }
+              seenRoleIds.add(roleId);
+              dedupedRoles.push({
+                role_id: roleId,
+                role_name: role?.role_name || 'staff',
+                role_display_name: role?.role_display_name || 'Staff',
+                role_color: role?.role_color || '#6B7280',
+                is_primary: !!role?.is_primary,
+              });
+            });
+
+            if (dedupedRoles.length > 0) {
+              const hasPrimary = dedupedRoles.some((role) => role.is_primary);
+              if (!hasPrimary) {
+                dedupedRoles[0].is_primary = true;
+              }
+              staff.roles = dedupedRoles;
             }
           });
         } catch (rolesError) {
@@ -754,16 +780,57 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         try {
           console.log('[StaffShiftModal] PIN submit - IPC call with', { staffId: selectedStaff?.id, branchId, terminalId });
           const authRes = await (window as any).electronAPI.invoke('staff-auth:authenticate-pin', enteredPin.trim(), selectedStaff?.id, terminalId, branchId);
-          if (authRes?.success && authRes.staffId === selectedStaff.id) {
+          // Main-process handlers may return either raw service payload
+          // or wrapped IPC response: { success, data }.
+          const normalizedAuth = authRes?.data && typeof authRes.data === 'object' ? authRes.data : authRes;
+          const authSucceeded = normalizedAuth?.success === true;
+          const returnedStaffId = normalizedAuth?.staffId ?? normalizedAuth?.staff_id ?? normalizedAuth?.staff?.id;
+          const selectedStaffId = selectedStaff?.id;
+          console.log('[StaffShiftModal] PIN IPC normalized auth', {
+            wrapped: !!authRes?.data,
+            authSucceeded,
+            returnedStaffId,
+            selectedStaffId,
+            error: normalizedAuth?.error
+          });
+          const staffMatches =
+            !returnedStaffId ||
+            !selectedStaffId ||
+            String(returnedStaffId).trim().toLowerCase() === String(selectedStaffId).trim().toLowerCase();
+
+          if (authSucceeded && staffMatches) {
             const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
             setRoleType(staffRole);
             setCheckInStep('select-role');
             setError('');
             return; // done
-          } else {
-            console.log('IPC PIN auth failed or mismatched staff (will try direct RPC next):', authRes);
-            // Do not return here; fall through to direct RPC
           }
+
+          if (authSucceeded && !staffMatches) {
+            console.warn('[StaffShiftModal] PIN auth staff mismatch', {
+              selectedStaffId,
+              returnedStaffId,
+            });
+            setError(t('modals.staffShift.invalidPIN'));
+            setEnteredPin('');
+            return;
+          }
+
+          // If main-process auth returned an explicit failure, trust it and
+          // avoid renderer direct-RPC fallback that depends on renderer env config.
+          if (normalizedAuth && normalizedAuth.success === false) {
+            const errorText = String(normalizedAuth.error || '').toLowerCase();
+            if (errorText.includes('invalid pin') || errorText.includes('not found') || errorText.includes('access denied')) {
+              setError(t('modals.staffShift.invalidPIN'));
+            } else {
+              setError(t('modals.staffShift.verifyPinFailed'));
+            }
+            setEnteredPin('');
+            return;
+          }
+
+          console.log('IPC PIN auth returned unexpected payload (will try direct RPC next):', authRes);
+          // Do not return here; fall through to direct RPC
         } catch (e) {
           console.warn('IPC PIN auth error, falling back to direct Supabase RPC:', e);
         }
@@ -797,7 +864,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
 
       if (!response.ok) {
-        throw new Error('PIN verification failed');
+        const errorBody = await response.text().catch(() => '');
+        throw new Error(`PIN verification failed (${response.status}): ${errorBody || response.statusText}`);
       }
 
       const results = await response.json();
@@ -1441,8 +1509,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           )}
 
           {/* Error/Success Messages */}
-          {error && <ErrorAlert title={t('common.status.error')} message={error} onClose={() => setError('')} className="mb-4" />}
-          {success && <ErrorAlert title={t('common.status.success')} message={success} severity="success" onClose={() => setSuccess('')} className="mb-4" />}
+          {error && <ErrorAlert title={t('common.status.error', 'Error')} message={error} onClose={() => setError('')} className="mb-4" />}
+          {success && <ErrorAlert title={t('common.status.success', 'Success')} message={success} severity="success" onClose={() => setSuccess('')} className="mb-4" />}
 
 
 
@@ -1669,7 +1737,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                     <div className="space-y-1">
                       <h3 className="text-2xl font-bold text-white tracking-tight">{selectedStaff.name}</h3>
-                      <p className="text-base font-medium text-blue-300/80">{translateRoleName(selectedStaff.role_name)}</p>
+                      <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                        {selectedStaff.roles && selectedStaff.roles.length > 0 ? (
+                          selectedStaff.roles
+                            .sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0))
+                            .map((role, idx) => (
+                              <span
+                                key={`${role.role_id}-${idx}`}
+                                className="inline-flex items-center gap-1.5 rounded-full border-2 border-orange-400 px-3 py-1 text-sm font-bold text-orange-400"
+                              >
+                                {(role.is_primary || role.role_name === 'cashier') && (
+                                  <Star className="w-4 h-4 text-orange-400" />
+                                )}
+                                {translateRoleName(role.role_name)}
+                              </span>
+                            ))
+                        ) : (
+                          <p className="text-base font-medium text-blue-300/80">{translateRoleName(selectedStaff.role_name)}</p>
+                        )}
+                      </div>
                     </div>
                   </div>
 

@@ -144,23 +144,23 @@ const SuppliersPage: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen p-6 ${isDark ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`min-h-screen p-6 ${isDark ? 'bg-black text-white' : 'bg-gray-50 text-gray-900'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className={`flex items-center justify-between mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <div className="flex items-center gap-3">
-          <div className={`p-3 rounded-xl ${isDark ? 'bg-cyan-500/20' : 'bg-cyan-100'}`}>
-            <Truck className="w-8 h-8 text-cyan-500" />
+          <div className={`p-3 rounded-xl ${isDark ? 'bg-zinc-900 border border-zinc-700' : 'bg-gray-100 border border-gray-200'}`}>
+            <Truck className={`w-8 h-8 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`} />
           </div>
           <div>
             <h1 className="text-2xl font-bold">{t('suppliers.title', 'Suppliers')}</h1>
-            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>
               {t('suppliers.subtitle', 'Manage suppliers and invoices')}
             </p>
           </div>
         </div>
         <button
           onClick={fetchSuppliers}
-          className={`p-3 rounded-xl transition-all ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'} shadow-lg`}
+          className={`p-3 rounded-xl transition-all border ${isDark ? 'bg-zinc-900 border-zinc-700 hover:bg-zinc-800' : 'bg-white border-gray-300 hover:bg-gray-100'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -168,47 +168,47 @@ const SuppliersPage: React.FC = () => {
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-blue-500/20"><Building2 className="w-5 h-5 text-blue-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-blue-500/20' : 'bg-blue-100'}`}><Building2 className={`w-5 h-5 ${isDark ? 'text-blue-300' : 'text-blue-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.total', 'Total')}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('suppliers.total', 'Total')}</p>
               <p className="text-xl font-bold">{stats.totalSuppliers}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-emerald-400' : 'bg-white border-gray-200 border-t-emerald-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-green-500/20"><CheckCircle className="w-5 h-5 text-green-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-emerald-500/20' : 'bg-emerald-100'}`}><CheckCircle className={`w-5 h-5 ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.active', 'Active')}</p>
-              <p className="text-xl font-bold text-green-500">{stats.activeSuppliers}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('suppliers.active', 'Active')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`}>{stats.activeSuppliers}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-amber-400' : 'bg-white border-gray-200 border-t-amber-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-yellow-500/20"><Clock className="w-5 h-5 text-yellow-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-amber-500/20' : 'bg-amber-100'}`}><Clock className={`w-5 h-5 ${isDark ? 'text-amber-300' : 'text-amber-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.pending', 'Pending')}</p>
-              <p className="text-xl font-bold text-yellow-500">{stats.pendingInvoices}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('suppliers.pending', 'Pending')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-600'}`}>{stats.pendingInvoices}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-red-400' : 'bg-white border-gray-200 border-t-red-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-red-500/20"><AlertCircle className="w-5 h-5 text-red-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-red-500/20' : 'bg-red-100'}`}><AlertCircle className={`w-5 h-5 ${isDark ? 'text-red-300' : 'text-red-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.overdue', 'Overdue')}</p>
-              <p className="text-xl font-bold text-red-500">{stats.overdueInvoices}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('suppliers.overdue', 'Overdue')}</p>
+              <p className={`text-xl font-bold ${isDark ? 'text-red-300' : 'text-red-600'}`}>{stats.overdueInvoices}</p>
             </div>
           </div>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-cyan-400' : 'bg-white border-gray-200 border-t-cyan-500'}`}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-cyan-500/20"><DollarSign className="w-5 h-5 text-cyan-500" /></div>
+            <div className={`p-2 rounded-lg ${isDark ? 'bg-cyan-500/20' : 'bg-cyan-100'}`}><DollarSign className={`w-5 h-5 ${isDark ? 'text-cyan-300' : 'text-cyan-600'}`} /></div>
             <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{t('suppliers.owed', 'Total Owed')}</p>
+              <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{t('suppliers.owed', 'Total Owed')}</p>
               <p className="text-lg font-bold">{formatMoney(stats.totalOwed)}</p>
             </div>
           </div>
@@ -217,23 +217,23 @@ const SuppliersPage: React.FC = () => {
 
       {/* Tabs */}
       <div className="flex gap-2 mb-6">
-        <button onClick={() => setActiveTab('suppliers')} className={`px-4 py-2 rounded-lg font-medium transition-all ${activeTab === 'suppliers' ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'}`}>
+        <button onClick={() => setActiveTab('suppliers')} className={`px-4 py-2 rounded-lg font-medium transition-all border ${activeTab === 'suppliers' ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black') : isDark ? 'bg-zinc-900 text-zinc-400 border-zinc-700' : 'bg-white text-gray-600 border-gray-300'}`}>
           <Building2 className="w-4 h-4 inline mr-2" />{t('suppliers.suppliers', 'Suppliers')}
         </button>
-        <button onClick={() => setActiveTab('invoices')} className={`px-4 py-2 rounded-lg font-medium transition-all ${activeTab === 'invoices' ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'}`}>
-          <FileText className="w-4 h-4 inline mr-2" />{t('suppliers.invoices', 'Invoices')}
+        <button onClick={() => setActiveTab('invoices')} className={`px-4 py-2 rounded-lg font-medium transition-all border ${activeTab === 'invoices' ? (isDark ? 'bg-zinc-100 text-black border-zinc-200' : 'bg-black text-white border-black') : isDark ? 'bg-zinc-900 text-zinc-400 border-zinc-700' : 'bg-white text-gray-600 border-gray-300'}`}>
+          <FileText className="w-4 h-4 inline mr-2" />{t('suppliers.invoices.title', 'Invoices')}
         </button>
       </div>
 
       {/* Search */}
-      <div className={`relative mb-6 ${isDark ? 'bg-gray-800' : 'bg-white'} rounded-xl shadow-lg`}>
+      <div className={`relative mb-6 rounded-xl border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
         <input
           type="text"
           placeholder={t('suppliers.search', 'Search suppliers...')}
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 focus:ring-cyan-500`}
+          className={`w-full pl-12 pr-4 py-3 rounded-xl ${isDark ? 'bg-zinc-950 text-zinc-100' : 'bg-white text-gray-900'} focus:outline-none focus:ring-2 ${isDark ? 'focus:ring-zinc-600' : 'focus:ring-gray-300'}`}
         />
       </div>
 
@@ -241,10 +241,10 @@ const SuppliersPage: React.FC = () => {
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {[1, 2, 3].map(i => (
-            <div key={i} className={`p-6 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} animate-pulse`}>
-              <div className="h-6 bg-gray-600 rounded w-3/4 mb-4" />
-              <div className="h-4 bg-gray-600 rounded w-1/2 mb-2" />
-              <div className="h-4 bg-gray-600 rounded w-2/3" />
+            <div key={i} className={`p-6 rounded-xl border animate-pulse ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
+              <div className={`h-6 rounded w-3/4 mb-4 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+              <div className={`h-4 rounded w-1/2 mb-2 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
+              <div className={`h-4 rounded w-2/3 ${isDark ? 'bg-zinc-800' : 'bg-gray-200'}`} />
             </div>
           ))}
         </div>
@@ -257,23 +257,23 @@ const SuppliersPage: React.FC = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: index * 0.05 }}
               onClick={() => setSelectedSupplier(supplier)}
-              className={`p-6 rounded-xl cursor-pointer transition-all hover:scale-[1.02] ${isDark ? 'bg-gray-800 hover:bg-gray-750' : 'bg-white hover:bg-gray-50'} shadow-lg ${selectedSupplier?.id === supplier.id ? 'ring-2 ring-cyan-500' : ''}`}
+              className={`p-6 rounded-xl cursor-pointer transition-all ${isDark ? 'bg-zinc-950 hover:bg-zinc-900 border border-zinc-800' : 'bg-white hover:bg-gray-50 border border-gray-200'} ${selectedSupplier?.id === supplier.id ? (isDark ? 'ring-2 ring-zinc-500' : 'ring-2 ring-gray-400') : ''}`}
             >
               <div className="flex items-start justify-between mb-4">
                 <div>
                   <h3 className="font-bold text-lg">{supplier.name}</h3>
-                  {supplier.contact_name && <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{supplier.contact_name}</p>}
+                  {supplier.contact_name && <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-600'}`}>{supplier.contact_name}</p>}
                 </div>
-                <span className={`px-2 py-1 rounded-full text-xs font-medium ${supplier.is_active ? 'bg-green-500/20 text-green-500' : 'bg-gray-500/20 text-gray-500'}`}>
+                <span className={`px-2 py-1 rounded-full text-xs font-medium border ${supplier.is_active ? (isDark ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-emerald-100 text-emerald-700 border-emerald-200') : (isDark ? 'bg-zinc-900 text-zinc-400 border-zinc-700' : 'bg-gray-100 text-gray-500 border-gray-300')}`}>
                   {supplier.is_active ? t('suppliers.active', 'Active') : t('suppliers.inactive', 'Inactive')}
                 </span>
               </div>
-              {supplier.category && <span className={`inline-block px-2 py-1 rounded-lg text-xs ${isDark ? 'bg-gray-700' : 'bg-gray-100'} mb-3`}>{supplier.category}</span>}
+              {supplier.category && <span className={`inline-block px-2 py-1 rounded-lg text-xs ${isDark ? 'bg-zinc-900 border border-zinc-700 text-zinc-300' : 'bg-gray-100 border border-gray-200 text-gray-700'} mb-3`}>{supplier.category}</span>}
               <div className="space-y-2 text-sm">
                 {supplier.phone && <div className="flex items-center gap-2"><Phone className="w-4 h-4 text-gray-400" />{supplier.phone}</div>}
                 {supplier.email && <div className="flex items-center gap-2"><Mail className="w-4 h-4 text-gray-400" />{supplier.email}</div>}
               </div>
-              <div className={`mt-4 pt-4 border-t ${isDark ? 'border-gray-700' : 'border-gray-200'} flex justify-between text-sm`}>
+              <div className={`mt-4 pt-4 border-t ${isDark ? 'border-zinc-800' : 'border-gray-200'} flex justify-between text-sm`}>
                 <span>{t('suppliers.orders', 'Orders')}: <strong>{supplier.total_orders || 0}</strong></span>
                 <span>{t('suppliers.spent', 'Spent')}: <strong>{formatMoney(supplier.total_spent || 0)}</strong></span>
               </div>
@@ -281,9 +281,9 @@ const SuppliersPage: React.FC = () => {
           ))}
         </div>
       ) : (
-        <div className={`rounded-xl overflow-hidden ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+        <div className={`rounded-xl overflow-hidden border ${isDark ? 'bg-zinc-950 border-zinc-800' : 'bg-white border-gray-200'}`}>
           <table className="w-full">
-            <thead className={isDark ? 'bg-gray-700' : 'bg-gray-100'}>
+            <thead className={isDark ? 'bg-zinc-900' : 'bg-gray-100'}>
               <tr>
                 <th className="px-4 py-3 text-left text-sm font-medium">{t('suppliers.invoice', 'Invoice')}</th>
                 <th className="px-4 py-3 text-left text-sm font-medium">{t('suppliers.supplier', 'Supplier')}</th>
@@ -292,11 +292,11 @@ const SuppliersPage: React.FC = () => {
                 <th className="px-4 py-3 text-right text-sm font-medium">{t('suppliers.dueDate', 'Due Date')}</th>
               </tr>
             </thead>
-            <tbody className={`divide-y ${isDark ? 'divide-gray-700' : 'divide-gray-200'}`}>
+            <tbody className={`divide-y ${isDark ? 'divide-zinc-800' : 'divide-gray-200'}`}>
               {invoices.map((invoice) => {
                 const supplier = suppliers.find(s => s.id === invoice.supplier_id);
                 return (
-                  <tr key={invoice.id} className={`${isDark ? 'hover:bg-gray-750' : 'hover:bg-gray-50'} transition-colors`}>
+                  <tr key={invoice.id} className={`${isDark ? 'hover:bg-zinc-900' : 'hover:bg-gray-50'} transition-colors`}>
                     <td className="px-4 py-3 font-medium">{invoice.invoice_number}</td>
                     <td className="px-4 py-3">{supplier?.name || '-'}</td>
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(invoice.amount)}</td>
