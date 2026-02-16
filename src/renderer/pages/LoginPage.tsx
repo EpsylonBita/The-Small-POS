@@ -242,7 +242,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 <ThemeToggle />
             </div>
 
-            <div className={`relative z-20 pos-login-card p-4 sm:p-6 md:p-8 pt-16 sm:pt-20 w-full max-w-[95vw] sm:max-w-md mx-auto ${isDark ? 'text-white' : 'text-slate-900'}`}>
+            <div className={`relative z-20 pos-login-card p-4 sm:p-6 md:p-8 pt-20 sm:pt-24 w-full max-w-[95vw] sm:max-w-md mx-auto ${isDark ? 'text-white' : 'text-slate-900'}`}>
                 <div className="pos-login-glow" />
 
                 <div className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
@@ -272,7 +272,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     )}
                 </div>
 
-                <div className="text-center mb-4 sm:mb-8 relative z-10">
+                <div className="text-center mt-2 sm:mt-4 mb-4 sm:mb-8 relative z-10">
                     <h1 className="text-xl sm:text-2xl md:text-3xl font-bold mb-1 sm:mb-2">{t('login.title')}</h1>
                     <p className={`text-sm sm:text-base ${isDark ? 'text-white/80' : 'text-slate-600'}`}>{t('login.subtitle')}</p>
                 </div>

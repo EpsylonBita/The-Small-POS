@@ -134,6 +134,27 @@ export class SyncQueueService extends BaseService {
 
       if (!item) return;
 
+      // For transient API backpressure/rate-limit errors, defer retry without consuming retry attempts.
+      if (this.isTransientBackpressureError(errorMessage)) {
+        const retryDelay = this.extractRetryAfterMs(errorMessage) ?? Math.max(item.retry_delay_ms || this.initialDelay, this.initialDelay);
+        const clampedDelay = Math.min(Math.max(retryDelay, this.initialDelay), this.maxDelay);
+        const jitteredDelay = this.applyDeterministicJitter(clampedDelay, item.id || syncId);
+        const finalDelay = Math.min(Math.max(jitteredDelay, this.initialDelay), this.maxDelay);
+        const nextRetryAt = new Date(Date.now() + finalDelay).toISOString();
+
+        const stmt = this.db.prepare(`
+          UPDATE sync_queue SET
+            last_attempt = ?,
+            error_message = ?,
+            retry_delay_ms = ?,
+            next_retry_at = ?
+          WHERE id = ?
+        `);
+
+        stmt.run(this.getCurrentTimestamp(), errorMessage, finalDelay, nextRetryAt, syncId);
+        return;
+      }
+
       const attempts = item.attempts + 1;
       const currentDelay = item.retry_delay_ms || this.initialDelay;
       const nextDelay = Math.min(currentDelay * this.backoffMultiplier, this.maxDelay);
@@ -151,6 +172,60 @@ export class SyncQueueService extends BaseService {
 
       stmt.run(attempts, this.getCurrentTimestamp(), errorMessage, nextDelay, nextRetryAt, syncId);
     });
+  }
+
+  private isTransientBackpressureError(errorMessage: string): boolean {
+    const message = (errorMessage || '').toLowerCase();
+    return (
+      /api error\s*\(429\)/i.test(message) ||
+      /queue is backed up/i.test(message) ||
+      /retry_after_seconds/i.test(message) ||
+      /too many requests/i.test(message) ||
+      /rate limit/i.test(message)
+    );
+  }
+
+  private extractRetryAfterMs(errorMessage: string): number | null {
+    const message = errorMessage || '';
+
+    const retryAfterMatch = message.match(/retry_after_seconds["']?\s*[:=]\s*(\d+(?:\.\d+)?)/i);
+    if (retryAfterMatch?.[1]) {
+      const seconds = Number.parseFloat(retryAfterMatch[1]);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.ceil(seconds * 1000);
+      }
+    }
+
+    const bracketStart = message.indexOf('{');
+    const bracketEnd = message.lastIndexOf('}');
+    if (bracketStart >= 0 && bracketEnd > bracketStart) {
+      const jsonCandidate = message.slice(bracketStart, bracketEnd + 1);
+      try {
+        const parsed = JSON.parse(jsonCandidate) as { retry_after_seconds?: unknown };
+        const raw = parsed.retry_after_seconds;
+        const seconds = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+        if (Number.isFinite(seconds) && seconds > 0) {
+          return Math.ceil(seconds * 1000);
+        }
+      } catch {
+        // Ignore parse failures and fall through.
+      }
+    }
+
+    return null;
+  }
+
+  private applyDeterministicJitter(delayMs: number, seed: string): number {
+    if (!seed) return delayMs;
+
+    let hash = 0;
+    for (let i = 0; i < seed.length; i += 1) {
+      hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+    }
+
+    // Spread retries by +/-15% in a deterministic way per sync item.
+    const normalized = ((Math.abs(hash) % 31) - 15) / 100;
+    return Math.round(delayMs * (1 + normalized));
   }
 
   getFailedSyncItems(): SyncQueue[] {

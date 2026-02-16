@@ -44,7 +44,7 @@ interface SyncOperation {
 type StaffRole = 'admin' | 'staff';
 
 interface SettingsCategory {
-  category: 'terminal' | 'restaurant' | 'payment';
+  category: 'terminal' | 'restaurant' | 'payment' | 'tax' | 'discount' | 'receipt' | 'inventory' | 'staff' | 'printer';
   key: string;
   value: any;
 }
@@ -391,8 +391,16 @@ export class DatabaseManager {
     // Map setting types to proper categories
     const categoryMap: Record<string, SettingsCategory['category']> = {
       'pos': 'terminal',
+      'terminal': 'terminal',
       'restaurant': 'restaurant',
       'payment': 'payment',
+      'tax': 'tax',
+      'discount': 'discount',
+      'receipt': 'receipt',
+      'inventory': 'inventory',
+      'staff': 'staff',
+      'printer': 'printer',
+      'hardware': 'terminal',
       'general': 'terminal'
     };
 

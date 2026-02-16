@@ -48,6 +48,153 @@ interface BatchSyncResponse {
     error_count: number;
 }
 
+type ApiPaymentStatus = 'pending' | 'paid' | 'partially_paid' | 'refunded' | 'failed';
+
+export class OrderSyncBackpressureError extends Error {
+    public readonly retryAfterSeconds?: number;
+
+    constructor(message: string, retryAfterSeconds?: number) {
+        super(message);
+        this.name = 'OrderSyncBackpressureError';
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+}
+
+function extractRetryAfterSeconds(errorMessage: string): number | undefined {
+    const message = errorMessage || '';
+    const regexMatch = message.match(/retry_after_seconds["']?\s*[:=]\s*(\d+(?:\.\d+)?)/i);
+    if (regexMatch?.[1]) {
+        const parsed = Number.parseFloat(regexMatch[1]);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+
+    const bracketStart = message.indexOf('{');
+    const bracketEnd = message.lastIndexOf('}');
+    if (bracketStart >= 0 && bracketEnd > bracketStart) {
+        const jsonCandidate = message.slice(bracketStart, bracketEnd + 1);
+        try {
+            const parsed = JSON.parse(jsonCandidate) as { retry_after_seconds?: unknown };
+            const raw = parsed.retry_after_seconds;
+            const seconds = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+            if (Number.isFinite(seconds) && seconds > 0) {
+                return seconds;
+            }
+        } catch {
+            // Ignore parse failure.
+        }
+    }
+
+    return undefined;
+}
+
+function buildBackpressureError(scope: 'insert' | 'update', apiFailureReason: string): OrderSyncBackpressureError {
+    const retryAfterSeconds = extractRetryAfterSeconds(apiFailureReason);
+    const retryHint = typeof retryAfterSeconds === 'number'
+        ? ` retry_after_seconds=${retryAfterSeconds}.`
+        : '';
+    return new OrderSyncBackpressureError(
+        `Order ${scope} sync deferred due to API backpressure.${retryHint} ${apiFailureReason}`.trim(),
+        retryAfterSeconds
+    );
+}
+
+export function isOrderSyncBackpressureError(error: unknown): error is OrderSyncBackpressureError {
+    if (error instanceof OrderSyncBackpressureError) {
+        return true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return isApiBackpressureError(message);
+}
+
+function normalizePaymentStatus(value: unknown): ApiPaymentStatus | undefined {
+    if (typeof value !== 'string') return undefined;
+
+    const normalized = value.trim().toLowerCase();
+    switch (normalized) {
+        case 'pending':
+        case 'paid':
+        case 'partially_paid':
+        case 'refunded':
+        case 'failed':
+            return normalized;
+        case 'completed':
+            return 'paid';
+        case 'processing':
+            return 'pending';
+        default:
+            return undefined;
+    }
+}
+
+function getCustomizationSyncKey(customization: any, index: number): string {
+    if (customization?.customizationId && typeof customization.customizationId === 'string') return customization.customizationId;
+    if (customization?.optionId && typeof customization.optionId === 'string') return customization.optionId;
+    if (customization?.name && typeof customization.name === 'string') return customization.name;
+    if (customization?.ingredient?.id && typeof customization.ingredient.id === 'string') return customization.ingredient.id;
+    if (customization?.ingredient?.name && typeof customization.ingredient.name === 'string') return customization.ingredient.name;
+    return `item-${index}`;
+}
+
+function normalizeCustomizationsForApi(value: unknown): Record<string, unknown> | null {
+    if (value === null || value === undefined) return null;
+
+    let parsedValue: unknown = value;
+    if (typeof parsedValue === 'string') {
+        const trimmed = parsedValue.trim();
+        if (!trimmed) return null;
+        try {
+            parsedValue = JSON.parse(trimmed);
+        } catch {
+            return null;
+        }
+    }
+
+    if (Array.isArray(parsedValue)) {
+        return parsedValue.reduce((acc, customization, index) => {
+            let key = getCustomizationSyncKey(customization, index);
+            if (Object.prototype.hasOwnProperty.call(acc, key)) {
+                key = `${key}_${index}`;
+            }
+            acc[key] = customization as unknown;
+            return acc;
+        }, {} as Record<string, unknown>);
+    }
+
+    if (typeof parsedValue === 'object') {
+        return parsedValue as Record<string, unknown>;
+    }
+
+    return null;
+}
+
+function isMissingColumnError(message: string): boolean {
+    return /42703|PGRST204|column .* does not exist|unknown column|could not find the '.*' column|schema cache/i.test(message);
+}
+
+function extractMissingColumnName(message: string): string | undefined {
+    const postgrestMatch = message.match(/could not find the '([a-zA-Z0-9_]+)' column/i);
+    if (postgrestMatch?.[1]) return postgrestMatch[1];
+
+    const postgresMatch = message.match(/column\s+\"?([a-zA-Z0-9_]+)\"?\s+does not exist/i);
+    if (postgresMatch?.[1]) return postgresMatch[1];
+
+    return undefined;
+}
+
+function isApiBackpressureError(errorMessage: string): boolean {
+    const msg = (errorMessage || '').toLowerCase();
+    return (
+        /api error\s*\(429\)/i.test(msg) ||
+        /queue is backed up/i.test(msg) ||
+        /retry_after_seconds/i.test(msg) ||
+        /too many requests/i.test(msg) ||
+        /rate limit/i.test(msg)
+    );
+}
+
 // Service role client for order operations (bypasses RLS)
 let serviceRoleClient: SupabaseClient | null = null;
 
@@ -321,6 +468,14 @@ export class OrderSyncService {
         const { terminalId, apiKey } = await this.resolveTerminalSettings();
         const baseUrl = this.getAdminDashboardUrl();
 
+        console.log('[OrderSyncService] API sync context', {
+            operation,
+            recordId,
+            terminalId,
+            hasApiKey: !!apiKey,
+            hasBaseUrl: !!baseUrl
+        });
+
         if (!apiKey) {
             console.warn('[OrderSyncService] No API key configured, cannot use API sync');
             return { success: false, error: 'No API key configured' };
@@ -331,11 +486,24 @@ export class OrderSyncService {
 
         const headers = this.buildApiHeaders(terminalId, apiKey);
 
+        const normalizedData: Record<string, unknown> = { ...data };
+        const normalizedPaymentStatus = normalizePaymentStatus(data.payment_status);
+        if (normalizedPaymentStatus) {
+            normalizedData.payment_status = normalizedPaymentStatus;
+        }
+
+        const normalizedItems = Array.isArray(items)
+            ? items.map((item) => ({
+                ...item,
+                customizations: normalizeCustomizationsForApi(item.customizations),
+            }))
+            : undefined;
+
         const syncOperation: ApiSyncOperation = {
             operation,
             client_order_id: recordId,
-            data,
-            items,
+            data: normalizedData,
+            items: normalizedItems,
         };
 
         const controller = new AbortController();
@@ -403,7 +571,7 @@ export class OrderSyncService {
             quantity: item.quantity || 1,
             unit_price: item.unit_price || item.unitPrice || item.price || 0,
             total_price: item.total_price || item.totalPrice || ((item.quantity || 1) * (item.unit_price || item.unitPrice || item.price || 0)),
-            customizations: item.customizations || null,
+            customizations: normalizeCustomizationsForApi(item.customizations),
             notes: item.notes || null,
         }));
     }
@@ -481,7 +649,7 @@ export class OrderSyncService {
             if (error) {
                 // If client_order_id column doesn't exist, try fallback approach
                 const msg = String(error?.message || '');
-                if (/42703|column .* does not exist/i.test(msg)) {
+                if (isMissingColumnError(msg)) {
                     console.warn('[OrderSyncService] client_order_id column not available, skipping reconciliation');
                     return;
                 }
@@ -633,6 +801,9 @@ export class OrderSyncService {
     private async handleInsert(recordId: string, data: any): Promise<void> {
         // Insert/update order in Supabase with idempotency via client_order_id.
         // Use local recordId as the stable client_order_id so restarts do not duplicate.
+        const normalizedPaymentStatus = normalizePaymentStatus(data.payment_status) || 'pending';
+        let apiFailureReason: string | null = null;
+
         // Get financial breakdown - use explicit values if provided, otherwise derive
         const insertFinancials = deriveOrderFinancials(
             data.total_amount,
@@ -732,6 +903,7 @@ export class OrderSyncService {
                 ...data,
                 organization_id: organizationId,
                 status: mapStatusForSupabase(data.status as any),
+                payment_status: normalizedPaymentStatus,
             };
 
             const apiResult = await this.syncOrderViaApi('insert', recordId, apiData, apiItems);
@@ -743,8 +915,19 @@ export class OrderSyncService {
                 return;
             }
 
-            // API sync failed, fall back to RPC/direct methods
+            apiFailureReason = apiResult.error || 'Unknown API sync error';
+            if (isApiBackpressureError(apiFailureReason)) {
+                throw buildBackpressureError('insert', apiFailureReason);
+            }
             console.warn(`[OrderSyncService] API sync failed for ${recordId}, falling back to RPC:`, apiResult.error);
+        }
+
+        // If API sync failed and no service-role credentials exist, RPC/direct fallback is not viable.
+        if (this.useApiSync && apiFailureReason && !getServiceRoleClient()) {
+            throw new Error(
+                `Order sync failed: ${apiFailureReason}. `
+                + 'No service-role key for RPC/direct fallback.'
+            );
         }
 
         // Sanitize UUID fields
@@ -789,7 +972,7 @@ export class OrderSyncService {
             p_total_amount: data.total_amount,
             p_tax_amount: taxAmount,
             p_discount_amount: discountAmount || 0,
-            p_payment_status: data.payment_status || 'pending',
+            p_payment_status: normalizedPaymentStatus,
             p_payment_method: data.payment_method || null,
             p_special_instructions: data.special_instructions || data.notes || null,
             // Delivery address fields
@@ -820,12 +1003,21 @@ export class OrderSyncService {
             if (!/42883|function .* does not exist/i.test(msg)) {
                 console.warn('[OrderSyncService] RPC failed, falling back to direct operations:', rpcError);
             }
+
+            // Without service-role credentials, direct table writes will hit RLS.
+            // Surface the real failure reason and avoid noisy guaranteed-fail inserts.
+            if (!getServiceRoleClient()) {
+                throw new Error(
+                    `Order sync fallback blocked: RPC failed (${msg}). `
+                    + `No service-role key for direct fallback. `
+                    + `API failure: ${apiFailureReason || 'unknown'}`
+                );
+            }
         }
 
         // Fallback: Direct table operations (requires service_role key or RLS bypass)
         const payload: any = {
             client_order_id: recordId,
-            plugin: 'pos',
             organization_id: organizationId,
             order_number: data.order_number || null,
             customer_name: data.customer_name,
@@ -837,7 +1029,7 @@ export class OrderSyncService {
             total_amount: data.total_amount,
             tax_amount: taxAmount,
             discount_amount: discountAmount || null,
-            payment_status: data.payment_status || 'pending',
+            payment_status: normalizedPaymentStatus,
             payment_method: data.payment_method || null,
             special_instructions: data.special_instructions || data.notes || null,
             // Delivery address fields
@@ -917,9 +1109,13 @@ export class OrderSyncService {
             // 2) Missing columns on some environments → remove optional cols and retry
             if (insertResp.error) {
                 const msg2 = String(insertResp.error?.message || msg);
-                if (/42703|column .* does not exist|unknown column/i.test(msg2)) {
+                if (isMissingColumnError(msg2)) {
+                    const missingColumn = extractMissingColumnName(msg2);
+                    if (missingColumn && missingColumn in payload) {
+                        delete (payload as any)[missingColumn];
+                    }
                     // Remove known optional columns first
-                    ['branch_id', 'terminal_id', 'special_instructions', 'table_number', 'estimated_ready_time', 'payment_method', 'payment_status', 'discount_amount', 'tax_amount', 'subtotal', 'notes'].forEach((k) => {
+                    ['branch_id', 'terminal_id', 'special_instructions', 'table_number', 'estimated_ready_time', 'payment_method', 'payment_status', 'discount_amount', 'tax_amount', 'subtotal', 'notes', 'plugin', 'platform', 'external_plugin_order_id', 'plugin_commission_pct'].forEach((k) => {
                         if (k in payload && new RegExp(`\\b${k}\\b`, 'i').test(msg2)) delete (payload as any)[k];
                     });
                     // If client_order_id column is missing, drop it and fallback to insert (no ON CONFLICT)
@@ -1039,7 +1235,7 @@ export class OrderSyncService {
                     const ins = await this.getOrderClient().from('order_items').insert(rows);
                     if (ins.error) {
                         const msg = String(ins.error?.message || '');
-                        if (/42P01|relation .* does not exist|42703|column .* does not exist/i.test(msg)) {
+                        if (/42P01|relation .* does not exist/i.test(msg) || isMissingColumnError(msg)) {
                             console.warn('[OrderSyncService] order_items insert skipped due to schema mismatch');
                         } else {
                             console.warn('[OrderSyncService] order_items insert error:', msg);
@@ -1059,6 +1255,11 @@ export class OrderSyncService {
             console.error('[OrderSyncService] Cannot update: Order not found in local DB', { recordId });
             throw new Error('Cannot update: Order not found');
         }
+        const normalizedPaymentStatus =
+            normalizePaymentStatus(data.payment_status)
+            || normalizePaymentStatus(localOrder.payment_status)
+            || 'pending';
+        let apiFailureReason: string | null = null;
 
         // =========================================================================
         // API SYNC PATH (Preferred - eliminates service role key requirement)
@@ -1068,6 +1269,7 @@ export class OrderSyncService {
                 ...data,
                 order_number: localOrder.order_number,
                 status: data.status ? mapStatusForSupabase(data.status as any) : undefined,
+                payment_status: normalizedPaymentStatus,
             };
 
             const apiResult = await this.syncOrderViaApi('update', recordId, apiData);
@@ -1082,8 +1284,19 @@ export class OrderSyncService {
                 return;
             }
 
-            // API sync failed, fall back to direct methods
+            apiFailureReason = apiResult.error || 'Unknown API sync error';
+            if (isApiBackpressureError(apiFailureReason)) {
+                throw buildBackpressureError('update', apiFailureReason);
+            }
             console.warn(`[OrderSyncService] API update failed for ${recordId}, falling back to direct:`, apiResult.error);
+        }
+
+        // If API sync failed and no service-role credentials exist, direct fallback will fail RLS.
+        if (this.useApiSync && apiFailureReason && !getServiceRoleClient()) {
+            throw new Error(
+                `Order update sync failed: ${apiFailureReason}. `
+                + 'No service-role key for direct fallback.'
+            );
         }
 
         // Fallback resolution: if supabase_id is missing (e.g., update queued before insert completes),
@@ -1108,6 +1321,7 @@ export class OrderSyncService {
             return obj;
         };
         const sanitizedData = sanitizeUuidFields({ ...data });
+        sanitizedData.payment_status = normalizedPaymentStatus;
 
         // Keep estimated_ready_time as INTEGER (minutes) - database column is INTEGER
         if ('estimated_ready_time' in sanitizedData && sanitizedData.estimated_ready_time != null) {
@@ -1235,7 +1449,11 @@ export class OrderSyncService {
                 versionSupported = false;
                 updateResp = await tryUpdateNoVersion(updatePayload);
             }
-            if (/42703|column .* does not exist|unknown column/i.test(msg)) {
+            if (isMissingColumnError(msg)) {
+                const missingColumn = extractMissingColumnName(msg);
+                if (missingColumn && missingColumn in updatePayload) {
+                    delete updatePayload[missingColumn];
+                }
                 delete updatePayload.branch_id;
                 delete updatePayload.terminal_id;
                 updateResp = versionSupported ? await tryUpdate(updatePayload) : await tryUpdateNoVersion(updatePayload);
@@ -1378,7 +1596,7 @@ export class OrderSyncService {
             } else {
                 const msg = String(tryClient.error?.message || '');
                 // If the column doesn't exist on this environment, ignore error and try order_number
-                if (!/42703|column .* does not exist|unknown column/i.test(msg) && tryClient.error) {
+                if (!isMissingColumnError(msg) && tryClient.error) {
                     // client_order_id lookup failed for other reasons
                 }
             }
@@ -1598,4 +1816,3 @@ export class OrderSyncService {
         }
     }
 }
-

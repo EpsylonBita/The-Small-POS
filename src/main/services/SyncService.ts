@@ -14,7 +14,7 @@ import { ORDER_STATUSES, mapStatusForPOS, isValidOrderStatus, mapStatusForSupaba
 
 // Sub-services
 import { NetworkMonitor } from './sync/NetworkMonitor';
-import { OrderSyncService } from './sync/OrderSyncService';
+import { OrderSyncService, isOrderSyncBackpressureError } from './sync/OrderSyncService';
 import { InventorySyncService } from './sync/InventorySyncService';
 import { ConfigurationSyncService } from './sync/ConfigurationSyncService';
 import { InterTerminalCommunicationService } from './sync/InterTerminalCommunicationService';
@@ -263,8 +263,22 @@ export class SyncService {
         await this.processSyncQueueItem(item);
         await this.dbManager.updateSyncQueueItem(item.id, true);
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (isOrderSyncBackpressureError(error)) {
+          const retryAfterSecondsRaw = Number((error as any)?.retryAfterSeconds);
+          const retryAfterSeconds = Number.isFinite(retryAfterSecondsRaw) ? retryAfterSecondsRaw : undefined;
+          console.warn('[SyncService] Deferred sync item due to API backpressure', {
+            syncId: item.id,
+            table: item.table_name,
+            recordId: item.record_id,
+            retryAfterSeconds,
+          });
+          await this.dbManager.updateSyncQueueItem(item.id, false, errorMessage);
+          continue;
+        }
+
         console.error(`Failed to sync item ${item.id}:`, error);
-        await this.dbManager.updateSyncQueueItem(item.id, false, (error as Error).message);
+        await this.dbManager.updateSyncQueueItem(item.id, false, errorMessage);
       }
     }
   }

@@ -600,6 +600,7 @@
       "withoutHint": "Σημειώστε υλικά για αφαίρεση (χωρίς χρέωση)",
       "withoutLabel": "Χωρίς",
       "withoutCount": "Χωρίς: {{count}} υλικό/ά",
+      "ingredients": "υλικά",
       "updateItem": "Ενημέρωση Προϊόντος"
     },
     "ingredients": {
@@ -2789,7 +2790,7 @@
     "shuttingDownMessage": "Η εφαρμογή τερματίζεται ή επανεκκινεί..."
   },
   "login": {
-    "title": "The Small POS",
+    "title": "The Small",
     "subtitle": "Εισαγάγετε το PIN σας για να συνεχίσετε",
     "clear": "Καθαρισμός",
     "loggingIn": "Σύνδεση…",

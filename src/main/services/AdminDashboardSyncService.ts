@@ -752,7 +752,8 @@ export class AdminDashboardSyncService {
         if (token) headers['Authorization'] = `Bearer ${token}`;
         if (apiKey) headers['x-pos-api-key'] = apiKey;
 
-        const response = await fetch(`${base}/api/pos/menu-sync?terminal_id=${encodeURIComponent(storedTid as string)}&last_sync=${this.lastSync || ''}`, {
+        const lastSyncParam = this.lastSync || '1970-01-01T00:00:00.000Z';
+        const response = await fetch(`${base}/api/pos/menu-sync?terminal_id=${encodeURIComponent(storedTid as string)}&last_sync=${encodeURIComponent(lastSyncParam)}`, {
           method: 'GET',
           headers,
           cache: 'no-store',
@@ -810,7 +811,12 @@ export class AdminDashboardSyncService {
 
         if (menuData.success && menuData.menu_data) {
           // Update local database with menu data
-          console.log(`📋 Received menu updates: ${menuData.sync_stats?.categories_updated ?? 0} categories, ${menuData.sync_stats?.subcategories_updated ?? 0} items`);
+          console.log(
+            `📋 Received menu updates: ${menuData.sync_stats?.categories_updated ?? 0} categories, `
+            + `${menuData.sync_stats?.subcategories_updated ?? 0} items, `
+            + `${menuData.sync_stats?.ingredients_updated ?? 0} ingredients, `
+            + `${menuData.sync_stats?.combos_updated ?? 0} combos`
+          );
 
           const dbSvc = this.dbManager.getDatabaseService();
           if (dbSvc && menuData.menu_data) {
@@ -1110,14 +1116,33 @@ export class AdminDashboardSyncService {
         hardware: settingsData.hardware,
       };
 
+      const categoryToLocalSettingCategory: Record<string, string> = {
+        tax: 'tax',
+        discount: 'discount',
+        receipt: 'receipt',
+        inventory: 'inventory',
+        staff: 'staff',
+        printer: 'printer',
+        // Hardware settings are terminal-scoped in POS local storage.
+        hardware: 'terminal',
+      };
+
       for (const [category, block] of Object.entries(categoryBlocks)) {
         if (block && typeof block === 'object') {
-          // Reuse POS local config for terminal-scoped settings
-          await this.dbManager.updatePOSLocalConfig(block);
+          const settingsCategory = categoryToLocalSettingCategory[category] || 'terminal';
+          for (const [key, value] of Object.entries(block)) {
+            await this.dbManager.updateLocalSettings(settingsCategory, { [key]: value });
+          }
           this.notifyRenderer('settings:update', { type: category, settings: block });
           this.notifyRenderer(`settings:update:${category}`, { settings: block });
         }
       }
+
+      // Notify renderer hooks that terminal settings changed, so they can refresh caps (discount/tax/etc).
+      this.notifyRenderer('terminal-settings-updated', {
+        source: 'admin-settings-sync',
+        timestamp: new Date().toISOString(),
+      });
 
       // Bump local versions heuristically if provided
       const versions = settingsData.versions || settingsPayload.versions || null;

@@ -648,8 +648,23 @@ export class SettingsService extends BaseService {
 
   // Discount Settings Helper Methods
   getDiscountMaxPercentage(): number {
-    const value = this.getSetting<number>('discount', 'max_discount_percentage', 30);
-    return value !== null ? value : 30;
+    const value = this.getSetting<number>('discount', 'max_discount_percentage');
+    if (typeof value === 'number' && value >= 0 && value <= 100) {
+      return value;
+    }
+
+    // Backward compatibility: older sync paths stored discount cap under terminal.*
+    const legacyValue = this.getSetting<number>('terminal', 'max_discount_percentage');
+    if (typeof legacyValue === 'number' && legacyValue >= 0 && legacyValue <= 100) {
+      try {
+        this.setSetting('discount', 'max_discount_percentage', legacyValue);
+      } catch {
+        // Ignore migration write failure and still return legacy value.
+      }
+      return legacyValue;
+    }
+
+    return 30;
   }
 
   setDiscountMaxPercentage(percentage: number): void {

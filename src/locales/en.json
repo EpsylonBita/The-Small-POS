@@ -608,6 +608,7 @@
       "withoutHint": "Mark ingredients to remove (no price change)",
       "withoutLabel": "Without",
       "withoutCount": "Without: {{count}} item(s)",
+      "ingredients": "ingredients",
       "updateItem": "Update Item"
     },
     "ingredients": {
@@ -2787,7 +2788,7 @@
     "shuttingDownMessage": "Application is shutting down or restarting..."
   },
   "login": {
-    "title": "The Small POS",
+    "title": "The Small",
     "subtitle": "Enter your PIN to continue",
     "clear": "Clear",
     "loggingIn": "Logging in…",

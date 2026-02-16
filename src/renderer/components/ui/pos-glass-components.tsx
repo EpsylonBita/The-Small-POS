@@ -645,10 +645,12 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
       const handleFocusIn = (e: FocusEvent) => {
         const target = e.target as Node;
 
-        // Don't trap focus if target is in another modal (nested modals)
-        const isInAnotherModal = target instanceof Element &&
-          target.closest('[role="dialog"]') &&
-          !containerRef.current?.contains(target);
+        // Don't trap focus if target is in another modal (nested modals).
+        // Support role-based dialogs plus modal shell class for legacy/custom overlays.
+        const nestedModalRoot = target instanceof Element
+          ? target.closest('[role="dialog"], [aria-modal="true"], .liquid-glass-modal-shell')
+          : null;
+        const isInAnotherModal = !!nestedModalRoot && !containerRef.current?.contains(nestedModalRoot);
 
         if (isInAnotherModal) {
           return; // Let the nested modal handle its own focus

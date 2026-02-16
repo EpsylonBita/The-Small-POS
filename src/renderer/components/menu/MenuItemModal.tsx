@@ -1,9 +1,14 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { toast } from 'react-hot-toast';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
-import { menuService, MenuItem, Ingredient } from '../../services/MenuService';
-import { Ban, Check, Minus, ShoppingCart, X } from 'lucide-react';
+import {
+  menuService,
+  MenuItem,
+  Ingredient,
+  parseIngredientFlavorType
+} from '../../services/MenuService';
+import { Ban, Check, Minus, Search, ShoppingCart, X } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 
 interface SelectedIngredient {
@@ -48,8 +53,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [ingredientsByColor, setIngredientsByColor] = useState<{ [color: string]: Ingredient[] }>({});
   const [activeFlavorType, setActiveFlavorType] = useState<'all' | 'savory' | 'sweet'>('all');
+  const [ingredientSearchTerm, setIngredientSearchTerm] = useState('');
   const [isLittleMode, setIsLittleMode] = useState(false);
   const [isWithoutMode, setIsWithoutMode] = useState(false); // New: "without" mode for removing ingredients
+  const ingredientSearchInputRef = useRef<HTMLInputElement | null>(null);
 
   // Track which menuItem we've initialized for to prevent re-initialization on parent re-renders
   const initializedForMenuItemRef = React.useRef<string | null>(null);
@@ -78,6 +85,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         setNotes(initialNotes || '');
       }
       setActiveFlavorType('all');
+      setIngredientSearchTerm('');
       setIsLittleMode(false);
       setIsWithoutMode(false);
       loadAvailableIngredients();
@@ -86,6 +94,19 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       initializedForMenuItemRef.current = null;
     }
   }, [isOpen, menuItem, isEditMode, initialCustomizations, initialQuantity, initialNotes]);
+
+  // Force-focus the ingredient search input after nested modal focus traps settle.
+  useEffect(() => {
+    if (!isOpen || !menuItem) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      ingredientSearchInputRef.current?.focus();
+    }, 140);
+
+    return () => window.clearTimeout(timer);
+  }, [isOpen, menuItem?.id]);
 
 
   // Guard: don't render if closed or no item provided
@@ -98,8 +119,11 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
     setLoading(true);
     try {
+      // Force a fresh ingredient fetch so startup/stale cache snapshots do not break flavor filtering.
+      menuService.clearCacheEntry('ingredients');
       // Always load ingredients - even non-customizable items can have extras or "without"
-      const ingredients = await menuService.getIngredients();
+      const availability = await menuService.getAvailableIngredientsForItem(menuItem.id);
+      const ingredients = availability.ingredients;
       setAvailableIngredients(ingredients);
 
       // Group ingredients by item_color
@@ -114,11 +138,57 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
       setIngredientsByColor(byColor);
 
+      if (!availability.hasExplicitLinks) {
+        console.warn('[MenuItemModal] Ingredient link payload unavailable for menu item', {
+          menuItemId: menuItem.id,
+          menuItemName: menuItem.name,
+          linkSource: availability.linkSource,
+        });
+      } else if (availability.links.length === 0) {
+        console.info('[MenuItemModal] No linked ingredients configured for menu item', {
+          menuItemId: menuItem.id,
+          menuItemName: menuItem.name,
+          linkSource: availability.linkSource,
+        });
+      } else if (ingredients.length === 0) {
+        console.warn('[MenuItemModal] Linked ingredient rows exist but none resolved in ingredient catalog', {
+          menuItemId: menuItem.id,
+          menuItemName: menuItem.name,
+          linkSource: availability.linkSource,
+          linkedRows: availability.links.length,
+        });
+      }
+
+      const flavorCounts = ingredients.reduce(
+        (acc, ingredient) => {
+          const resolvedFlavor =
+            ingredient.resolved_flavor_type
+            || parseIngredientFlavorType(ingredient.flavor_type)
+            || parseIngredientFlavorType((ingredient as any).category_flavor_type)
+            || parseIngredientFlavorType((ingredient as any).categoryFlavorType)
+            || null;
+          if (resolvedFlavor === 'savory') acc.savory += 1;
+          else if (resolvedFlavor === 'sweet') acc.sweet += 1;
+          else acc.unresolved += 1;
+          return acc;
+        },
+        { savory: 0, sweet: 0, unresolved: 0 }
+      );
+
+      console.info('[MenuItemModal] Ingredient availability diagnostics', {
+        menuItemId: menuItem.id,
+        menuItemName: menuItem.name,
+        linkSource: availability.linkSource,
+        hasExplicitLinks: availability.hasExplicitLinks,
+        linkedRows: availability.links.length,
+        availableCount: ingredients.length,
+        flavorCounts,
+      });
+
       // Only load default ingredients for customizable items when NOT in edit mode
       // In edit mode, we use the initialCustomizations passed in
       if (menuItem.is_customizable === true && !isEditMode) {
-        const defaultIngredients = await menuService.getMenuItemIngredients(menuItem.id);
-        const defaultSelected = defaultIngredients
+        const defaultSelected = availability.links
           .filter(mi => mi.is_default)
           .map(mi => {
             const ingredient = ingredients.find((ing: Ingredient) => ing.id === mi.ingredient_id);
@@ -243,12 +313,60 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
   // Filter ingredients by flavor type
   const filteredIngredients = useMemo(() => {
+    const resolveIngredientFlavor = (ingredient: Ingredient): 'savory' | 'sweet' | null => {
+      return (
+        ingredient.resolved_flavor_type
+        || parseIngredientFlavorType(ingredient.flavor_type)
+        || parseIngredientFlavorType((ingredient as any).category_flavor_type)
+        || parseIngredientFlavorType((ingredient as any).categoryFlavorType)
+        || parseIngredientFlavorType((ingredient as any).ingredient_subcategory)
+        || parseIngredientFlavorType((ingredient as any).ingredientSubcategory)
+        || parseIngredientFlavorType(ingredient.category_name)
+        || parseIngredientFlavorType((ingredient as any).categoryName)
+        || parseIngredientFlavorType((ingredient as any).flavorType)
+      );
+    };
+
+    let filtered = availableIngredients;
+
     if (activeFlavorType === 'all') {
-      return availableIngredients;
+      filtered = availableIngredients;
+    } else if (activeFlavorType === 'savory') {
+      filtered = availableIngredients.filter((ing) => resolveIngredientFlavor(ing) === 'savory');
+    } else {
+      filtered = availableIngredients.filter((ing) => resolveIngredientFlavor(ing) === 'sweet');
     }
 
-    return availableIngredients.filter(ing => ing.flavor_type === activeFlavorType);
-  }, [availableIngredients, activeFlavorType]);
+    const normalizedSearch = ingredientSearchTerm.trim().toLowerCase();
+    if (normalizedSearch) {
+      filtered = filtered.filter((ingredient) =>
+        getIngredientName(ingredient).toLowerCase().includes(normalizedSearch)
+      );
+    }
+
+    if (activeFlavorType !== 'all' && filtered.length === 0 && availableIngredients.length > 0) {
+      const flavorCounts = availableIngredients.reduce(
+        (acc, ingredient) => {
+          const resolved = resolveIngredientFlavor(ingredient);
+          if (resolved === 'savory') acc.savory += 1;
+          else if (resolved === 'sweet') acc.sweet += 1;
+          else acc.unresolved += 1;
+          return acc;
+        },
+        { savory: 0, sweet: 0, unresolved: 0 }
+      );
+
+      console.warn('[MenuItemModal] Flavor filter produced no ingredients', {
+        menuItemId: menuItem?.id,
+        menuItemName: menuItem?.name,
+        activeFlavorType,
+        totalIngredients: availableIngredients.length,
+        flavorCounts,
+      });
+    }
+
+    return filtered;
+  }, [availableIngredients, activeFlavorType, ingredientSearchTerm, language]);
 
   // Group filtered ingredients by color
   const filteredByColor = useMemo(() => {
@@ -271,7 +389,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col">
+      <div
+        className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-label={menuItem.name || 'Menu item'}
+      >
         {/* Header */}
         <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
           <div className="flex justify-between items-start gap-4">
@@ -412,12 +535,38 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   </button>
                 </div>
 
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 liquid-glass-modal-text-muted" />
+                  <input
+                    ref={ingredientSearchInputRef}
+                    type="text"
+                    value={ingredientSearchTerm}
+                    onChange={(e) => setIngredientSearchTerm(e.target.value)}
+                    autoFocus
+                    placeholder={t('menu.itemModal.searchIngredients', { defaultValue: 'Search ingredients...' })}
+                    autoComplete="off"
+                    spellCheck={false}
+                    inputMode="text"
+                    className="w-full pl-9 pr-3 py-2 rounded-lg border liquid-glass-modal-border liquid-glass-modal-card liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 pointer-events-auto cursor-text"
+                  />
+                </div>
+
                 {/* Ingredients Grouped by Color */}
                 <div className="space-y-6">
                   {Object.keys(filteredByColor).length === 0 ? (
                     <div className="text-center py-8 liquid-glass-modal-text-muted">
-                      <p>No ingredients available for this filter.</p>
-                      <p className="text-sm mt-2">Try selecting "All" to see all ingredients.</p>
+                      <p>
+                        {activeFlavorType === 'savory'
+                          ? 'No savory ingredients for this filter.'
+                          : activeFlavorType === 'sweet'
+                            ? 'No sweet ingredients for this filter.'
+                            : 'No ingredients available.'}
+                      </p>
+                      <p className="text-sm mt-2">
+                        {activeFlavorType === 'all'
+                          ? 'No ingredients were loaded from the catalog.'
+                          : 'Try selecting "All" to see all ingredients.'}
+                      </p>
                     </div>
                   ) : (
                     Object.entries(filteredByColor).map(([color, ingredients]) => {

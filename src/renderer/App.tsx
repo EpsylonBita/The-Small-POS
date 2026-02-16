@@ -27,6 +27,7 @@ import { useAppEvents } from "./hooks/useAppEvents";
 import { useWindowState } from "./hooks/useWindowState";
 import { updateAdminUrlFromSettings } from "../config/environment";
 import { setSupabaseContext } from "../shared/supabase-config";
+import { menuService } from "./services/MenuService";
 import {
   clearTerminalCredentialCache,
   updateTerminalCredentialCache,
@@ -196,6 +197,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
     const handleCredentialsUpdated = (data: { terminalId?: string; apiKey?: string }) => {
       console.log('[ConfigGuard] Terminal credentials updated');
+      menuService.clearCache();
       if (data?.terminalId) {
         localStorage.setItem('terminal_id', data.terminalId);
         updateTerminalCredentialCache({ terminalId: data.terminalId });
@@ -225,6 +227,7 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
 
     const handleConfigUpdated = (data: { branch_id?: string; organization_id?: string }) => {
       console.log('[ConfigGuard] Terminal config updated from heartbeat:', data);
+      menuService.clearCache();
       if (data?.branch_id) {
         localStorage.setItem('branch_id', data.branch_id);
         updateTerminalCredentialCache({ branchId: data.branch_id });
@@ -322,6 +325,18 @@ function AppContent() {
 
   // Start background menu version polling once a user session exists
   useMenuVersionPolling({ enabled: !!user });
+
+  // Keep renderer cache invalidation explicit when a background menu refresh completes.
+  useEffect(() => {
+    const handleMenuSyncRefreshed = () => {
+      menuService.clearCache();
+    };
+
+    window.addEventListener('menu-sync:refreshed', handleMenuSyncRefreshed as EventListener);
+    return () => {
+      window.removeEventListener('menu-sync:refreshed', handleMenuSyncRefreshed as EventListener);
+    };
+  }, []);
 
   // Track hash route for unauthenticated screens so UI updates without reload
   const [hash, setHash] = useState<string>(typeof window !== 'undefined' ? window.location.hash : '');
