@@ -10,7 +10,6 @@ import type { MenuCombo } from '@shared/types/combo';
 interface MenuItemGridProps {
   selectedCategory: string;
   selectedSubcategory?: string;
-  searchTerm?: string;
   onItemSelect: (item: MenuItem) => void;
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSyncMenu?: () => void;
@@ -24,7 +23,6 @@ interface MenuItemGridProps {
 export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   selectedCategory,
   selectedSubcategory = '',
-  searchTerm = '',
   onItemSelect,
   orderType = 'pickup',
   onSyncMenu,
@@ -89,15 +87,6 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
           }
         }
 
-        const normalizedSearch = searchTerm.trim().toLowerCase();
-        if (normalizedSearch) {
-          items = items.filter((item) => {
-            const name = (item.name || '').toLowerCase();
-            const description = (item.description || '').toLowerCase();
-            return name.includes(normalizedSearch) || description.includes(normalizedSearch);
-          });
-        }
-
         // Validate items have required fields
         const validItems = items.filter(item => {
           const isValid = item.id && item.name && item.price !== undefined;
@@ -136,7 +125,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
       console.error('Error setting up real-time subscription:', error);
       // Continue without real-time updates
     }
-  }, [selectedCategory, selectedSubcategory, searchTerm]);
+  }, [selectedCategory, selectedSubcategory]);
 
   // Combo mode - render combo cards instead of menu items
   if (comboMode && onComboSelect) {

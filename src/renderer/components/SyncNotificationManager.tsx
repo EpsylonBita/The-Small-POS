@@ -97,11 +97,14 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
       window.electronAPI.onSyncComplete?.(handleSyncComplete);
 
       // Category-specific listeners
+      // Note: window.electronAPI is Proxy-backed in Tauri — typeof check
+      // always returns 'function' for unknown props. Guard the return value.
       categories.forEach(category => {
-        const listenerName = `on${category.charAt(0).toUpperCase() + category.slice(1)}SettingsUpdate` as keyof typeof window.electronAPI;
-        if (typeof window.electronAPI[listenerName] === 'function') {
-          const listener = window.electronAPI[listenerName] as (callback: (data: any) => void) => () => void;
-          const unsubscribe = listener((data: any) => {
+        const listenerName = `on${category.charAt(0).toUpperCase() + category.slice(1)}SettingsUpdate`;
+        try {
+          const method = (window.electronAPI as any)[listenerName];
+          if (typeof method !== 'function') return;
+          const unsubscribe = method((data: any) => {
             const update: SettingsUpdate = {
               id: `settings-${category}-${Date.now()}`,
               category,
@@ -109,16 +112,17 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
               data,
               timestamp: new Date().toISOString()
             };
-
             setPendingUpdates(prev => [...prev, update]);
             setShowNotificationPanel(true);
-
-            // Auto-apply if enabled
             if (autoApply) {
               handleApplyUpdate(update);
             }
           });
-          unsubscribers.push(unsubscribe);
+          if (typeof unsubscribe === 'function') {
+            unsubscribers.push(unsubscribe);
+          }
+        } catch {
+          // Listener not available in this runtime
         }
       });
     }

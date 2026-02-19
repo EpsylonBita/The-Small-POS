@@ -27,6 +27,24 @@ function posApiGetWithTimeout<T>(
     .finally(() => clearTimeout(id))
 }
 
+type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>
+
+function getIpcInvoke(): IpcInvoke | null {
+  if (typeof window === 'undefined') return null
+
+  const w = window as any
+  if (typeof w?.electronAPI?.invoke === 'function') {
+    return w.electronAPI.invoke.bind(w.electronAPI)
+  }
+  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
+    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer)
+  }
+  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
+    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer)
+  }
+  return null
+}
+
 export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?: boolean }) {
   const intervalMs = options?.intervalMs ?? 30000
   const enabled = options?.enabled ?? true
@@ -70,37 +88,17 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
   }, [])
 
   const triggerMenuSync = useCallback(async (latest: string | null) => {
-    // Always re-resolve from latest cache to avoid stale values
-    const cached = getCachedTerminalCredentials()
-    const lsTerminal = (typeof localStorage !== 'undefined' ? localStorage.getItem('terminal_id') : '') || ''
-    const terminalId = (lsTerminal || cached.terminalId || creds.terminalId || environment.TERMINAL_ID || '').trim()
-    if (!terminalId) return
+    const invoke = getIpcInvoke()
+    if (!invoke) throw new Error('IPC bridge unavailable for menu sync')
+
     try {
-      const params = new URLSearchParams()
-      params.set('terminal_id', terminalId)
-      if (state.lastSeen) params.set('last_sync', state.lastSeen)
-
-      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-terminal-id': terminalId }
-      const apiKey = (cached.apiKey || creds.apiKey || '').trim()
-      if (apiKey) headers['x-pos-api-key'] = apiKey
-      else throw new Error('Missing per-terminal POS API key for menu sync')
-
-      // Debug logging for troubleshooting auth issues
-      console.log('[triggerMenuSync] auth debug:', {
-        hasApiKey: !!apiKey,
-        terminalId,
-        hasCachedApiKey: !!cached.apiKey,
-        hasMemoApiKey: !!creds.apiKey
-      })
-
-      const endpoint = `/pos/menu-sync?${params.toString()}`
-      const result = await posApiGetWithTimeout(endpoint, { headers })
-      if (!result.success) {
-        const msg = result.error || 'Unknown error'
-        throw new Error(`menu-sync failed: ${msg}`)
+      const result = await invoke('menu:sync')
+      if (!result?.success) {
+        const code = result?.errorCode || 'menu_sync_failed'
+        const msg = result?.error || 'Unknown error'
+        throw new Error(`${code}: ${msg}`)
       }
-      // We don’t currently use the payload; we refresh caches from Supabase directly
-      // to keep sources consistent with MenuService.
+
       await Promise.allSettled([
         (async () => { menuService.clearCache(); })(),
         menuService.getMenuCategories(),
@@ -113,6 +111,13 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
         if (mountedRef.current) setState(prev => ({ ...prev, lastSeen: latest }))
       }
 
+      console.log('[useMenuVersionPolling] menu cache refreshed via IPC menu:sync', {
+        latest,
+        version: result?.version,
+        counts: result?.counts,
+        updated: result?.updated,
+      })
+
       // Notify UI listeners that a background menu refresh completed
       try {
         window.dispatchEvent(new CustomEvent('menu-sync:refreshed', { detail: { latest } }))
@@ -123,7 +128,7 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
       console.warn('[useMenuVersionPolling] triggerMenuSync error:', e?.message || e)
       if (mountedRef.current) setState(prev => ({ ...prev, error: e?.message || 'Menu sync failed' }))
     }
-  }, [creds.apiKey, creds.terminalId, state.lastSeen])
+  }, [])
 
   const debugCountRef = useRef(0)
   const fallbackUsedRef = useRef(false)

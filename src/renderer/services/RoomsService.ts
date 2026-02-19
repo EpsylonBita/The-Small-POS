@@ -88,6 +88,9 @@ function transformFromAPI(data: RoomFromAPI): Room {
   };
 }
 
+function getIpcRenderer() {
+  return (window as any).electronAPI?.ipcRenderer ?? (window as any).electron?.ipcRenderer;
+}
 
 class RoomsService {
   private branchId: string = '';
@@ -124,7 +127,11 @@ class RoomsService {
       }
 
       // Use IPC to fetch rooms via API (proper auth & audit logging)
-      const result = await (window as any).api.invoke('sync:fetch-rooms', options);
+      const ipc = getIpcRenderer();
+      if (!ipc) {
+        throw new Error('IPC renderer not available');
+      }
+      const result = await ipc.invoke('sync:fetch-rooms', options);
 
       if (!result.success) {
         console.error('[RoomsService] API error:', result.error);
@@ -156,7 +163,11 @@ class RoomsService {
       console.log('[RoomsService] Updating room status via API:', roomId, newStatus);
 
       // Use IPC to update room via API (proper auth & audit logging)
-      const result = await (window as any).api.invoke('sync:update-room-status', roomId, newStatus);
+      const ipc = getIpcRenderer();
+      if (!ipc) {
+        throw new Error('IPC renderer not available');
+      }
+      const result = await ipc.invoke('sync:update-room-status', roomId, newStatus);
 
       if (!result.success) {
         console.error('[RoomsService] API error:', result.error);
@@ -213,6 +224,12 @@ class RoomsService {
       return;
     }
 
+    const ipc = getIpcRenderer();
+    if (!ipc) {
+      console.warn('[RoomsService] IPC not available for room update subscription');
+      return;
+    }
+
     // Listen for room updates from the main process (if Supabase realtime is set up there)
     const handler = (_event: any, payload: { room: RoomFromAPI }) => {
       if (payload.room) {
@@ -221,9 +238,9 @@ class RoomsService {
       }
     };
 
-    (window as any).api.on('rooms:updated', handler);
+    ipc.on('rooms:updated', handler);
     this.realtimeUnsubscribe = () => {
-      (window as any).api.off('rooms:updated', handler);
+      ipc.removeListener('rooms:updated', handler);
     };
 
     console.log('[RoomsService] Subscribed to room updates via IPC');

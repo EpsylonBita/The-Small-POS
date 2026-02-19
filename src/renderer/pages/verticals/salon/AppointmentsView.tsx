@@ -14,8 +14,9 @@ import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAppointments } from '../../../hooks/useAppointments';
 import { formatDate, formatTime } from '../../../utils/format';
-import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, RefreshCw, CheckCircle, Play, XCircle, X, Plus } from 'lucide-react';
+import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, RefreshCw, CheckCircle, Play, XCircle, X, Plus, Ban } from 'lucide-react';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
+import { CustomerSearchModal } from '../../../components/modals/CustomerSearchModal';
 import { supabase } from '../../../lib/supabase';
 import type { Appointment, AppointmentStatus, AppointmentFilters } from '../../../services/AppointmentsService';
 
@@ -116,9 +117,8 @@ export const AppointmentsView: React.FC = memo(() => {
   const [staffList, setStaffList] = useState<{ id: string; name: string }[]>([]);
   const [servicesList, setServicesList] = useState<{ id: string; name: string; duration: number }[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
-  const [customerFound, setCustomerFound] = useState<{ id: string; name: string; phone: string; email?: string } | null>(null);
-  const [showAddCustomer, setShowAddCustomer] = useState(false);
+  const [showCustomerSearch, setShowCustomerSearch] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<{ id: string; name: string; phone: string; email?: string; is_banned?: boolean; ban_reason?: string } | null>(null);
   const [formData, setFormData] = useState({
     customerId: '',
     customerName: '',
@@ -126,117 +126,34 @@ export const AppointmentsView: React.FC = memo(() => {
     customerEmail: '',
     staffId: '',
     serviceId: '',
-    date: new Date().toISOString().split('T')[0],
+    date: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
     startTime: '09:00',
     notes: '',
   });
 
   const isDark = resolvedTheme === 'dark';
   const effectiveOrgId = organizationId || localOrgId || '';
-  
-  // Search customer by phone number
-  const searchCustomerByPhone = async (phone: string) => {
-    if (!phone || phone.length < 3) {
-      setCustomerFound(null);
-      setShowAddCustomer(false);
-      return;
-    }
-    
-    console.log('[AppointmentsView] Searching customer with phone:', phone, 'orgId:', effectiveOrgId);
-    
-    if (!effectiveOrgId) {
-      console.error('[AppointmentsView] No organization ID available for customer search');
-      toast.error('Organization not configured');
-      return;
-    }
-    
-    setIsSearching(true);
-    try {
-      // First try exact match, then partial match
-      const { data, error } = await (supabase as any)
-        .from('customers')
-        .select('id, name, phone, email')
-        .eq('organization_id', effectiveOrgId)
-        .or(`phone.eq.${phone},phone.ilike.%${phone}%`)
-        .limit(1);
-      
-      console.log('[AppointmentsView] Customer search result:', { data, error });
-      
-      if (data && data.length > 0 && !error) {
-        const customer = data[0];
-        setCustomerFound({
-          id: customer.id,
-          name: customer.name,
-          phone: customer.phone,
-          email: customer.email
-        });
-        setFormData(prev => ({
-          ...prev,
-          customerId: customer.id,
-          customerName: customer.name,
-          customerEmail: customer.email || ''
-        }));
-        setShowAddCustomer(false);
-      } else {
-        console.log('[AppointmentsView] Customer not found, showing add form');
-        setCustomerFound(null);
-        setShowAddCustomer(true);
-      }
-    } catch (err) {
-      console.error('[AppointmentsView] Customer search error:', err);
-      setCustomerFound(null);
-      setShowAddCustomer(true);
-    } finally {
-      setIsSearching(false);
-    }
-  };
-  
-  // Create new customer
-  const createCustomer = async () => {
-    if (!formData.customerName || !formData.customerPhone) {
-      toast.error('Name and phone are required');
-      return null;
-    }
-    
-    try {
-      const { data, error } = await (supabase as any)
-        .from('customers')
-        .insert({
-          organization_id: effectiveOrgId,
-          branch_id: branchId,
-          name: formData.customerName,
-          phone: formData.customerPhone,
-          email: formData.customerEmail || null,
-        })
-        .select('id, name, phone, email')
-        .single();
-      
-      if (error) {
-        if (error.code === '23505') {
-          toast.error('Customer with this phone already exists');
-        } else {
-          toast.error('Failed to create customer');
-        }
-        return null;
-      }
-      
-      setCustomerFound({
-        id: data.id,
-        name: data.name,
-        phone: data.phone,
-        email: data.email
-      });
-      setFormData(prev => ({ ...prev, customerId: data.id }));
-      setShowAddCustomer(false);
-      toast.success('Customer created');
-      return data.id;
-    } catch (err) {
-      console.error('[AppointmentsView] Create customer error:', err);
-      toast.error('Failed to create customer');
-      return null;
-    }
-  };
-  
+
+  // Handle customer selected from CustomerSearchModal
+  const handleCustomerSelected = useCallback((customer: any) => {
+    setSelectedCustomer({
+      id: customer.id,
+      name: customer.name,
+      phone: customer.phone,
+      email: customer.email,
+      is_banned: customer.is_banned,
+      ban_reason: customer.ban_reason,
+    });
+    setFormData(prev => ({
+      ...prev,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerPhone: customer.phone || '',
+      customerEmail: customer.email || '',
+    }));
+    setShowCustomerSearch(false);
+  }, []);
+
   // Load staff and services for the create modal
   useEffect(() => {
     const loadDropdownData = async () => {
@@ -259,8 +176,14 @@ export const AppointmentsView: React.FC = memo(() => {
           // Primary: existing IPC handler used by shift check-in (very stable path).
           if (branchId) {
             const staffRpc = await invoke('shift:list-staff-for-checkin', branchId);
-            if (staffRpc?.success && Array.isArray(staffRpc?.data)) {
-              staffRows = staffRpc.data;
+            const rpcPayload = staffRpc?.data ?? staffRpc;
+            const rpcRows = Array.isArray(rpcPayload?.data)
+              ? rpcPayload.data
+              : Array.isArray(rpcPayload)
+                ? rpcPayload
+                : [];
+            if (staffRpc?.success !== false) {
+              staffRows = rpcRows;
             } else {
               console.warn('[AppointmentsView] shift:list-staff-for-checkin failed:', staffRpc?.error || staffRpc);
             }
@@ -269,10 +192,12 @@ export const AppointmentsView: React.FC = memo(() => {
           // Secondary: POS sync API (requires admin route whitelist).
           if (!staffRows.length) {
             const staffResp = await invoke('api:fetch-from-admin', '/api/pos/sync/staff?limit=1000');
-            if (staffResp?.success && staffResp?.data?.success !== false) {
-              staffRows = Array.isArray(staffResp?.data?.data) ? staffResp.data.data : [];
+            const payload = staffResp?.data ?? staffResp;
+            const payloadSuccess = payload?.success !== false;
+            if (staffResp?.success !== false && payloadSuccess) {
+              staffRows = Array.isArray(payload?.data) ? payload.data : [];
             } else {
-              console.warn('[AppointmentsView] Staff sync API failed:', staffResp?.error || staffResp?.data?.error || staffResp);
+              console.warn('[AppointmentsView] Staff sync API failed:', staffResp?.error || payload?.error || staffResp);
             }
           }
 
@@ -401,24 +326,30 @@ export const AppointmentsView: React.FC = memo(() => {
     }
   }, [branchId, effectiveOrgId, showCreateModal]);
 
+  // Helper: format a Date as YYYY-MM-DD using local timezone
+  const toLocalDateStr = (d: Date): string => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
   // Build filters based on selected date
+  // IMPORTANT: Use local date strings (YYYY-MM-DD) to avoid timezone bugs
+  // where .toISOString() shifts the date by UTC offset
   const filters: AppointmentFilters = useMemo(() => {
     const baseFilters: AppointmentFilters = {};
-    
+
     if (quickFilter === 'week') {
       const weekStart = new Date(selectedDate);
       weekStart.setDate(weekStart.getDate() - weekStart.getDay());
       const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekEnd.getDate() + 7);
-      baseFilters.dateFrom = weekStart.toISOString();
-      baseFilters.dateTo = weekEnd.toISOString();
+      weekEnd.setDate(weekEnd.getDate() + 6);
+      baseFilters.dateFrom = toLocalDateStr(weekStart);
+      baseFilters.dateTo = toLocalDateStr(weekEnd);
     } else {
-      const dayStart = new Date(selectedDate);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(selectedDate);
-      dayEnd.setHours(23, 59, 59, 999);
-      baseFilters.dateFrom = dayStart.toISOString();
-      baseFilters.dateTo = dayEnd.toISOString();
+      baseFilters.dateFrom = toLocalDateStr(selectedDate);
+      baseFilters.dateTo = toLocalDateStr(selectedDate);
     }
 
     if (staffFilter !== 'all') {
@@ -471,30 +402,22 @@ export const AppointmentsView: React.FC = memo(() => {
       toast.error('Please select staff and service');
       return;
     }
-    
-    // If adding new customer, create them first
-    let customerId = formData.customerId;
-    if (showAddCustomer && formData.customerName && formData.customerPhone) {
-      const newCustomerId = await createCustomer();
-      if (!newCustomerId) return; // Customer creation failed
-      customerId = newCustomerId;
-    }
-    
+
     setIsSubmitting(true);
     try {
       const service = servicesList.find(s => s.id === formData.serviceId);
       const duration = service?.duration || 30;
-      
+
       // Build start and end times
       const [hours, minutes] = formData.startTime.split(':').map(Number);
       const startDate = new Date(formData.date);
       startDate.setHours(hours, minutes, 0, 0);
-      
+
       const endDate = new Date(startDate);
       endDate.setMinutes(endDate.getMinutes() + duration);
-      
+
       await createAppointment({
-        customerId: customerId || undefined,
+        customerId: formData.customerId || undefined,
         customerName: formData.customerName || undefined,
         customerPhone: formData.customerPhone || undefined,
         staffId: formData.staffId,
@@ -503,7 +426,7 @@ export const AppointmentsView: React.FC = memo(() => {
         endTime: endDate.toISOString(),
         notes: formData.notes || undefined,
       });
-      
+
       // Reset form and close modal
       setFormData({
         customerId: '',
@@ -512,14 +435,13 @@ export const AppointmentsView: React.FC = memo(() => {
         customerEmail: '',
         staffId: '',
         serviceId: '',
-        date: new Date().toISOString().split('T')[0],
+        date: toLocalDateStr(new Date()),
         startTime: '09:00',
         notes: '',
       });
-      setCustomerFound(null);
-      setShowAddCustomer(false);
+      setSelectedCustomer(null);
       setShowCreateModal(false);
-      
+
       // Refresh to show new appointment
       refetch();
     } catch (err) {
@@ -658,7 +580,7 @@ export const AppointmentsView: React.FC = memo(() => {
           </button>
           <input
             type="date"
-            value={selectedDate.toISOString().split('T')[0]}
+            value={toLocalDateStr(selectedDate)}
             onChange={(e) => {
               // Parse date string as local date (not UTC)
               const [year, month, day] = e.target.value.split('-').map(Number);
@@ -851,18 +773,17 @@ export const AppointmentsView: React.FC = memo(() => {
           setFormData={setFormData}
           staffList={staffList}
           servicesList={servicesList}
-          customerFound={customerFound}
-          showAddCustomer={showAddCustomer}
-          isSearching={isSearching}
+          selectedCustomer={selectedCustomer}
           isSubmitting={isSubmitting}
-          searchCustomerByPhone={searchCustomerByPhone}
-          setShowAddCustomer={setShowAddCustomer}
-          setCustomerFound={setCustomerFound}
+          onSearchCustomer={() => setShowCustomerSearch(true)}
+          onClearCustomer={() => {
+            setSelectedCustomer(null);
+            setFormData(prev => ({ ...prev, customerId: '', customerName: '', customerPhone: '', customerEmail: '' }));
+          }}
           handleCreateAppointment={handleCreateAppointment}
           onClose={() => {
             setShowCreateModal(false);
-            setCustomerFound(null);
-            setShowAddCustomer(false);
+            setSelectedCustomer(null);
             setFormData({
               customerId: '',
               customerName: '',
@@ -870,7 +791,7 @@ export const AppointmentsView: React.FC = memo(() => {
               customerEmail: '',
               staffId: '',
               serviceId: '',
-              date: new Date().toISOString().split('T')[0],
+              date: toLocalDateStr(new Date()),
               startTime: '09:00',
               notes: '',
             });
@@ -879,6 +800,18 @@ export const AppointmentsView: React.FC = memo(() => {
           organizationId={effectiveOrgId}
         />
       )}
+
+      {/* Customer Search Modal — reuses the full-featured search from the users module */}
+      <CustomerSearchModal
+        isOpen={showCustomerSearch}
+        onClose={() => setShowCustomerSearch(false)}
+        onCustomerSelected={handleCustomerSelected}
+        onAddNewCustomer={(phone) => {
+          // Pre-fill walk-in fields with the phone number
+          setFormData(prev => ({ ...prev, customerPhone: phone, customerName: '' }));
+          setShowCustomerSearch(false);
+        }}
+      />
     </div>
   );
 });
@@ -904,13 +837,10 @@ interface CreateAppointmentModalContentProps {
   setFormData: React.Dispatch<React.SetStateAction<AppointmentFormData>>;
   staffList: { id: string; name: string }[];
   servicesList: { id: string; name: string; duration: number }[];
-  customerFound: { id: string; name: string; phone: string; email?: string } | null;
-  showAddCustomer: boolean;
-  isSearching: boolean;
+  selectedCustomer: { id: string; name: string; phone: string; email?: string; is_banned?: boolean; ban_reason?: string } | null;
   isSubmitting: boolean;
-  searchCustomerByPhone: (phone: string) => Promise<void>;
-  setShowAddCustomer: (show: boolean) => void;
-  setCustomerFound: (customer: { id: string; name: string; phone: string; email?: string } | null) => void;
+  onSearchCustomer: () => void;
+  onClearCustomer: () => void;
   handleCreateAppointment: () => Promise<void>;
   onClose: () => void;
   branchId: string;
@@ -923,13 +853,10 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   setFormData,
   staffList,
   servicesList,
-  customerFound,
-  showAddCustomer,
-  isSearching,
+  selectedCustomer,
   isSubmitting,
-  searchCustomerByPhone,
-  setShowAddCustomer,
-  setCustomerFound,
+  onSearchCustomer,
+  onClearCustomer,
   handleCreateAppointment,
   onClose,
   branchId,
@@ -989,17 +916,19 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
       if (!selectedDay || !branchId) return;
       setLoadingSlots(true);
       try {
-        const dayStart = new Date(selectedDay);
-        dayStart.setHours(0, 0, 0, 0);
-        const dayEnd = new Date(selectedDay);
-        dayEnd.setHours(23, 59, 59, 999);
-        
+        // Build local day boundaries to avoid timezone shift via .toISOString()
+        const yyyy = selectedDay.getFullYear();
+        const mm = String(selectedDay.getMonth() + 1).padStart(2, '0');
+        const dd = String(selectedDay.getDate()).padStart(2, '0');
+        const dayStartLocal = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
+        const dayEndLocal = new Date(`${yyyy}-${mm}-${dd}T23:59:59.999`);
+
         const { data } = await (supabase as any)
           .from('appointments')
           .select('staff_id, start_time, end_time, status')
           .eq('branch_id', branchId)
-          .gte('start_time', dayStart.toISOString())
-          .lte('start_time', dayEnd.toISOString())
+          .gte('start_time', dayStartLocal.toISOString())
+          .lte('start_time', dayEndLocal.toISOString())
           .neq('status', 'cancelled')
           .neq('status', 'no_show');
         
@@ -1079,65 +1008,71 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
         <div className="p-4 sm:p-6 overflow-y-auto flex-1">
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-5">
             <div className="xl:col-span-5 space-y-4">
-          {/* Phone Search */}
+          {/* Customer Selection */}
           <div className={`rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>
             <label className={`block text-sm font-medium mb-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-              <Search className="w-4 h-4 inline mr-1" /> {t('appointments.modal.phoneSearchLabel', 'Search Customer by Phone')}
+              <User className="w-4 h-4 inline mr-1" /> {t('appointments.modal.customer', 'Customer')}
             </label>
-            <div className="flex gap-2">
-              <input
-                type="tel"
-                value={formData.customerPhone}
-                onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
-                placeholder={t('appointments.modal.phonePlaceholder', 'Enter phone number...')}
-                className={`flex-1 px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              />
-              <button
-                type="button"
-                onClick={() => searchCustomerByPhone(formData.customerPhone)}
-                disabled={isSearching || !formData.customerPhone}
-                className="px-4 py-2.5 rounded-xl font-medium text-sm bg-zinc-100 text-black border border-zinc-300 hover:bg-white disabled:opacity-50"
-              >
-                {isSearching ? '...' : t('appointments.modal.search', 'Search')}
-              </button>
-            </div>
-          </div>
 
-          {/* Customer Found */}
-          {customerFound && (
-            <div className={`p-4 rounded-2xl border ${isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200'}`}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className={`font-semibold ${isDark ? 'text-emerald-300' : 'text-emerald-700'}`}>{customerFound.name}</p>
-                  <p className={`text-sm ${isDark ? 'text-emerald-200/90' : 'text-emerald-600'}`}>{customerFound.phone}</p>
+            {selectedCustomer ? (
+              /* Selected customer card */
+              <div className={`p-3 rounded-xl border ${selectedCustomer.is_banned ? (isDark ? 'bg-red-500/10 border-red-500/30' : 'bg-red-50 border-red-200') : (isDark ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-emerald-50 border-emerald-200')}`}>
+                {selectedCustomer.is_banned && (
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Ban className="w-4 h-4 text-red-500" />
+                    <span className="text-xs font-semibold text-red-500 uppercase">{t('appointments.modal.bannedCustomer', 'Banned Customer')}</span>
+                    {selectedCustomer.ban_reason && <span className="text-xs text-red-400">— {selectedCustomer.ban_reason}</span>}
+                  </div>
+                )}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className={`font-semibold ${selectedCustomer.is_banned ? 'text-red-400' : (isDark ? 'text-emerald-300' : 'text-emerald-700')}`}>{selectedCustomer.name}</p>
+                    <p className={`text-sm ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>{selectedCustomer.phone}</p>
+                    {selectedCustomer.email && <p className={`text-xs ${isDark ? 'text-zinc-500' : 'text-gray-400'}`}>{selectedCustomer.email}</p>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle className="w-5 h-5 text-green-500" />
+                    <button
+                      type="button"
+                      onClick={onClearCustomer}
+                      className={`p-1.5 rounded-lg ${isDark ? 'hover:bg-zinc-700' : 'hover:bg-gray-200'}`}
+                      title={t('appointments.modal.clearCustomer', 'Clear')}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
-                <CheckCircle className="w-5 h-5 text-green-500" />
               </div>
-            </div>
-          )}
-
-          {/* Add New Customer */}
-          {showAddCustomer && !customerFound && (
-            <div className={`p-4 rounded-2xl border space-y-3 ${isDark ? 'bg-amber-500/10 border-amber-500/30' : 'bg-amber-50 border-amber-200'}`}>
-              <p className={`text-sm ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
-                {t('appointments.modal.customerNotFound', 'Customer not found. Add new customer:')}
-              </p>
-              <input
-                type="text"
-                value={formData.customerName}
-                onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
-                placeholder={t('appointments.modal.customerNamePlaceholder', 'Customer Name *')}
-                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              />
-              <input
-                type="email"
-                value={formData.customerEmail}
-                onChange={(e) => setFormData(prev => ({ ...prev, customerEmail: e.target.value }))}
-                placeholder={t('appointments.modal.customerEmailPlaceholder', 'Email (optional)')}
-                className={`w-full px-3.5 py-2.5 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
-              />
-            </div>
-          )}
+            ) : (
+              /* Search button + walk-in option */
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  onClick={onSearchCustomer}
+                  className={`w-full px-4 py-2.5 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-200 hover:bg-zinc-800' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'}`}
+                >
+                  <Search className="w-4 h-4" />
+                  {t('appointments.modal.searchCustomer', 'Search Customer')}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={formData.customerName}
+                    onChange={(e) => setFormData(prev => ({ ...prev, customerName: e.target.value }))}
+                    placeholder={t('appointments.modal.walkInName', 'Walk-in name')}
+                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                  />
+                  <input
+                    type="tel"
+                    value={formData.customerPhone}
+                    onChange={(e) => setFormData(prev => ({ ...prev, customerPhone: e.target.value }))}
+                    placeholder={t('appointments.modal.walkInPhone', 'Phone')}
+                    className={`px-3 py-2 rounded-xl border text-sm ${isDark ? 'bg-zinc-950 border-zinc-700 text-zinc-100' : 'bg-white border-gray-300 text-gray-900'} focus:outline-none ${isDark ? 'focus:ring-2 focus:ring-zinc-600' : 'focus:ring-2 focus:ring-gray-300'}`}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Staff & Service */}
           <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-2xl border p-4 ${isDark ? 'bg-zinc-900/70 border-zinc-800' : 'bg-gray-50 border-gray-200'}`}>

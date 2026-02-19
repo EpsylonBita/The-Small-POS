@@ -46,6 +46,8 @@ import {
   Warehouse,
   ScanBarcode,
   Ticket,
+  Info,
+  Activity,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
@@ -382,6 +384,24 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
             title={t('navigation.zReport')}
           >
             <span className="font-bold text-base">Z</span>
+          </button>
+
+          {/* System Health Button */}
+          <button
+            onClick={() => handleNavClick('system_health', false)}
+            className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('green', currentView === 'system_health', resolvedTheme)}`}
+            title="System Health"
+          >
+            <Activity className="w-5 h-5" strokeWidth={2} />
+          </button>
+
+          {/* About Button */}
+          <button
+            onClick={() => handleNavClick('about', false)}
+            className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('blue', currentView === 'about', resolvedTheme)}`}
+            title="About"
+          >
+            <Info className="w-5 h-5" strokeWidth={2} />
           </button>
 
           {/* Settings Button */}

@@ -175,20 +175,17 @@ export function useFeatures() {
       }
     };
 
-    // Subscribe to terminal config updates.
-    // preload ipcRenderer.on callback receives only payload data.
-    const listener = (data: any) => handleConfigUpdate(data);
-    (window as any).electronAPI?.ipcRenderer?.on?.(
+    // Subscribe to terminal config updates
+    const unsubscribe = (window as any).electronAPI?.ipcRenderer?.on?.(
       'terminal-config-updated',
-      listener
+      (_event: any, data: any) => handleConfigUpdate(data)
     );
 
     return () => {
       mounted = false;
-      (window as any).electronAPI?.ipcRenderer?.removeListener?.(
-        'terminal-config-updated',
-        listener
-      );
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
     };
   }, [loadFeatures]);
 

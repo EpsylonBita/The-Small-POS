@@ -11,6 +11,9 @@ interface SyncStatus {
   isOnline: boolean;
   lastSync: string | null;
   pendingItems: number;
+  queuedRemote: number;
+  backpressureDeferred: number;
+  oldestNextRetryAt: string | null;
   syncInProgress: boolean;
   error: string | null;
   terminalHealth: number;
@@ -56,6 +59,9 @@ const normalizeStatus = (status: any): SyncStatus => {
       isOnline: getNavigatorOnline(),
       lastSync: null,
       pendingItems: 0,
+      queuedRemote: 0,
+      backpressureDeferred: 0,
+      oldestNextRetryAt: null,
       syncInProgress: false,
       error: null,
       terminalHealth: 80,
@@ -68,8 +74,11 @@ const normalizeStatus = (status: any): SyncStatus => {
 
   return {
     isOnline: typeof status.isOnline === 'boolean' ? status.isOnline : getNavigatorOnline(),
-    lastSync: toDateString(status.lastSync),
-    pendingItems: coerceNumber(status.pendingItems, 0),
+    lastSync: toDateString(status.lastSync ?? status.lastSyncAt),
+    pendingItems: coerceNumber(status.pendingItems ?? status.pendingChanges, 0),
+    queuedRemote: coerceNumber(status.queuedRemote, 0),
+    backpressureDeferred: coerceNumber(status.backpressureDeferred, 0),
+    oldestNextRetryAt: toDateString(status.oldestNextRetryAt),
     syncInProgress: !!status.syncInProgress,
     error: typeof status.error === 'string' ? status.error : null,
     terminalHealth: normalizeHealth(status.terminalHealth),
@@ -89,6 +98,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     isOnline: getNavigatorOnline(),
     lastSync: null,
     pendingItems: 0,
+    queuedRemote: 0,
+    backpressureDeferred: 0,
+    oldestNextRetryAt: null,
     syncInProgress: false,
     error: null,
     terminalHealth: 80,
@@ -194,7 +206,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     financialStats.staff_payments.failed > 0 ||
     financialStats.shift_expenses.failed > 0;
 
-  const hasPending = syncStatus.pendingItems > 0 || syncStatus.pendingPaymentItems > 0;
+  const hasPending =
+    syncStatus.pendingItems > 0 ||
+    syncStatus.pendingPaymentItems > 0 ||
+    syncStatus.backpressureDeferred > 0;
 
   const getStatusText = () => {
     if (!syncStatus.isOnline) return t('sync.status.offline');
@@ -360,6 +375,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 <div className="liquid-glass-modal-card p-3 rounded-xl">
                   <div className="text-xs font-bold text-black dark:text-white uppercase tracking-wide mb-1">{t('sync.labels.pending')}</div>
                   <div className="text-2xl font-extrabold text-blue-800 dark:text-blue-300">{syncStatus.pendingItems}</div>
+                  {(syncStatus.queuedRemote > 0 || syncStatus.backpressureDeferred > 0) && (
+                    <div className="mt-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      queued {syncStatus.queuedRemote} | deferred {syncStatus.backpressureDeferred}
+                    </div>
+                  )}
+                  {syncStatus.oldestNextRetryAt && (
+                    <div className="mt-0.5 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+                      next retry {new Date(syncStatus.oldestNextRetryAt).toLocaleTimeString()}
+                    </div>
+                  )}
                 </div>
 
                 <div className="liquid-glass-modal-card p-3 rounded-xl">

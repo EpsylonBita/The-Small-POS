@@ -37,10 +37,10 @@ interface OrderItem {
 interface Order {
   id: string;
   order_number: string;
-  status: 'pending' | 'confirmed' | 'preparing' | 'ready' | 'completed' | 'cancelled';
-  order_type: 'dine-in' | 'pickup' | 'delivery';
-  payment_method: 'cash' | 'card' | 'digital_wallet' | 'other';
-  payment_status?: 'pending' | 'paid' | 'partially_paid' | 'refunded' | 'failed';
+  status: string;
+  order_type: string;
+  payment_method: string;
+  payment_status?: string;
   total_amount: number;
   subtotal?: number;
   tax_amount?: number;
@@ -61,6 +61,10 @@ interface Order {
   created_at: string;
   updated_at: string;
   estimated_ready_time?: number;
+  sync_status?: string;
+  supabase_id?: string;
+  client_order_id?: string;
+  source?: 'local' | 'remote';
 }
 
 interface FetchOrdersOptions {
@@ -72,6 +76,120 @@ interface FetchOrdersOptions {
   limit?: number;
   offset?: number;
 }
+
+const asString = (value: any): string | undefined =>
+  typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+
+const asNumber = (value: any, fallback = 0): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+const normalizeOrderType = (value: string | undefined): string => {
+  const normalized = (value || '').trim().toLowerCase();
+  if (!normalized) return 'pickup';
+  if (normalized === 'dine_in') return 'dine-in';
+  if (normalized === 'takeaway' || normalized === 'takeout') return 'pickup';
+  return normalized;
+};
+
+const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const id = asString(raw.id) || asString(raw.client_order_id) || asString(raw.order_number);
+  if (!id) return null;
+
+  const createdAt = asString(raw.created_at) || asString(raw.createdAt) || new Date().toISOString();
+  const updatedAt = asString(raw.updated_at) || asString(raw.updatedAt) || createdAt;
+  const orderItems = Array.isArray(raw.order_items)
+    ? raw.order_items
+    : Array.isArray(raw.items)
+      ? raw.items
+      : [];
+
+  return {
+    id,
+    order_number: asString(raw.order_number) || asString(raw.orderNumber) || id.slice(0, 8),
+    status: asString(raw.status) || 'pending',
+    order_type: normalizeOrderType(asString(raw.order_type) || asString(raw.orderType)),
+    payment_method: asString(raw.payment_method) || asString(raw.paymentMethod) || 'cash',
+    payment_status: asString(raw.payment_status) || asString(raw.paymentStatus),
+    total_amount: asNumber(raw.total_amount ?? raw.totalAmount, 0),
+    subtotal: asNumber(raw.subtotal, 0),
+    tax_amount: asNumber(raw.tax_amount ?? raw.taxAmount, 0),
+    delivery_fee: asNumber(raw.delivery_fee ?? raw.deliveryFee, 0),
+    discount_amount: asNumber(raw.discount_amount ?? raw.discountAmount, 0),
+    customer_name: asString(raw.customer_name) || asString(raw.customerName),
+    customer_phone: asString(raw.customer_phone) || asString(raw.customerPhone),
+    customer_email: asString(raw.customer_email) || asString(raw.customerEmail),
+    delivery_address: asString(raw.delivery_address) || asString(raw.deliveryAddress),
+    delivery_city: asString(raw.delivery_city) || asString(raw.deliveryCity),
+    delivery_postal_code: asString(raw.delivery_postal_code) || asString(raw.deliveryPostalCode),
+    delivery_floor: asString(raw.delivery_floor) || asString(raw.deliveryFloor),
+    delivery_notes: asString(raw.delivery_notes) || asString(raw.deliveryNotes),
+    table_number: asString(raw.table_number) || asString(raw.tableNumber),
+    special_instructions: asString(raw.special_instructions) || asString(raw.specialInstructions),
+    name_on_ringer: asString(raw.name_on_ringer) || asString(raw.nameOnRinger),
+    order_items: orderItems as OrderItem[],
+    created_at: createdAt,
+    updated_at: updatedAt,
+    estimated_ready_time: raw.estimated_ready_time ?? raw.estimatedTime,
+    sync_status: asString(raw.sync_status) || asString(raw.syncStatus),
+    supabase_id: asString(raw.supabase_id) || asString(raw.supabaseId),
+    client_order_id: asString(raw.client_order_id),
+    source,
+  };
+};
+
+const toIdentitySet = (order: Order): Set<string> => {
+  const keys = [
+    order.id,
+    order.supabase_id,
+    order.client_order_id,
+    order.order_number,
+  ]
+    .filter((v): v is string => !!v)
+    .map((v) => v.trim().toLowerCase());
+  return new Set(keys);
+};
+
+const sharesIdentity = (a: Order, b: Order): boolean => {
+  const aKeys = toIdentitySet(a);
+  const bKeys = toIdentitySet(b);
+  for (const key of aKeys) {
+    if (bKeys.has(key)) return true;
+  }
+  return false;
+};
+
+const isPendingOrQueuedLocal = (order: Order): boolean => {
+  const syncStatus = (order.sync_status || '').toLowerCase();
+  return order.source === 'local' && (syncStatus === 'pending' || syncStatus === 'queued');
+};
+
+const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[] => {
+  const merged: Order[] = [];
+  const upsert = (incoming: Order) => {
+    const index = merged.findIndex((existing) => sharesIdentity(existing, incoming));
+    if (index === -1) {
+      merged.push(incoming);
+      return;
+    }
+
+    const existing = merged[index];
+    if (isPendingOrQueuedLocal(existing) && incoming.source === 'remote') {
+      return;
+    }
+
+    const existingTs = new Date(existing.updated_at).getTime();
+    const incomingTs = new Date(incoming.updated_at).getTime();
+    if (Number.isNaN(existingTs) || incomingTs >= existingTs) {
+      merged[index] = { ...existing, ...incoming };
+    }
+  };
+
+  localOrders.forEach(upsert);
+  remoteOrders.forEach(upsert);
+  return merged;
+};
 
 const OrdersPage: React.FC = () => {
   const { t } = useTranslation();
@@ -102,6 +220,32 @@ const OrdersPage: React.FC = () => {
 
   const formatMoney = (amount: number) => formatCurrency(amount);
 
+  const applyFilters = useCallback((input: Order[]): Order[] => {
+    const search = searchTerm.trim().toLowerCase();
+    return input.filter((order) => {
+      if (statusFilter !== 'all' && order.status !== statusFilter) return false;
+      if (orderTypeFilter !== 'all' && order.order_type !== orderTypeFilter) return false;
+      if (dateFrom && order.created_at.slice(0, 10) < dateFrom) return false;
+      if (dateTo && order.created_at.slice(0, 10) > dateTo) return false;
+
+      if (!search) return true;
+      const haystack = [
+        order.order_number,
+        order.customer_name,
+        order.customer_phone,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }, [statusFilter, orderTypeFilter, dateFrom, dateTo, searchTerm]);
+
+  const paginateOrders = useCallback((input: Order[]) => {
+    const start = (currentPage - 1) * pageSize;
+    return input.slice(start, start + pageSize);
+  }, [currentPage, pageSize]);
+
   const fetchOrders = useCallback(async () => {
     if (!window.electron?.ipcRenderer) {
       console.error('[OrdersPage] Electron API not available');
@@ -112,33 +256,45 @@ const OrdersPage: React.FC = () => {
 
     setSyncing(true);
     try {
-      const options: FetchOrdersOptions = {
-        limit: pageSize,
-        offset: (currentPage - 1) * pageSize,
-      };
+      const remoteOptions: FetchOrdersOptions = { limit: 500, offset: 0 };
+      if (statusFilter !== 'all') remoteOptions.status = statusFilter;
+      if (orderTypeFilter !== 'all') remoteOptions.order_type = orderTypeFilter;
+      if (searchTerm) remoteOptions.search = searchTerm;
+      if (dateFrom) remoteOptions.date_from = dateFrom;
+      if (dateTo) remoteOptions.date_to = dateTo;
 
-      if (statusFilter !== 'all') options.status = statusFilter;
-      if (orderTypeFilter !== 'all') options.order_type = orderTypeFilter;
-      if (searchTerm) options.search = searchTerm;
-      if (dateFrom) options.date_from = dateFrom;
-      if (dateTo) options.date_to = dateTo;
+      const localRaw = await window.electron.ipcRenderer.invoke('order:get-all');
+      const localOrders = (Array.isArray(localRaw) ? localRaw : [])
+        .map((entry: any) => normalizeOrder(entry, 'local'))
+        .filter((entry: Order | null): entry is Order => !!entry);
 
-      console.log('[OrdersPage] Fetching orders with options:', options);
-      const result = await window.electron.ipcRenderer.invoke('sync:fetch-orders', options);
-      console.log('[OrdersPage] Fetch result:', {
-        success: result.success,
-        ordersCount: result.orders?.length,
-        total: result.total,
-        error: result.error
-      });
+      let mergedOrders = localOrders;
+      let filtered = applyFilters(mergedOrders).sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+      setTotal(filtered.length);
+      setOrders(paginateOrders(filtered));
 
-      if (result.success) {
-        setOrders(result.orders || []);
-        setTotal(result.total || 0);
-        console.log('[OrdersPage] Orders set:', result.orders?.length || 0);
-      } else {
-        console.error('[OrdersPage] Failed to fetch orders:', result.error);
-        toast.error(result.error || 'Failed to load orders');
+      try {
+        const remoteResult = await window.electron.ipcRenderer.invoke('sync:fetch-orders', remoteOptions);
+        if (remoteResult?.success) {
+          const remoteOrders = (Array.isArray(remoteResult.orders) ? remoteResult.orders : [])
+            .map((entry: any) => normalizeOrder(entry, 'remote'))
+            .filter((entry: Order | null): entry is Order => !!entry);
+          mergedOrders = mergeHybridOrders(localOrders, remoteOrders);
+          filtered = applyFilters(mergedOrders).sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+          );
+          setTotal(filtered.length);
+          setOrders(paginateOrders(filtered));
+        } else if (localOrders.length === 0) {
+          toast.error(remoteResult?.error || 'Failed to load remote orders');
+        }
+      } catch (remoteError) {
+        console.warn('[OrdersPage] Remote fetch failed, using local orders only', remoteError);
+        if (localOrders.length === 0) {
+          toast.error('Failed to load orders');
+        }
       }
     } catch (error) {
       console.error('[OrdersPage] Exception while fetching orders:', error);
@@ -147,7 +303,15 @@ const OrdersPage: React.FC = () => {
       setLoading(false);
       setSyncing(false);
     }
-  }, [statusFilter, orderTypeFilter, searchTerm, dateFrom, dateTo, currentPage, pageSize, t]);
+  }, [
+    statusFilter,
+    orderTypeFilter,
+    searchTerm,
+    dateFrom,
+    dateTo,
+    applyFilters,
+    paginateOrders,
+  ]);
 
   useEffect(() => {
     fetchOrders();
@@ -438,4 +602,3 @@ const OrdersPage: React.FC = () => {
 };
 
 export default OrdersPage;
-

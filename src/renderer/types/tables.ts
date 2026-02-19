@@ -2,7 +2,7 @@
 // Shared between components for table management
 
 // Import canonical TableStatus from shared types
-import type { TableStatus as CanonicalTableStatus } from '../../../../shared/types/table-status';
+import type { TableStatus as CanonicalTableStatus } from '../../repo-shared/types/table-status';
 
 // Re-export canonical TableStatus
 export type TableStatus = CanonicalTableStatus;

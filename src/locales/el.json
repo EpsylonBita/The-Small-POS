@@ -600,7 +600,6 @@
       "withoutHint": "Σημειώστε υλικά για αφαίρεση (χωρίς χρέωση)",
       "withoutLabel": "Χωρίς",
       "withoutCount": "Χωρίς: {{count}} υλικό/ά",
-      "ingredients": "υλικά",
       "updateItem": "Ενημέρωση Προϊόντος"
     },
     "ingredients": {

@@ -62,6 +62,7 @@ interface DiscoveredPrinter {
   model?: string
   manufacturer?: string
   isConfigured: boolean
+  source?: string
 }
 
 interface PrinterDiagnostics {
@@ -81,6 +82,61 @@ interface PrinterDiagnostics {
 interface Props {
   isOpen: boolean
   onClose: () => void
+}
+
+const PRINTER_TYPES: PrinterType[] = ['network', 'bluetooth', 'usb', 'wifi', 'system']
+
+const normalizePrinterType = (value: unknown): PrinterType => {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if ((PRINTER_TYPES as string[]).includes(raw)) return raw as PrinterType
+  return 'system'
+}
+
+const formatPrinterTypeLabel = (value: unknown): string => {
+  return normalizePrinterType(value).toUpperCase()
+}
+
+const normalizeDiscoveredPrinterEntry = (raw: any): DiscoveredPrinter | null => {
+  if (!raw || typeof raw !== 'object') return null
+
+  const type = normalizePrinterType(raw.type)
+  const name =
+    (typeof raw.name === 'string' && raw.name.trim()) ||
+    (typeof raw.printerName === 'string' && raw.printerName.trim()) ||
+    ''
+  const addressCandidate =
+    (typeof raw.address === 'string' && raw.address.trim()) ||
+    (typeof raw.ip === 'string' && raw.ip.trim()) ||
+    (typeof raw.host === 'string' && raw.host.trim()) ||
+    name
+  if (!name && !addressCandidate) return null
+
+  const parsedPort = Number(raw.port)
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : undefined
+
+  return {
+    name: name || addressCandidate,
+    type,
+    address: addressCandidate || name,
+    port,
+    model: typeof raw.model === 'string' ? raw.model : undefined,
+    manufacturer: typeof raw.manufacturer === 'string' ? raw.manufacturer : undefined,
+    isConfigured: Boolean(raw.isConfigured),
+    source: typeof raw.source === 'string' ? raw.source : undefined,
+  }
+}
+
+const dedupeDiscoveredPrinters = (printers: DiscoveredPrinter[]): DiscoveredPrinter[] => {
+  const seen = new Set<string>()
+  const out: DiscoveredPrinter[] = []
+  for (const printer of printers) {
+    const key = `${normalizePrinterType(printer.type)}:${(printer.address || '').trim().toLowerCase()}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(printer)
+    }
+  }
+  return out
 }
 
 // View modes for the modal
@@ -183,7 +239,17 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     try {
       const result = await api?.printerDiscover?.(types)
       if (result?.success) {
-        setDiscoveredPrinters(result.printers || [])
+        const rawPrinters = Array.isArray(result.printers) ? result.printers : []
+        const normalizedPrinters = rawPrinters
+          .map((entry: unknown) => normalizeDiscoveredPrinterEntry(entry))
+          .filter((printer: DiscoveredPrinter | null): printer is DiscoveredPrinter => Boolean(printer))
+        if (normalizedPrinters.length !== rawPrinters.length) {
+          console.warn('[PrinterSettings] Filtered malformed discovery entries', {
+            received: rawPrinters.length,
+            accepted: normalizedPrinters.length,
+          })
+        }
+        setDiscoveredPrinters(normalizedPrinters)
         setViewMode('discover')
       } else {
         toast.error(result?.error || t('settings.printer.discoveryFailed'))
@@ -202,23 +268,93 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     try {
       console.log('[PrinterSettings] Scanning for Bluetooth devices...')
 
-      // Call the updated handler that scans Windows paired devices
-      const result = await api?.printerDiscover?.(['bluetooth'])
+      // 1) Native scan via IPC
+      const nativeResult = await api?.printerDiscover?.(['bluetooth'])
+      if (nativeResult && nativeResult.success === false) {
+        toast.error(nativeResult.error || t('settings.printer.bluetoothDiscoveryFailed'))
+        return
+      }
 
-      if (result?.success) {
-        const btDevices = result.printers || []
-        console.log('[PrinterSettings] Found Bluetooth devices:', btDevices)
+      const nativePrinters = (Array.isArray(nativeResult?.printers) ? nativeResult.printers : [])
+        .map((entry: unknown) =>
+          normalizeDiscoveredPrinterEntry({
+            ...(entry as Record<string, unknown>),
+            source: (entry as any)?.source || 'native',
+          })
+        )
+        .filter((printer: DiscoveredPrinter | null): printer is DiscoveredPrinter => Boolean(printer))
 
-        if (btDevices.length > 0) {
-          // Replace discovered printers with Bluetooth results
-          setDiscoveredPrinters(btDevices)
-          setViewMode('discover')
-          toast.success(t('settings.printer.bluetoothDeviceFound', { count: btDevices.length }))
+      console.log('[PrinterSettings] Native Bluetooth scan results:', {
+        requested: 'bluetooth',
+        received: Array.isArray(nativeResult?.printers) ? nativeResult.printers.length : 0,
+        normalized: nativePrinters.length,
+      })
+
+      let webFallbackPrinters: DiscoveredPrinter[] = []
+
+      // 2) Web Bluetooth fallback only when native found nothing
+      if (nativePrinters.length === 0) {
+        const bluetoothStatus = await getBluetoothStatus()
+        if (!bluetoothStatus.available) {
+          console.warn('[PrinterSettings] Web Bluetooth unavailable for fallback:', bluetoothStatus.error)
+          toast.error(
+            bluetoothStatus.error ||
+            t(
+              'settings.printer.bluetoothUnavailable',
+              'Bluetooth is not available. Ensure Bluetooth is enabled and permissions are granted.'
+            )
+          )
+          return
         } else {
-          toast(t('settings.printer.noBluetoothDevicesFound'), { icon: <Info className="w-4 h-4 text-blue-500" /> })
+          try {
+            const webDevices = await discoverBluetoothPrinters()
+            webFallbackPrinters = webDevices
+              .map((entry: unknown) =>
+                normalizeDiscoveredPrinterEntry({
+                  ...(entry as Record<string, unknown>),
+                  source: 'web-bluetooth',
+                })
+              )
+              .filter((printer: DiscoveredPrinter | null): printer is DiscoveredPrinter => Boolean(printer))
+            console.log('[PrinterSettings] Web Bluetooth fallback results:', {
+              received: webDevices.length,
+              normalized: webFallbackPrinters.length,
+            })
+          } catch (fallbackError: any) {
+            const message = fallbackError?.message || String(fallbackError || '')
+            console.error('[PrinterSettings] Web Bluetooth fallback failed:', fallbackError)
+            if (/permission denied|notallowed|securityerror/i.test(message)) {
+              toast.error(
+                t(
+                  'settings.printer.bluetoothPermissionDenied',
+                  'Bluetooth permission denied. Allow access and try again.'
+                )
+              )
+            } else {
+              toast.error(
+                message ||
+                t('settings.printer.bluetoothDiscoveryFailed', 'Bluetooth discovery failed')
+              )
+            }
+            return
+          }
         }
+      }
+
+      const merged = dedupeDiscoveredPrinters([...nativePrinters, ...webFallbackPrinters])
+      console.log('[PrinterSettings] Final Bluetooth discovery payload:', {
+        native: nativePrinters.length,
+        webFallback: webFallbackPrinters.length,
+        merged: merged.length,
+        sources: merged.map((p) => p.source || 'unknown'),
+      })
+
+      if (merged.length > 0) {
+        setDiscoveredPrinters(merged)
+        setViewMode('discover')
+        toast.success(t('settings.printer.bluetoothDeviceFound', { count: merged.length }))
       } else {
-        toast.error(result?.error || t('settings.printer.bluetoothDiscoveryFailed'))
+        toast(t('settings.printer.noBluetoothDevicesFound'), { icon: <Info className="w-4 h-4 text-blue-500" /> })
       }
     } catch (e: any) {
       console.error('Bluetooth discovery failed:', e)
@@ -604,7 +740,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                       )}
                     </div>
                     <div className="text-xs liquid-glass-modal-text-muted">
-                      {printer.type.toUpperCase()} • {getRoleLabel(printer.role)}
+                      {formatPrinterTypeLabel(printer.type)} • {getRoleLabel(printer.role)}
                       {status && ` • ${getStateLabel(status.state)}`}
                       {status?.queueLength > 0 && ` • ${status.queueLength} ${t('settings.printer.jobsInQueue')}`}
                     </div>
@@ -679,7 +815,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               <div>
                 <div className="font-medium liquid-glass-modal-text">{printer.name}</div>
                 <div className="text-xs liquid-glass-modal-text-muted">
-                  {printer.type.toUpperCase()} • {printer.address}
+                  {formatPrinterTypeLabel(printer.type)} • {printer.address}
                   {printer.port && `:${printer.port}`}
                   {printer.model && ` • ${printer.model}`}
                 </div>
@@ -1060,7 +1196,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             {/* Connection Details */}
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div className="liquid-glass-modal-text-muted">{t('settings.printer.connectionType')}:</div>
-              <div className="liquid-glass-modal-text">{diagnostics.connectionType.toUpperCase()}</div>
+              <div className="liquid-glass-modal-text">{formatPrinterTypeLabel(diagnostics.connectionType)}</div>
 
               {diagnostics.connectionLatencyMs !== undefined && (
                 <>

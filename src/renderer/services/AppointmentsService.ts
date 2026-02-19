@@ -292,7 +292,8 @@ class AppointmentsService {
       const params = new URLSearchParams();
 
       if (filters?.dateFrom) {
-        params.set('date', filters.dateFrom.split('T')[0]); // API expects date only
+        // dateFrom is already YYYY-MM-DD local date string (no UTC conversion needed)
+        params.set('date', filters.dateFrom);
       }
       if (filters?.statusFilter && filters.statusFilter !== 'all') {
         params.set('status', filters.statusFilter);
@@ -349,11 +350,14 @@ class AppointmentsService {
         .eq('branch_id', this.branchId)
         .order('start_time', { ascending: true });
 
+      // dateFrom/dateTo are YYYY-MM-DD local date strings — build UTC boundaries
       if (filters?.dateFrom) {
-        query = query.gte('start_time', filters.dateFrom);
+        const dayStart = new Date(`${filters.dateFrom}T00:00:00`); // Local midnight
+        query = query.gte('start_time', dayStart.toISOString());
       }
       if (filters?.dateTo) {
-        query = query.lte('start_time', filters.dateTo);
+        const dayEnd = new Date(`${filters.dateTo}T23:59:59.999`); // Local end of day
+        query = query.lte('start_time', dayEnd.toISOString());
       }
       if (filters?.statusFilter && filters.statusFilter !== 'all') {
         query = query.eq('status', filters.statusFilter);
@@ -386,13 +390,14 @@ class AppointmentsService {
    */
   async getTodaysAppointments(): Promise<Appointment[]> {
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const dateStr = `${yyyy}-${mm}-${dd}`;
 
     return this.fetchAppointments({
-      dateFrom: today.toISOString(),
-      dateTo: tomorrow.toISOString(),
+      dateFrom: dateStr,
+      dateTo: dateStr,
     });
   }
 

@@ -7,7 +7,7 @@
  * Task 17.2: Create POS appointments interface
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
 import {
   appointmentsService,
@@ -108,27 +108,24 @@ export function useAppointments({
     fetchAppointments();
   }, [fetchAppointments]);
 
-  // Real-time subscription
+  // Polling refresh — refetch with the CURRENT date filters every 30s
+  // (replaces the old unfiltered subscribeToUpdates which leaked all-date data)
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
   useEffect(() => {
     if (!enableRealtime || !branchId || branchId.trim() === '') return;
 
-    appointmentsService.subscribeToUpdates((updatedAppointment) => {
-      setAppointments((prev) => {
-        const index = prev.findIndex((a) => a.id === updatedAppointment.id);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = updatedAppointment;
-          return updated;
-        }
-        return [...prev, updatedAppointment].sort(
-          (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
-        );
-      });
-    });
+    const intervalId = setInterval(async () => {
+      try {
+        const data = await appointmentsService.fetchAppointments(filtersRef.current);
+        setAppointments(data);
+      } catch (err) {
+        console.error('[useAppointments] Polling refresh error:', err);
+      }
+    }, 30000);
 
-    return () => {
-      appointmentsService.unsubscribeFromUpdates();
-    };
+    return () => clearInterval(intervalId);
   }, [branchId, enableRealtime]);
 
   // Calculate stats

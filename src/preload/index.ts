@@ -442,6 +442,7 @@ const electronAPI = {
         'menu:get-ingredients',
         'menu:get-subcategory-ingredients',
         'menu:get-combos',
+        'menu:sync',
         'menu:update-category',
         'menu:update-subcategory',
         'menu:update-ingredient',

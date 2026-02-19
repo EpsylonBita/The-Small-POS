@@ -17,7 +17,7 @@ import { menuService } from '../../services/MenuService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
-import { Pencil, Search } from 'lucide-react';
+import { Pencil } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import { posApiPost } from '../../utils/api-helpers';
 
@@ -80,7 +80,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const { staff } = useShift();
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
-  const [menuSearchTerm, setMenuSearchTerm] = useState<string>("");
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
   const [cartItems, setCartItems] = useState<any[]>([]);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -910,18 +909,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0">
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-            <div className="px-2 sm:px-4 pt-2 sm:pt-3">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 liquid-glass-modal-text-muted" />
-                <input
-                  type="text"
-                  value={menuSearchTerm}
-                  onChange={(e) => setMenuSearchTerm(e.target.value)}
-                  placeholder={t('modals.menu.searchSubcategories', { defaultValue: 'Search subcategories...' })}
-                  className="w-full pl-9 pr-3 py-2 rounded-lg border liquid-glass-modal-border liquid-glass-modal-card liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                />
-              </div>
-            </div>
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
               onCategoryChange={setSelectedCategory}
@@ -933,7 +920,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             <MenuItemGrid
               selectedCategory={selectedCategory}
               selectedSubcategory={selectedSubcategory}
-              searchTerm={menuSearchTerm}
               orderType={orderType}
               onItemSelect={setSelectedMenuItem}
               onQuickAdd={handleQuickAdd}

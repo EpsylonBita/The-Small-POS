@@ -457,12 +457,33 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
       }
 
-      console.log('[loadStaff] Final staff list:', staffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
+      const normalizedStaffList: StaffMember[] = (staffList || [])
+        .map((staff: any) => {
+          const fullName = `${staff?.first_name ?? ''} ${staff?.last_name ?? ''}`.trim();
+          const name = (staff?.name || fullName || 'Staff').toString().trim() || 'Staff';
+          return {
+            ...staff,
+            id: String(staff?.id ?? '').trim(),
+            name,
+            first_name: String(staff?.first_name ?? ''),
+            last_name: String(staff?.last_name ?? ''),
+            email: String(staff?.email ?? ''),
+            role_id: String(staff?.role_id ?? ''),
+            role_name: String(staff?.role_name ?? 'staff'),
+            role_display_name: String(staff?.role_display_name ?? 'Staff'),
+            roles: Array.isArray(staff?.roles) ? staff.roles : [],
+            can_login_pos: staff?.can_login_pos ?? true,
+            is_active: staff?.is_active ?? true,
+          };
+        })
+        .filter((staff) => !!staff.id);
+
+      console.log('[loadStaff] Final staff list:', normalizedStaffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
 
       // Create a new array reference to trigger React re-render
-      setAvailableStaff([...staffList]);
+      setAvailableStaff([...normalizedStaffList]);
       try {
-        await loadActiveShiftsForStaff(staffList);
+        await loadActiveShiftsForStaff(normalizedStaffList);
       } catch (e) {
         console.warn('Active shifts load failed', e);
       }
@@ -1633,7 +1654,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           const bActive = staffActiveShifts.has(b.id);
                           if (aActive && !bActive) return -1;
                           if (!aActive && bActive) return 1;
-                          return a.name.localeCompare(b.name);
+                          const aName = (a?.name || `${a?.first_name ?? ''} ${a?.last_name ?? ''}` || 'Staff').trim();
+                          const bName = (b?.name || `${b?.first_name ?? ''} ${b?.last_name ?? ''}` || 'Staff').trim();
+                          return aName.localeCompare(bName);
                         })
                         .map((staffMember) => {
                           const isActive = staffActiveShifts.has(staffMember.id);

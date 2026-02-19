@@ -12,4 +12,4 @@
 // Service: salon, spa, barbershop, beauty_salon, wellness, fitness, clinic, dental, medical_clinic, veterinary, physiotherapy
 // Retail: retail, shop, boutique, convenience, grocery
 // Business Models: food_truck, chain, franchise
-export type { BusinessType } from '../../../../shared/types/organization';
+export type { BusinessType, BillingCycle } from '../../../../shared/types/organization';

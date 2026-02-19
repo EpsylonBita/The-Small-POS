@@ -608,7 +608,6 @@
       "withoutHint": "Mark ingredients to remove (no price change)",
       "withoutLabel": "Without",
       "withoutCount": "Without: {{count}} item(s)",
-      "ingredients": "ingredients",
       "updateItem": "Update Item"
     },
     "ingredients": {

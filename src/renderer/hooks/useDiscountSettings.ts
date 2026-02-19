@@ -86,39 +86,6 @@ export function useDiscountSettings(): UseDiscountSettingsReturn {
     fetchSettings();
   }, []);
 
-  // Refresh settings when terminal settings are updated from sync/config changes.
-  useEffect(() => {
-    const unsubscribe = (window as any)?.electronAPI?.onTerminalSettingsUpdated?.(() => {
-      fetchSettings();
-    });
-
-    return () => {
-      if (typeof unsubscribe === 'function') {
-        unsubscribe();
-      }
-    };
-  }, []);
-
-  // Also react to granular settings sync events emitted during admin sync.
-  useEffect(() => {
-    const ipc = (window as any)?.electronAPI?.ipcRenderer;
-    if (!ipc?.on) {
-      return;
-    }
-
-    const handleSettingsUpdate = (payload: any) => {
-      const category = payload?.type;
-      if (!category || category === 'discount' || category === 'terminal' || category === 'payment') {
-        fetchSettings();
-      }
-    };
-
-    ipc.on('settings:update', handleSettingsUpdate);
-    return () => {
-      ipc.removeListener?.('settings:update', handleSettingsUpdate);
-    };
-  }, []);
-
   const refreshSettings = async () => {
     await fetchSettings();
   };

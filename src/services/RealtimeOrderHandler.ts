@@ -446,7 +446,7 @@ export class RealtimeOrderHandler {
         try {
           const dbService = this.dbManager.getDatabaseService()
           const settingsService = dbService.settings
-          const lastZReportTimestamp = settingsService?.getSetting<string>('system', 'last_z_report_timestamp')
+          const lastZReportTimestamp = (settingsService?.getSetting as any)?.('system', 'last_z_report_timestamp') as string | undefined
 
           if (lastZReportTimestamp) {
             const orderCreatedAt = payload.old?.created_at
@@ -562,7 +562,7 @@ export class RealtimeOrderHandler {
     // Skip orders created BEFORE the last Z-Report timestamp
     // This prevents old orders from being synced back after Z-Report clears them
     // Even if is_closed wasn't set properly on the server, we use local timestamp as source of truth
-    const lastZReportTimestamp = settingsService?.getSetting<string>('system', 'last_z_report_timestamp')
+    const lastZReportTimestamp = (settingsService?.getSetting as any)?.('system', 'last_z_report_timestamp') as string | undefined
     if (lastZReportTimestamp && order.created_at) {
       const orderCreatedAt = new Date(order.created_at).getTime()
       const zReportTime = new Date(lastZReportTimestamp).getTime()

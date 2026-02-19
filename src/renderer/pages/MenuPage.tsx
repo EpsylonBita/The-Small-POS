@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useDeferredValue } from 'react';
+import React, { useState, useEffect, useDeferredValue, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -70,6 +70,7 @@ const MenuPage: React.FC = () => {
   const [isLoadingMenu, setIsLoadingMenu] = useState(true);
   const [menuError, setMenuError] = useState<POSError | null>(null);
   const [hasLoadedMenu, setHasLoadedMenu] = useState(false);
+  const bootstrapSyncAttemptedRef = useRef(false);
 
   // Tax rate from terminal settings (percentage, e.g., 24 for 24%)
   const taxRatePercentage = getSetting<number>('tax', 'tax_rate_percentage', 24) ?? 24;
@@ -119,6 +120,37 @@ const MenuPage: React.FC = () => {
     }
   }, [searchParams]);
 
+  const buildCategoryObjects = (categoriesData: any[]) => {
+    const getCategoryIcon = (name: string): string => {
+      const iconMap: Record<string, string> = {
+        'crepes': '🥞',
+        'waffles': '🧇',
+        'toasts': '🍞',
+        'beverages': '🥤',
+        'desserts': '🧁',
+        'salads': '🥗',
+        'my crepe': '🎨',
+        'my waffle': '🎨',
+        'my toast': '🎨'
+      };
+      return iconMap[name.toLowerCase()] || '🍽️';
+    };
+
+    const defaultCategories = [
+      { id: "all", name: t('menu.categories.allItems'), icon: "🍽️" },
+      { id: "featured", name: t('menu.categories.featured'), icon: "⭐" }
+    ];
+
+    return [
+      ...defaultCategories,
+      ...categoriesData.map((cat: any) => ({
+        id: cat.id,
+        name: cat.name || cat.name_en || 'Unknown',
+        icon: getCategoryIcon(cat.name || cat.name_en || 'unknown')
+      }))
+    ];
+  };
+
   // Load menu data from Supabase
   useEffect(() => {
     const loadMenuData = async () => {
@@ -129,44 +161,37 @@ const MenuPage: React.FC = () => {
         // Use the singleton menuService instance
 
         // Load menu items
-        const items = await menuService.getMenuItems();
-        setMenuItems(items);
+        let items = await menuService.getMenuItems();
 
         // Load categories as objects with {id, name, icon}
-        const categoriesData = await menuService.getMenuCategories();
+        let categoriesData = await menuService.getMenuCategories();
 
+        if (items.length === 0 && !bootstrapSyncAttemptedRef.current) {
+          bootstrapSyncAttemptedRef.current = true;
+          console.warn('[MenuPage] Initial menu cache is empty, attempting bootstrap sync.');
 
-        // Helper to get category icon
-        const getCategoryIcon = (name: string): string => {
-          const iconMap: Record<string, string> = {
-            'crepes': '🥞',
-            'waffles': '🧇',
-            'toasts': '🍞',
-            'beverages': '🥤',
-            'desserts': '🧁',
-            'salads': '🥗',
-            'my crepe': '🎨',
-            'my waffle': '🎨',
-            'my toast': '🎨'
-          };
-          return iconMap[name.toLowerCase()] || '🍽️';
-        };
+          const bootstrapResult = await menuService.syncMenu();
+          if (!bootstrapResult.success) {
+            console.warn('[MenuPage] Bootstrap menu sync failed:', bootstrapResult);
+            if (bootstrapResult.errorCode === 'invalid_terminal_credentials') {
+              toast.error('Terminal credentials are invalid. Please reconnect this terminal.');
+            }
+            throw new Error(bootstrapResult.error || 'Menu bootstrap sync failed');
+          }
 
-        // Default categories
-        const defaultCategories = [
-          { id: "all", name: t('menu.categories.allItems'), icon: "🍽️" },
-          { id: "featured", name: t('menu.categories.featured'), icon: "⭐" }
-        ];
+          items = await menuService.getMenuItems();
+          categoriesData = await menuService.getMenuCategories();
 
-        // Combine default categories with database categories
-        const categoryObjects = [
-          ...defaultCategories,
-          ...categoriesData.map((cat: any) => ({
-            id: cat.id,
-            name: cat.name || cat.name_en || 'Unknown',
-            icon: getCategoryIcon(cat.name || cat.name_en || 'unknown')
-          }))
-        ];
+          if (items.length === 0) {
+            console.warn('[MenuPage] Menu remains empty after bootstrap sync.', {
+              version: bootstrapResult.version,
+              counts: bootstrapResult.counts,
+            });
+          }
+        }
+
+        setMenuItems(items);
+        const categoryObjects = buildCategoryObjects(categoriesData);
 
         setCategories(categoryObjects);
 
@@ -446,47 +471,26 @@ const MenuPage: React.FC = () => {
       if (!hasLoadedMenu) setIsLoadingMenu(true);
       toast.loading(t('menu.sync.syncing'), { id: 'sync-menu' });
 
-      // Clear cache
-      menuService.clearCache();
+      const syncResult = await menuService.syncMenu();
+      if (!syncResult.success) {
+        if (syncResult.errorCode === 'invalid_terminal_credentials') {
+          toast.error('Terminal credentials are invalid. Please reconnect this terminal.', { id: 'sync-menu' });
+          return;
+        }
+        throw new Error(syncResult.error || 'Menu sync failed');
+      }
 
-      // Reload data
       const items = await menuService.getMenuItems();
-      setMenuItems(items);
-
       const categoriesData = await menuService.getMenuCategories();
+      setMenuItems(items);
+      setCategories(buildCategoryObjects(categoriesData));
 
-      // Helper to get category icon (same as in loadMenuData)
-      const getCategoryIcon = (name: string): string => {
-        const iconMap: Record<string, string> = {
-          'crepes': '🥞',
-          'waffles': '🧇',
-          'toasts': '🍞',
-          'beverages': '🥤',
-          'desserts': '🧁',
-          'salads': '🥗',
-          'my crepe': '🎨',
-          'my waffle': '🎨',
-          'my toast': '🎨'
-        };
-        return iconMap[name.toLowerCase()] || '🍽️';
-      };
-
-      // Default categories (same as in loadMenuData)
-      const defaultCategories = [
-        { id: "all", name: t('menu.categories.allItems'), icon: "🍽️" },
-        { id: "featured", name: t('menu.categories.featured'), icon: "⭐" }
-      ];
-
-      // Combine default categories with database categories
-      const categoryObjects = [
-        ...defaultCategories,
-        ...categoriesData.map((cat: any) => ({
-          id: cat.id,
-          name: cat.name || cat.name_en || 'Unknown',
-          icon: getCategoryIcon(cat.name || cat.name_en || 'unknown')
-        }))
-      ];
-      setCategories(categoryObjects);
+      if (items.length === 0) {
+        console.warn('[MenuPage] Menu is still empty after manual sync.', {
+          version: syncResult.version,
+          counts: syncResult.counts,
+        });
+      }
 
       toast.success(t('menu.sync.syncSuccess'), { id: 'sync-menu' });
     } catch (error) {

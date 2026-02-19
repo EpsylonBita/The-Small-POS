@@ -19,19 +19,33 @@ const DESKTOP_OPTIONS = {
   },
 };
 
+// Safe accessor for process.env (not available in Vite browser runtime)
+function getEnv(key: string): string | undefined {
+  // Vite injects import.meta.env for VITE_* prefixed vars
+  try {
+    const meta = (import.meta as any).env;
+    if (meta && meta[key]) return meta[key];
+  } catch { /* not in a Vite context */ }
+  // Node.js / Electron
+  if (typeof process !== 'undefined' && process.env) {
+    return process.env[key];
+  }
+  return undefined;
+}
+
 // Get Supabase configuration from environment
 export function getSupabaseConfig(platform: string = 'desktop') {
   const envUrl = runtimeSupabaseUrlOverride ||
-                 process.env['SUPABASE_URL'] || 
-                 process.env['VITE_SUPABASE_URL'] ||
-                 process.env['NEXT_PUBLIC_SUPABASE_URL'];
-                 
-  const envAnonKey = runtimeSupabaseAnonKeyOverride ||
-                     process.env['SUPABASE_ANON_KEY'] || 
-                     process.env['VITE_SUPABASE_ANON_KEY'] ||
-                     process.env['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
+                 getEnv('SUPABASE_URL') ||
+                 getEnv('VITE_SUPABASE_URL') ||
+                 getEnv('NEXT_PUBLIC_SUPABASE_URL');
 
-  const envServiceKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  const envAnonKey = runtimeSupabaseAnonKeyOverride ||
+                     getEnv('SUPABASE_ANON_KEY') ||
+                     getEnv('VITE_SUPABASE_ANON_KEY') ||
+                     getEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+
+  const envServiceKey = getEnv('SUPABASE_SERVICE_ROLE_KEY');
   const isElectron = typeof process !== 'undefined' && !!(process as any).versions?.electron;
   // SECURITY: Never expose service role key inside Electron (desktop) builds.
   const exposeServiceRoleKey = !!envServiceKey && !isElectron;
