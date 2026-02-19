@@ -13,6 +13,7 @@ export type {
   EnabledModule as SharedEnabledModule,
   ModuleResolutionResult as SharedModuleResolutionResult,
   ModuleResolutionOptions,
+  BusinessCategory,
 } from '../../../../shared/types/modules';
 
 // Re-export BusinessType from shared (via organization)

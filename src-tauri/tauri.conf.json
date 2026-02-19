@@ -1,0 +1,63 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri-v2/main/core/tauri-config-schema/schema.json",
+  "productName": "The Small POS",
+  "version": "1.2.0",
+  "identifier": "com.thesmall.pos",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "The Small POS",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 600,
+        "decorations": false,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.supabase.co https://*.supabase.in; connect-src 'self' https://*.supabase.co https://*.supabase.in wss://*.supabase.co; font-src 'self' data:; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "The Small POS",
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma"
+      }
+    },
+    "publisher": "The Small Team"
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    },
+    "updater": {
+      "pubkey": "__TAURI_UPDATER_PUBKEY__",
+      "endpoints": [
+        "https://github.com/EpsylonBita/The-Small-POS/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

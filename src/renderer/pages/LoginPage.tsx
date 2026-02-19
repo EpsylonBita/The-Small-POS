@@ -34,7 +34,8 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     useEffect(() => {
         const loadVersion = async () => {
             try {
-                const version = await (window as any).electronAPI?.ipcRenderer?.invoke('app:get-version');
+                const result = await (window as any).electronAPI?.ipcRenderer?.invoke('app:get-version');
+                const version = typeof result === 'string' ? result : result?.version;
                 if (version) {
                     setAppVersion(version);
                 }

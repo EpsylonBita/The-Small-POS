@@ -518,16 +518,38 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         });
       }
 
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const normalizedItems = orderData.items.map((item: any) => ({
+        menu_item_id: item.menuItemId || item.menu_item_id || item.id, // Use menuItemId (Supabase UUID) instead of id (cart ID)
+        quantity: item.quantity,
+        price: item.price,
+        customizations: item.customizations || item.selectedIngredients || null,
+        notes: item.notes || item.special_instructions || null
+      }));
+      const invalidItems = normalizedItems.filter((item: any) => {
+        const id = typeof item.menu_item_id === 'string' ? item.menu_item_id.trim() : '';
+        return !uuidRegex.test(id);
+      });
+      if (invalidItems.length > 0) {
+        toast.error(
+          t(
+            'orderFlow.invalidCartItems',
+            'Order cannot be created because some cart items are not synced menu items. Sync menu and try again.'
+          )
+        );
+        setIsProcessingOrder(false);
+        return;
+      }
+
+      const clientRequestId =
+        globalThis.crypto?.randomUUID?.() ??
+        `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
       const orderToCreate = {
         // API required fields
         customer_id: selectedCustomer?.id !== 'pickup-customer' ? selectedCustomer?.id : null,
-        items: orderData.items.map((item: any) => ({
-          menu_item_id: item.menuItemId || item.menu_item_id || item.id, // Use menuItemId (Supabase UUID) instead of id (cart ID)
-          quantity: item.quantity,
-          price: item.price,
-          customizations: item.customizations || item.selectedIngredients || null,
-          notes: item.notes || item.special_instructions || null
-        })),
+        clientRequestId,
+        items: normalizedItems,
 
         // Use total_amount instead of total (matching shared types)
         total_amount: total_amount,
@@ -605,6 +627,24 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           ActivityTracker.trackOrderCreated(result.orderId || orderToCreate.orderNumber, total_amount)
           ActivityTracker.trackDiscount(Boolean(discountAmount), discountAmount, discountPercentage)
         } catch {}
+
+        // Record payment in local DB (fire-and-forget — don't block order flow)
+        if (orderData.paymentData && result.orderId) {
+          try {
+            await window.electronAPI.recordPayment({
+              orderId: result.orderId,
+              method: orderData.paymentData.method || 'cash',
+              amount: total_amount,
+              cashReceived: orderData.paymentData.cashReceived,
+              changeGiven: orderData.paymentData.change,
+              transactionRef: orderData.paymentData.transactionId,
+              staffId: staff?.staffId,
+              staffShiftId: activeShift?.id,
+            });
+          } catch (payErr) {
+            console.error('Failed to record payment:', payErr);
+          }
+        }
 
         // Record driver earnings for delivery orders
         if (selectedOrderType === 'delivery' && orderData.paymentData?.driverId && activeShift?.id) {

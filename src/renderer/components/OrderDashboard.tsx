@@ -21,6 +21,7 @@ import { LiquidGlassModal } from './ui/pos-glass-components';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
 import type { CreateReservationDto } from './tables';
 import { reservationsService } from '../services/ReservationsService';
+import { PrintPreviewModal } from './modals/PrintPreviewModal';
 import { Plus } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { useI18n } from '../contexts/i18n-context';
@@ -161,6 +162,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [isValidatingAddress, setIsValidatingAddress] = useState(false);
   const [addressValid, setAddressValid] = useState(false);
   const [deliveryZoneInfo, setDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
+
+  // Receipt preview state
+  const [receiptPreviewHtml, setReceiptPreviewHtml] = useState<string | null>(null);
+  const [showReceiptPreview, setShowReceiptPreview] = useState(false);
 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
@@ -1362,6 +1367,25 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         return;
       }
 
+      if (action === 'receipt') {
+        if (selectedOrders.length === 1) {
+          try {
+            const api = (window as any).electronAPI;
+            const result = await api?.getReceiptPreview(selectedOrders[0]);
+            if (result?.success && result?.html) {
+              setReceiptPreviewHtml(result.html);
+              setShowReceiptPreview(true);
+            } else {
+              toast.error(result?.error || 'Failed to generate receipt preview');
+            }
+          } catch (err) {
+            console.error('Receipt preview failed:', err);
+            toast.error('Failed to generate receipt preview');
+          }
+        }
+        return;
+      }
+
       if (action === 'assign') {
         // Driver assignment for delivery orders
         const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
@@ -2127,6 +2151,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         editOrderNumber={currentEditOrderNumber}
         initialCartItems={[]}
         onEditComplete={handleEditMenuComplete}
+      />
+
+      {/* Receipt Preview Modal */}
+      <PrintPreviewModal
+        isOpen={showReceiptPreview}
+        onClose={() => { setShowReceiptPreview(false); setReceiptPreviewHtml(null); }}
+        onPrint={() => { /* Physical printing not yet wired */ }}
+        title={t('orderDashboard.receiptPreview') || 'Receipt Preview'}
+        previewHtml={receiptPreviewHtml || ''}
       />
     </div>
   );

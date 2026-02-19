@@ -2,10 +2,11 @@ import React, { useState, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle, RotateCcw } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
+import RefundVoidModal from './RefundVoidModal';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -28,6 +29,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const { resolvedTheme } = useTheme();
   const [orderData, setOrderData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
 
   useEffect(() => {
     if (isOpen && orderId && !order) {
@@ -258,9 +260,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   );
 
+  const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
+
   const modalFooter = (
     <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
-      <div className="grid grid-cols-2 gap-3">
+      <div className={`grid gap-3 ${canRefund ? 'grid-cols-3' : 'grid-cols-2'}`}>
         {onPrintReceipt && (
           <button
             onClick={onPrintReceipt}
@@ -268,6 +272,15 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           >
             <Printer className="w-4 h-4" />
             {t('modals.orderDetails.printReceipt') || 'Print Receipt'}
+          </button>
+        )}
+        {canRefund && (
+          <button
+            onClick={() => setShowRefundModal(true)}
+            className="liquid-glass-modal-button w-full gap-2 bg-red-600/10 hover:bg-red-600/20 text-red-400 border-red-500/20"
+          >
+            <RotateCcw className="w-4 h-4" />
+            {t('modals.orderDetails.voidRefund', { defaultValue: 'Void / Refund' })}
           </button>
         )}
         <button
@@ -281,6 +294,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   );
 
   return (
+    <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
@@ -599,6 +613,22 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       </div>
 
     </LiquidGlassModal>
+
+    {showRefundModal && (
+      <RefundVoidModal
+        isOpen={showRefundModal}
+        onClose={() => setShowRefundModal(false)}
+        orderId={orderId}
+        orderTotal={total}
+        onRefundComplete={() => {
+          // Reload order data to reflect updated payment status
+          if (orderId && !order) {
+            loadOrderData();
+          }
+        }}
+      />
+    )}
+    </>
   );
 };
 

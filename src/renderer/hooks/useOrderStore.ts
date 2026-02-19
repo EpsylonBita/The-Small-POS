@@ -887,14 +887,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         const orderService = OrderService.getInstance();
 
-        // Wrap with timeout and retry
-        const newOrder = await withRetry(async () => {
-          return await withTimeout(
-            orderService.createOrder(orderData),
-            TIMING.ORDER_CREATE_TIMEOUT,
-            'Create order'
-          );
-        }, RETRY.MAX_RETRY_ATTEMPTS, RETRY.RETRY_DELAY_MS);
+        // Create is side-effectful; keep timeout protection but do not retry.
+        const newOrder = await withTimeout(
+          orderService.createOrder(orderData),
+          TIMING.ORDER_CREATE_TIMEOUT,
+          'Create order'
+        );
 
         // Don't add to state here - the order-created IPC event will handle it
         // This prevents duplicate orders in the list

@@ -5,6 +5,7 @@ import { environment, getApiUrl, isDevelopment } from '../config/environment';
 import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
 import { API } from '../shared/constants';
+import { isTauri } from '../lib/platform-detect';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -192,6 +193,7 @@ export class OrderService {
 
   // Fetch orders - prefer local (IPC) first, fallback to Admin API
   async fetchOrders(): Promise<Order[]> {
+    const _isTauri = isTauri();
     try {
       // 1) Try local-first via Electron IPC (renderer -> main -> SQLite)
       if (typeof window !== 'undefined') {
@@ -210,7 +212,16 @@ export class OrderService {
               debugLogger.info(`Fetched ${normalized.length} orders via IPC (local DB)`, 'OrderService');
               return normalized as Order[];
             }
+            // IPC returned non-array
+            if (_isTauri) {
+              throw ErrorFactory.system('IPC fetchOrders returned unexpected response');
+            }
           } catch (ipcErr) {
+            if (_isTauri) {
+              const errMsg = (ipcErr as any)?.message || String(ipcErr);
+              debugLogger.error('Tauri IPC fetchOrders failed', ipcErr, 'OrderService');
+              throw ErrorFactory.system(errMsg);
+            }
             debugLogger.warn('IPC fetchOrders failed, falling back to Admin API', ipcErr, 'OrderService');
           }
         }
@@ -226,7 +237,14 @@ export class OrderService {
         url += `?organization_id=${encodeURIComponent(organizationId)}`;
       }
 
-      const response = await fetch(url, { method: 'GET', headers });
+      const abortController = new AbortController();
+      const fetchTimer = setTimeout(() => abortController.abort(), 10000);
+      let response: Response;
+      try {
+        response = await fetch(url, { method: 'GET', headers, signal: abortController.signal });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           console.error('[OrderService] ❌ 401 Unauthorized. Credentials rejected.');
@@ -252,6 +270,7 @@ export class OrderService {
 
   // Update order status - local-first via IPC, fallback to Admin API
   async updateOrderStatus(orderId: string, status: OrderStatus): Promise<void> {
+    const _isTauri = isTauri();
     console.log('[RENDERER OrderService] 🔄 updateOrderStatus called', { orderId, status, timestamp: new Date().toISOString() });
     try {
       // 1) Try local-first via IPC
@@ -267,12 +286,19 @@ export class OrderService {
               console.log('[RENDERER OrderService] ✅ IPC update successful, returning');
               return;
             }
-            // If IPC returns error, log and continue to fallback
-            if (resp && resp.error) {
-              console.warn('[RENDERER OrderService] ⚠️ IPC returned error:', resp.error);
-              debugLogger.warn('IPC update-status returned error; will try Admin API', resp.error, 'OrderService');
+            // IPC returned a non-success response
+            const ipcError = resp?.error || 'IPC update-status returned unexpected response';
+            if (_isTauri) {
+              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
             }
+            console.warn('[RENDERER OrderService] ⚠️ IPC returned error:', ipcError);
+            debugLogger.warn('IPC update-status returned error; will try Admin API', ipcError, 'OrderService');
           } catch (ipcErr) {
+            if (_isTauri) {
+              const errMsg = (ipcErr as any)?.message || String(ipcErr);
+              debugLogger.error('Tauri IPC updateOrderStatus failed', ipcErr, 'OrderService');
+              throw ErrorFactory.system(errMsg);
+            }
             console.error('[RENDERER OrderService] ❌ IPC call threw error:', ipcErr);
             debugLogger.warn('IPC update-status failed; will try Admin API', ipcErr, 'OrderService');
           }
@@ -310,11 +336,19 @@ export class OrderService {
         requestBody.organization_id = organizationId;
       }
 
-      const response = await fetch(getApiUrl('/pos/orders'), {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify(requestBody),
-      });
+      const abortController = new AbortController();
+      const fetchTimer = setTimeout(() => abortController.abort(), 10000);
+      let response: Response;
+      try {
+        response = await fetch(getApiUrl('/pos/orders'), {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: abortController.signal,
+        });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
 
       if (!response.ok) {
         let bodyText = ''
@@ -366,6 +400,24 @@ export class OrderService {
   // Create new order - local-first via IPC, fallback to Admin API
   async createOrder(orderData: Partial<Order>): Promise<Order> {
     try {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      const requestId =
+        (orderData as any).clientRequestId ||
+        (orderData as any).client_request_id ||
+        (globalThis.crypto?.randomUUID?.() ??
+          `req-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+
+      const rawItems = orderData.items || []
+      const hasInvalidMenuItem = rawItems.some((item: any) => {
+        const menuItemId = item?.menu_item_id || item?.menuItemId || item?.id
+        return !menuItemId || !uuidRegex.test(String(menuItemId))
+      })
+      if (hasInvalidMenuItem) {
+        throw ErrorFactory.validation(
+          'Cannot create order: one or more cart items are not synced menu items (invalid menu_item_id).'
+        )
+      }
+
       // Normalize incoming orderData for main process expectations
       // NOTE: For delivery orders, if deliveryAddress is missing, the backend will attempt
       // to resolve the address from the customer record using customerId. Ensure that:
@@ -377,8 +429,10 @@ export class OrderService {
         customerName: (orderData as any).customerName ?? orderData.customer_name,
         customerPhone: orderData.customerPhone ?? orderData.customer_phone,
         customerEmail: (orderData as any).customerEmail ?? orderData.customer_email,
-        items: orderData.items || [],
+        items: rawItems,
         totalAmount: (orderData.totalAmount ?? orderData.total_amount) as number,
+        clientRequestId: requestId,
+        client_request_id: requestId,
         // Discount and fee fields
         subtotal: (orderData as any).subtotal ?? (orderData as any).total ?? null,
         discountAmount: (orderData as any).discountAmount ?? (orderData as any).discount_amount ?? 0,
@@ -397,27 +451,53 @@ export class OrderService {
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
       };
 
-      // 1) Try local-first via IPC
+      // 1) Try local-first via IPC (Tauri Rust backend or Electron main process)
+      const _isTauri = isTauri();
       if (typeof window !== 'undefined') {
         const api = (window as any).electronAPI;
         if (api?.invoke) {
           try {
             const resp: any = await api.invoke('order:create', { orderData: normalized });
-            // handleIPCError wrapper returns { success, data } where data contains { orderId }
-            // Also handle legacy format where orderId is directly on resp
-            const orderId = resp?.data?.orderId || resp?.orderId;
-            const isSuccess = resp?.success === true;
+            const ipcPayload = resp?.data ?? resp;
+            const orderId =
+              ipcPayload?.orderId ||
+              resp?.orderId ||
+              resp?.data?.orderId ||
+              resp?.order?.id ||
+              resp?.order?.orderId;
+            const isSuccess = resp?.success === true || ipcPayload?.success === true;
             if (isSuccess && orderId) {
-              const created: any = await api.invoke('order:get-by-id', { orderId });
-              if (created) {
-                debugLogger.info('Created order via IPC', { orderId }, 'OrderService');
-                return created as Order;
+              try {
+                const created: any = await api.invoke('order:get-by-id', { orderId });
+                if (created) {
+                  debugLogger.info('Created order via IPC', { orderId }, 'OrderService');
+                  return created as Order;
+                }
+              } catch {
+                // If fetch-by-id fails after a successful create, still return
+                // the created order identity and avoid triggering a second create.
               }
+              return {
+                ...(resp?.order || {}),
+                id: orderId,
+              } as Order;
             }
-            if (resp && resp.error) {
-              debugLogger.warn('IPC create returned error; will try Admin API', resp.error, 'OrderService');
+            // IPC returned a non-success response
+            const ipcError = resp?.error || 'IPC create returned unexpected response';
+            if (_isTauri) {
+              // In Tauri, the Rust backend IS the backend. Don't fall through
+              // to the Admin HTTP API — it would bypass local SQLite and hang.
+              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
             }
+            debugLogger.warn('IPC create returned error; will try Admin API', ipcError, 'OrderService');
           } catch (ipcErr) {
+            if (_isTauri) {
+              // In Tauri, surface the Rust error immediately instead of
+              // falling through to a slow/unreachable Admin API.
+              const errMsg = (ipcErr as any)?.message || String(ipcErr);
+              debugLogger.error('Tauri IPC order create failed', ipcErr, 'OrderService');
+              throw ErrorFactory.system(errMsg);
+            }
             debugLogger.warn('IPC create failed; will try Admin API', ipcErr, 'OrderService');
           }
         }
@@ -481,6 +561,7 @@ export class OrderService {
         payment_method: orderData.payment_method || orderDataAny.paymentMethod || 'cash',
         payment_status: paymentStatus,
         total_amount: orderData.total_amount || orderDataAny.totalAmount || 0,
+        client_request_id: requestId,
 
         // Optional fields - use ?? for numbers to handle 0 values correctly
         customer_id: orderData.customer_id || null,
@@ -521,11 +602,20 @@ export class OrderService {
       });
 
       const headers = await this.buildHeaders();
-      const response = await fetch(getApiUrl('/pos/orders'), {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(apiPayload),
-      });
+      // Abort the fetch after 10s so we don't hang until the outer withTimeout fires
+      const abortController = new AbortController();
+      const fetchTimer = setTimeout(() => abortController.abort(), 10000);
+      let response: Response;
+      try {
+        response = await fetch(getApiUrl('/pos/orders'), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(apiPayload),
+          signal: abortController.signal,
+        });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -564,6 +654,7 @@ export class OrderService {
 
   // Delete order - local-first via IPC, fallback to Admin API
   async deleteOrder(orderId: string): Promise<void> {
+    const _isTauri = isTauri();
     try {
       // 1) Try local-first via IPC
       if (typeof window !== 'undefined') {
@@ -575,10 +666,17 @@ export class OrderService {
               debugLogger.info('Deleted order via IPC', { orderId }, 'OrderService');
               return;
             }
-            if (resp && resp.error) {
-              debugLogger.warn('IPC delete returned error; will try Admin API', resp.error, 'OrderService');
+            const ipcError = resp?.error || 'IPC delete returned unexpected response';
+            if (_isTauri) {
+              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
             }
+            debugLogger.warn('IPC delete returned error; will try Admin API', ipcError, 'OrderService');
           } catch (ipcErr) {
+            if (_isTauri) {
+              const errMsg = (ipcErr as any)?.message || String(ipcErr);
+              debugLogger.error('Tauri IPC deleteOrder failed', ipcErr, 'OrderService');
+              throw ErrorFactory.system(errMsg);
+            }
             debugLogger.warn('IPC delete failed; will try Admin API', ipcErr, 'OrderService');
           }
         }
@@ -594,7 +692,14 @@ export class OrderService {
         url += `&organization_id=${encodeURIComponent(organizationId)}`;
       }
 
-      const response = await fetch(url, { method: 'DELETE', headers });
+      const abortController = new AbortController();
+      const fetchTimer = setTimeout(() => abortController.abort(), 10000);
+      let response: Response;
+      try {
+        response = await fetch(url, { method: 'DELETE', headers, signal: abortController.signal });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     } catch (error) {
       console.error('❌ Failed to delete order:', error);

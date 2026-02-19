@@ -57,9 +57,6 @@ export interface Ingredient {
   id: string;
   category_id?: string; // DB field (NULLABLE) - may be empty if no category assigned
   category_name?: string; // Category name from ingredient_categories for display
-  category_color?: string | null; // Raw category color hint from sync payloads
-  ingredient_subcategory?: string | null; // Legacy flavor grouping source (e.g. sweet/savory)
-  category_flavor_type?: string | null; // Raw category flavor hint from sync payloads
   name: string; // Computed field: name_en || name || 'Unknown'
   name_en?: string; // English name from database
   name_el?: string; // Greek name from database
@@ -77,7 +74,6 @@ export interface Ingredient {
   nutritional_info?: any;
   display_order: number;
   item_color?: string; // Hex color code for grouping/display
-  resolved_flavor_type: 'savory' | 'sweet' | null; // Normalized flavor used by UI filtering
   flavor_type?: 'savory' | 'sweet' | null; // Flavor classification
   created_at: string;
   updated_at: string;
@@ -160,155 +156,6 @@ type RawMenuCategory = Record<string, any>;
 type RawMenuItem = Record<string, any>;
 type RawIngredient = Record<string, any>;
 
-const FINAL_INGREDIENT_FALLBACK_COLOR = '#6B7280';
-const HASH_COLOR_PALETTE = [
-  '#EF4444',
-  '#F97316',
-  '#EAB308',
-  '#84CC16',
-  '#22C55E',
-  '#10B981',
-  '#14B8A6',
-  '#06B6D4',
-  '#0EA5E9',
-  '#3B82F6',
-  '#6366F1',
-  '#8B5CF6',
-  '#EC4899',
-  '#F43F5E',
-];
-
-function toIngredientCategory(raw: RawIngredient): Record<string, any> | null {
-  const nested = Array.isArray(raw?.ingredient_categories)
-    ? raw.ingredient_categories[0]
-    : raw?.ingredient_categories;
-
-  if (!nested || typeof nested !== 'object') {
-    return null;
-  }
-  return nested as Record<string, any>;
-}
-
-export function parseIngredientFlavorType(value: unknown): 'savory' | 'sweet' | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === 'sweet' || normalized.includes('sweet') || normalized.includes('γλυκ')) return 'sweet';
-  if (
-    normalized === 'savory'
-    || normalized === 'savoury'
-    || normalized.includes('savory')
-    || normalized.includes('savoury')
-    || normalized.includes('αλμυρ')
-    || normalized.includes('salty')
-    || normalized.includes('salt')
-  ) return 'savory';
-  return null;
-}
-
-function normalizeHexColor(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const hexMatch = trimmed.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
-  if (!hexMatch) return null;
-
-  const hex = hexMatch[1];
-  if (hex.length === 3) {
-    return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`.toUpperCase();
-  }
-  return `#${hex.toUpperCase()}`;
-}
-
-function deterministicColorFromSeed(seed: string): string {
-  if (!seed) return FINAL_INGREDIENT_FALLBACK_COLOR;
-  let hash = 0;
-  for (let i = 0; i < seed.length; i += 1) {
-    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-  }
-  const index = Math.abs(hash) % HASH_COLOR_PALETTE.length;
-  return HASH_COLOR_PALETTE[index];
-}
-
-export function resolveIngredientFlavorType(
-  raw: RawIngredient,
-  categoryFlavorMap?: Map<string, 'savory' | 'sweet' | null>
-): 'savory' | 'sweet' | null {
-  const nestedCategory = toIngredientCategory(raw);
-
-  // 1) Explicit payload flavor hints (snake_case contract fields)
-  const explicitFlavor =
-    parseIngredientFlavorType(raw.flavor_type)
-    || parseIngredientFlavorType(raw.category_flavor_type);
-  if (explicitFlavor) return explicitFlavor;
-
-  // 2) Aliases used by older payloads (camelCase)
-  const aliasedFlavor =
-    parseIngredientFlavorType(raw.flavorType)
-    || parseIngredientFlavorType(raw.categoryFlavorType);
-  if (aliasedFlavor) return aliasedFlavor;
-
-  // 3) Nested ingredient category flavor
-  const nestedFlavor =
-    parseIngredientFlavorType(nestedCategory?.flavor_type)
-    || parseIngredientFlavorType(nestedCategory?.flavorType);
-  if (nestedFlavor) return nestedFlavor;
-
-  // Preserve compatibility for Supabase fallback data when category hierarchy is available locally.
-  const mappedFlavor =
-    typeof raw.category_id === 'string' && categoryFlavorMap
-      ? categoryFlavorMap.get(raw.category_id) || null
-      : null;
-  if (mappedFlavor) return mappedFlavor;
-
-  // 4) Last-resort parse from known textual fallback fields
-  return (
-    parseIngredientFlavorType(raw.ingredient_subcategory)
-    || parseIngredientFlavorType(raw.ingredientSubcategory)
-    || parseIngredientFlavorType(raw.category_name)
-    || parseIngredientFlavorType(raw.categoryName)
-    || null
-  );
-}
-
-export function resolveIngredientColor(raw: RawIngredient): string {
-  const nestedCategory = toIngredientCategory(raw);
-
-  // 1) item_color
-  const itemColor = normalizeHexColor(raw.item_color ?? raw.itemColor);
-  if (itemColor) return itemColor;
-
-  // 2) category_color
-  const categoryColor = normalizeHexColor(raw.category_color ?? raw.categoryColor);
-  if (categoryColor) return categoryColor;
-
-  // 3) nested category color_code
-  const nestedColor = normalizeHexColor(nestedCategory?.color_code ?? nestedCategory?.colorCode);
-  if (nestedColor) return nestedColor;
-
-  // 4) deterministic hash color from category id/name
-  const hashSeed = String(raw.category_id || raw.category_name || raw.categoryName || '').trim();
-  if (hashSeed) {
-    return deterministicColorFromSeed(hashSeed);
-  }
-
-  // 5) final fallback
-  return FINAL_INGREDIENT_FALLBACK_COLOR;
-}
-
-export function ingredientMatchesFlavorTab(
-  resolvedFlavor: 'savory' | 'sweet' | null,
-  activeFlavor: 'all' | 'savory' | 'sweet'
-): boolean {
-  if (activeFlavor === 'all') return true;
-  return resolvedFlavor === activeFlavor;
-}
-
-export function isExplicitDefaultIngredientLink(link: Record<string, any>): boolean {
-  return Object.prototype.hasOwnProperty.call(link, 'is_default') && link.is_default === true;
-}
-
 export interface MenuItemIngredient {
   id: string;
   menu_item_id: string;
@@ -317,18 +164,6 @@ export interface MenuItemIngredient {
   is_default: boolean;
   is_optional: boolean;
   additional_price: number;
-}
-
-export interface MenuItemIngredientAvailability {
-  ingredients: Ingredient[];
-  links: MenuItemIngredient[];
-  hasExplicitLinks: boolean;
-  linkSource: 'ipc' | 'supabase' | 'unavailable';
-}
-
-interface MenuItemIngredientFetchResult {
-  links: MenuItemIngredient[];
-  source: 'ipc' | 'supabase' | 'unavailable';
 }
 
 export interface CustomizationPreset {
@@ -344,6 +179,23 @@ export interface CustomizationPreset {
 }
 
 type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+
+export interface MenuSyncCounts {
+  categories: number;
+  subcategories: number;
+  ingredients: number;
+  combos: number;
+}
+
+export interface MenuSyncResult {
+  success: boolean;
+  updated?: boolean;
+  version?: string;
+  counts?: MenuSyncCounts;
+  timestamp?: string;
+  errorCode?: string;
+  error?: string;
+}
 
 function getIpcInvoke(): IpcInvoke | null {
   if (typeof window === 'undefined') return null;
@@ -409,6 +261,73 @@ class MenuService {
     }
   }
 
+  async syncMenu(): Promise<MenuSyncResult> {
+    const invoke = getIpcInvoke();
+    if (!invoke) {
+      return {
+        success: false,
+        errorCode: 'ipc_unavailable',
+        error: 'IPC bridge is not available',
+      };
+    }
+
+    try {
+      const rawResult = await invoke('menu:sync');
+      const result: MenuSyncResult = (rawResult || { success: false, error: 'menu:sync returned empty payload' }) as MenuSyncResult;
+
+      if (!result.success) {
+        console.warn('[MenuService] menu:sync failed:', {
+          errorCode: result.errorCode,
+          error: result.error,
+        });
+        return result;
+      }
+
+      this.clearCache();
+      const [categories, menuItems, ingredients, combos] = await Promise.all([
+        this.getMenuCategories(),
+        this.getMenuItems(),
+        this.getIngredients(),
+        this.getMenuCombos(),
+      ]);
+
+      const countsFromCache: MenuSyncCounts = {
+        categories: categories.length,
+        subcategories: menuItems.length,
+        ingredients: ingredients.length,
+        combos: combos.length,
+      };
+
+      const mergedResult: MenuSyncResult = {
+        ...result,
+        counts: result.counts || countsFromCache,
+      };
+
+      if (menuItems.length === 0) {
+        console.warn('[MenuService] syncMenu completed but menu items are still empty after cache refresh', {
+          version: mergedResult.version,
+          counts: mergedResult.counts,
+        });
+      } else {
+        console.log('[MenuService] syncMenu loaded fresh menu data', {
+          version: mergedResult.version,
+          counts: mergedResult.counts,
+          updated: mergedResult.updated,
+        });
+      }
+
+      return mergedResult;
+    } catch (error) {
+      const message = formatError(error);
+      console.error('[MenuService] menu:sync invoke error:', message);
+      return {
+        success: false,
+        errorCode: 'menu_sync_invoke_failed',
+        error: message,
+      };
+    }
+  }
+
   getLoadingStatus(): {
     menuItems: 'loading' | 'loaded' | 'error';
     categories: 'loading' | 'loaded' | 'error';
@@ -426,6 +345,7 @@ class MenuService {
 
     // Return cached data if valid
     if (this.isCacheValid(cacheKey)) {
+      console.debug('[MenuService] getMenuCategories: using in-memory cache');
       return this.cache.get(cacheKey);
     }
 
@@ -444,6 +364,7 @@ class MenuService {
         const normalized = filteredData.map((item: any) => this.normalizeMenuCategory(item));
         this.setCache(cacheKey, normalized);
         this.loadingStates.set(cacheKey, 'loaded');
+        console.log('[MenuService] getMenuCategories: loaded from IPC cache', { count: normalized.length });
         return normalized;
       }
 
@@ -475,6 +396,7 @@ class MenuService {
       const normalized = filteredData.map((item: any) => this.normalizeMenuCategory(item));
       this.setCache(cacheKey, normalized);
       this.loadingStates.set(cacheKey, 'loaded');
+      console.log('[MenuService] getMenuCategories: loaded from Supabase fallback', { count: normalized.length });
       return normalized;
     } catch (error) {
       // Set error state
@@ -491,6 +413,7 @@ class MenuService {
       }
 
       // Return empty array as graceful fallback
+      console.warn('[MenuService] getMenuCategories: returning empty array after fetch failure');
       return [];
     }
   }
@@ -562,6 +485,7 @@ class MenuService {
 
     // Return cached data if valid
     if (this.isCacheValid(cacheKey)) {
+      console.debug('[MenuService] getIngredients: using in-memory cache');
       return this.cache.get(cacheKey);
     }
 
@@ -580,6 +504,7 @@ class MenuService {
         const normalized = filteredData.map((raw: any) => this.normalizeIngredient(raw));
         this.setCache(cacheKey, normalized);
         this.loadingStates.set(cacheKey, 'loaded');
+        console.log('[MenuService] getIngredients: loaded from IPC cache', { count: normalized.length });
         return normalized;
       }
 
@@ -587,6 +512,37 @@ class MenuService {
         console.warn('[MenuService] Supabase not configured and IPC ingredients unavailable');
         this.loadingStates.set(cacheKey, 'loaded');
         return [];
+      }
+
+      // First, fetch all ingredient categories to build a flavor_type lookup map
+      // This handles hierarchical categories where subcategories inherit flavor_type from parent
+      const { data: categoriesData } = await supabase
+        .from('ingredient_categories')
+        .select('id, name, flavor_type, parent_id');
+
+      // Build category lookup map: category_id -> flavor_type (inheriting from parent if needed)
+      const categoryFlavorMap = new Map<string, 'savory' | 'sweet' | null>();
+      const categoriesById = new Map<string, any>();
+
+      if (categoriesData) {
+        // First pass: index all categories by id
+        for (const cat of categoriesData) {
+          categoriesById.set(cat.id, cat);
+        }
+        // Second pass: resolve flavor_type (direct or from parent)
+        for (const cat of categoriesData) {
+          let flavorType = cat.flavor_type;
+          // If no direct flavor_type, check parent
+          if (!flavorType && cat.parent_id) {
+            const parent = categoriesById.get(cat.parent_id);
+            if (parent?.flavor_type) {
+              flavorType = parent.flavor_type;
+            }
+          }
+          if (flavorType === 'sweet' || flavorType === 'savory') {
+            categoryFlavorMap.set(cat.id, flavorType);
+          }
+        }
       }
 
       // Wrap Supabase query with timeout
@@ -642,11 +598,11 @@ class MenuService {
         return !name.includes('rls');
       });
 
-      const categoryFlavorMap = await this.getCategoryFlavorMap();
       // Normalize ingredients, using the category flavor map for hierarchical flavor_type resolution
       const normalized = filteredData.map((raw: any) => this.normalizeIngredient(raw, categoryFlavorMap));
       this.setCache(cacheKey, normalized);
       this.loadingStates.set(cacheKey, 'loaded');
+      console.log('[MenuService] getIngredients: loaded from Supabase fallback', { count: normalized.length });
       return normalized;
     } catch (error) {
       // Set error state
@@ -663,6 +619,7 @@ class MenuService {
       }
 
       // Return empty array as graceful fallback
+      console.warn('[MenuService] getIngredients: returning empty array after fetch failure');
       return [];
     }
   }
@@ -675,77 +632,6 @@ class MenuService {
       console.error('Error fetching ingredients by category:', error);
       return [];
     }
-  }
-
-  private async getCategoryFlavorMap(): Promise<Map<string, 'savory' | 'sweet' | null>> {
-    const categoryFlavorMap = new Map<string, 'savory' | 'sweet' | null>();
-    if (!isSupabaseConfigured()) {
-      return categoryFlavorMap;
-    }
-
-    try {
-      const { data: categoriesData, error } = await supabase
-        .from('ingredient_categories')
-        .select('id, parent_id, flavor_type')
-        .eq('is_active', true);
-
-      if (error || !categoriesData) {
-        return categoryFlavorMap;
-      }
-
-      const categoriesById = new Map<string, { parent_id: string | null; flavor_type: unknown }>();
-      for (const rawCat of categoriesData as Array<Record<string, unknown>>) {
-        const id = rawCat.id;
-        if (typeof id !== 'string' || !id) continue;
-        categoriesById.set(id, {
-          parent_id: typeof rawCat.parent_id === 'string' ? rawCat.parent_id : null,
-          flavor_type: rawCat.flavor_type ?? null,
-        });
-      }
-
-      const memo = new Map<string, 'savory' | 'sweet' | null>();
-      const resolveFlavor = (categoryId: string, seen: Set<string>): 'savory' | 'sweet' | null => {
-        if (memo.has(categoryId)) {
-          return memo.get(categoryId) ?? null;
-        }
-
-        if (seen.has(categoryId)) {
-          memo.set(categoryId, null);
-          return null;
-        }
-
-        seen.add(categoryId);
-        const category = categoriesById.get(categoryId);
-        if (!category) {
-          memo.set(categoryId, null);
-          return null;
-        }
-
-        const directFlavor = parseIngredientFlavorType(category.flavor_type);
-        if (directFlavor) {
-          memo.set(categoryId, directFlavor);
-          return directFlavor;
-        }
-
-        const parentId = category.parent_id;
-        if (!parentId) {
-          memo.set(categoryId, null);
-          return null;
-        }
-
-        const inherited = resolveFlavor(parentId, seen);
-        memo.set(categoryId, inherited);
-        return inherited;
-      };
-
-      for (const categoryId of categoriesById.keys()) {
-        categoryFlavorMap.set(categoryId, resolveFlavor(categoryId, new Set<string>()));
-      }
-    } catch (error) {
-      console.warn('Error building ingredient category flavor map:', error);
-    }
-
-    return categoryFlavorMap;
   }
 
   /**
@@ -811,22 +697,41 @@ class MenuService {
    * @param categoryFlavorMap Optional map of category_id -> flavor_type (with parent inheritance already resolved)
    */
   private normalizeIngredient(raw: RawIngredient, categoryFlavorMap?: Map<string, 'savory' | 'sweet' | null>): Ingredient {
-    const nestedCategory = toIngredientCategory(raw);
-    const categoryName =
-      nestedCategory?.name
-      || (raw as any).category_name
-      || (raw as any).categoryName
-      || undefined;
-    const resolvedFlavorType = resolveIngredientFlavorType(raw, categoryFlavorMap);
-    const resolvedColor = resolveIngredientColor(raw);
+    // Extract flavor_type using the category lookup map (preferred - handles parent inheritance)
+    // Falls back to direct category.flavor_type if map not provided
+    let flavorType: 'savory' | 'sweet' | null = null;
+
+    // First try the pre-built lookup map (handles parent category inheritance)
+    if (categoryFlavorMap && raw.category_id) {
+      flavorType = categoryFlavorMap.get(raw.category_id) || null;
+    }
+
+    // Fallback: try direct flavor_type from the joined category data
+    if (!flavorType) {
+      const category = (raw as any).ingredient_categories;
+      if (category?.flavor_type) {
+        const ft = category.flavor_type.toLowerCase();
+        if (ft === 'sweet' || ft === 'savory') {
+          flavorType = ft as 'savory' | 'sweet';
+        }
+      }
+    }
+
+    if (!flavorType) {
+      const directFlavorType = (raw as any).flavor_type;
+      if (directFlavorType === 'sweet' || directFlavorType === 'savory') {
+        flavorType = directFlavorType;
+      }
+    }
+
+    // Get category name from joined data
+    const category = (raw as any).ingredient_categories;
+    const categoryName = category?.name || (raw as any).category_name || undefined;
 
     return {
       id: raw.id,
       category_id: raw.category_id || undefined, // NULLABLE in DB - may be undefined
       category_name: categoryName, // Category name for display in UI
-      category_color: (raw as any).category_color ?? (raw as any).categoryColor ?? nestedCategory?.color_code ?? null,
-      ingredient_subcategory: (raw as any).ingredient_subcategory ?? (raw as any).ingredientSubcategory ?? null,
-      category_flavor_type: (raw as any).category_flavor_type ?? (raw as any).categoryFlavorType ?? null,
       name: raw.name_en || raw.name || 'Unknown',
       description: raw.description || '',
       price: raw.price || 0,
@@ -840,9 +745,8 @@ class MenuService {
       is_available: raw.is_available ?? true,
       allergens: raw.allergen_info || [],
       display_order: raw.display_order || 0,
-      item_color: resolvedColor,
-      resolved_flavor_type: resolvedFlavorType,
-      flavor_type: resolvedFlavorType,
+      item_color: (raw as any).item_color || (raw as any).category_color || category?.color_code || '#6B7280', // Fallback to category color, then default gray
+      flavor_type: flavorType, // From ingredient_categories.flavor_type field
       created_at: raw.created_at,
       updated_at: raw.updated_at,
     };
@@ -853,6 +757,7 @@ class MenuService {
 
     // Return cached data if valid
     if (this.isCacheValid(cacheKey)) {
+      console.debug('[MenuService] getMenuItems: using in-memory cache');
       return this.cache.get(cacheKey);
     }
 
@@ -871,6 +776,7 @@ class MenuService {
         const normalized = filteredData.map((item: any) => this.normalizeMenuItem(item));
         this.setCache(cacheKey, normalized);
         this.loadingStates.set(cacheKey, 'loaded');
+        console.log('[MenuService] getMenuItems: loaded from IPC cache', { count: normalized.length });
         return normalized;
       }
 
@@ -907,6 +813,7 @@ class MenuService {
       const normalized = filteredData.map((item: any) => this.normalizeMenuItem(item));
       this.setCache(cacheKey, normalized);
       this.loadingStates.set(cacheKey, 'loaded');
+      console.log('[MenuService] getMenuItems: loaded from Supabase fallback', { count: normalized.length });
       return normalized;
     } catch (error) {
       // Set error state
@@ -923,6 +830,7 @@ class MenuService {
       }
 
       // Return empty array as graceful fallback
+      console.warn('[MenuService] getMenuItems: returning empty array after fetch failure');
       return [];
     }
   }
@@ -1037,26 +945,23 @@ class MenuService {
     }
   }
 
-  async getMenuItemIngredients(menuItemId: string): Promise<MenuItemIngredientFetchResult> {
+  async getMenuItemIngredients(menuItemId: string): Promise<MenuItemIngredient[]> {
     try {
       const ipcIngredients = await this.fetchViaIpc<any[]>('menu:get-subcategory-ingredients', menuItemId);
-      if (ipcIngredients !== null) {
-        return {
-          source: 'ipc',
-          links: ipcIngredients.map((item: any) => ({
-            id: `${item.subcategory_id}-${item.ingredient_id}`,
-            menu_item_id: item.subcategory_id,
-            ingredient_id: item.ingredient_id,
-            quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
-            is_default: isExplicitDefaultIngredientLink(item),
-            is_optional: item.is_optional === true,
-            additional_price: 0
-          }))
-        };
+      if (ipcIngredients) {
+        return ipcIngredients.map((item: any) => ({
+          id: `${item.subcategory_id}-${item.ingredient_id}`,
+          menu_item_id: item.subcategory_id,
+          ingredient_id: item.ingredient_id,
+          quantity: item.quantity ?? 1,
+          is_default: true,
+          is_optional: false,
+          additional_price: 0
+        }));
       }
 
       if (!isSupabaseConfigured()) {
-        return { links: [], source: 'unavailable' };
+        return [];
       }
 
       const { data, error } = await supabase
@@ -1065,32 +970,32 @@ class MenuService {
           subcategory_id,
           ingredient_id,
           quantity,
-          is_active
+          ingredients(
+            id,
+            name_en,
+            name_el,
+            cost_per_unit
+          )
         `)
         .eq('subcategory_id', menuItemId);
 
       if (error) {
         console.error('Error fetching menu item ingredients:', error);
-        return { links: [], source: 'unavailable' };
+        return [];
       }
 
-      return {
-        source: 'supabase',
-        links: (data || [])
-          .filter((row: any) => row?.is_active !== false)
-          .map((item) => ({
-          id: `${item.subcategory_id}-${item.ingredient_id}`,
-          menu_item_id: item.subcategory_id,
-          ingredient_id: item.ingredient_id,
-          quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
-          is_default: isExplicitDefaultIngredientLink(item),
-          is_optional: false,
-          additional_price: 0
-          }))
-      };
+      return (data || []).map((item, index) => ({
+        id: `${item.subcategory_id}-${item.ingredient_id}`,
+        menu_item_id: item.subcategory_id,
+        ingredient_id: item.ingredient_id,
+        quantity: item.quantity ?? 1,
+        is_default: true,
+        is_optional: false,
+        additional_price: 0
+      }));
     } catch (error) {
       console.error('Error fetching menu item ingredients:', error);
-      return { links: [], source: 'unavailable' };
+      return [];
     }
   }
 
@@ -1100,52 +1005,11 @@ class MenuService {
     return [];
   }
 
-  // Resolve available ingredients for a menu item.
-  // The modal should display the full active ingredient catalog and use links only for defaults/metadata.
-  async getAvailableIngredientsForItem(menuItemId: string): Promise<MenuItemIngredientAvailability> {
-    try {
-      const allIngredients = await this.getIngredients();
-
-      let linkResult: MenuItemIngredientFetchResult = { links: [], source: 'unavailable' };
-      try {
-        linkResult = await this.getMenuItemIngredients(menuItemId);
-      } catch (linkError) {
-        console.warn('Failed to load menu item ingredient links', linkError);
-      }
-
-      if (linkResult.source === 'unavailable') {
-        return {
-          ingredients: allIngredients,
-          links: [],
-          hasExplicitLinks: false,
-          linkSource: 'unavailable',
-        };
-      }
-
-      if (linkResult.links.length === 0) {
-        return {
-          ingredients: allIngredients,
-          links: [],
-          hasExplicitLinks: false,
-          linkSource: linkResult.source,
-        };
-      }
-
-      return {
-        ingredients: allIngredients,
-        links: linkResult.links,
-        hasExplicitLinks: true,
-        linkSource: linkResult.source,
-      };
-    } catch (error) {
-      console.error('Error resolving available ingredients for menu item:', error);
-      return {
-        ingredients: [],
-        links: [],
-        hasExplicitLinks: false,
-        linkSource: 'unavailable',
-      };
-    }
+  // Helper method to get available ingredients for a customizable item
+  async getAvailableIngredientsForItem(menuItemId: string): Promise<Ingredient[]> {
+    // Note: Simplified version - complex ingredient management not implemented
+    console.warn('getAvailableIngredientsForItem: Feature not available in current database schema');
+    return [];
   }
 
   // Method to calculate total price with customizations

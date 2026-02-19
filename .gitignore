@@ -1,61 +1,33 @@
 # Dependencies
 node_modules/
 
-# Build outputs
+# Build output
 dist/
-release/
-release2/
-*.exe
-*.asar
-*.tsbuildinfo
 
-# Environment files (contain secrets)
+# Rust build output
+src-tauri/target/
+
+# Generated Tauri files
+src-tauri/gen/
+
+# Environment
 .env
 .env.local
-.env.production
-.env.development
-
-# Logs
-*.log
-build.log
-test_output.txt
+.env.*.local
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
-nul
 
-# Test artifacts
-test-results/
-playwright-report/
-coverage/
+# Logs
+*.log
+npm-debug.log*
 
-# Temporary files
-*.tmp
-*.temp
-
-# Database files
-*.db
-*.sqlite
-
-# Debug files
-debug_*.js
-fix_*.js
-fix-*.html
-restore_*.js
-check-*.js
-test-*.js
-comprehensive-*.js
-final-*.js
-interact-*.js
-verify-*.js
-set-*.js
-set-*.sql
-
-# Upload artifacts
-upload_url.txt
-main-stats.json
+# TypeScript
+*.tsbuildinfo

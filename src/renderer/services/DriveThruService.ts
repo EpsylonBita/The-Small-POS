@@ -88,6 +88,10 @@ function transformOrderFromAPI(data: any): DriveThruOrder {
   };
 }
 
+function getIpcRenderer() {
+  return (window as any).electronAPI?.ipcRenderer ?? (window as any).electron?.ipcRenderer;
+}
+
 class DriveThruService {
   private branchId: string = '';
   private organizationId: string = '';
@@ -114,7 +118,11 @@ class DriveThruService {
 
       console.log('[DriveThruService] Fetching lanes via API');
 
-      const result = await (window as any).api.invoke('sync:fetch-drive-thru', {});
+      const ipc = getIpcRenderer();
+      if (!ipc) {
+        throw new Error('IPC renderer not available');
+      }
+      const result = await ipc.invoke('sync:fetch-drive-thru', {});
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
@@ -145,7 +153,11 @@ class DriveThruService {
         options.lane_id = laneId;
       }
 
-      const result = await (window as any).api.invoke('sync:fetch-drive-thru', options);
+      const ipc = getIpcRenderer();
+      if (!ipc) {
+        throw new Error('IPC renderer not available');
+      }
+      const result = await ipc.invoke('sync:fetch-drive-thru', options);
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
@@ -166,7 +178,11 @@ class DriveThruService {
     try {
       console.log('[DriveThruService] Updating order status via API:', { orderId, status });
 
-      const result = await (window as any).api.invoke(
+      const ipc = getIpcRenderer();
+      if (!ipc) {
+        throw new Error('IPC renderer not available');
+      }
+      const result = await ipc.invoke(
         'sync:update-drive-thru-order-status',
         orderId,
         status
