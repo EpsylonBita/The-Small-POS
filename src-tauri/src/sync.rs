@@ -52,6 +52,43 @@ impl SyncState {
 }
 
 // ---------------------------------------------------------------------------
+// Order number generation
+// ---------------------------------------------------------------------------
+
+/// Generate a sequential order number in format ORD-DDMMYYYY-NNNNN.
+///
+/// Uses `local_settings` (category='orders', key='order_counter') as a
+/// persistent counter. The counter is reset to 0 when a Z-report is generated
+/// via `submit_z_report()`.
+fn next_order_number(conn: &rusqlite::Connection) -> String {
+    let today = chrono::Local::now();
+    let date_display = today.format("%d%m%Y").to_string();
+
+    let current: i64 = conn
+        .query_row(
+            "SELECT setting_value FROM local_settings \
+             WHERE setting_category = 'orders' AND setting_key = 'order_counter'",
+            [],
+            |row| {
+                row.get::<_, String>(0)
+                    .map(|v| v.parse::<i64>().unwrap_or(0))
+            },
+        )
+        .unwrap_or(0);
+
+    let next = current + 1;
+    let _ = conn.execute(
+        "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
+         VALUES ('orders', 'order_counter', ?1, datetime('now')) \
+         ON CONFLICT(setting_category, setting_key) DO UPDATE SET \
+            setting_value = excluded.setting_value, updated_at = excluded.updated_at",
+        params![next.to_string()],
+    );
+
+    format!("ORD-{}-{:05}", date_display, next)
+}
+
+// ---------------------------------------------------------------------------
 // Order creation
 // ---------------------------------------------------------------------------
 
@@ -115,8 +152,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     let branch_id = storage::get_credential("branch_id").unwrap_or_default();
 
     // Extract fields from payload with defaults
-    let order_number =
-        str_field(payload, "orderNumber").or_else(|| str_field(payload, "order_number"));
+    let order_number = Some(next_order_number(&conn));
     let customer_name =
         str_field(payload, "customerName").or_else(|| str_field(payload, "customer_name"));
     let customer_phone =
@@ -237,6 +273,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     if let Value::Object(obj) = &mut sync_data {
         obj.entry("orderId".to_string())
             .or_insert_with(|| Value::String(order_id.clone()));
+        // Ensure the Rust-generated order number is synced to admin
+        if let Some(ref num) = order_number {
+            obj.insert("orderNumber".to_string(), Value::String(num.clone()));
+            obj.insert("order_number".to_string(), Value::String(num.clone()));
+        }
         if let Some(req_id) = client_request_id.as_ref() {
             obj.entry("clientRequestId".to_string())
                 .or_insert_with(|| Value::String(req_id.clone()));

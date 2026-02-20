@@ -8,6 +8,11 @@ import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';
 import type { Order } from '../../shared/types/orders';
 import { OrderService } from '../../services/OrderService';
 
+// Track self-created order IDs to suppress "new order received" toasts for own orders.
+// Since Rust no longer emits order_created for self-created orders, this is a safety net
+// in case order_save_from_remote echoes back our own order.
+const _recentlyCreatedOrderIds = new Set<string>();
+
 // Conflict and retry interfaces
 interface OrderConflict {
   id: string;
@@ -55,7 +60,7 @@ interface OrderStore {
   getOrderById: (orderId: string) => Promise<Order | null>;
   updateOrderStatus: (orderId: string, status: Order['status']) => Promise<boolean>;
   returnCancelledToPending: (orderId: string) => Promise<boolean>;
-  createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; error?: string; savedForRetry?: boolean }>;
+  createOrder: (orderData: Partial<Order>) => Promise<{ success: boolean; orderId?: string; orderNumber?: string; error?: string; savedForRetry?: boolean }>;
   setSelectedOrder: (order: Order | null) => void;
   setFilter: (filter: Partial<OrderStore['filter']>) => void;
   getFilteredOrders: () => Order[];
@@ -438,36 +443,35 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           get()._invalidateCache();
         };
 
-        // Listen for new orders being created
+        // Listen for new orders from OTHER terminals (order_save_from_remote only).
+        // Self-created orders are added to state directly in createOrder().
         const handleOrderCreated = (orderData: any) => {
-          console.log('📡 [useOrderStore] Received new order created:', orderData);
-
-          // Validate order data
           if (!orderData || !orderData.id) {
             console.warn('⚠️ [useOrderStore] Invalid order data received:', orderData);
             return;
           }
+
+          // Skip self-created orders (safety net)
+          if (_recentlyCreatedOrderIds.has(orderData.id)) return;
+
+          console.log('📡 [useOrderStore] Received remote order:', orderData.id);
 
           set((state) => {
             const combined = [...state.orders, ...state.pendingExternalOrders];
             const existingOrderIndex = findOrderIndex(combined, orderData);
 
             if (existingOrderIndex >= 0) {
-              console.log('📡 [useOrderStore] Updating existing order:', orderData.id);
               const updatedOrders = [...combined];
               updatedOrders[existingOrderIndex] = { ...updatedOrders[existingOrderIndex], ...orderData };
               return splitOrdersForState(updatedOrders as Order[]);
             }
 
-            console.log('📡 [useOrderStore] Adding new order to state:', orderData.id);
             return splitOrdersForState([orderData, ...combined] as Order[]);
           });
 
-
-
           get()._invalidateCache();
 
-          // Show toast notification for new order
+          // Show toast for remote orders only
           toast.success(`New order #${orderData.order_number || orderData.id.slice(0, 8)} received!`, {
             duration: 5000,
             icon: createElement(Bell, { className: 'w-4 h-4 text-blue-500' })
@@ -646,7 +650,6 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           console.log('🗑️  Orders cleared, refreshing...');
           set({ orders: [], pendingExternalOrders: [], conflicts: [] });
           get()._invalidateCache();
-          toast.success('All orders cleared successfully');
         };
 
         // Register conflict and retry listeners
@@ -894,13 +897,25 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           'Create order'
         );
 
-        // Don't add to state here - the order-created IPC event will handle it
-        // This prevents duplicate orders in the list
+        // Track the ID so handleOrderCreated ignores any echo from remote sync
+        if (newOrder.id) {
+          _recentlyCreatedOrderIds.add(newOrder.id);
+          setTimeout(() => _recentlyCreatedOrderIds.delete(newOrder.id), 30000);
+        }
+
+        // Add to state directly (no IPC event for self-created orders)
+        if (newOrder.id) {
+          set((state) => {
+            const combined = [...state.orders, ...state.pendingExternalOrders];
+            const orderForState = { ...orderData, ...newOrder, id: newOrder.id } as Order;
+            return splitOrdersForState([orderForState, ...combined]);
+          });
+        }
+
         get()._invalidateCache();
         get()._setLoading(operation, false);
 
-        toast.success('Order created successfully');
-        return { success: true, orderId: newOrder.id };
+        return { success: true, orderId: newOrder.id, orderNumber: newOrder.orderNumber || newOrder.order_number };
       } catch (error) {
         // Handle error
         const posError = errorHandler.handle(error);

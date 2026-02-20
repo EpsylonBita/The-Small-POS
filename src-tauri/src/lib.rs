@@ -2518,7 +2518,7 @@ async fn order_fetch_items_from_supabase(
 async fn order_create(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing order payload")?;
     let normalized = payload.get("orderData").cloned().unwrap_or(payload);
@@ -2543,21 +2543,9 @@ async fn order_create(
         }
     }
 
-    let deduplicated = resp
-        .get("deduplicated")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if !deduplicated {
-        if let Some(order_id) = order_id {
-            let event_payload = match sync::get_order_by_id(&db, &order_id) {
-                Ok(order) if !order.is_null() => order,
-                _ => serde_json::json!({ "id": order_id }),
-            };
-            let _ = app.emit("order_created", event_payload.clone());
-            let _ = app.emit("order_realtime_update", event_payload);
-        }
-    }
+    // NOTE: We intentionally do NOT emit order_created/order_realtime_update here.
+    // Self-created orders are added to state directly in the frontend store.
+    // Only order_save_from_remote() emits these events (for orders from other terminals).
     Ok(resp)
 }
 
@@ -3228,22 +3216,82 @@ async fn sync_clear_all_orders(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let _ = conn.execute(
+        "DELETE FROM sync_queue WHERE entity_type IN ('order', 'payment', 'payment_adjustment')",
+        [],
+    );
     let cleared = conn
         .execute("DELETE FROM orders", [])
         .map_err(|e| e.to_string())?;
     let _ = app.emit("orders_cleared", serde_json::json!({ "count": cleared }));
-    Ok(serde_json::json!({ "success": true }))
+    Ok(serde_json::json!({ "success": true, "cleared": cleared }))
 }
 
 #[tauri::command]
 async fn sync_cleanup_deleted_orders(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
+    hydrate_terminal_credentials_from_local_settings(&db);
+    let admin_url =
+        storage::get_credential("admin_dashboard_url").ok_or("Admin URL not configured")?;
+    let api_key = storage::get_credential("pos_api_key").ok_or("API key not configured")?;
+
+    // Fetch deleted IDs from server (all deletions since epoch)
+    let resp = api::fetch_from_admin(
+        &admin_url,
+        &api_key,
+        "/api/pos/orders/sync?limit=100&include_deleted=true&since=1970-01-01T00:00:00.000Z",
+        "GET",
+        None,
+    )
+    .await
+    .map_err(|e| format!("Failed to fetch deleted orders: {e}"))?;
+
+    let deleted_ids = resp
+        .get("deleted_ids")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let checked = deleted_ids.len();
+    let mut deleted = 0usize;
+
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let count = conn
-        .execute("DELETE FROM orders WHERE status = 'deleted'", [])
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "success": true, "deleted": count }))
+    for deleted_id in &deleted_ids {
+        let Some(remote_id) = deleted_id.as_str().filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        let local_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+                rusqlite::params![remote_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(local_id) = local_id {
+            let _ = conn.execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id = ?1",
+                rusqlite::params![local_id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'payment' AND entity_id IN (SELECT id FROM order_payments WHERE order_id = ?1)",
+                rusqlite::params![local_id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'payment_adjustment' AND entity_id IN (SELECT id FROM payment_adjustments WHERE order_id = ?1)",
+                rusqlite::params![local_id],
+            );
+            let count = conn
+                .execute(
+                    "DELETE FROM orders WHERE id = ?1",
+                    rusqlite::params![local_id],
+                )
+                .unwrap_or(0);
+            deleted += count;
+        }
+    }
+
+    Ok(serde_json::json!({ "success": true, "deleted": deleted, "checked": checked }))
 }
 
 async fn sync_fetch_with_options(
@@ -3285,11 +3333,16 @@ async fn sync_clear_old_orders(
 ) -> Result<serde_json::Value, String> {
     let today = Local::now().format("%Y-%m-%d").to_string();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Clean orphaned sync_queue entries for old orders
+    let _ = conn.execute(
+        "DELETE FROM sync_queue WHERE entity_type = 'order' AND entity_id IN (
+            SELECT id FROM orders WHERE substr(created_at, 1, 10) < ?1
+        )",
+        rusqlite::params![today],
+    );
     let cleared = conn
         .execute(
-            "DELETE FROM orders
-             WHERE substr(created_at, 1, 10) < ?1
-               AND status NOT IN ('delivered', 'completed', 'cancelled')",
+            "DELETE FROM orders WHERE substr(created_at, 1, 10) < ?1",
             rusqlite::params![today],
         )
         .map_err(|e| e.to_string())?;
@@ -4961,7 +5014,17 @@ async fn zreport_generate(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    zreport::generate_z_report(&db, &payload)
+
+    let has_shift_id = payload.get("shiftId").and_then(|v| v.as_str()).is_some()
+        || payload.get("shift_id").and_then(|v| v.as_str()).is_some();
+    let has_branch_date = payload.get("branchId").and_then(|v| v.as_str()).is_some()
+        || payload.get("date").and_then(|v| v.as_str()).is_some();
+
+    if has_shift_id && !has_branch_date {
+        zreport::generate_z_report(&db, &payload)
+    } else {
+        zreport::generate_z_report_for_date(&db, &payload)
+    }
 }
 
 #[tauri::command]
@@ -7155,7 +7218,15 @@ async fn report_generate_z_report(
         zreport::generate_z_report_for_date(&db, &payload)?
     };
 
-    Ok(serde_json::json!({ "success": true, "data": generated }))
+    // Frontend expects report_json fields (sales, cashDrawer, etc.) directly
+    // under "data". Extract reportJson from the nested response.
+    let report_data = generated
+        .get("report")
+        .and_then(|r| r.get("reportJson"))
+        .cloned()
+        .unwrap_or(generated.clone());
+
+    Ok(serde_json::json!({ "success": true, "data": report_data }))
 }
 
 #[tauri::command]

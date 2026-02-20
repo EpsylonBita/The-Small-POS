@@ -256,22 +256,24 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .query_row(
             "SELECT opening_amount, closing_amount, expected_amount, variance_amount,
                     total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                    cash_drops, driver_cash_given, driver_cash_returned
+                    cash_drops, driver_cash_given, driver_cash_returned, reconciled
              FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
+                let reconciled: bool = row.get::<_, i64>(11).unwrap_or(0) != 0;
                 Ok(serde_json::json!({
-                    "opening": row.get::<_, f64>(0).unwrap_or(0.0),
+                    "openingTotal": row.get::<_, f64>(0).unwrap_or(0.0),
                     "closing": row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
                     "expected": row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    "variance": row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    "totalVariance": row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
                     "cashSales": row.get::<_, f64>(4).unwrap_or(0.0),
                     "cardSales": row.get::<_, f64>(5).unwrap_or(0.0),
                     "totalRefunds": row.get::<_, f64>(6).unwrap_or(0.0),
                     "totalExpenses": row.get::<_, f64>(7).unwrap_or(0.0),
-                    "cashDrops": row.get::<_, f64>(8).unwrap_or(0.0),
+                    "totalCashDrops": row.get::<_, f64>(8).unwrap_or(0.0),
                     "driverCashGiven": row.get::<_, f64>(9).unwrap_or(0.0),
                     "driverCashReturned": row.get::<_, f64>(10).unwrap_or(0.0),
+                    "unreconciledCount": if reconciled { 0 } else { 1 },
                 }))
             },
         )
@@ -804,23 +806,25 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     COALESCE(SUM(total_expenses), 0),
                     COALESCE(SUM(cash_drops), 0),
                     COALESCE(SUM(driver_cash_given), 0),
-                    COALESCE(SUM(driver_cash_returned), 0)
+                    COALESCE(SUM(driver_cash_returned), 0),
+                    SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END)
              FROM cash_drawer_sessions
              WHERE opened_at > ?1",
             params![period_start],
             |row| {
                 Ok(serde_json::json!({
-                    "opening": row.get::<_, f64>(0)?,
+                    "openingTotal": row.get::<_, f64>(0)?,
                     "closing": row.get::<_, f64>(1)?,
                     "expected": row.get::<_, f64>(2)?,
-                    "variance": row.get::<_, f64>(3)?,
+                    "totalVariance": row.get::<_, f64>(3)?,
                     "cashSales": row.get::<_, f64>(4)?,
                     "cardSales": row.get::<_, f64>(5)?,
                     "totalRefunds": row.get::<_, f64>(6)?,
                     "totalExpenses": row.get::<_, f64>(7)?,
-                    "cashDrops": row.get::<_, f64>(8)?,
+                    "totalCashDrops": row.get::<_, f64>(8)?,
                     "driverCashGiven": row.get::<_, f64>(9)?,
                     "driverCashReturned": row.get::<_, f64>(10)?,
+                    "unreconciledCount": row.get::<_, i64>(11)?,
                 }))
             },
         )
@@ -907,6 +911,20 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "staffReports": staff_reports,
     });
 
+    // If no closed shifts, return a preview-only response (no persist).
+    // This lets the frontend display aggregated order/payment data even when
+    // staff are still checked in.
+    if shifts.is_empty() {
+        info!("No closed shifts in period — returning preview-only Z-report");
+        return Ok(serde_json::json!({
+            "success": true,
+            "preview": true,
+            "report": {
+                "reportJson": report_json,
+            },
+        }));
+    }
+
     // --- Persist in transaction ---
     let z_report_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -914,13 +932,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let report_json_str = report_json.to_string();
     let idempotency_key = format!("zreport:{z_report_id}");
 
-    // Use the first shift's ID as the FK reference (required by z_reports schema).
-    // If no shifts were found, fall back to "none" — but z_reports has FK to
-    // staff_shifts so we must have at least one shift.
-    let shift_id_for_db = shifts
-        .first()
-        .map(|s| s.id.clone())
-        .ok_or("No closed shifts found for Z-report")?;
+    let shift_id_for_db = shifts.first().map(|s| s.id.clone()).unwrap();
 
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
@@ -1049,6 +1061,60 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 /// Submit a Z-report: generate (or return existing), store the
 /// `last_z_report_timestamp`, clear operational data, and return results.
 pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let branch_id = str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+
+    // --- Pre-condition: all staff must be checked out ---
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, COALESCE(staff_name, staff_id) as name
+                 FROM staff_shifts
+                 WHERE status = 'active'
+                   AND (branch_id = ?1 OR branch_id IS NULL)",
+            )
+            .map_err(|e| format!("prepare active-shift check: {e}"))?;
+
+        let active_names: Vec<String> = stmt
+            .query_map(params![branch_id], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("query active shifts: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !active_names.is_empty() {
+            return Err(format!(
+                "Cannot generate Z-report: {} staff still checked in: {}",
+                active_names.len(),
+                active_names.join(", ")
+            ));
+        }
+    }
+
+    // --- Pre-condition: all orders must have settled payments ---
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let period_start = get_period_start(&conn);
+        let unpaid_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM orders
+                 WHERE created_at > ?1
+                   AND status NOT IN ('cancelled', 'canceled')
+                   AND payment_status NOT IN ('paid', 'completed')",
+                params![period_start],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if unpaid_count > 0 {
+            return Err(format!(
+                "Cannot generate Z-report: {} order(s) have unsettled payments",
+                unpaid_count
+            ));
+        }
+    }
+
     // Step 1: Generate the report (multi-shift or single-shift)
     let has_shift_id = str_field(payload, "shiftId")
         .or_else(|| str_field(payload, "shift_id"))
@@ -1062,11 +1128,22 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         generate_z_report_for_date(db, payload)?
     };
 
-    // Step 2: Store last_z_report_timestamp
+    // Step 2: Store last_z_report_timestamp + reset order counter
     let now = Utc::now().to_rfc3339();
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         db::set_setting(&conn, "system", "last_z_report_timestamp", &now)?;
+
+        // Reset order counter for next business day
+        conn.execute(
+            "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
+             VALUES ('orders', 'order_counter', '0', datetime('now')) \
+             ON CONFLICT(setting_category, setting_key) DO UPDATE SET \
+                setting_value = '0', updated_at = datetime('now')",
+            [],
+        )
+        .map_err(|e| format!("reset order counter: {e}"))?;
+        info!("Order counter reset to 0 after Z-report");
     }
 
     info!(timestamp = %now, "Stored last_z_report_timestamp");

@@ -628,33 +628,49 @@ pub fn get_active_cashier_by_terminal(
 pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    // Fetch the shift
-    let shift = conn
+    // --- 1. Fetch the shift ---
+    let (role_type, branch_id, terminal_id, check_in_time, shift): (
+        String,
+        String,
+        String,
+        String,
+        Value,
+    ) = conn
         .query_row(
             "SELECT id, staff_id, staff_name, role_type, status, opening_cash_amount,
                     closing_cash_amount, expected_cash_amount, cash_variance,
                     check_in_time, check_out_time, total_orders_count,
-                    total_sales_amount, total_cash_sales, total_card_sales
+                    total_sales_amount, total_cash_sales, total_card_sales,
+                    branch_id, terminal_id, calculation_version, payment_amount
              FROM staff_shifts WHERE id = ?1",
             params![shift_id],
             |row| {
-                Ok(serde_json::json!({
-                    "shiftId": row.get::<_, String>(0)?,
-                    "staffId": row.get::<_, String>(1)?,
-                    "staffName": row.get::<_, Option<String>>(2)?,
-                    "roleType": row.get::<_, String>(3)?,
+                let rt: String = row.get(3)?;
+                let bi: String = row.get::<_, Option<String>>(15)?.unwrap_or_default();
+                let ti: String = row.get::<_, Option<String>>(16)?.unwrap_or_default();
+                let ci: String = row.get(9)?;
+                let val = serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "staff_id": row.get::<_, String>(1)?,
+                    "staff_name": row.get::<_, Option<String>>(2)?,
+                    "role_type": &rt,
                     "status": row.get::<_, String>(4)?,
-                    "openingCash": row.get::<_, f64>(5)?,
-                    "closingCash": row.get::<_, Option<f64>>(6)?,
-                    "expectedCash": row.get::<_, Option<f64>>(7)?,
-                    "cashVariance": row.get::<_, Option<f64>>(8)?,
-                    "checkInTime": row.get::<_, String>(9)?,
-                    "checkOutTime": row.get::<_, Option<String>>(10)?,
-                    "totalOrdersCount": row.get::<_, i64>(11)?,
-                    "totalSalesAmount": row.get::<_, f64>(12)?,
-                    "totalCashSales": row.get::<_, f64>(13)?,
-                    "totalCardSales": row.get::<_, f64>(14)?,
-                }))
+                    "opening_cash_amount": row.get::<_, f64>(5)?,
+                    "closing_cash_amount": row.get::<_, Option<f64>>(6)?,
+                    "expected_cash_amount": row.get::<_, Option<f64>>(7)?,
+                    "cash_variance": row.get::<_, Option<f64>>(8)?,
+                    "check_in_time": &ci,
+                    "check_out_time": row.get::<_, Option<String>>(10)?,
+                    "total_orders_count": row.get::<_, i64>(11)?,
+                    "total_sales_amount": row.get::<_, f64>(12)?,
+                    "total_cash_sales": row.get::<_, f64>(13)?,
+                    "total_card_sales": row.get::<_, f64>(14)?,
+                    "branch_id": &bi,
+                    "terminal_id": &ti,
+                    "calculation_version": row.get::<_, i64>(17)?,
+                    "payment_amount": row.get::<_, Option<f64>>(18)?,
+                });
+                Ok((rt, bi, ti, ci, val))
             },
         )
         .map_err(|e| match e {
@@ -662,57 +678,325 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             _ => format!("query shift: {e}"),
         })?;
 
-    // Aggregate orders linked to this shift
-    let order_stats = conn
+    // --- 2. Cash drawer session (all roles may have one) ---
+    let cash_drawer: Value = conn
         .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(total_amount), 0),
-                    COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN total_amount ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN payment_method = 'card' THEN total_amount ELSE 0 END), 0),
-                    COALESCE(SUM(tip_amount), 0),
-                    COALESCE(SUM(discount_amount), 0)
-             FROM orders WHERE staff_shift_id = ?1",
+            "SELECT id, opening_amount, closing_amount, expected_amount, variance_amount,
+                    total_cash_sales, total_card_sales, total_refunds, total_expenses,
+                    cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                    opened_at, closed_at, reconciled
+             FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
                 Ok(serde_json::json!({
-                    "orderCount": row.get::<_, i64>(0)?,
-                    "totalSales": row.get::<_, f64>(1)?,
-                    "cashSales": row.get::<_, f64>(2)?,
-                    "cardSales": row.get::<_, f64>(3)?,
-                    "totalTips": row.get::<_, f64>(4)?,
-                    "totalDiscounts": row.get::<_, f64>(5)?,
+                    "id": row.get::<_, String>(0)?,
+                    "opening_amount": row.get::<_, f64>(1)?,
+                    "closing_amount": row.get::<_, Option<f64>>(2)?,
+                    "expected_amount": row.get::<_, Option<f64>>(3)?,
+                    "variance_amount": row.get::<_, Option<f64>>(4)?,
+                    "total_cash_sales": row.get::<_, f64>(5)?,
+                    "total_card_sales": row.get::<_, f64>(6)?,
+                    "total_refunds": row.get::<_, f64>(7)?,
+                    "total_expenses": row.get::<_, f64>(8)?,
+                    "cash_drops": row.get::<_, f64>(9)?,
+                    "driver_cash_given": row.get::<_, f64>(10)?,
+                    "driver_cash_returned": row.get::<_, f64>(11)?,
+                    "total_staff_payments": row.get::<_, f64>(12)?,
+                    "opened_at": row.get::<_, String>(13)?,
+                    "closed_at": row.get::<_, Option<String>>(14)?,
+                    "reconciled": row.get::<_, i64>(15)? != 0,
                 }))
             },
         )
-        .unwrap_or(serde_json::json!({
-            "orderCount": 0, "totalSales": 0.0, "cashSales": 0.0,
-            "cardSales": 0.0, "totalTips": 0.0, "totalDiscounts": 0.0,
-        }));
+        .unwrap_or(Value::Null);
 
-    // Sum expenses for this shift
-    let expenses_total: f64 = conn
+    // --- 3. Sales breakdown by order_type × payment_method ---
+    let mut breakdown_stmt = conn
+        .prepare(
+            "SELECT COALESCE(order_type, 'dine-in'), COALESCE(payment_method, 'cash'),
+                    COUNT(*), COALESCE(SUM(total_amount), 0)
+             FROM orders
+             WHERE staff_shift_id = ?1 AND status NOT IN ('cancelled', 'canceled')
+             GROUP BY order_type, payment_method",
+        )
+        .map_err(|e| format!("prepare breakdown: {e}"))?;
+
+    let rows: Vec<(String, String, i64, f64)> = breakdown_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query breakdown: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let instore_types = ["dine-in", "takeaway", "pickup"];
+    let is_instore = |t: &str| instore_types.contains(&t);
+
+    let sum_by = |f: &dyn Fn(&(String, String, i64, f64)) -> bool| -> f64 {
+        rows.iter().filter(|r| f(r)).map(|r| r.3).sum()
+    };
+    let count_by = |f: &dyn Fn(&(String, String, i64, f64)) -> bool| -> i64 {
+        rows.iter().filter(|r| f(r)).map(|r| r.2).sum()
+    };
+
+    let breakdown = serde_json::json!({
+        "instore": {
+            "cashTotal": sum_by(&|r| is_instore(&r.0) && r.1 == "cash"),
+            "cardTotal": sum_by(&|r| is_instore(&r.0) && r.1 == "card"),
+            "cashCount": count_by(&|r| is_instore(&r.0) && r.1 == "cash"),
+            "cardCount": count_by(&|r| is_instore(&r.0) && r.1 == "card"),
+        },
+        "delivery": {
+            "cashTotal": sum_by(&|r| !is_instore(&r.0) && r.1 == "cash"),
+            "cardTotal": sum_by(&|r| !is_instore(&r.0) && r.1 == "card"),
+            "cashCount": count_by(&|r| !is_instore(&r.0) && r.1 == "cash"),
+            "cardCount": count_by(&|r| !is_instore(&r.0) && r.1 == "card"),
+        },
+        "overall": {
+            "cashTotal": sum_by(&|r| r.1 == "cash"),
+            "cardTotal": sum_by(&|r| r.1 == "card"),
+            "totalCount": count_by(&|_| true),
+            "totalAmount": sum_by(&|_| true),
+        }
+    });
+
+    // --- 4. Canceled orders breakdown ---
+    let mut canceled_stmt = conn
+        .prepare(
+            "SELECT COALESCE(payment_method, 'cash'), COUNT(*), COALESCE(SUM(total_amount), 0)
+             FROM orders
+             WHERE staff_shift_id = ?1 AND status IN ('cancelled', 'canceled', 'refunded')
+             GROUP BY payment_method",
+        )
+        .map_err(|e| format!("prepare canceled: {e}"))?;
+
+    let canceled_rows: Vec<(String, i64, f64)> = canceled_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query canceled: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let canceled_cash = canceled_rows.iter().find(|r| r.0 == "cash");
+    let canceled_card = canceled_rows.iter().find(|r| r.0 == "card");
+
+    let canceled_orders = serde_json::json!({
+        "cashTotal": canceled_cash.map_or(0.0, |r| r.2),
+        "cardTotal": canceled_card.map_or(0.0, |r| r.2),
+        "cashCount": canceled_cash.map_or(0, |r| r.1),
+        "cardCount": canceled_card.map_or(0, |r| r.1),
+    });
+
+    // --- 5. Cash refunds ---
+    let cash_refunds: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
+            "SELECT COALESCE(SUM(total_amount), 0) FROM orders
+             WHERE staff_shift_id = ?1 AND status = 'refunded' AND payment_method = 'cash'",
             params![shift_id],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
 
-    let expenses_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM shift_expenses WHERE staff_shift_id = ?1",
-            params![shift_id],
-            |row| row.get(0),
+    // --- 6. Expense items array + total ---
+    let mut exp_stmt = conn
+        .prepare(
+            "SELECT id, expense_type, amount, description, receipt_number, status, created_at
+             FROM shift_expenses WHERE staff_shift_id = ?1
+             ORDER BY created_at ASC",
         )
-        .unwrap_or(0);
+        .map_err(|e| format!("prepare expenses: {e}"))?;
 
-    Ok(serde_json::json!({
+    let expense_items: Vec<Value> = exp_stmt
+        .query_map(params![shift_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "expense_type": row.get::<_, String>(1)?,
+                "amount": row.get::<_, f64>(2)?,
+                "description": row.get::<_, String>(3)?,
+                "receipt_number": row.get::<_, Option<String>>(4)?,
+                "status": row.get::<_, String>(5)?,
+                "created_at": row.get::<_, String>(6)?,
+            }))
+        })
+        .map_err(|e| format!("query expenses: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_expenses: f64 = expense_items
+        .iter()
+        .map(|e| e["amount"].as_f64().unwrap_or(0.0))
+        .sum();
+
+    // --- 7. Driver data (role-dependent) ---
+    let mut driver_deliveries: Vec<Value> = Vec::new();
+    let mut transferred_drivers: Vec<Value> = Vec::new();
+
+    if role_type == "cashier" || role_type == "manager" {
+        // For cashier checkout: get closed driver shifts from same terminal/day
+        let start_of_day = if let Some(date_part) = check_in_time.get(..10) {
+            format!("{date_part}T00:00:00")
+        } else {
+            check_in_time.clone()
+        };
+        let end_of_day = if let Some(date_part) = check_in_time.get(..10) {
+            format!("{date_part}T23:59:59")
+        } else {
+            check_in_time.clone()
+        };
+
+        let mut drv_stmt = conn
+            .prepare(
+                "SELECT ds.id, ds.staff_id, ds.staff_name, ds.opening_cash_amount,
+                        ds.payment_amount, ds.check_in_time, ds.check_out_time
+                 FROM staff_shifts ds
+                 WHERE ds.check_in_time >= ?1 AND ds.check_in_time <= ?2
+                   AND ds.branch_id = ?3 AND ds.terminal_id = ?4
+                   AND ds.role_type = 'driver' AND ds.status = 'closed'
+                   AND ds.is_transfer_pending = 0
+                   AND ds.transferred_to_cashier_shift_id IS NULL
+                 ORDER BY ds.check_in_time ASC",
+            )
+            .map_err(|e| format!("prepare driver shifts: {e}"))?;
+
+        let drv_shifts: Vec<(String, String, Option<String>, f64, Option<f64>)> = drv_stmt
+            .query_map(
+                params![start_of_day, end_of_day, branch_id, terminal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,         // id
+                        row.get::<_, String>(1)?,         // staff_id
+                        row.get::<_, Option<String>>(2)?, // staff_name
+                        row.get::<_, f64>(3)?,            // opening_cash
+                        row.get::<_, Option<f64>>(4)?,    // payment_amount
+                    ))
+                },
+            )
+            .map_err(|e| format!("query driver shifts: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (ds_id, ds_staff_id, ds_name, ds_opening, ds_payment) in &drv_shifts {
+            let drv_expenses: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
+                     WHERE staff_shift_id = ?1 AND expense_type != 'staff_payment'",
+                    params![ds_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+
+            driver_deliveries.push(serde_json::json!({
+                "driver_id": ds_staff_id,
+                "driver_name": ds_name.as_deref().unwrap_or(ds_staff_id),
+                "starting_amount": ds_opening,
+                "driver_payment": ds_payment.unwrap_or(0.0),
+                "expenses": drv_expenses,
+                "shift_id": ds_id,
+                "role": "driver",
+            }));
+        }
+
+        // Transferred drivers (inherited from previous cashier)
+        let mut tr_stmt = conn
+            .prepare(
+                "SELECT ds.id, ds.staff_id, ds.staff_name, ds.opening_cash_amount, ds.check_in_time
+                 FROM staff_shifts ds
+                 WHERE ds.transferred_to_cashier_shift_id = ?1
+                   AND ds.role_type = 'driver' AND ds.status = 'active'
+                 ORDER BY ds.check_in_time ASC",
+            )
+            .map_err(|e| format!("prepare transferred drivers: {e}"))?;
+
+        transferred_drivers = tr_stmt
+            .query_map(params![shift_id], |row| {
+                Ok(serde_json::json!({
+                    "shift_id": row.get::<_, String>(0)?,
+                    "driver_id": row.get::<_, String>(1)?,
+                    "driver_name": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    "starting_amount": row.get::<_, f64>(3)?,
+                    "check_in_time": row.get::<_, String>(4)?,
+                }))
+            })
+            .map_err(|e| format!("query transferred drivers: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+    } else if role_type == "driver" {
+        // For driver checkout: get individual delivery records
+        let mut de_stmt = conn
+            .prepare(
+                "SELECT de.id, de.order_id, de.delivery_fee, de.tip_amount,
+                        de.total_earning, de.payment_method, de.cash_collected,
+                        de.card_amount, de.cash_to_return,
+                        o.order_number, o.delivery_address, o.total_amount,
+                        o.status, o.customer_name, o.customer_phone
+                 FROM driver_earnings de
+                 LEFT JOIN orders o ON de.order_id = o.id
+                 WHERE de.staff_shift_id = ?1
+                 ORDER BY de.created_at DESC",
+            )
+            .map_err(|e| format!("prepare driver earnings: {e}"))?;
+
+        driver_deliveries = de_stmt
+            .query_map(params![shift_id], |row| {
+                let status: String = row.get::<_, Option<String>>(12)?.unwrap_or_default();
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "order_id": row.get::<_, String>(1)?,
+                    "delivery_fee": row.get::<_, f64>(2)?,
+                    "tip_amount": row.get::<_, f64>(3)?,
+                    "total_earning": row.get::<_, f64>(4)?,
+                    "payment_method": row.get::<_, String>(5)?,
+                    "cash_collected": row.get::<_, f64>(6)?,
+                    "card_amount": row.get::<_, f64>(7)?,
+                    "cash_to_return": row.get::<_, f64>(8)?,
+                    "order_number": row.get::<_, Option<String>>(9)?,
+                    "delivery_address": row.get::<_, Option<String>>(10)?,
+                    "total_amount": row.get::<_, Option<f64>>(11)?,
+                    "status": &status,
+                    "order_status": &status,
+                    "customer_name": row.get::<_, Option<String>>(13)?,
+                    "customer_phone": row.get::<_, Option<String>>(14)?,
+                }))
+            })
+            .map_err(|e| format!("query driver earnings: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+    }
+
+    // --- Build response matching Electron POS shape ---
+    let overall = &breakdown["overall"];
+    let orders_count = overall["totalCount"].as_i64().unwrap_or(0);
+    let sales_amount = overall["totalAmount"].as_f64().unwrap_or(0.0);
+
+    let mut result = serde_json::json!({
         "shift": shift,
-        "orders": order_stats,
-        "expenses": {
-            "total": expenses_total,
-            "count": expenses_count,
-        },
-    }))
+        "cashDrawer": cash_drawer,
+        "expenses": expense_items,
+        "totalExpenses": total_expenses,
+        "breakdown": breakdown,
+        "canceledOrders": canceled_orders,
+        "cashRefunds": cash_refunds,
+        "driverDeliveries": driver_deliveries,
+        "staffPayments": [],
+        "ordersCount": orders_count,
+        "salesAmount": sales_amount,
+    });
+
+    if !transferred_drivers.is_empty() {
+        result["transferredDrivers"] = serde_json::json!(transferred_drivers);
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1132,9 +1416,8 @@ fn query_shift(
         let mut obj = serde_json::Map::new();
         for (i, name) in col_names.iter().enumerate() {
             let val = row_value_at(row, i);
-            // Convert snake_case column names to camelCase for frontend
-            let camel = to_camel_case(name);
-            obj.insert(camel, val);
+            // Keep raw snake_case column names — frontend expects them
+            obj.insert(name.clone(), val);
         }
         Ok(Value::Object(obj))
     });
@@ -1162,23 +1445,6 @@ fn row_value_at(row: &rusqlite::Row, idx: usize) -> Value {
         Ok(ValueRef::Blob(_)) => Value::Null,
         Err(_) => Value::Null,
     }
-}
-
-/// Convert snake_case to camelCase.
-fn to_camel_case(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut capitalize_next = false;
-    for ch in s.chars() {
-        if ch == '_' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            result.push(ch.to_ascii_uppercase());
-            capitalize_next = false;
-        } else {
-            result.push(ch);
-        }
-    }
-    result
 }
 
 fn str_field(v: &Value, key: &str) -> Option<String> {

@@ -826,11 +826,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         });
       }
 
-      // Show success feedback
-      setTimeout(() => {
-        toast.success(t('modals.menu.orderSuccess'));
-      }, 100);
-
       // Reset state
       setCartItems([]);
       setSelectedCategory("all");

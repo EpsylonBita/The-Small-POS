@@ -2,6 +2,12 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 
+function toOptionalTrimmedString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 // Show fatal errors visually (since DevTools may not be open)
 function showFatalError(err: unknown) {
   const msg = err instanceof Error ? err.stack || err.message : String(err);
@@ -28,23 +34,31 @@ try {
   // This must happen before React renders so components can use Supabase.
   try {
     const config = await (window as any).electronAPI?.invoke?.('terminal-config:get-full-config');
-    if (config?.supabase_url && config?.supabase_anon_key) {
+    const supabaseUrl = toOptionalTrimmedString(config?.supabase_url);
+    const supabaseAnonKey = toOptionalTrimmedString(config?.supabase_anon_key);
+
+    if (supabaseUrl && supabaseAnonKey) {
       const { configureSupabaseRuntime } = await import('./shared/supabase-config');
-      configureSupabaseRuntime(config.supabase_url, config.supabase_anon_key);
+      configureSupabaseRuntime(supabaseUrl, supabaseAnonKey);
       console.log('[Startup] Supabase configured from terminal credentials');
     }
+
+    const terminalId = toOptionalTrimmedString(config?.terminal_id);
+    const organizationId = toOptionalTrimmedString(config?.organization_id);
+    const branchId = toOptionalTrimmedString(config?.branch_id);
+
     // Also store terminal context for Supabase headers
-    if (config?.terminal_id || config?.organization_id || config?.branch_id) {
+    if (terminalId || organizationId || branchId) {
       const { setSupabaseContext } = await import('./shared/supabase-config');
       setSupabaseContext({
-        terminalId: config.terminal_id,
-        organizationId: config.organization_id,
-        branchId: config.branch_id,
+        terminalId,
+        organizationId,
+        branchId,
       });
       // Also stash in localStorage for hydration on reload
-      if (config.terminal_id) localStorage.setItem('terminal_id', config.terminal_id);
-      if (config.organization_id) localStorage.setItem('organization_id', config.organization_id);
-      if (config.branch_id) localStorage.setItem('branch_id', config.branch_id);
+      if (terminalId) localStorage.setItem('terminal_id', terminalId);
+      if (organizationId) localStorage.setItem('organization_id', organizationId);
+      if (branchId) localStorage.setItem('branch_id', branchId);
     }
   } catch (e) {
     console.warn('[Startup] Supabase hydration failed (non-fatal):', e);

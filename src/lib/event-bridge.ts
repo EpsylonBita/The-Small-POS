@@ -137,6 +137,9 @@ const EVENT_MAP: Record<string, string> = {
 export async function startEventBridge(): Promise<void> {
   if (!isTauri()) return;
 
+  // Clean up any existing listeners first (idempotent — prevents HMR accumulation)
+  stopEventBridge();
+
   const { listen } = await import('@tauri-apps/api/event');
 
   for (const [tauriEvent, electronChannel] of Object.entries(EVENT_MAP)) {

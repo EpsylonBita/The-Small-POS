@@ -833,6 +833,34 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   </button>
                 </div>
 
+                {/* Clear All Orders - Higher destructive */}
+                <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className="text-left min-w-0">
+                      <span className={`font-medium block liquid-glass-modal-text`}>{t('settings.database.clearAllOrdersLabel', 'Clear All Orders')}</span>
+                      <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.database.clearAllOrdersHelp', 'Removes all orders including today\'s')}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all-orders')
+                        if (result?.success) {
+                          toast.success(t('settings.database.allOrdersCleared', `Cleared ${result.cleared} orders`))
+                        } else {
+                          toast.error(result?.error || t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+                        }
+                      } catch (e) {
+                        console.error('Failed to clear all orders:', e)
+                        toast.error(t('settings.database.allOrdersClearFailed', 'Failed to clear all orders'))
+                      }
+                    }}
+                    className={`flex-shrink-0 px-4 py-2 rounded-lg transition-all font-medium text-sm whitespace-nowrap bg-orange-600/30 border-2 border-orange-500 hover:bg-orange-600/50 text-orange-300 shadow-[0_0_12px_rgba(251,146,60,0.5)]`}
+                  >
+                    {t('settings.database.clearAllOrdersButton', 'Clear')}
+                  </button>
+                </div>
+
                 {/* Sync Deleted Orders - Cleanup orphaned orders */}
                 <div className="flex items-center justify-between gap-3 pt-2 border-t liquid-glass-modal-border">
                   <div className="flex items-center gap-3 flex-1 min-w-0">

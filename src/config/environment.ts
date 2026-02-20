@@ -1,5 +1,5 @@
 // Environment configuration service for POS system
-import { getSupabaseClient, SUPABASE_CONFIG } from '../shared/supabase-config';
+import { SUPABASE_CONFIG } from '../shared/supabase-config';
 
 // Window interface for electron API
 interface WindowWithElectronAPI {
@@ -23,8 +23,14 @@ export interface EnvironmentConfig {
   TERMINAL_ID: string;
 }
 
-function normalizeAdminDashboardUrl(rawUrl: string): string {
-  const trimmed = (rawUrl || '').trim();
+function asTrimmedString(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  return '';
+}
+
+function normalizeAdminDashboardUrl(rawUrl: unknown): string {
+  const trimmed = asTrimmedString(rawUrl);
   if (!trimmed) return '';
 
   let normalized = trimmed;
@@ -61,32 +67,50 @@ function applyAdminDashboardUrl(adminUrl: string): void {
   }
 }
 
+function readMetaEnvVar(key: string): string | undefined {
+  try {
+    const meta = (import.meta as any)?.env;
+    const value = meta?.[key];
+    return typeof value === 'string' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Get environment variable with fallback
 function getEnvVar(key: string, fallback: string = ''): string {
-  // Check process.env first (main process)
-  if (typeof process !== 'undefined' && process.env) {
-    return process.env[key] || fallback;
+  // Prefer import.meta.env in Vite/Tauri renderer.
+  const metaValue = readMetaEnvVar(key);
+  if (metaValue !== undefined) {
+    return metaValue;
   }
 
-  // Check window environment (renderer process)
-  if (typeof window !== 'undefined') {
-    const windowWithElectron = window as WindowWithElectronAPI & Window;
-    if (windowWithElectron.electronAPI && windowWithElectron.electronAPI.getEnv) {
-      return windowWithElectron.electronAPI.getEnv(key) || fallback;
+  // Check process.env first (main process)
+  if (typeof process !== 'undefined' && process.env) {
+    const processValue = process.env[key];
+    if (typeof processValue === 'string') {
+      return processValue;
     }
   }
 
   return fallback;
 }
 
+function getPersistedAdminDashboardUrl(): string {
+  if (typeof window === 'undefined') return '';
+
+  try {
+    return normalizeAdminDashboardUrl(window.localStorage.getItem('admin_dashboard_url'));
+  } catch {
+    return '';
+  }
+}
+
 // Initialize environment configuration
 function initializeEnvironment(): EnvironmentConfig {
   const envDashboardUrl = normalizeAdminDashboardUrl(getEnvVar('ADMIN_DASHBOARD_URL', ''));
   const envApiBaseUrl = normalizeAdminDashboardUrl(getEnvVar('ADMIN_API_BASE_URL', ''));
-  const persistedDashboardUrl =
-    typeof window !== 'undefined'
-      ? normalizeAdminDashboardUrl(window.localStorage.getItem('admin_dashboard_url') || '')
-      : '';
+  const persistedDashboardUrl = getPersistedAdminDashboardUrl();
   const adminDashboardUrl = envDashboardUrl || envApiBaseUrl || persistedDashboardUrl || 'http://localhost:3001';
 
   return {

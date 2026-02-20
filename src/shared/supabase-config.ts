@@ -63,6 +63,12 @@ let _config: ReturnType<typeof getSupabaseConfig> | null = null;
 let runtimeSupabaseUrlOverride: string | null = null;
 let runtimeSupabaseAnonKeyOverride: string | null = null;
 
+function normalizeRuntimeCredential(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  return '';
+}
+
 function getConfig() {
   if (!_config) {
     _config = getSupabaseConfig('desktop');
@@ -155,9 +161,9 @@ let supabaseClient: SupabaseClient | null = null;
  * Configure Supabase runtime credentials after startup.
  * Used when credentials are received from admin API during onboarding/sync.
  */
-export function configureSupabaseRuntime(url: string, anonKey: string): boolean {
-  const normalizedUrl = (url || '').trim();
-  const normalizedAnonKey = (anonKey || '').trim();
+export function configureSupabaseRuntime(url: unknown, anonKey: unknown): boolean {
+  const normalizedUrl = normalizeRuntimeCredential(url);
+  const normalizedAnonKey = normalizeRuntimeCredential(anonKey);
   if (!normalizedUrl || !normalizedAnonKey) {
     return false;
   }
@@ -195,7 +201,7 @@ export function getSupabaseClient(): SupabaseClient {
     // Create client even with empty/default values - it will fail gracefully on API calls
     // This allows the app to start and show onboarding
     supabaseClient = createClient(
-      config.url || 'https://placeholder.supabase.co', 
+      config.url || 'https://example.invalid',
       config.anonKey || 'placeholder-key',
       {
         ...config.options,
