@@ -14,6 +14,7 @@ import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '..
 interface CustomerAddress {
   id: string;
   street_address: string;
+  street?: string;
   city: string;
   postal_code?: string;
   floor_number?: string;
@@ -50,6 +51,37 @@ interface CustomerSearchModalProps {
   /** Pre-selected customer to show directly (e.g., after editing an address) */
   initialCustomer?: Customer | null;
 }
+
+const resolveAddressStreet = (address?: Partial<CustomerAddress> | null): string => {
+  if (!address) return '';
+
+  const streetAddress = typeof address.street_address === 'string'
+    ? address.street_address.trim()
+    : '';
+  if (streetAddress) return streetAddress;
+
+  return typeof address.street === 'string' ? address.street.trim() : '';
+};
+
+const normalizeCustomerAddress = (address: any): CustomerAddress => {
+  const normalizedStreet = resolveAddressStreet(address);
+  return {
+    ...address,
+    id: address?.id ?? '',
+    city: typeof address?.city === 'string' ? address.city : '',
+    street: normalizedStreet,
+    street_address: normalizedStreet,
+    notes: address?.notes ?? address?.delivery_notes,
+    address_type: typeof address?.address_type === 'string' ? address.address_type : 'delivery',
+    is_default: Boolean(address?.is_default),
+    created_at: typeof address?.created_at === 'string' ? address.created_at : '',
+  };
+};
+
+const normalizeCustomerAddresses = (addresses: any): CustomerAddress[] => {
+  if (!Array.isArray(addresses)) return [];
+  return addresses.map((address) => normalizeCustomerAddress(address));
+};
 
 export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   isOpen,
@@ -107,7 +139,10 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   // Set customer from initialCustomer prop when modal opens
   useEffect(() => {
     if (isOpen && initialCustomer) {
-      setCustomer(initialCustomer);
+      setCustomer({
+        ...initialCustomer,
+        addresses: normalizeCustomerAddresses(initialCustomer.addresses),
+      });
       setSearchQuery(initialCustomer.phone || '');
       setCustomers([]);
       setError(null);
@@ -200,7 +235,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           notes: c.notes,
           name_on_ringer: c.name_on_ringer,
           version: c.version,
-          addresses: c.addresses,
+          addresses: normalizeCustomerAddresses(c.addresses),
           is_banned: c.is_banned,
           ban_reason: c.ban_reason,
           banned_at: c.banned_at,
@@ -221,7 +256,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           notes: payload.customer.notes,
           name_on_ringer: payload.customer.name_on_ringer,
           version: payload.customer.version,
-          addresses: payload.customer.addresses,
+          addresses: normalizeCustomerAddresses(payload.customer.addresses),
           is_banned: payload.customer.is_banned,
           ban_reason: payload.customer.ban_reason,
           banned_at: payload.customer.banned_at,
@@ -284,7 +319,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         addressCount: customer.addresses?.length,
         addresses: customer.addresses?.map(a => ({
           id: a.id,
-          street: a.street_address,
+          street: resolveAddressStreet(a),
           notes: a.notes
         }))
       });
@@ -302,15 +337,16 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       if (addressToUse && customer.addresses) {
         const selectedAddr = customer.addresses.find(a => a.id === addressToUse);
         if (selectedAddr) {
+          const selectedStreet = resolveAddressStreet(selectedAddr) || customer.address || '';
           console.log('[CustomerSearch] Selected address:', {
             id: selectedAddr.id,
-            street: selectedAddr.street_address,
+            street: selectedStreet,
             notes: selectedAddr.notes,
             rawAddress: selectedAddr
           });
           const customerWithSelectedAddress = {
             ...customer,
-            address: selectedAddr.street_address,
+            address: selectedStreet,
             city: selectedAddr.city,
             postal_code: selectedAddr.postal_code,
             floor_number: selectedAddr.floor_number,
@@ -473,7 +509,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             addressCount: payload.customer.addresses?.length,
             addresses: payload.customer.addresses?.map((a: any) => ({
               id: a.id,
-              street: a.street_address,
+              street: resolveAddressStreet(a),
               notes: a.notes
             }))
           });
@@ -488,7 +524,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             notes: payload.customer.notes,
             name_on_ringer: payload.customer.name_on_ringer,
             version: payload.customer.version,
-            addresses: payload.customer.addresses,
+            addresses: normalizeCustomerAddresses(payload.customer.addresses),
             is_banned: payload.customer.is_banned,
             ban_reason: payload.customer.ban_reason,
             banned_at: payload.customer.banned_at,
@@ -670,7 +706,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                           )}
                           <div className="flex-1 min-w-0">
                             <p className={`text-sm font-medium ${isSelected ? 'text-green-400' : 'liquid-glass-modal-text'}`}>
-                              {addr.street_address}
+                              {resolveAddressStreet(addr)}
                             </p>
                             <p className="text-xs liquid-glass-modal-text-muted">
                               {[addr.city, addr.postal_code].filter(Boolean).join(', ')}
@@ -809,7 +845,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             <span>
               {selectedAddressId && customer.addresses?.find(a => a.id === selectedAddressId)
                 ? t('modals.customerSearch.continueWithAddress', 'Continue with {{address}}', {
-                  address: customer.addresses.find(a => a.id === selectedAddressId)?.street_address
+                  address: resolveAddressStreet(customer.addresses.find(a => a.id === selectedAddressId))
                 })
                 : t('modals.customerSearch.continue', 'Continue')
               }

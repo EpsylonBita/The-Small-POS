@@ -3,7 +3,7 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { menuService, MenuItem, Ingredient } from '../../services/MenuService';
-import { Ban, Check, Minus, ShoppingCart, X } from 'lucide-react';
+import { Ban, Check, MessageSquare, Minus, ShoppingCart, X } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 
 interface SelectedIngredient {
@@ -45,6 +45,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   const [availableIngredients, setAvailableIngredients] = useState<Ingredient[]>([]);
   const [quantity, setQuantity] = useState(1);
   const [notes, setNotes] = useState("");
+  const [showNotesOverlay, setShowNotesOverlay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [ingredientsByColor, setIngredientsByColor] = useState<{ [color: string]: Ingredient[] }>({});
   const [activeFlavorType, setActiveFlavorType] = useState<'all' | 'savory' | 'sweet'>('all');
@@ -271,39 +272,17 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col">
-        {/* Header */}
-        <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
-          <div className="flex justify-between items-start gap-4">
-            <div className="flex-1">
-              <h2 className="text-2xl font-bold liquid-glass-modal-text">
-                {menuItem.name}
-              </h2>
-              {menuItem.description && (
-                <p className="text-sm mt-1 liquid-glass-modal-text-muted">
-                  {menuItem.description}
-                </p>
-              )}
-              <div className="flex items-center gap-3 mt-3 flex-wrap">
-                <span className="text-lg font-bold text-green-500">
-                  {formatCurrency(basePrice)}
-                </span>
-                <span className="text-xs px-2 py-1 rounded-full liquid-glass-modal-badge">
-                  {orderType === 'pickup' ? t('menu.item.pickup') : t('menu.item.delivery')} {t('menu.item.price')}
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={onClose}
-              className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
-              aria-label={t('common.actions.close')}
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        </div>
+      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col relative">
+        {/* Close button */}
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 z-20 liquid-glass-modal-button p-2 min-h-0 min-w-0"
+          aria-label={t('common.actions.close')}
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 relative z-0">
@@ -605,73 +584,58 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           </div>
         </div>
 
-        {/* Footer - Fixed */}
-        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-6 py-4 space-y-4 bg-black/40 backdrop-blur-sm relative z-10">
-          {/* Special Instructions */}
-          <div>
-            <label htmlFor="special-instructions-textarea" className="block text-sm font-medium mb-2 liquid-glass-modal-text">
-              {t('menu.itemModal.specialInstructions')}
-            </label>
-            <textarea
-              id="special-instructions-textarea"
-              name="specialInstructions"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onFocus={(e) => e.stopPropagation()}
-              onKeyDown={(e) => e.stopPropagation()}
-              onKeyUp={(e) => e.stopPropagation()}
-              onKeyPress={(e) => e.stopPropagation()}
-              className="w-full p-3 rounded-xl liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-blue-500 transition-all resize-none text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted pointer-events-auto cursor-text"
-              rows={2}
-              placeholder={t('menu.itemModal.specialInstructionsPlaceholder')}
-            />
-          </div>
-
-          {/* Quantity */}
-          <div>
-            <label className="block text-sm font-medium mb-2 liquid-glass-modal-text">
-              {t('menu.itemModal.quantity')}
-            </label>
-            <div className="flex items-center gap-4">
+        {/* Footer - Compact */}
+        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-6 py-3 space-y-3 bg-black/40 backdrop-blur-sm relative z-10">
+          {/* Row: Quantity + Notes + Total */}
+          <div className="flex items-center justify-between gap-3">
+            {/* Quantity - inline */}
+            <div className="flex items-center gap-2">
               <button
                 onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                className="liquid-glass-modal-button w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold"
+                className="liquid-glass-modal-button w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
               >
-                <Minus className="w-5 h-5" />
+                <Minus className="w-4 h-4" />
               </button>
-              <span className="text-2xl font-bold liquid-glass-modal-text min-w-[3rem] text-center">
+              <span className="text-xl font-bold liquid-glass-modal-text min-w-[2rem] text-center">
                 {quantity}
               </span>
               <button
                 onClick={() => setQuantity(quantity + 1)}
-                className="liquid-glass-modal-button w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold"
+                className="liquid-glass-modal-button w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
               >
                 +
               </button>
             </div>
-          </div>
-          <div className="flex justify-between items-center mb-4">
-            <span className="text-lg font-semibold liquid-glass-modal-text">
-              {t('menu.itemModal.total')}:
-            </span>
-            <span className="text-3xl font-bold text-green-500">
+
+            {/* Notes button */}
+            <button
+              onClick={() => setShowNotesOverlay(true)}
+              className="liquid-glass-modal-button px-3 py-2 rounded-lg text-sm flex items-center gap-2"
+            >
+              <MessageSquare className="w-4 h-4" />
+              {notes
+                ? (t('menu.itemModal.editNotes', { defaultValue: 'Edit Notes' }))
+                : (t('menu.itemModal.addNotes', { defaultValue: 'Add Notes' }))}
+              {notes && <span className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />}
+            </button>
+
+            {/* Total */}
+            <span className="text-2xl font-bold text-green-500">
               {formatCurrency(totalPrice)}
             </span>
           </div>
 
           {selectedIngredients.length > 0 && (
-            <div className="text-sm mb-4 liquid-glass-modal-text-muted">
-              {/* Show extras and "without" items separately */}
+            <div className="text-sm liquid-glass-modal-text-muted">
               {(() => {
                 const extras = selectedIngredients.filter(si => !si.isWithout);
                 const withoutItems = selectedIngredients.filter(si => si.isWithout);
                 const totalExtrasCount = extras.reduce((sum, si) => sum + si.quantity, 0);
 
                 return (
-                  <div className="space-y-1">
+                  <div className="flex items-center gap-3 flex-wrap">
                     {totalExtrasCount > 0 && (
-                      <div>
+                      <span>
                         {t('menu.itemModal.ingredientsSelected', { count: totalExtrasCount })}
                         {ingredientPrice > 0 && (
                           <span className="ml-1 text-green-500 font-semibold">
@@ -680,15 +644,13 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                             })}
                           </span>
                         )}
-                      </div>
+                      </span>
                     )}
                     {withoutItems.length > 0 && (
-                      <div className="text-red-400">
-                        <span className="inline-flex items-center gap-1">
-                          <Ban className="w-3 h-3" />
-                          {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
-                        </span>
-                      </div>
+                      <span className="text-red-400 inline-flex items-center gap-1">
+                        <Ban className="w-3 h-3" />
+                        {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
+                      </span>
                     )}
                   </div>
                 );
@@ -716,6 +678,38 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             )}
           </button>
         </div>
+
+        {/* Notes overlay */}
+        {showNotesOverlay && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-2xl">
+            <div className="bg-gray-900/95 border border-white/15 rounded-xl p-5 mx-6 max-w-md w-full shadow-2xl">
+              <h3 className="text-sm font-semibold text-white mb-3">
+                {t('menu.itemModal.specialInstructions')}
+              </h3>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onFocus={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+                onKeyUp={(e) => e.stopPropagation()}
+                onKeyPress={(e) => e.stopPropagation()}
+                className="w-full p-3 rounded-xl bg-black/30 border border-white/10 focus:ring-2 focus:ring-blue-500 transition-all resize-none text-sm text-white placeholder:text-gray-500 pointer-events-auto cursor-text"
+                rows={3}
+                placeholder={t('menu.itemModal.specialInstructionsPlaceholder')}
+                autoFocus
+              />
+              <div className="flex gap-2 justify-end mt-3">
+                <button
+                  onClick={() => setShowNotesOverlay(false)}
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+                >
+                  {t('common.actions.done', { defaultValue: 'Done' })}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );

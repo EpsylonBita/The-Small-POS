@@ -185,6 +185,8 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
         method: 'POST',
         headers,
         body: JSON.stringify({
+          street: formData.address.trim(),
+          street_address: formData.address.trim(),
           address: formData.address.trim(),
           postal_code: formData.postalCode.trim() || undefined,
           floor_number: formData.floorNumber.trim() || undefined,

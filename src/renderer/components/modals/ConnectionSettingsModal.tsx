@@ -422,6 +422,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   }
 
   return (
+    <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
@@ -944,13 +945,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </div>
 
-        {showPrinterSettingsModal && (
-          <PrinterSettingsModal
-            isOpen={showPrinterSettingsModal}
-            onClose={() => setShowPrinterSettingsModal(false)}
-          />
-        )}
-
         {/* Payment Terminals Settings trigger */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
@@ -970,86 +964,96 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </div>
 
-        {/* Clear Operational Data Confirmation Dialog */}
-        <ConfirmDialog
-          isOpen={showClearOperationalConfirm}
-          onClose={() => setShowClearOperationalConfirm(false)}
-          onConfirm={async () => {
-            setIsClearingOperational(true)
-            try {
-              const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
-              if (result?.success) {
-                toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
-                setShowClearOperationalConfirm(false)
-              } else {
-                toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-              }
-            } catch (e) {
-              console.error('Failed to clear operational data:', e)
-              toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
-            } finally {
-              setIsClearingOperational(false)
-            }
-          }}
-          title={t('settings.database.confirmClearOperationalTitle', 'Clear Operational Data')}
-          message={t('settings.database.confirmClearOperationalMessage', 'This action cannot be undone. All operational data will be permanently deleted.')}
-          variant="warning"
-          confirmText={t('settings.database.clearOperationalButton', 'Clear')}
-          cancelText={t('common.actions.cancel', 'Cancel')}
-          isLoading={isClearingOperational}
-          requireCheckbox={t('settings.database.confirmClearOperationalCheckbox', 'I understand that this will delete all orders, shifts, drawers, payments, and driver earnings')}
-          details={
-            <ul className="list-disc list-inside space-y-1 text-white/70">
-              <li>{t('settings.database.clearItem.orders', 'All orders')}</li>
-              <li>{t('settings.database.clearItem.shifts', 'All staff shifts')}</li>
-              <li>{t('settings.database.clearItem.drawers', 'All cash drawer sessions')}</li>
-              <li>{t('settings.database.clearItem.payments', 'All payments and expenses')}</li>
-              <li>{t('settings.database.clearItem.earnings', 'All driver earnings')}</li>
-            </ul>
-          }
-        />
-
-        {/* Factory Reset Warning Dialog (Step 1) */}
-        <ConfirmDialog
-          isOpen={showFactoryResetWarning}
-          onClose={() => setShowFactoryResetWarning(false)}
-          onConfirm={handleFactoryResetWarningConfirm}
-          title={t('settings.database.factoryResetWarningTitle', 'Factory Reset Warning')}
-          message={t('settings.database.factoryResetWarningMessage', 'This will completely restore the POS terminal to factory settings.')}
-          variant="warning"
-          confirmText={t('common.actions.continue', 'Continue')}
-          cancelText={t('common.actions.cancel', 'Cancel')}
-          details={
-            <ul className="list-disc list-inside space-y-1 text-white/70">
-              <li>{t('settings.database.factoryResetItem.orders', 'All local orders will be deleted')}</li>
-              <li>{t('settings.database.factoryResetItem.settings', 'All settings will be cleared')}</li>
-              <li>{t('settings.database.factoryResetItem.terminal', 'Terminal configuration will be removed')}</li>
-              <li>{t('settings.database.factoryResetItem.reconnect', 'You will need to reconnect with connection string')}</li>
-            </ul>
-          }
-        />
-
-        {/* Factory Reset Final Confirmation Dialog (Step 2) */}
-        <ConfirmDialog
-          isOpen={showFactoryResetFinal}
-          onClose={() => setShowFactoryResetFinal(false)}
-          onConfirm={handleFactoryResetFinalConfirm}
-          title={t('settings.database.factoryResetFinalTitle', 'Final Confirmation')}
-          message={t('settings.database.factoryResetFinalMessage', 'This is your last chance to cancel.')}
-          variant="error"
-          confirmText={t('settings.database.factoryResetConfirmButton', 'Reset')}
-          cancelText={t('common.actions.cancel', 'Cancel')}
-          isLoading={isResetting}
-          requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that all data will be permanently deleted and the app will restart')}
-          details={
-            <div className="text-red-300 font-medium">
-              {t('settings.database.factoryResetFinalWarning', 'All data will be permanently deleted and the app will restart.')}
-            </div>
-          }
-        />
       </div>
       )}
     </LiquidGlassModal>
+
+    {/* Sub-modals rendered outside LiquidGlassModal for independent viewport positioning */}
+    {showPrinterSettingsModal && (
+      <PrinterSettingsModal
+        isOpen={showPrinterSettingsModal}
+        onClose={() => setShowPrinterSettingsModal(false)}
+      />
+    )}
+
+    {/* Clear Operational Data Confirmation Dialog */}
+    <ConfirmDialog
+      isOpen={showClearOperationalConfirm}
+      onClose={() => setShowClearOperationalConfirm(false)}
+      onConfirm={async () => {
+        setIsClearingOperational(true)
+        try {
+          const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
+          if (result?.success) {
+            toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
+            setShowClearOperationalConfirm(false)
+          } else {
+            toast.error(result?.error || t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+          }
+        } catch (e) {
+          console.error('Failed to clear operational data:', e)
+          toast.error(t('settings.database.operationalClearFailed', 'Failed to clear operational data'))
+        } finally {
+          setIsClearingOperational(false)
+        }
+      }}
+      title={t('settings.database.confirmClearOperationalTitle', 'Clear Operational Data')}
+      message={t('settings.database.confirmClearOperationalMessage', 'This action cannot be undone. All operational data will be permanently deleted.')}
+      variant="warning"
+      confirmText={t('settings.database.clearOperationalButton', 'Clear')}
+      cancelText={t('common.actions.cancel', 'Cancel')}
+      isLoading={isClearingOperational}
+      requireCheckbox={t('settings.database.confirmClearOperationalCheckbox', 'I understand that this will delete all orders, shifts, drawers, payments, and driver earnings')}
+      details={
+        <ul className="list-disc list-inside space-y-1 text-white/70">
+          <li>{t('settings.database.clearItem.orders', 'All orders')}</li>
+          <li>{t('settings.database.clearItem.shifts', 'All staff shifts')}</li>
+          <li>{t('settings.database.clearItem.drawers', 'All cash drawer sessions')}</li>
+          <li>{t('settings.database.clearItem.payments', 'All payments and expenses')}</li>
+          <li>{t('settings.database.clearItem.earnings', 'All driver earnings')}</li>
+        </ul>
+      }
+    />
+
+    {/* Factory Reset Warning Dialog (Step 1) */}
+    <ConfirmDialog
+      isOpen={showFactoryResetWarning}
+      onClose={() => setShowFactoryResetWarning(false)}
+      onConfirm={handleFactoryResetWarningConfirm}
+      title={t('settings.database.factoryResetWarningTitle', 'Factory Reset Warning')}
+      message={t('settings.database.factoryResetWarningMessage', 'This will completely restore the POS terminal to factory settings.')}
+      variant="warning"
+      confirmText={t('common.actions.continue', 'Continue')}
+      cancelText={t('common.actions.cancel', 'Cancel')}
+      details={
+        <ul className="list-disc list-inside space-y-1 text-white/70">
+          <li>{t('settings.database.factoryResetItem.orders', 'All local orders will be deleted')}</li>
+          <li>{t('settings.database.factoryResetItem.settings', 'All settings will be cleared')}</li>
+          <li>{t('settings.database.factoryResetItem.terminal', 'Terminal configuration will be removed')}</li>
+          <li>{t('settings.database.factoryResetItem.reconnect', 'You will need to reconnect with connection string')}</li>
+        </ul>
+      }
+    />
+
+    {/* Factory Reset Final Confirmation Dialog (Step 2) */}
+    <ConfirmDialog
+      isOpen={showFactoryResetFinal}
+      onClose={() => setShowFactoryResetFinal(false)}
+      onConfirm={handleFactoryResetFinalConfirm}
+      title={t('settings.database.factoryResetFinalTitle', 'Final Confirmation')}
+      message={t('settings.database.factoryResetFinalMessage', 'This is your last chance to cancel.')}
+      variant="error"
+      confirmText={t('settings.database.factoryResetConfirmButton', 'Reset')}
+      cancelText={t('common.actions.cancel', 'Cancel')}
+      isLoading={isResetting}
+      requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that all data will be permanently deleted and the app will restart')}
+      details={
+        <div className="text-red-300 font-medium">
+          {t('settings.database.factoryResetFinalWarning', 'All data will be permanently deleted and the app will restart.')}
+        </div>
+      }
+    />
+    </>
   )
 }
 

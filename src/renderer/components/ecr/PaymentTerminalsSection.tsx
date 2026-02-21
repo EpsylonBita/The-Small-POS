@@ -83,11 +83,11 @@ interface TerminalStats {
 const ecrAPI = {
   discoverDevices: async (types?: ConnectionType[]): Promise<DiscoveredDevice[]> => {
     const result = await (window as any).electronAPI?.invoke('ecr:discover-devices', types)
-    return result || []
+    return result?.devices || []
   },
   getDevices: async (): Promise<ECRDevice[]> => {
     const result = await (window as any).electronAPI?.invoke('ecr:get-devices')
-    return result || []
+    return result?.devices || []
   },
   addDevice: async (
     config: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>
@@ -114,7 +114,12 @@ const ecrAPI = {
   },
   getAllStatuses: async (): Promise<Record<string, ECRDeviceStatus>> => {
     const result = await (window as any).electronAPI?.invoke('ecr:get-all-statuses')
-    return result || {}
+    const arr: any[] = result?.statuses || []
+    const map: Record<string, ECRDeviceStatus> = {}
+    for (const s of arr) {
+      if (s?.deviceId) map[s.deviceId] = s
+    }
+    return map
   },
 }
 

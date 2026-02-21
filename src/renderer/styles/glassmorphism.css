@@ -576,38 +576,8 @@
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-.liquid-glass-modal-input {
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 0.75rem;
-  padding: 0.75rem 1rem;
-  padding: 0.75rem 1rem;
-  color: var(--modal-c-content);
-  opacity: 1;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  min-height: 44px;
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
-}
-
-.liquid-glass-modal-input:focus {
-  outline: none;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--modal-c-action);
-  box-shadow:
-    0 0 0 2px color-mix(in srgb, var(--modal-c-action) 30%, transparent),
-    inset 0 2px 4px rgba(0, 0, 0, 0.05);
-}
-
-.dark .liquid-glass-modal-input {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.1);
-}
-
-.dark .liquid-glass-modal-input:focus {
-  background: rgba(0, 0, 0, 0.3);
-}
+/* .liquid-glass-modal-input rules moved to globals.css @layer components
+   so Tailwind utilities (pl-10, pr-10, etc.) can properly override padding */
 
 .liquid-glass-modal-card {
   background: rgba(241, 245, 249, 0.8);

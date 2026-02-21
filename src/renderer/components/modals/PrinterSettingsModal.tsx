@@ -168,6 +168,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [diagnostics, setDiagnostics] = useState<PrinterDiagnostics | null>(null)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
 
   // Form state for add/edit
   const [formData, setFormData] = useState({
@@ -486,9 +487,15 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }
 
-  // Delete printer
-  const handleDelete = async (printerId: string) => {
-    if (!confirm(t('settings.printer.confirmDelete'))) return
+  // Delete printer — show in-app confirmation first
+  const handleDeleteRequest = (printerId: string) => {
+    setDeleteConfirmId(printerId)
+  }
+
+  const handleDeleteConfirm = async () => {
+    const printerId = deleteConfirmId
+    if (!printerId) return
+    setDeleteConfirmId(null)
     setLoading(true)
     try {
       const result = await api?.printerRemove?.(printerId)
@@ -771,7 +778,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     <Pencil className="w-4 h-4" />
                   </button>
                   <button
-                    onClick={() => handleDelete(printer.id)}
+                    onClick={() => handleDeleteRequest(printer.id)}
                     disabled={loading}
                     className={liquidGlassModalButton('danger', 'sm')}
                     title={t('common.actions.delete')}
@@ -1315,6 +1322,40 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       <div className="p-6">
         {renderContent()}
       </div>
+
+      {/* Delete confirmation overlay */}
+      {deleteConfirmId && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm rounded-2xl">
+          <div className="bg-gray-900/95 border border-white/15 rounded-xl p-6 mx-6 max-w-sm w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <Trash2 className="w-5 h-5 text-red-400 flex-shrink-0" />
+              <div>
+                <h3 className="text-sm font-semibold text-white">Delete Printer</h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {printers.find(p => p.id === deleteConfirmId)?.name || 'Printer'}
+                </p>
+              </div>
+            </div>
+            <p className="text-sm text-gray-300 mb-5">
+              {t('settings.printer.confirmDelete')}
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className={liquidGlassModalButton('secondary', 'sm')}
+              >
+                {t('common.actions.cancel') || 'Cancel'}
+              </button>
+              <button
+                onClick={handleDeleteConfirm}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 hover:bg-red-700 text-white transition-colors"
+              >
+                {t('common.actions.delete') || 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </LiquidGlassModal>
   )
 }

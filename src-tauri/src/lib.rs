@@ -7241,24 +7241,158 @@ async fn report_submit_z_report(
     Ok(result)
 }
 
-fn map_printer_profile_input(id: Option<String>, payload: serde_json::Value) -> serde_json::Value {
-    let mut out = payload.as_object().cloned().unwrap_or_default();
-    if !out.contains_key("name") {
-        let fallback = out
-            .get("printerName")
-            .or_else(|| out.get("printer_name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Printer");
-        out.insert("name".to_string(), serde_json::json!(fallback));
-    }
-    if !out.contains_key("printerName") {
-        if let Some(name) = out.get("name").and_then(|v| v.as_str()) {
-            out.insert("printerName".to_string(), serde_json::json!(name));
-        }
-    }
+/// Transform a flat Rust printer profile (from DB) into Electron-compatible format.
+///
+/// Maps DB columns → frontend PrinterConfig shape:
+/// - `printerType` → `type`
+/// - `paperWidthMm` (80) → `paperSize` ("80mm")
+/// - `connectionJson` (parsed) or fallback → `connectionDetails`
+/// - `isDefault` / `enabled` kept as booleans
+fn profile_to_electron_format(profile: &serde_json::Value) -> serde_json::Value {
+    let printer_type = value_str(profile, &["printerType", "printer_type"])
+        .unwrap_or_else(|| "system".to_string());
+
+    let paper_width = profile
+        .get("paperWidthMm")
+        .or_else(|| profile.get("paper_width_mm"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(80);
+    let paper_size = format!("{paper_width}mm");
+
+    // Parse connectionJson or build default from printerName
+    let conn_details = profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .unwrap_or_else(|| {
+            let printer_name =
+                value_str(profile, &["printerName", "printer_name"]).unwrap_or_default();
+            serde_json::json!({
+                "type": printer_type,
+                "systemName": printer_name
+            })
+        });
+
+    let is_default = profile
+        .get("isDefault")
+        .or_else(|| profile.get("is_default"))
+        .map(|v| v.as_bool().unwrap_or(false) || v.as_i64().unwrap_or(0) != 0)
+        .unwrap_or(false);
+
+    let enabled = profile
+        .get("enabled")
+        .map(|v| v.as_bool().unwrap_or(true) || v.as_i64().unwrap_or(1) != 0)
+        .unwrap_or(true);
+
+    serde_json::json!({
+        "id": value_str(profile, &["id"]).unwrap_or_default(),
+        "name": value_str(profile, &["name"]).unwrap_or_default(),
+        "type": printer_type,
+        "connectionDetails": conn_details,
+        "paperSize": paper_size,
+        "characterSet": value_str(profile, &["characterSet", "character_set"]).unwrap_or_else(|| "PC437_USA".to_string()),
+        "greekRenderMode": value_str(profile, &["greekRenderMode", "greek_render_mode"]),
+        "receiptTemplate": value_str(profile, &["receiptTemplate", "receipt_template"]),
+        "role": value_str(profile, &["role"]).unwrap_or_else(|| "receipt".to_string()),
+        "isDefault": is_default,
+        "fallbackPrinterId": value_str(profile, &["fallbackPrinterId", "fallback_printer_id"]),
+        "enabled": enabled,
+        "createdAt": value_str(profile, &["createdAt", "created_at"]),
+        "updatedAt": value_str(profile, &["updatedAt", "updated_at"]),
+    })
+}
+
+/// Transform an Electron-compatible printer config (from frontend) into flat Rust profile format.
+///
+/// Maps frontend PrinterConfig → DB columns:
+/// - `type` → `printerType`
+/// - `connectionDetails.systemName` → `printerName`
+/// - `connectionDetails` (serialized) → `connectionJson`
+/// - `paperSize` ("80mm") → `paperWidthMm` (80)
+fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    let obj = payload.as_object();
+
+    // Pass through id
     if let Some(id) = id {
         out.insert("id".to_string(), serde_json::json!(id));
     }
+
+    // name
+    if let Some(name) = obj.and_then(|o| o.get("name")).and_then(|v| v.as_str()) {
+        out.insert("name".to_string(), serde_json::json!(name));
+    }
+
+    // type → printerType
+    let printer_type = obj
+        .and_then(|o| o.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("system");
+    out.insert("printerType".to_string(), serde_json::json!(printer_type));
+
+    // connectionDetails → printerName + connectionJson
+    if let Some(conn) = obj.and_then(|o| o.get("connectionDetails")) {
+        // Serialize full connectionDetails as JSON
+        if let Ok(json_str) = serde_json::to_string(conn) {
+            out.insert("connectionJson".to_string(), serde_json::json!(json_str));
+        }
+
+        // Extract printerName from connectionDetails based on type
+        let printer_name = conn
+            .get("systemName")
+            .and_then(|v| v.as_str())
+            .or_else(|| conn.get("hostname").and_then(|v| v.as_str()))
+            .or_else(|| conn.get("ip").and_then(|v| v.as_str()))
+            .or_else(|| conn.get("address").and_then(|v| v.as_str()))
+            .or_else(|| conn.get("deviceName").and_then(|v| v.as_str()))
+            .or_else(|| obj.and_then(|o| o.get("name")).and_then(|v| v.as_str()))
+            .unwrap_or("Printer");
+        out.insert("printerName".to_string(), serde_json::json!(printer_name));
+    } else if !out.contains_key("printerName") {
+        // Fallback: use name as printerName
+        let fallback = out
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Printer")
+            .to_string();
+        out.insert("printerName".to_string(), serde_json::json!(fallback));
+    }
+
+    // paperSize ("80mm") → paperWidthMm (80)
+    if let Some(ps) = obj
+        .and_then(|o| o.get("paperSize"))
+        .and_then(|v| v.as_str())
+    {
+        let mm = ps.trim_end_matches("mm").parse::<i64>().unwrap_or(80);
+        out.insert("paperWidthMm".to_string(), serde_json::json!(mm));
+    }
+
+    // Direct pass-through fields
+    let pass_fields = [
+        ("role", "role"),
+        ("characterSet", "characterSet"),
+        ("greekRenderMode", "greekRenderMode"),
+        ("receiptTemplate", "receiptTemplate"),
+        ("fallbackPrinterId", "fallbackPrinterId"),
+    ];
+    for (src, dst) in pass_fields {
+        if let Some(v) = obj.and_then(|o| o.get(src)) {
+            out.insert(dst.to_string(), v.clone());
+        }
+    }
+
+    // Bool fields
+    if let Some(v) = obj
+        .and_then(|o| o.get("isDefault"))
+        .and_then(|v| v.as_bool())
+    {
+        out.insert("isDefault".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = obj.and_then(|o| o.get("enabled")).and_then(|v| v.as_bool()) {
+        out.insert("enabled".to_string(), serde_json::json!(v));
+    }
+
     serde_json::Value::Object(out)
 }
 
@@ -7696,13 +7830,15 @@ async fn printer_add(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = map_printer_profile_input(None, arg0.unwrap_or(serde_json::json!({})));
+    let payload = electron_to_profile_input(None, arg0.unwrap_or(serde_json::json!({})));
     let created = printers::create_printer_profile(&db, &payload)?;
     let profile_id = value_str(&created, &["profileId"]).unwrap_or_default();
     let profile = if profile_id.is_empty() {
         serde_json::Value::Null
     } else {
-        printers::get_printer_profile(&db, &profile_id).unwrap_or(serde_json::Value::Null)
+        let raw =
+            printers::get_printer_profile(&db, &profile_id).unwrap_or(serde_json::Value::Null);
+        profile_to_electron_format(&raw)
     };
     let _ = app.emit(
         "printer_status_changed",
@@ -7711,7 +7847,7 @@ async fn printer_add(
             "status": "configured"
         }),
     );
-    Ok(serde_json::json!({ "success": true, "data": profile }))
+    Ok(serde_json::json!({ "success": true, "printer": profile }))
 }
 
 #[tauri::command]
@@ -7722,12 +7858,13 @@ async fn printer_update(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let printer_id = arg0.ok_or("Missing printerId")?;
-    let payload = map_printer_profile_input(
+    let payload = electron_to_profile_input(
         Some(printer_id.clone()),
         arg1.unwrap_or(serde_json::json!({})),
     );
     let _ = printers::update_printer_profile(&db, &payload)?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
+    let raw = printers::get_printer_profile(&db, &printer_id)?;
+    let profile = profile_to_electron_format(&raw);
     let _ = app.emit(
         "printer_status_changed",
         serde_json::json!({
@@ -7735,7 +7872,7 @@ async fn printer_update(
             "status": "updated"
         }),
     );
-    Ok(serde_json::json!({ "success": true, "data": profile }))
+    Ok(serde_json::json!({ "success": true, "printer": profile }))
 }
 
 #[tauri::command]
@@ -7759,7 +7896,13 @@ async fn printer_remove(
 #[tauri::command]
 async fn printer_get_all(db: tauri::State<'_, db::DbState>) -> Result<serde_json::Value, String> {
     let profiles = printers::list_printer_profiles(&db)?;
-    Ok(serde_json::json!({ "success": true, "data": profiles }))
+    let electron_profiles: Vec<serde_json::Value> = profiles
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .map(profile_to_electron_format)
+        .collect();
+    Ok(serde_json::json!({ "success": true, "printers": electron_profiles }))
 }
 
 #[tauri::command]
@@ -7768,8 +7911,9 @@ async fn printer_get(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let printer_id = arg0.ok_or("Missing printerId")?;
-    let profile = printers::get_printer_profile(&db, &printer_id)?;
-    Ok(serde_json::json!({ "success": true, "data": profile }))
+    let raw = printers::get_printer_profile(&db, &printer_id)?;
+    let profile = profile_to_electron_format(&raw);
+    Ok(serde_json::json!({ "success": true, "printer": profile }))
 }
 
 #[tauri::command]
@@ -7782,12 +7926,25 @@ async fn printer_get_status(
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
     let system = printers::list_system_printers();
     let connected = system.iter().any(|name| name == &printer_name);
+    let state = if connected { "online" } else { "offline" };
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let queue_len: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM print_jobs WHERE status IN ('pending', 'printing') AND printer_profile_id = ?1",
+            rusqlite::params![printer_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
     Ok(serde_json::json!({
         "success": true,
         "printerId": printer_id,
+        "state": state,
         "connected": connected,
-        "status": if connected { "connected" } else { "disconnected" },
-        "printerName": printer_name
+        "queueLength": queue_len,
+        "printerName": printer_name,
+        "lastSeen": chrono::Utc::now().to_rfc3339()
     }))
 }
 
@@ -7797,22 +7954,38 @@ async fn printer_get_all_statuses(
 ) -> Result<serde_json::Value, String> {
     let profiles = printers::list_printer_profiles(&db)?;
     let system = printers::list_system_printers();
-    let mut statuses: Vec<serde_json::Value> = Vec::new();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let mut status_map = serde_json::Map::new();
     if let Some(arr) = profiles.as_array() {
         for profile in arr {
             let printer_id = value_str(profile, &["id"]).unwrap_or_default();
             let printer_name =
                 value_str(profile, &["printerName", "printer_name"]).unwrap_or_default();
             let connected = system.iter().any(|name| name == &printer_name);
-            statuses.push(serde_json::json!({
-                "printerId": printer_id,
-                "printerName": printer_name,
-                "connected": connected,
-                "status": if connected { "connected" } else { "disconnected" }
-            }));
+
+            // Count pending print jobs for this printer
+            let queue_len: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM print_jobs WHERE status IN ('pending', 'printing') AND printer_profile_id = ?1",
+                    rusqlite::params![printer_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            let state = if connected { "online" } else { "offline" };
+            status_map.insert(
+                printer_id.clone(),
+                serde_json::json!({
+                    "printerId": printer_id,
+                    "state": state,
+                    "queueLength": queue_len,
+                    "lastSeen": chrono::Utc::now().to_rfc3339()
+                }),
+            );
         }
     }
-    Ok(serde_json::json!({ "success": true, "statuses": statuses }))
+    Ok(serde_json::json!({ "success": true, "statuses": status_map }))
 }
 
 #[tauri::command]
@@ -7883,12 +8056,85 @@ async fn printer_retry_job(
 }
 
 #[tauri::command]
-async fn printer_test(arg0: Option<String>) -> Result<serde_json::Value, String> {
-    Ok(serde_json::json!({
-        "success": true,
-        "message": "Test print queued",
-        "printerId": arg0
-    }))
+async fn printer_test(
+    arg0: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    use tauri::Manager;
+    let printer_id = arg0.ok_or("Missing printerId")?;
+    let profile = printers::get_printer_profile(&db, &printer_id)?;
+    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
+
+    if printer_name.is_empty() {
+        return Err("Printer has no system printer name configured".into());
+    }
+
+    let start = std::time::Instant::now();
+
+    // Generate a simple test page HTML
+    let now_str = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+    let test_html = format!(
+        r#"<!DOCTYPE html>
+<html><head><style>
+body {{ font-family: monospace; font-size: 12px; width: 280px; margin: 0 auto; }}
+h2 {{ text-align: center; margin: 10px 0; }}
+hr {{ border: 1px dashed #000; }}
+p {{ margin: 4px 0; }}
+</style></head><body>
+<h2>TEST PRINT</h2>
+<hr>
+<p>Printer: {}</p>
+<p>Date: {}</p>
+<hr>
+<p>ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+<p>abcdefghijklmnopqrstuvwxyz</p>
+<p>0123456789 !@#$%^&*()</p>
+<hr>
+<p style="text-align:center">-- End of Test --</p>
+</body></html>"#,
+        printer_name, now_str
+    );
+
+    // Write to temp file
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    let receipts_dir = app_dir.join("receipts");
+    std::fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
+    let test_file = receipts_dir.join(format!("test_{}.html", printer_id));
+    std::fs::write(&test_file, &test_html).map_err(|e| format!("write test file: {e}"))?;
+
+    // Send to Windows printer
+    let file_path = test_file.to_string_lossy().to_string();
+    match printers::print_to_windows(&printer_name, &file_path) {
+        Ok(()) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            info!(
+                printer = %printer_name,
+                latency_ms = latency_ms,
+                "Test print dispatched"
+            );
+            Ok(serde_json::json!({
+                "success": true,
+                "printerId": printer_id,
+                "latencyMs": latency_ms,
+                "message": "Test print dispatched"
+            }))
+        }
+        Err(e) => {
+            warn!(printer = %printer_name, error = %e, "Test print failed");
+            Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "error": e,
+                "latencyMs": start.elapsed().as_millis() as u64
+            }))
+        }
+    }
 }
 
 #[tauri::command]
@@ -7911,18 +8157,42 @@ async fn printer_diagnostics(
     let printer_id = arg0.ok_or("Missing printerId")?;
     let profile = printers::get_printer_profile(&db, &printer_id)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let failed_jobs: i64 = conn
+
+    let total_jobs: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM print_jobs WHERE status = 'failed'",
-            [],
+            "SELECT COUNT(*) FROM print_jobs WHERE printer_profile_id = ?1",
+            rusqlite::params![printer_id],
             |row| row.get(0),
         )
         .unwrap_or(0);
+    let failed_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM print_jobs WHERE status = 'failed' AND printer_profile_id = ?1",
+            rusqlite::params![printer_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let successful_jobs = total_jobs - failed_jobs;
+
+    let printer_type = value_str(&profile, &["printerType", "printer_type"])
+        .unwrap_or_else(|| "system".to_string());
+    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
+    let system = printers::list_system_printers();
+    let connected = system.iter().any(|name| name == &printer_name);
+
     Ok(serde_json::json!({
         "success": true,
-        "printer": profile,
-        "failedJobs": failed_jobs,
-        "systemPrinters": printers::list_system_printers()
+        "diagnostics": {
+            "printerId": printer_id,
+            "connectionType": printer_type,
+            "model": printer_name,
+            "isOnline": connected,
+            "recentJobs": {
+                "total": total_jobs,
+                "successful": successful_jobs,
+                "failed": failed_jobs
+            }
+        }
     }))
 }
 

@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 14;
+const CURRENT_SCHEMA_VERSION: i32 = 15;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -143,6 +143,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 14 {
         migrate_v14(conn)?;
+    }
+    if current < 15 {
+        migrate_v15(conn)?;
     }
 
     Ok(())
@@ -909,6 +912,74 @@ fn migrate_v14(conn: &Connection) -> Result<(), String> {
     })?;
 
     info!("Applied migration v14 (driver_earnings table)");
+    Ok(())
+}
+
+/// Migration v15: Extended printer profile columns for Electron-compat UI.
+///
+/// Adds `printer_type`, `role`, `is_default`, `enabled`, `character_set`,
+/// `greek_render_mode`, `receipt_template`, `fallback_printer_id`, and
+/// `connection_json` so that the full Electron-style printer config can be
+/// round-tripped through the Tauri backend.
+fn migrate_v15(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "printer_profiles", "printer_type")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN printer_type TEXT NOT NULL DEFAULT 'system';",
+        )
+        .map_err(|e| format!("migration v15 add printer_type: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "role")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN role TEXT NOT NULL DEFAULT 'receipt';",
+        )
+        .map_err(|e| format!("migration v15 add role: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "is_default")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| format!("migration v15 add is_default: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "enabled")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+        )
+        .map_err(|e| format!("migration v15 add enabled: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "character_set")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN character_set TEXT NOT NULL DEFAULT 'PC437_USA';",
+        )
+        .map_err(|e| format!("migration v15 add character_set: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "greek_render_mode")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN greek_render_mode TEXT DEFAULT 'text';",
+        )
+        .map_err(|e| format!("migration v15 add greek_render_mode: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "receipt_template")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles ADD COLUMN receipt_template TEXT DEFAULT 'classic';",
+        )
+        .map_err(|e| format!("migration v15 add receipt_template: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "fallback_printer_id")? {
+        conn.execute_batch("ALTER TABLE printer_profiles ADD COLUMN fallback_printer_id TEXT;")
+            .map_err(|e| format!("migration v15 add fallback_printer_id: {e}"))?;
+    }
+    if !column_exists(conn, "printer_profiles", "connection_json")? {
+        conn.execute_batch("ALTER TABLE printer_profiles ADD COLUMN connection_json TEXT;")
+            .map_err(|e| format!("migration v15 add connection_json: {e}"))?;
+    }
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (15);")
+        .map_err(|e| {
+            error!("Migration v15 failed: {e}");
+            format!("migration v15: {e}")
+        })?;
+
+    info!("Applied migration v15 (extended printer profile columns)");
     Ok(())
 }
 
@@ -1795,6 +1866,73 @@ mod tests {
             shift_id_after.is_none(),
             "staff_shift_id should be SET NULL after shift delete"
         );
+    }
+
+    #[test]
+    fn test_migration_v15_printer_profile_extended_columns() {
+        let conn = test_db();
+        run_migrations(&conn).expect("migrations");
+
+        // Insert a printer profile with extended columns
+        conn.execute(
+            "INSERT INTO printer_profiles (id, name, driver_type, printer_name,
+                                           printer_type, role, is_default, enabled,
+                                           character_set, greek_render_mode, receipt_template,
+                                           fallback_printer_id, connection_json,
+                                           created_at, updated_at)
+             VALUES ('pp-ext', 'Receipt Printer', 'windows', 'POS-80',
+                     'network', 'kitchen', 1, 1,
+                     'PC737_GREEK', 'bitmap', 'modern',
+                     NULL, '{\"type\":\"network\",\"ip\":\"192.168.1.100\",\"port\":9100}',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert extended printer profile");
+
+        // Read back new columns
+        let (ptype, role, is_default, enabled): (String, String, i32, i32) = conn
+            .query_row(
+                "SELECT printer_type, role, is_default, enabled FROM printer_profiles WHERE id = 'pp-ext'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(ptype, "network");
+        assert_eq!(role, "kitchen");
+        assert_eq!(is_default, 1);
+        assert_eq!(enabled, 1);
+
+        let (charset, grm, tpl): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT character_set, greek_render_mode, receipt_template FROM printer_profiles WHERE id = 'pp-ext'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(charset, "PC737_GREEK");
+        assert_eq!(grm, Some("bitmap".to_string()));
+        assert_eq!(tpl, Some("modern".to_string()));
+
+        // Verify defaults for a profile without explicit extended fields
+        conn.execute(
+            "INSERT INTO printer_profiles (id, name, driver_type, printer_name, created_at, updated_at)
+             VALUES ('pp-defaults', 'Default Printer', 'windows', 'POS-58', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert profile with defaults");
+
+        let (def_type, def_role, def_default, def_enabled, def_charset): (String, String, i32, i32, String) = conn
+            .query_row(
+                "SELECT printer_type, role, is_default, enabled, character_set FROM printer_profiles WHERE id = 'pp-defaults'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(def_type, "system");
+        assert_eq!(def_role, "receipt");
+        assert_eq!(def_default, 0);
+        assert_eq!(def_enabled, 1);
+        assert_eq!(def_charset, "PC437_USA");
     }
 
     #[test]

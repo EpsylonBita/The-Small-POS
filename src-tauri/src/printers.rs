@@ -246,6 +246,47 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .and_then(|v| v.as_i64())
         .unwrap_or(200) as i32;
 
+    // v15 extended columns
+    let printer_type = profile
+        .get("printerType")
+        .or_else(|| profile.get("printer_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("system");
+    let role = profile
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("receipt");
+    let is_default = profile
+        .get("isDefault")
+        .or_else(|| profile.get("is_default"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let enabled = profile
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let character_set = profile
+        .get("characterSet")
+        .or_else(|| profile.get("character_set"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("PC437_USA");
+    let greek_render_mode = profile
+        .get("greekRenderMode")
+        .or_else(|| profile.get("greek_render_mode"))
+        .and_then(|v| v.as_str());
+    let receipt_template = profile
+        .get("receiptTemplate")
+        .or_else(|| profile.get("receipt_template"))
+        .and_then(|v| v.as_str());
+    let fallback_printer_id = profile
+        .get("fallbackPrinterId")
+        .or_else(|| profile.get("fallback_printer_id"))
+        .and_then(|v| v.as_str());
+    let connection_json = profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(|v| v.as_str());
+
     if driver_type != "windows" {
         return Err(format!("Unsupported driver_type: {driver_type}"));
     }
@@ -268,8 +309,12 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         "INSERT INTO printer_profiles (id, name, driver_type, printer_name, paper_width_mm,
                                        copies_default, cut_paper, open_cash_drawer,
                                        drawer_mode, drawer_host, drawer_port, drawer_pulse_ms,
+                                       printer_type, role, is_default, enabled,
+                                       character_set, greek_render_mode, receipt_template,
+                                       fallback_printer_id, connection_json,
                                        created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22)",
         params![
             id,
             name,
@@ -283,6 +328,15 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
             drawer_host,
             drawer_port,
             drawer_pulse_ms,
+            printer_type,
+            role,
+            is_default as i32,
+            enabled as i32,
+            character_set,
+            greek_render_mode,
+            receipt_template,
+            fallback_printer_id,
+            connection_json,
             now,
         ],
     )
@@ -395,6 +449,72 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         vals.push(Box::new(v as i32));
     }
 
+    // v15 extended columns
+    if let Some(v) = profile
+        .get("printerType")
+        .or_else(|| profile.get("printer_type"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("printer_type = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile.get("role").and_then(|v| v.as_str()) {
+        sets.push("role = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("isDefault")
+        .or_else(|| profile.get("is_default"))
+        .and_then(|v| v.as_bool())
+    {
+        sets.push("is_default = ?");
+        vals.push(Box::new(v as i32));
+    }
+    if let Some(v) = profile.get("enabled").and_then(|v| v.as_bool()) {
+        sets.push("enabled = ?");
+        vals.push(Box::new(v as i32));
+    }
+    if let Some(v) = profile
+        .get("characterSet")
+        .or_else(|| profile.get("character_set"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("character_set = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("greekRenderMode")
+        .or_else(|| profile.get("greek_render_mode"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("greek_render_mode = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("receiptTemplate")
+        .or_else(|| profile.get("receipt_template"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("receipt_template = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("fallbackPrinterId")
+        .or_else(|| profile.get("fallback_printer_id"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("fallback_printer_id = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(|v| v.as_str())
+    {
+        sets.push("connection_json = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+
     if sets.is_empty() {
         return Err("No fields to update".into());
     }
@@ -430,7 +550,10 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
             "SELECT id, name, driver_type, printer_name, paper_width_mm,
                     copies_default, cut_paper, open_cash_drawer,
                     drawer_mode, drawer_host, drawer_port, drawer_pulse_ms,
-                    created_at, updated_at
+                    created_at, updated_at,
+                    printer_type, role, is_default, enabled,
+                    character_set, greek_render_mode, receipt_template,
+                    fallback_printer_id, connection_json
              FROM printer_profiles ORDER BY created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -452,6 +575,15 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
                 "drawerPulseMs": row.get::<_, i32>(11)?,
                 "createdAt": row.get::<_, String>(12)?,
                 "updatedAt": row.get::<_, String>(13)?,
+                "printerType": row.get::<_, String>(14)?,
+                "role": row.get::<_, String>(15)?,
+                "isDefault": row.get::<_, i32>(16)? != 0,
+                "enabled": row.get::<_, i32>(17)? != 0,
+                "characterSet": row.get::<_, String>(18)?,
+                "greekRenderMode": row.get::<_, Option<String>>(19)?,
+                "receiptTemplate": row.get::<_, Option<String>>(20)?,
+                "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
+                "connectionJson": row.get::<_, Option<String>>(22)?,
             }))
         })
         .map_err(|e| e.to_string())?
@@ -469,7 +601,10 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
         "SELECT id, name, driver_type, printer_name, paper_width_mm,
                 copies_default, cut_paper, open_cash_drawer,
                 drawer_mode, drawer_host, drawer_port, drawer_pulse_ms,
-                created_at, updated_at
+                created_at, updated_at,
+                printer_type, role, is_default, enabled,
+                character_set, greek_render_mode, receipt_template,
+                fallback_printer_id, connection_json
          FROM printer_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
@@ -488,6 +623,15 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
                 "drawerPulseMs": row.get::<_, i32>(11)?,
                 "createdAt": row.get::<_, String>(12)?,
                 "updatedAt": row.get::<_, String>(13)?,
+                "printerType": row.get::<_, String>(14)?,
+                "role": row.get::<_, String>(15)?,
+                "isDefault": row.get::<_, i32>(16)? != 0,
+                "enabled": row.get::<_, i32>(17)? != 0,
+                "characterSet": row.get::<_, String>(18)?,
+                "greekRenderMode": row.get::<_, Option<String>>(19)?,
+                "receiptTemplate": row.get::<_, Option<String>>(20)?,
+                "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
+                "connectionJson": row.get::<_, Option<String>>(22)?,
             }))
         },
     )
