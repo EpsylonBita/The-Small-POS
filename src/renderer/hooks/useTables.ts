@@ -10,8 +10,10 @@ import type { RestaurantTable, TableAPIResponse, TableStatus } from '../types/ta
 import { transformTableFromAPI } from '../types/tables';
 import { supabase } from '../lib/supabase';
 import { reservationsService } from '../services/ReservationsService';
+import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
 type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
+const TABLE_REFRESH_MIN_MS = 30000;
 
 interface UseTablesOptions {
   branchId: string;
@@ -28,19 +30,9 @@ interface UseTablesReturn {
 }
 
 function getIpcInvoke(): IpcInvoke | null {
-  if (typeof window === 'undefined') return null;
-
-  const w = window as any;
-  if (typeof w?.electronAPI?.invoke === 'function') {
-    return w.electronAPI.invoke.bind(w.electronAPI);
-  }
-  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
-    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
-  }
-  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
-    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
-  }
-  return null;
+  if (isBrowser()) return null;
+  const bridge = getBridge();
+  return bridge.invoke.bind(bridge);
 }
 
 function formatError(error: unknown): string {
@@ -245,12 +237,46 @@ export function useTables({ branchId, organizationId, enabled = true }: UseTable
   useEffect(() => {
     if (!enabled) return;
 
-    const intervalId = setInterval(() => {
-      console.log('[useTables] Auto-refreshing tables');
-      fetchTables();
-    }, 30000);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastSyncRefreshAt = Date.now();
 
-    return () => clearInterval(intervalId);
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        void fetchTables();
+      }, delayMs);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastSyncRefreshAt < TABLE_REFRESH_MIN_MS) {
+        return;
+      }
+      lastSyncRefreshAt = now;
+      scheduleRefresh(300);
+    };
+
+    const handleOrderMutation = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleOrderMutation);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleOrderMutation);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
+    };
   }, [fetchTables, enabled]);
 
   return {

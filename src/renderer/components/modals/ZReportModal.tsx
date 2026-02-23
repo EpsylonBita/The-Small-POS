@@ -10,6 +10,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { Banknote, CheckCircle, Circle, CreditCard, XCircle } from 'lucide-react';
+import { getBridge } from '../../../lib';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -19,6 +20,7 @@ interface ZReportModalProps {
 }
 
 const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, date }) => {
+  const bridge = getBridge();
   const { clearShift } = useShift();
   const { t } = useTranslation();
   const { isFeatureEnabled, isMobileWaiter, parentTerminalId } = useFeatures();
@@ -146,7 +148,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
       setLoading(true);
       setError(null);
       try {
-        const result = await window.electronAPI?.generateZReport?.({ branchId, date: selectedDate });
+        const result = await bridge.reports.generateZReport({ branchId, date: selectedDate });
         if (!mounted) return;
         // IPC handlers wrap response in { success: true, data: ... }
         const report = result?.data || result;
@@ -720,8 +722,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
           onClick={async () => {
             if (!zReport) return;
             try {
-              const terminalName = await (window as any).electronAPI?.getTerminalSetting?.('terminal', 'name');
-              const result = await (window as any).electronAPI?.printZReport?.(zReport, terminalName || undefined);
+              const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
+              const result = await bridge.invoke('report:print-z-report', {
+                snapshot: zReport,
+                terminalName: typeof terminalName === 'string' ? terminalName : undefined,
+              });
               if (result?.success) {
                 console.log('[ZReportModal] Z-Report printed successfully');
               } else {
@@ -747,7 +752,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               setSubmitting(true);
               try {
                 console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
-                const res = await (window as any)?.electronAPI?.submitZReport?.({ branchId, date: selectedDate });
+                const res: any = await bridge.reports.submitZReport({ branchId, date: selectedDate });
                 
                 // Check for IPC wrapper error (success === false)
                 if (res?.success === false) {
@@ -767,7 +772,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   onClose();
 
                   // Clear all data and logout
-                  try { await (window as any).electronAPI?.ipcRenderer?.invoke('auth:logout'); } catch { }
+                  try { await bridge.auth.logout(); } catch { }
                   try { localStorage.clear(); } catch { }
                   try { clearShift(); } catch { }
 

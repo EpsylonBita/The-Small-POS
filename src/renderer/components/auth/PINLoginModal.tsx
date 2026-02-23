@@ -112,6 +112,7 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
       onClose={onClose}
       title={titleToShow}
       size="md"
+      className="!max-w-lg"
     >
           <p className="text-sm text-gray-500 mb-4">{subtitleToShow}</p>
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface InterTerminalStatus {
     parentInfo: any;
@@ -8,30 +9,37 @@ interface InterTerminalStatus {
 }
 
 export const OrderSyncRouteIndicator: React.FC<{ condensed?: boolean }> = ({ condensed = false }) => {
+    const bridge = getBridge();
     const { t } = useTranslation();
     const [status, setStatus] = useState<InterTerminalStatus | null>(null);
 
     useEffect(() => {
         const fetchStatus = async () => {
-            if (window.electronAPI?.invoke) {
-                try {
-                    const result = await window.electronAPI.invoke('sync:get-inter-terminal-status');
-                    setStatus(result);
-
-                    // Also trigger a connection test if via_parent
-                    if (result.routingMode === 'via_parent') {
-                        // We don't want to spam, but initial status might be stale if no recent sync
-                        // Just rely on what main process reports
-                    }
-                } catch (e) {
-                    console.error("Failed to get inter-terminal status", e);
-                }
+            try {
+                const result = await bridge.sync.getInterTerminalStatus();
+                setStatus(result);
+            } catch (e) {
+                console.error("Failed to get inter-terminal status", e);
             }
         };
 
+        const handleNetworkStatus = (network: { isOnline?: boolean }) => {
+            setStatus(prev => {
+                if (!prev) return prev;
+                const isParentReachable = !!network?.isOnline;
+                return {
+                    ...prev,
+                    isParentReachable,
+                    routingMode: isParentReachable ? 'via_parent' : 'direct_cloud',
+                };
+            });
+        };
+
         fetchStatus();
-        const interval = setInterval(fetchStatus, 15000); // Poll every 15s
-        return () => clearInterval(interval);
+        onEvent('network:status', handleNetworkStatus);
+        return () => {
+            offEvent('network:status', handleNetworkStatus);
+        };
     }, []);
 
     if (!status || status.routingMode === 'main') return null;

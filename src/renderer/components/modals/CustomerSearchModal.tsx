@@ -9,7 +9,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
 import { inputBase } from '../../styles/designSystem';
 import { formatDate } from '../../utils/format';
-import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
+import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 
 interface CustomerAddress {
   id: string;
@@ -106,32 +106,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [isDeleting, setIsDeleting] = useState(false);
 
   const resolvePosCredentials = useCallback(async (): Promise<{ posKey: string; termId: string }> => {
-    const ls = typeof window !== 'undefined' ? window.localStorage : null;
-    const electron = typeof window !== 'undefined' ? window.electron : undefined;
-
-    let posKey = '';
-    let termId = '';
-
-    try {
-      if (electron?.ipcRenderer) {
-        const [mainTerminalId, mainApiKey] = await Promise.all([
-          electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-          electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-        ]);
-        termId = (mainTerminalId || '').toString().trim();
-        posKey = (mainApiKey || '').toString().trim();
-      }
-    } catch (e) {
-      console.warn('[CustomerSearch] Failed to get credentials from main process:', e);
-    }
-
-    const refreshed = await refreshTerminalCredentialCache();
-    if (!posKey) {
-      posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
-    }
-    if (!termId) {
-      termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim();
-    }
+    const resolved = await getResolvedTerminalCredentials();
+    const posKey = (resolved.apiKey || '').trim();
+    const termId = (resolved.terminalId || '').trim();
 
     return { posKey, termId };
   }, []);
@@ -551,7 +528,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       title={t('modals.customerSearch.title')}
-      size="md"
+      size="sm"
+      className="!max-w-md"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

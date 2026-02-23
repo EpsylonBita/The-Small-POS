@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense } from '../../types';
 import toast from 'react-hot-toast';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
+import { getBridge } from '../../../lib';
 
 interface ExpenseModalProps {
   isOpen: boolean;
@@ -11,6 +13,7 @@ interface ExpenseModalProps {
 }
 
 export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { staff, activeShift, refreshActiveShift } = useShift();
 
@@ -33,14 +36,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const loadExpenses = async () => {
     try {
       // Load expenses from the active cashier's shift (not just any shift)
-      const branchId = staff?.branchId || localStorage.getItem('branch_id') || '';
-      const terminalId = (staff as any)?.terminalId || localStorage.getItem('terminal_id') || '';
+      const refreshed = await refreshTerminalCredentialCache();
+      const cached = getCachedTerminalCredentials();
+      const branchId = staff?.branchId || refreshed.branchId || cached.branchId || '';
+      const terminalId = (staff as any)?.terminalId || refreshed.terminalId || cached.terminalId || '';
 
       let shiftIdToLoad: string | null = null;
 
       // First try to get the active cashier shift
       if (branchId && terminalId) {
-        const cashierShift = await (window as any).electronAPI.getActiveCashierByTerminal(branchId, terminalId);
+        const cashierShift = await bridge.shifts.getActiveCashierByTerminal(branchId, terminalId);
         if (cashierShift?.id) {
           shiftIdToLoad = cashierShift.id;
         }
@@ -61,7 +66,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         return;
       }
 
-      const shiftExpenses = await window.electronAPI.getShiftExpenses(shiftIdToLoad);
+      const shiftExpenses = await bridge.shifts.getExpenses(shiftIdToLoad);
       // Ensure we always have an array
       setExpenses(Array.isArray(shiftExpenses) ? shiftExpenses : []);
     } catch (err) {
@@ -76,11 +81,13 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
     try {
       // First, try to get the active cashier shift for this terminal
-      const branchId = staff?.branchId || localStorage.getItem('branch_id') || '';
-      const terminalId = (staff as any)?.terminalId || localStorage.getItem('terminal_id') || '';
+      const refreshed = await refreshTerminalCredentialCache();
+      const cached = getCachedTerminalCredentials();
+      const branchId = staff?.branchId || refreshed.branchId || cached.branchId || '';
+      const terminalId = (staff as any)?.terminalId || refreshed.terminalId || cached.terminalId || '';
 
       if (branchId && terminalId) {
-        cashierShift = await (window as any).electronAPI.getActiveCashierByTerminal(branchId, terminalId);
+        cashierShift = await bridge.shifts.getActiveCashierByTerminal(branchId, terminalId);
         if (cashierShift?.id) {
           shiftIdToUse = cashierShift.id;
         }
@@ -96,15 +103,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
       // If still no shift and staff exists, try to auto-open a cashier shift
       if (!shiftIdToUse && staff) {
-        const openResp = await (window as any).electronAPI.openShift({
+        const openResp = await bridge.shifts.open({
           staffId: staff.staffId,
           branchId: staff.branchId,
           terminalId: (staff as any).terminalId,
           roleType: 'cashier',
           openingCash: 0,
         });
-        if (openResp?.success && openResp.shiftId) {
-          shiftIdToUse = openResp.shiftId as string;
+        const openedShiftId = (openResp as any)?.shiftId || (openResp as any)?.data?.shiftId;
+        if ((openResp as any)?.success && openedShiftId) {
+          shiftIdToUse = openedShiftId as string;
           // Refresh context in the background
           try { await refreshActiveShift(); } catch {}
         }
@@ -132,10 +140,8 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setLoading(true);
 
     try {
-      const result = await window.electronAPI.recordExpense({
+      const result = await bridge.shifts.recordExpense({
         shiftId: shiftIdToUse,
-        staffId: staff.staffId,
-        branchId: staff.branchId,
         expenseType: 'other',
         amount,
         description: expenseDescription,
@@ -171,7 +177,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
       />
 
       {/* Modal Container */}
-      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-2xl max-h-[90vh] z-[1050] flex flex-col">
+      <div className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full !max-w-lg max-h-[90vh] z-[1050] flex flex-col">
 
         {/* Header */}
         <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
@@ -339,10 +345,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
             <button
               onClick={() => setShowExpenseForm(true)}
-              className="w-full liquid-glass-modal-button bg-green-600/20 hover:bg-green-600/30 text-green-400 border-green-500/30 gap-2 py-3"
+              className="w-full py-3 rounded-lg text-green-400 border border-green-400 shadow-[0_0_10px_rgba(74,222,128,0.3)] hover:shadow-[0_0_18px_rgba(74,222,128,0.5)] hover:bg-green-400/10 transition-all font-medium"
             >
-              <Plus className="w-5 h-5" />
-              {t('modals.expense.addButton', { defaultValue: '+ Add Expense' })}
+              {t('modals.expense.addButton', { defaultValue: 'Add Expense' })}
             </button>
           </div>
         )}

@@ -5,6 +5,7 @@ import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { formatCurrency } from '../../utils/format';
+import { getBridge } from '../../../lib';
 
 interface RefundVoidModalProps {
   isOpen: boolean;
@@ -47,6 +48,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   orderTotal,
   onRefundComplete,
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { staff } = useShift();
 
@@ -72,10 +74,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     if (!orderId) return;
     setLoading(true);
     try {
-      const api = (window as any).electronAPI;
-
       // Load payments for this order
-      const orderPayments = await api.getOrderPayments(orderId);
+      const orderPayments = await bridge.payments.getOrderPayments(orderId);
       const paymentList: PaymentRecord[] = Array.isArray(orderPayments) ? orderPayments : [];
       setPayments(paymentList);
 
@@ -84,12 +84,12 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       for (const p of paymentList) {
         if (p.status === 'completed') {
           try {
-            const bal = await api.getPaymentBalance(p.id);
+            const bal = await bridge.refunds.getPaymentBalance(p.id);
             if (bal) {
               balanceMap[p.id] = {
-                originalAmount: bal.originalAmount ?? bal.original_amount ?? p.amount,
-                totalRefunds: bal.totalRefunds ?? bal.total_refunds ?? 0,
-                remaining: bal.remaining ?? (p.amount - (bal.totalRefunds ?? bal.total_refunds ?? 0)),
+                originalAmount: bal.originalAmount ?? p.amount,
+                totalRefunds: bal.totalRefunds ?? 0,
+                remaining: bal.remaining ?? (p.amount - (bal.totalRefunds ?? 0)),
               };
             }
           } catch {
@@ -101,7 +101,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
       // Load adjustment history
       try {
-        const adj = await api.listOrderAdjustments(orderId);
+        const adj = await bridge.refunds.listOrderAdjustments(orderId);
         setAdjustments(Array.isArray(adj) ? adj : []);
       } catch {
         setAdjustments([]);
@@ -112,7 +112,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [orderId, t]);
+  }, [bridge, orderId, t]);
 
   useEffect(() => {
     if (isOpen) {
@@ -150,8 +150,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
     setProcessing(true);
     try {
-      const api = (window as any).electronAPI;
-      const result = await api.refundPayment({
+      const result = await bridge.refunds.refundPayment({
         paymentId,
         amount,
         reason: refundReason.trim(),
@@ -186,8 +185,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
     setProcessing(true);
     try {
-      const api = (window as any).electronAPI;
-      const result = await api.voidPayment(paymentId, voidReason.trim(), staff?.staffId);
+      const result = await bridge.payments.voidPayment(paymentId, voidReason.trim(), staff?.staffId);
 
       if (result?.success !== false && !result?.error) {
         toast.success(
@@ -271,7 +269,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       size="lg"
-      className="max-w-3xl"
+      className="!max-w-3xl"
       contentClassName="p-0 overflow-hidden"
       ariaLabel={t('modals.refund.title', { defaultValue: 'Void / Refund' })}
       header={modalHeader}

@@ -500,12 +500,31 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             }
         }
 
+        // Compute staff earnings for this shift (all role types)
+        let (order_count, total_sales, shift_cash_sales, shift_card_sales): (i64, f64, f64, f64) =
+            conn.query_row(
+                "SELECT
+                    COUNT(DISTINCT o.id),
+                    COALESCE(SUM(o.total_amount), 0),
+                    COALESCE(SUM(CASE WHEN op.method = 'cash' THEN op.amount ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN op.method = 'card' THEN op.amount ELSE 0 END), 0)
+                 FROM orders o
+                 LEFT JOIN order_payments op ON op.order_id = o.id AND op.status = 'completed'
+                 WHERE o.staff_shift_id = ?1
+                   AND o.status NOT IN ('cancelled', 'canceled')",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or((0, 0.0, 0.0, 0.0));
+
         // Update the shift record
         conn.execute(
             "UPDATE staff_shifts SET
                 check_out_time = ?1, closing_cash_amount = ?2, expected_cash_amount = ?3,
                 cash_variance = ?4, status = 'closed', payment_amount = ?5,
-                closed_by = ?6, sync_status = 'pending', updated_at = ?1
+                closed_by = ?6, sync_status = 'pending', updated_at = ?1,
+                total_orders_count = ?8, total_sales_amount = ?9,
+                total_cash_sales = ?10, total_card_sales = ?11
              WHERE id = ?7",
             params![
                 now,
@@ -515,6 +534,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 payment_amount,
                 closed_by,
                 shift_id,
+                order_count,
+                total_sales,
+                shift_cash_sales,
+                shift_card_sales,
             ],
         )
         .map_err(|e| format!("close shift: {e}"))?;
@@ -737,9 +760,11 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let instore_types = ["dine-in", "takeaway", "pickup"];
     let is_instore = |t: &str| instore_types.contains(&t);
 
+    #[allow(clippy::type_complexity)]
     let sum_by = |f: &dyn Fn(&(String, String, i64, f64)) -> bool| -> f64 {
         rows.iter().filter(|r| f(r)).map(|r| r.3).sum()
     };
+    #[allow(clippy::type_complexity)]
     let count_by = |f: &dyn Fn(&(String, String, i64, f64)) -> bool| -> i64 {
         rows.iter().filter(|r| f(r)).map(|r| r.2).sum()
     };
@@ -868,6 +893,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             )
             .map_err(|e| format!("prepare driver shifts: {e}"))?;
 
+        #[allow(clippy::type_complexity)]
         let drv_shifts: Vec<(String, String, Option<String>, f64, Option<f64>)> = drv_stmt
             .query_map(
                 params![start_of_day, end_of_day, branch_id, terminal_id],

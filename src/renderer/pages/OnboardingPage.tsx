@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Toaster, toast } from 'react-hot-toast';
 import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
+import { getBridge } from '../../lib';
 
 type SupportedLanguage = 'en' | 'el';
 
@@ -58,6 +59,7 @@ function looksLikeRawApiKey(value: string): boolean {
 }
 
 const OnboardingPage: React.FC = () => {
+    const bridge = getBridge();
     const { t, setLanguage, language } = useI18n();
     const [step, setStep] = useState(1);
     const [connectionString, setConnectionString] = useState('');
@@ -96,9 +98,10 @@ const OnboardingPage: React.FC = () => {
             // Call the backend to update credentials and sync
             const normalizedAdminUrl = decoded.adminUrl.replace(/\/+$/, '').replace(/\/api$/i, '');
             localStorage.setItem('admin_dashboard_url', normalizedAdminUrl);
-            const result = await window.electron?.ipcRenderer.invoke('settings:update-terminal-credentials', {
+            const result = await bridge.settings.updateTerminalCredentials({
                 terminalId: decoded.terminalId,
                 apiKey: decoded.apiKey,
+                adminUrl: normalizedAdminUrl,
                 adminDashboardUrl: normalizedAdminUrl,
                 supabaseUrl: decoded.supabaseUrl,
                 supabaseAnonKey: decoded.supabaseAnonKey,
@@ -109,7 +112,7 @@ const OnboardingPage: React.FC = () => {
                 // Restart the entire Electron app to reinitialize with new settings
                 setTimeout(async () => {
                     try {
-                        await window.electron?.ipcRenderer?.invoke('app:restart');
+                        await bridge.app.restart();
                     } catch (e) {
                         console.error('Failed to restart app, falling back to reload:', e);
                         window.location.reload();

@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
+import { offEvent, onEvent } from '../../lib';
 import {
   driveThruService,
   DriveThruLane,
@@ -16,6 +17,8 @@ import {
   DriveThruStats,
   DriveThruOrderStatus,
 } from '../services/DriveThruService';
+
+const EVENT_REFRESH_THROTTLE_MS = 5000;
 
 interface UseDriveThruProps {
   branchId: string;
@@ -62,11 +65,14 @@ export function useDriveThru({
   }, [branchId, organizationId]);
 
   // Fetch lanes and orders
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (options: { silent?: boolean } = {}) => {
+    const { silent = false } = options;
     if (!branchId) return;
 
-    setIsLoading(true);
-    setError(null);
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
 
     try {
       const [lanesData, ordersData] = await Promise.all([
@@ -77,10 +83,14 @@ export function useDriveThru({
       setOrders(ordersData);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch drive-thru data';
-      setError(message);
+      if (!silent) {
+        setError(message);
+      }
       console.error('Error fetching drive-thru data:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, [branchId]);
 
@@ -89,43 +99,61 @@ export function useDriveThru({
     fetchData();
   }, [fetchData]);
 
-  // Real-time subscriptions
+  // Refresh from native sync/order events instead of direct renderer realtime subscriptions.
   useEffect(() => {
     if (!enableRealtime || !branchId) return;
 
-    driveThruService.subscribeToLaneUpdates((updatedLane) => {
-      setLanes((prev) => {
-        const index = prev.findIndex((l) => l.id === updatedLane.id);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = updatedLane;
-          return updated;
-        }
-        return prev;
-      });
-    });
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = 0;
 
-    driveThruService.subscribeToOrderUpdates((updatedOrder) => {
-      setOrders((prev) => {
-        // If served, remove from active orders
-        if (updatedOrder.status === 'served') {
-          return prev.filter((o) => o.id !== updatedOrder.id);
-        }
-        
-        const index = prev.findIndex((o) => o.id === updatedOrder.id);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = updatedOrder;
-          return updated;
-        }
-        return [...prev, updatedOrder].sort((a, b) => a.position - b.position);
-      });
-    });
+    const scheduleRefresh = () => {
+      if (disposed) return;
+
+      const now = Date.now();
+      const elapsed = now - lastRefreshAt;
+
+      if (elapsed >= EVENT_REFRESH_THROTTLE_MS) {
+        lastRefreshAt = now;
+        void fetchData({ silent: true });
+        return;
+      }
+
+      if (pendingTimer) return;
+
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        if (disposed) return;
+        lastRefreshAt = Date.now();
+        void fetchData({ silent: true });
+      }, EVENT_REFRESH_THROTTLE_MS - elapsed);
+    };
+
+    const handleSyncStatus = (status?: { inProgress?: boolean }) => {
+      if (status && status.inProgress) return;
+      scheduleRefresh();
+    };
+    const handleSyncComplete = () => scheduleRefresh();
+    const handleOrderMutation = () => scheduleRefresh();
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
 
     return () => {
-      driveThruService.unsubscribeFromUpdates();
+      disposed = true;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+      }
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
     };
-  }, [branchId, enableRealtime]);
+  }, [branchId, enableRealtime, fetchData]);
 
   // Calculate stats
   const stats = useMemo(() => {

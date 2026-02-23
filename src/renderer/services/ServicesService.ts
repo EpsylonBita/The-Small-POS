@@ -2,30 +2,21 @@
  * ServicesService - POS Services Service
  * 
  * Provides service catalog management functionality for the POS system (Salon Vertical).
- * In Electron, uses admin dashboard API via main-process IPC (terminal-authenticated).
- * Falls back to direct Supabase only in non-Electron contexts.
+ * In Tauri, uses admin dashboard API via main-process IPC (terminal-authenticated).
+ * Falls back to direct Supabase only in non-Tauri browser contexts.
  * 
  * Follows the same pattern as AppointmentsService.
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel, isSupabaseConfigured } from '../../shared/supabase';
+import { supabase } from '../../shared/supabase';
+import { getBridge, isBrowser } from '../../lib';
 
 type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
 
 function getIpcInvoke(): IpcInvoke | null {
-  if (typeof window === 'undefined') return null;
-
-  const w = window as any;
-  if (typeof w?.electronAPI?.invoke === 'function') {
-    return w.electronAPI.invoke.bind(w.electronAPI);
-  }
-  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
-    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
-  }
-  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
-    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
-  }
-  return null;
+  if (isBrowser()) return null;
+  const bridge = getBridge();
+  return bridge.invoke.bind(bridge);
 }
 
 function formatError(error: unknown): string {
@@ -117,21 +108,6 @@ function transformCategoryFromAPI(data: any): ServiceCategory {
 class ServicesService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: any = null;
-
-  private hasElectronIpc(): boolean {
-    if (typeof window === 'undefined') return false;
-    const w = window as any;
-    return Boolean(
-      typeof w?.electronAPI?.invoke === 'function' ||
-      typeof w?.electronAPI?.ipcRenderer?.invoke === 'function' ||
-      typeof w?.electron?.ipcRenderer?.invoke === 'function'
-    );
-  }
-
-  private canUseSupabaseFallback(): boolean {
-    return !this.hasElectronIpc() && isSupabaseConfigured();
-  }
 
   private buildServicesApiPath(filters?: ServiceFilters): string {
     const params = new URLSearchParams();
@@ -364,40 +340,6 @@ class ServicesService {
     };
   }
 
-  /**
-   * Subscribe to real-time service updates
-   */
-  subscribeToUpdates(callback: (service: Service) => void): void {
-    if (this.realtimeChannel) {
-      this.unsubscribeFromUpdates();
-    }
-
-    // In Electron/API mode, avoid direct Supabase realtime subscriptions.
-    // This prevents placeholder websocket attempts and keeps auth context consistent.
-    if (!this.canUseSupabaseFallback()) {
-      return;
-    }
-
-    this.realtimeChannel = subscribeToTable(
-      'services',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-    }
-  }
 }
 
 // Export singleton instance

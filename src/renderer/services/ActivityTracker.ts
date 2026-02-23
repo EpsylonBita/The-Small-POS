@@ -1,6 +1,7 @@
 /* Centralized Activity Tracker (renderer)
  * Sends activity events to main via IPC and queues offline if needed.
  */
+import { getBridge, isBrowser, onEvent } from '../../lib'
 
 export type ActivityContext = {
   staffId?: string
@@ -22,11 +23,20 @@ class ActivityTrackerClass {
   private static _instance: ActivityTrackerClass
   private context: ActivityContext = {}
   private queue: ActivityEvent[] = []
-  private retryTimer: any = null
+  private retryTimeout: ReturnType<typeof setTimeout> | null = null
+  private retryDelayMs = 1500
+  private retryEventsBound = false
+  private readonly RETRY_DELAY_MIN_MS = 1500
+  private readonly RETRY_DELAY_MAX_MS = 30000
+  private bridge = getBridge()
 
   static get instance() {
     if (!this._instance) this._instance = new ActivityTrackerClass()
     return this._instance
+  }
+
+  private constructor() {
+    this.bindRetryEvents()
   }
 
   setContext(ctx: ActivityContext) {
@@ -45,42 +55,71 @@ class ActivityTrackerClass {
   }
 
   private async send(ev: ActivityEvent) {
+    if (isBrowser()) return false
     const ctx = { ...this.loadFallbackContext(), ...this.context }
     const payload = { ...ev, ...ctx, timestamp: ev.timestamp || new Date().toISOString() }
     try {
-      const resourceType = (payload.metadata?.resourceType ?? null) as string | null
-      const resourceId = (payload.metadata?.resourceId ?? payload.metadata?.orderId ?? null) as string | null
-      await (window as any).electronAPI?.ipcRenderer?.invoke(
-        'staff-auth:track-activity',
-        payload.type,
-        resourceType,
-        resourceId,
-        payload.action,
-        payload.metadata ?? {},
-        payload.result,
-      )
+      // Current native command refreshes inactivity timers only.
+      // Keep payload construction for future structured activity endpoints.
+      void payload
+      await this.bridge.staffAuth.trackActivity()
       return true
     } catch (e) {
       return false
     }
   }
 
-  private ensureRetryLoop() {
-    if (this.retryTimer) return
-    this.retryTimer = setInterval(async () => {
+  private bindRetryEvents() {
+    if (this.retryEventsBound) return
+    this.retryEventsBound = true
+
+    const triggerRetry = () => {
       if (!this.queue.length) return
-      const next = this.queue[0]
-      const ok = await this.send(next)
-      if (ok) this.queue.shift()
-    }, 3000)
+      this.retryDelayMs = this.RETRY_DELAY_MIN_MS
+      this.scheduleRetry(150)
+    }
+
+    onEvent('sync:complete', triggerRetry)
+    onEvent('sync:status', (payload: any) => {
+      if (payload?.isOnline === false) return
+      triggerRetry()
+    })
+    onEvent('network:status', (payload: any) => {
+      if (payload?.isOnline === false) return
+      triggerRetry()
+    })
+  }
+
+  private scheduleRetry(delayMs = this.retryDelayMs) {
+    if (this.retryTimeout) return
+    this.retryTimeout = setTimeout(() => {
+      this.retryTimeout = null
+      void this.retryOnce()
+    }, delayMs)
+  }
+
+  private async retryOnce() {
+    if (!this.queue.length) return
+    const next = this.queue[0]
+    const ok = await this.send(next)
+    if (ok) {
+      this.queue.shift()
+      this.retryDelayMs = this.RETRY_DELAY_MIN_MS
+      if (this.queue.length) {
+        this.scheduleRetry(200)
+      }
+      return
+    }
+
+    this.retryDelayMs = Math.min(this.retryDelayMs * 2, this.RETRY_DELAY_MAX_MS)
+    this.scheduleRetry(this.retryDelayMs)
   }
 
   private track(ev: ActivityEvent) {
     this.send(ev).then(ok => {
-      if (!ok) {
-        this.queue.push(ev)
-        this.ensureRetryLoop()
-      }
+      if (ok) return
+      this.queue.push(ev)
+      this.scheduleRetry(this.RETRY_DELAY_MIN_MS)
     })
   }
 

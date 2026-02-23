@@ -8,8 +8,6 @@ declare global {
     };
     Buffer: typeof Buffer;
     ReactRouterDOM: typeof ReactRouterDOMTypes;
-    // Fallback typing to ensure renderer compilation even if ElectronAPI d.ts is not picked up
-    electronAPI: any;
   }
 }
 

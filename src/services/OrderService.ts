@@ -1,11 +1,11 @@
 // OrderService for POS system - API integration with admin dashboard
 import { Order, OrderStatus } from '../shared/types/orders';
 import { mapStatusForSupabase, mapStatusForPOS } from '../shared/types/order-status';
-import { environment, getApiUrl, isDevelopment } from '../config/environment';
+import { environment, getApiUrl } from '../config/environment';
 import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
-import { API } from '../shared/constants';
-import { isTauri } from '../lib/platform-detect';
+import { isBrowser } from '../lib/platform-detect';
+import { getBridge } from '../lib';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -25,9 +25,24 @@ export class OrderService {
     return OrderService.instance;
   }
 
+  private getBridge() {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    try {
+      return getBridge();
+    } catch {
+      return null;
+    }
+  }
+
+  private allowAdminApiFallback(): boolean {
+    return isBrowser();
+  }
+
   /**
    * Resolve organization_id using multiple fallback sources.
-   * Priority: cache → localStorage → Electron IPC.
+   * Priority: cache -> typed bridge.
    */
   private async getOrganizationId(): Promise<string | null> {
     // 1. Use in-memory cache if available
@@ -35,55 +50,31 @@ export class OrderService {
       return this.cachedOrganizationId;
     }
 
-    // 2. Try localStorage
-    if (typeof window !== 'undefined') {
-      try {
-        const storedOrgId = localStorage.getItem('organization_id');
-        if (storedOrgId) {
-          this.cachedOrganizationId = storedOrgId;
-          return storedOrgId;
-        }
-
-        // Try getting from stored staff object
-        const staff = localStorage.getItem('staff');
-        if (staff) {
-          const parsed = JSON.parse(staff);
-          if (parsed.organizationId) {
-            this.cachedOrganizationId = parsed.organizationId;
-            return parsed.organizationId;
-          }
-        }
-      } catch (error) {
-        console.warn('[OrderService] Failed to read organization_id from localStorage:', error);
-      }
+    // 2. Try typed bridge
+    const bridge = this.getBridge();
+    if (!bridge) {
+      return null;
     }
 
-    // 3. Try Electron IPC
-    if (typeof window !== 'undefined') {
-      const api = (window as any).electronAPI;
-      if (api?.invoke) {
-        try {
-          // Try dedicated organization IPC (correct channel name)
-          const orgId = await api.invoke('terminal-config:get-organization-id');
-          if (orgId) {
-            this.cachedOrganizationId = orgId;
-            return orgId;
-          }
-        } catch (error) {
-          // Ignore - try next method
-        }
-
-        try {
-          // Try terminal settings (correct channel name)
-          const settingsOrgId = await api.invoke('terminal-config:get-setting', 'terminal', 'organization_id');
-          if (settingsOrgId) {
-            this.cachedOrganizationId = settingsOrgId;
-            return settingsOrgId;
-          }
-        } catch (error) {
-          console.warn('[OrderService] Failed to get organization_id from terminal settings:', error);
-        }
+    try {
+      const orgId = await bridge.terminalConfig.getOrganizationId();
+      if (orgId) {
+        this.cachedOrganizationId = orgId;
+        return orgId;
       }
+    } catch {
+      // Ignore - try next method
+    }
+
+    try {
+      const settingsOrgId = await bridge.terminalConfig.getSetting('terminal', 'organization_id');
+      const orgId = (settingsOrgId || '').toString().trim();
+      if (orgId) {
+        this.cachedOrganizationId = orgId;
+        return orgId;
+      }
+    } catch (error) {
+      console.warn('[OrderService] Failed to get organization_id from terminal settings:', error);
     }
 
     return null;
@@ -99,13 +90,9 @@ export class OrderService {
   private async getCredentials(): Promise<{ terminalId: string; apiKey: string }> {
     const cached = getCachedTerminalCredentials();
 
-    // 1. Start with renderer cache and terminal id persisted metadata
-    let terminalId = typeof window !== 'undefined' ? (localStorage.getItem('terminal_id') || '') : '';
+    // 1. Start with in-memory credential cache
+    let terminalId = cached.terminalId || '';
     let apiKey = cached.apiKey || '';
-
-    if (!terminalId && cached.terminalId) {
-      terminalId = cached.terminalId;
-    }
 
     // 2. If cache is empty, use service cache
     if (!terminalId && this.cachedTerminalId) terminalId = this.cachedTerminalId;
@@ -121,7 +108,6 @@ export class OrderService {
         if (ipcTerminalId && !terminalId) {
           terminalId = ipcTerminalId;
           this.cachedTerminalId = ipcTerminalId;
-          localStorage.setItem('terminal_id', ipcTerminalId);
         }
         if (ipcApiKey && !apiKey) {
           apiKey = ipcApiKey;
@@ -140,8 +126,8 @@ export class OrderService {
   }
 
   private buildHeadersSync(): Record<string, string> {
-    const lsTerminal = typeof window !== 'undefined' ? (localStorage.getItem('terminal_id') || '') : ''
-    const terminalId = lsTerminal || this.cachedTerminalId || environment.TERMINAL_ID || 'terminal-001'
+    const cachedCredentials = getCachedTerminalCredentials()
+    const terminalId = cachedCredentials.terminalId || this.cachedTerminalId || environment.TERMINAL_ID || 'terminal-001'
     const cached = getCachedTerminalCredentials()
     const apiKey = cached.apiKey || this.cachedApiKey || ''
     const headers: Record<string, string> = {
@@ -193,37 +179,34 @@ export class OrderService {
 
   // Fetch orders - prefer local (IPC) first, fallback to Admin API
   async fetchOrders(): Promise<Order[]> {
-    const _isTauri = isTauri();
     try {
-      // 1) Try local-first via Electron IPC (renderer -> main -> SQLite)
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            const result = await api.invoke('order:get-all');
-            // Handle IPC response format: { success: true, data: [...] } or direct array
-            const orders = result?.data ?? result;
-            if (Array.isArray(orders)) {
-              // Normalize statuses for POS UI (map server 'completed' -> POS 'delivered')
-              const normalized = (orders as any[]).map((o) => ({
-                ...o,
-                status: o?.status ? mapStatusForPOS(o.status as any) : o?.status
-              }));
-              debugLogger.info(`Fetched ${normalized.length} orders via IPC (local DB)`, 'OrderService');
-              return normalized as Order[];
-            }
-            // IPC returned non-array
-            if (_isTauri) {
-              throw ErrorFactory.system('IPC fetchOrders returned unexpected response');
-            }
-          } catch (ipcErr) {
-            if (_isTauri) {
-              const errMsg = (ipcErr as any)?.message || String(ipcErr);
-              debugLogger.error('Tauri IPC fetchOrders failed', ipcErr, 'OrderService');
-              throw ErrorFactory.system(errMsg);
-            }
-            debugLogger.warn('IPC fetchOrders failed, falling back to Admin API', ipcErr, 'OrderService');
+      // 1) Try local-first via typed bridge (renderer -> main -> SQLite)
+      const bridge = this.getBridge();
+      if (bridge) {
+        try {
+          const result: any = await bridge.orders.getAll();
+          // Handle response format: { success: true, data: [...] } or direct array
+          const orders = result?.data ?? result;
+          if (Array.isArray(orders)) {
+            // Normalize statuses for POS UI (map server 'completed' -> POS 'delivered')
+            const normalized = (orders as any[]).map((o) => ({
+              ...o,
+              status: o?.status ? mapStatusForPOS(o.status as any) : o?.status
+            }));
+            debugLogger.info(`Fetched ${normalized.length} orders via bridge (local DB)`, 'OrderService');
+            return normalized as Order[];
           }
+          // Bridge returned non-array
+          if (!this.allowAdminApiFallback()) {
+            throw ErrorFactory.system('Bridge fetchOrders returned unexpected response');
+          }
+        } catch (ipcErr) {
+          if (!this.allowAdminApiFallback()) {
+            const errMsg = (ipcErr as any)?.message || String(ipcErr);
+            debugLogger.error('Native bridge fetchOrders failed', ipcErr, 'OrderService');
+            throw ErrorFactory.system(errMsg);
+          }
+          debugLogger.warn('Bridge fetchOrders failed, falling back to Admin API', ipcErr, 'OrderService');
         }
       }
 
@@ -270,38 +253,35 @@ export class OrderService {
 
   // Update order status - local-first via IPC, fallback to Admin API
   async updateOrderStatus(orderId: string, status: OrderStatus): Promise<void> {
-    const _isTauri = isTauri();
     console.log('[RENDERER OrderService] 🔄 updateOrderStatus called', { orderId, status, timestamp: new Date().toISOString() });
     try {
       // 1) Try local-first via IPC
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            console.log('[RENDERER OrderService] 📤 Invoking IPC order:update-status', { orderId, status });
-            const resp: any = await api.invoke('order:update-status', { orderId, status });
-            console.log('[RENDERER OrderService] 📥 IPC response received', { resp, orderId, status });
-            if (resp && resp.success) {
-              debugLogger.info(`Order status updated locally via IPC`, { orderId, status }, 'OrderService');
-              console.log('[RENDERER OrderService] ✅ IPC update successful, returning');
-              return;
-            }
-            // IPC returned a non-success response
-            const ipcError = resp?.error || 'IPC update-status returned unexpected response';
-            if (_isTauri) {
-              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
-            }
-            console.warn('[RENDERER OrderService] ⚠️ IPC returned error:', ipcError);
-            debugLogger.warn('IPC update-status returned error; will try Admin API', ipcError, 'OrderService');
-          } catch (ipcErr) {
-            if (_isTauri) {
-              const errMsg = (ipcErr as any)?.message || String(ipcErr);
-              debugLogger.error('Tauri IPC updateOrderStatus failed', ipcErr, 'OrderService');
-              throw ErrorFactory.system(errMsg);
-            }
-            console.error('[RENDERER OrderService] ❌ IPC call threw error:', ipcErr);
-            debugLogger.warn('IPC update-status failed; will try Admin API', ipcErr, 'OrderService');
+      const bridge = this.getBridge();
+      if (bridge) {
+        try {
+          console.log('[RENDERER OrderService] 📤 Invoking bridge orders.updateStatus', { orderId, status });
+          const resp: any = await bridge.orders.updateStatus(orderId, status);
+          console.log('[RENDERER OrderService] 📥 Bridge response received', { resp, orderId, status });
+          if (resp && resp.success) {
+            debugLogger.info(`Order status updated locally via bridge`, { orderId, status }, 'OrderService');
+            console.log('[RENDERER OrderService] ✅ Bridge update successful, returning');
+            return;
           }
+          // Bridge returned a non-success response
+          const ipcError = resp?.error || 'Bridge updateStatus returned unexpected response';
+          if (!this.allowAdminApiFallback()) {
+            throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
+          }
+          console.warn('[RENDERER OrderService] ⚠️ Bridge returned error:', ipcError);
+          debugLogger.warn('Bridge update-status returned error; will try Admin API', ipcError, 'OrderService');
+        } catch (ipcErr) {
+          if (!this.allowAdminApiFallback()) {
+            const errMsg = (ipcErr as any)?.message || String(ipcErr);
+            debugLogger.error('Native bridge updateOrderStatus failed', ipcErr, 'OrderService');
+            throw ErrorFactory.system(errMsg);
+          }
+          console.error('[RENDERER OrderService] ❌ Bridge call threw error:', ipcErr);
+          debugLogger.warn('Bridge update-status failed; will try Admin API', ipcErr, 'OrderService');
         }
       }
 
@@ -309,18 +289,16 @@ export class OrderService {
       const headers = await this.buildHeaders();
       // Resolve a server-recognizable identifier: prefer Supabase ID, then order_number, else best-effort
       let idToSend: string = orderId;
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            const order: any = await api.invoke('order:get-by-id', { orderId });
-            if (order) {
-              // Prefer Supabase ID; otherwise send order_number (server resolves UUID/order_number/client_order_id)
-              idToSend = order.supabase_id || order.supabaseId || order.order_number || order.orderNumber || orderId;
-            }
-          } catch (_) {
-            // ignore - continue with heuristics
+      if (bridge) {
+        try {
+          const orderResult: any = await bridge.orders.getById(orderId);
+          const order = orderResult?.data ?? orderResult;
+          if (order) {
+            // Prefer Supabase ID; otherwise send order_number (server resolves UUID/order_number/client_order_id)
+            idToSend = order.supabase_id || order.supabaseId || order.order_number || order.orderNumber || orderId;
           }
+        } catch (_) {
+          // ignore - continue with heuristics
         }
       }
       // Heuristic: if it looks like a UUID or an order_number (ORD-...), send as-is; otherwise server will also try client_order_id
@@ -449,63 +427,64 @@ export class OrderService {
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
         paymentMethod: orderData.paymentMethod ?? orderData.payment_method,
         paymentTransactionId: orderData.paymentTransactionId ?? orderData.payment_transaction_id,
+        staffShiftId: (orderData as any).staffShiftId ?? (orderData as any).staff_shift_id ?? null,
+        staffId: (orderData as any).staffId ?? (orderData as any).staff_id ?? null,
       };
 
-      // 1) Try local-first via IPC (Tauri Rust backend or Electron main process)
-      const _isTauri = isTauri();
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            const resp: any = await api.invoke('order:create', { orderData: normalized });
-            const ipcPayload = resp?.data ?? resp;
-            const orderId =
-              ipcPayload?.orderId ||
-              resp?.orderId ||
-              resp?.data?.orderId ||
-              resp?.order?.id ||
-              resp?.order?.orderId;
-            const isSuccess = resp?.success === true || ipcPayload?.success === true;
-            if (isSuccess && orderId) {
-              try {
-                const created: any = await api.invoke('order:get-by-id', { orderId });
-                if (created) {
-                  debugLogger.info('Created order via IPC', { orderId }, 'OrderService');
-                  return created as Order;
-                }
-              } catch {
-                // If fetch-by-id fails after a successful create, still return
-                // the created order identity and avoid triggering a second create.
+      // 1) Try local-first via IPC (native Rust backend)
+      const bridge = this.getBridge();
+      if (bridge) {
+        try {
+          const resp: any = await bridge.orders.create(normalized as any);
+          const ipcPayload = resp?.data ?? resp;
+          const orderId =
+            ipcPayload?.orderId ||
+            resp?.orderId ||
+            resp?.data?.orderId ||
+            resp?.order?.id ||
+            resp?.order?.orderId;
+          const isSuccess = resp?.success === true || ipcPayload?.success === true;
+          if (isSuccess && orderId) {
+            try {
+              const createdResult: any = await bridge.orders.getById(orderId);
+              const created = createdResult?.data ?? createdResult;
+              if (created) {
+                debugLogger.info('Created order via bridge', { orderId }, 'OrderService');
+                return created as Order;
               }
-              return {
-                ...(resp?.order || {}),
-                id: orderId,
-              } as Order;
+            } catch {
+              // If fetch-by-id fails after a successful create, still return
+              // the created order identity and avoid triggering a second create.
             }
-            // IPC returned a non-success response
-            const ipcError = resp?.error || 'IPC create returned unexpected response';
-            if (_isTauri) {
-              // In Tauri, the Rust backend IS the backend. Don't fall through
-              // to the Admin HTTP API — it would bypass local SQLite and hang.
-              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
-            }
-            debugLogger.warn('IPC create returned error; will try Admin API', ipcError, 'OrderService');
-          } catch (ipcErr) {
-            if (_isTauri) {
-              // In Tauri, surface the Rust error immediately instead of
-              // falling through to a slow/unreachable Admin API.
-              const errMsg = (ipcErr as any)?.message || String(ipcErr);
-              debugLogger.error('Tauri IPC order create failed', ipcErr, 'OrderService');
-              throw ErrorFactory.system(errMsg);
-            }
-            debugLogger.warn('IPC create failed; will try Admin API', ipcErr, 'OrderService');
+            return {
+              ...(resp?.order || {}),
+              id: orderId,
+            } as Order;
           }
+          // Bridge returned a non-success response
+          const ipcError = resp?.error || 'Bridge create returned unexpected response';
+          if (!this.allowAdminApiFallback()) {
+            // In desktop runtime, the Rust backend IS the backend. Don't fall through
+            // to the Admin HTTP API — it would bypass local SQLite and hang.
+            throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
+          }
+          debugLogger.warn('Bridge create returned error; will try Admin API', ipcError, 'OrderService');
+        } catch (ipcErr) {
+          if (!this.allowAdminApiFallback()) {
+            // In desktop runtime, surface the Rust error immediately instead of
+            // falling through to a slow/unreachable Admin API.
+            const errMsg = (ipcErr as any)?.message || String(ipcErr);
+            debugLogger.error('Native bridge order create failed', ipcErr, 'OrderService');
+            throw ErrorFactory.system(errMsg);
+          }
+          debugLogger.warn('Bridge create failed; will try Admin API', ipcErr, 'OrderService');
         }
       }
 
       // 2) Fallback to Admin API
       // Transform orderData to match Admin API schema
-      const branchId = typeof window !== 'undefined' ? localStorage.getItem('branch_id') : null;
+      const latestCreds = await refreshTerminalCredentialCache();
+      const branchId = latestCreds.branchId || getCachedTerminalCredentials().branchId || null;
       const organizationId = await this.getOrganizationId();
       const orderDataAny = orderData as any;
 
@@ -520,10 +499,10 @@ export class OrderService {
       // Try to resolve active cashier shift to attribute revenue properly
       let activeCashierShiftId: string | null = null;
       try {
-        const api = (typeof window !== 'undefined') ? (window as any).electronAPI : null;
-        if (api?.getActiveShiftByTerminalLoose) {
-          const tId = (typeof window !== 'undefined') ? (localStorage.getItem('terminal_id') || environment.TERMINAL_ID || 'terminal-001') : 'terminal-001';
-          const shift = await api.getActiveShiftByTerminalLoose(tId);
+        if (bridge) {
+          const creds = await this.getCredentials();
+          const tId = creds.terminalId || environment.TERMINAL_ID || 'terminal-001';
+          const shift = await bridge.shifts.getActiveByTerminalLoose(tId);
           if (shift && shift.role_type === 'cashier') {
             activeCashierShiftId = shift.id;
           }
@@ -628,19 +607,17 @@ export class OrderService {
       debugLogger.info(`Created order via Admin API: ${newOrder.id}`, 'OrderService');
 
       // Sync the order to local SQLite so it appears in the POS order list
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            const syncResp = await api.invoke('order:save-from-remote', { orderData: newOrder });
-            if (syncResp?.success) {
-              debugLogger.info(`Synced remote order to local DB: ${syncResp.orderId}`, 'OrderService');
-            } else {
-              debugLogger.warn('Failed to sync remote order to local DB', syncResp, 'OrderService');
-            }
-          } catch (syncErr) {
-            debugLogger.warn('Error syncing remote order to local DB', syncErr, 'OrderService');
+      if (bridge) {
+        try {
+          const syncResp = await bridge.orders.saveFromRemote(newOrder);
+          if (syncResp?.success) {
+            const syncedOrderId = (syncResp as any)?.orderId || (syncResp as any)?.data?.orderId || newOrder?.id;
+            debugLogger.info(`Synced remote order to local DB: ${syncedOrderId}`, 'OrderService');
+          } else {
+            debugLogger.warn('Failed to sync remote order to local DB', syncResp, 'OrderService');
           }
+        } catch (syncErr) {
+          debugLogger.warn('Error syncing remote order to local DB', syncErr, 'OrderService');
         }
       }
 
@@ -654,31 +631,28 @@ export class OrderService {
 
   // Delete order - local-first via IPC, fallback to Admin API
   async deleteOrder(orderId: string): Promise<void> {
-    const _isTauri = isTauri();
     try {
       // 1) Try local-first via IPC
-      if (typeof window !== 'undefined') {
-        const api = (window as any).electronAPI;
-        if (api?.invoke) {
-          try {
-            const resp: any = await api.invoke('order:delete', { orderId });
-            if (resp && resp.success) {
-              debugLogger.info('Deleted order via IPC', { orderId }, 'OrderService');
-              return;
-            }
-            const ipcError = resp?.error || 'IPC delete returned unexpected response';
-            if (_isTauri) {
-              throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
-            }
-            debugLogger.warn('IPC delete returned error; will try Admin API', ipcError, 'OrderService');
-          } catch (ipcErr) {
-            if (_isTauri) {
-              const errMsg = (ipcErr as any)?.message || String(ipcErr);
-              debugLogger.error('Tauri IPC deleteOrder failed', ipcErr, 'OrderService');
-              throw ErrorFactory.system(errMsg);
-            }
-            debugLogger.warn('IPC delete failed; will try Admin API', ipcErr, 'OrderService');
+      const bridge = this.getBridge();
+      if (bridge) {
+        try {
+          const resp: any = await bridge.orders.delete(orderId);
+          if (resp && resp.success) {
+            debugLogger.info('Deleted order via bridge', { orderId }, 'OrderService');
+            return;
           }
+          const ipcError = resp?.error || 'Bridge delete returned unexpected response';
+          if (!this.allowAdminApiFallback()) {
+            throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
+          }
+          debugLogger.warn('Bridge delete returned error; will try Admin API', ipcError, 'OrderService');
+        } catch (ipcErr) {
+          if (!this.allowAdminApiFallback()) {
+            const errMsg = (ipcErr as any)?.message || String(ipcErr);
+            debugLogger.error('Native bridge deleteOrder failed', ipcErr, 'OrderService');
+            throw ErrorFactory.system(errMsg);
+          }
+          debugLogger.warn('Bridge delete failed; will try Admin API', ipcErr, 'OrderService');
         }
       }
 

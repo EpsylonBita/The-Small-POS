@@ -153,6 +153,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       onClose={handleClose}
       title={t('modals.payment.title')}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={false}
       closeOnEscape={!isProcessingPayment}
     >

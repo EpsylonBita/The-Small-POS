@@ -27,135 +27,109 @@ import { useAppEvents } from "./hooks/useAppEvents";
 import { useWindowState } from "./hooks/useWindowState";
 import { updateAdminUrlFromSettings } from "../config/environment";
 import { setSupabaseContext } from "../shared/supabase-config";
+import { getBridge, isBrowser, offEvent, onEvent } from "../lib";
 import {
+  getCachedTerminalCredentials,
   clearTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
 
-// Extend window interface for electron API (Comment 1: secure preload)
-declare global {
-  interface Window {
-    electron?: {
-      ipcRenderer: {
-        on: (channel: string, callback: (data: any) => void) => void;
-        removeListener: (channel: string, callback: (data: any) => void) => void;
-        removeAllListeners: (channel: string) => void;
-        invoke: (channel: string, ...args: any[]) => Promise<any>;
-      };
-      clipboard?: {
-        readText: () => Promise<string>;
-        writeText: (text: string) => Promise<void>;
-      };
-    };
-    isElectron?: boolean;
-  }
-}
-
 function ConfigGuard({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
+  const bridge = getBridge();
   const [isConfigured, setIsConfigured] = useState<boolean | null>(null);
 
   // Check configuration status on startup and sync credentials to in-memory cache
   useEffect(() => {
     const checkConfiguration = async () => {
-      if (window.electron?.ipcRenderer) {
-        try {
-          // Small delay to ensure database is ready after restart
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          // Update admin URL from stored settings (for API calls)
-          await updateAdminUrlFromSettings();
-
-          console.log('[ConfigGuard] Calling settings:is-configured...');
-          const result = await window.electron.ipcRenderer.invoke('settings:is-configured');
-          console.log('[ConfigGuard] settings:is-configured result:', JSON.stringify(result));
-          
-          // Handle both direct response and handleIPCError wrapped response
-          // Direct: { configured: boolean, reason: string }
-          // Wrapped: { success: boolean, data: { configured: boolean, reason: string } }
-          const configData = result?.data ?? result;
-          const isConfiguredValue = configData?.configured ?? false;
-          const reason = configData?.reason ?? 'Unknown';
-          
-          console.log('[ConfigGuard] Parsed: configured=%s, reason=%s', isConfiguredValue, reason);
-          setIsConfigured(isConfiguredValue);
-          console.log('[ConfigGuard] isConfigured set to:', isConfiguredValue);
-
-          // If not configured, ensure we clear any stale session data
-          if (!isConfiguredValue) {
-            console.log('Terminal not configured, clearing stale session data');
-            localStorage.removeItem("pos-user");
-            localStorage.removeItem("terminal_id");
-            clearTerminalCredentialCache();
-          } else {
-            // If configured, sync credentials from main process to in-memory cache
-            // This ensures menu-version polling can authenticate immediately
-            try {
-              const [settings, apiKeyFromMain] = await Promise.all([
-                window.electron.ipcRenderer.invoke('terminal-config:get-settings'),
-                window.electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-              ]);
-
-              const terminalId = settings?.['terminal.terminal_id'] || settings?.terminal?.terminal_id;
-              const apiKey =
-                (typeof apiKeyFromMain === 'string' ? apiKeyFromMain : '') ||
-                settings?.['terminal.pos_api_key'] ||
-                settings?.terminal?.pos_api_key;
-
-              console.log('[ConfigGuard] Resolved credentials:', {
-                terminalId: terminalId || '(not found)',
-                hasApiKey: !!apiKey,
-                lsTerminalId: localStorage.getItem('terminal_id') || '(not in localStorage)',
-              });
-
-              // Always sync if we have values - don't skip if already in localStorage
-              // This handles cases where localStorage might be stale
-              if (terminalId) {
-                localStorage.setItem('terminal_id', terminalId);
-                console.log('[ConfigGuard] Synced terminal_id to localStorage:', terminalId);
-                updateTerminalCredentialCache({ terminalId });
-              }
-              if (apiKey) {
-                updateTerminalCredentialCache({ apiKey });
-              }
-
-              const branchId = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id;
-              const organizationId = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id;
-              if (branchId) {
-                localStorage.setItem('branch_id', branchId);
-                updateTerminalCredentialCache({ branchId });
-              }
-              if (organizationId) {
-                localStorage.setItem('organization_id', organizationId);
-                updateTerminalCredentialCache({ organizationId });
-              }
-              setSupabaseContext({
-                terminalId: terminalId || undefined,
-                organizationId: organizationId || undefined,
-                branchId: branchId || undefined,
-                clientType: 'desktop',
-              });
-            } catch (syncErr) {
-              console.warn('[ConfigGuard] Failed to sync terminal credentials cache:', syncErr);
-            }
-          }
-        } catch (err) {
-          console.error('Failed to check configuration:', err);
-          setIsConfigured(false); // Default to not configured on error
-        }
-      } else {
-        // Non-electron environment (dev), assume configured
+      if (isBrowser()) {
+        // Non-native environment (dev), assume configured
         setIsConfigured(true);
+        return;
+      }
+      try {
+        // Small delay to ensure database is ready after restart
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Update admin URL from stored settings (for API calls)
+        await updateAdminUrlFromSettings();
+
+        console.log('[ConfigGuard] Calling settings:is-configured...');
+        const result: any = await bridge.settings.isConfigured();
+        console.log('[ConfigGuard] settings:is-configured result:', JSON.stringify(result));
+        
+        // Handle both direct response and handleIPCError wrapped response
+        // Direct: { configured: boolean, reason: string }
+        // Wrapped: { success: boolean, data: { configured: boolean, reason: string } }
+        const configData = result?.data ?? result;
+        const isConfiguredValue = configData?.configured ?? false;
+        const reason = configData?.reason ?? 'Unknown';
+        
+        console.log('[ConfigGuard] Parsed: configured=%s, reason=%s', isConfiguredValue, reason);
+        setIsConfigured(isConfiguredValue);
+        console.log('[ConfigGuard] isConfigured set to:', isConfiguredValue);
+
+        // If not configured, ensure we clear any stale session data
+        if (!isConfiguredValue) {
+          console.log('Terminal not configured, clearing stale session data');
+          localStorage.removeItem("pos-user");
+          clearTerminalCredentialCache();
+        } else {
+          // If configured, sync credentials from main process to in-memory cache
+          // This ensures menu-version polling can authenticate immediately
+          try {
+            const [settings, apiKeyFromMain] = await Promise.all([
+              bridge.terminalConfig.getSettings(),
+              bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
+            ]);
+
+            const terminalId = settings?.['terminal.terminal_id'] || settings?.terminal?.terminal_id;
+            const apiKey =
+              (typeof apiKeyFromMain === 'string' ? apiKeyFromMain : '') ||
+              settings?.['terminal.pos_api_key'] ||
+              settings?.terminal?.pos_api_key;
+
+            console.log('[ConfigGuard] Resolved credentials:', {
+              terminalId: terminalId || '(not found)',
+              hasApiKey: !!apiKey,
+            });
+
+            if (terminalId) {
+              updateTerminalCredentialCache({ terminalId });
+            }
+            if (apiKey) {
+              updateTerminalCredentialCache({ apiKey });
+            }
+
+            const branchId = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id;
+            const organizationId = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id;
+            if (branchId) {
+              updateTerminalCredentialCache({ branchId });
+            }
+            if (organizationId) {
+              updateTerminalCredentialCache({ organizationId });
+            }
+            setSupabaseContext({
+              terminalId: terminalId || undefined,
+              organizationId: organizationId || undefined,
+              branchId: branchId || undefined,
+              clientType: 'desktop',
+            });
+          } catch (syncErr) {
+            console.warn('[ConfigGuard] Failed to sync terminal credentials cache:', syncErr);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to check configuration:', err);
+        setIsConfigured(false); // Default to not configured on error
       }
     };
 
     checkConfiguration();
-  }, []);
+  }, [bridge.settings, bridge.terminalConfig]);
 
   // Listen for app:reset event (remote wipe / terminal deleted)
   useEffect(() => {
-    if (!window.electron?.ipcRenderer) return;
-
     const handleReset = (data: any) => {
       const reason = data?.reason || 'unknown';
       console.log('App reset triggered:', reason);
@@ -163,6 +137,8 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       // Clear all local storage
       localStorage.removeItem("pos-user");
       localStorage.removeItem("terminal_id");
+      localStorage.removeItem("branch_id");
+      localStorage.removeItem("organization_id");
       localStorage.removeItem("admin_dashboard_url");
       clearTerminalCredentialCache();
 
@@ -182,71 +158,64 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       });
     };
 
-    window.electron.ipcRenderer.on('app:reset', handleReset);
+    onEvent('app:reset', handleReset);
 
     return () => {
-      window.electron?.ipcRenderer.removeListener('app:reset', handleReset);
+      offEvent('app:reset', handleReset);
     };
   }, [t]);
 
   // Listen for terminal-credentials-updated event (after onboarding)
   // This stores credentials in in-memory cache for immediate renderer access
   useEffect(() => {
-    if (!window.electron?.ipcRenderer) return;
-
     const handleCredentialsUpdated = (data: { terminalId?: string; apiKey?: string }) => {
       console.log('[ConfigGuard] Terminal credentials updated');
       if (data?.terminalId) {
-        localStorage.setItem('terminal_id', data.terminalId);
         updateTerminalCredentialCache({ terminalId: data.terminalId });
-        setSupabaseContext({
-          terminalId: data.terminalId,
-          organizationId: localStorage.getItem('organization_id') || undefined,
-          branchId: localStorage.getItem('branch_id') || undefined,
-          clientType: 'desktop',
-        });
       }
       if (data?.apiKey) {
         updateTerminalCredentialCache({ apiKey: data.apiKey });
       }
-    };
-
-    window.electron.ipcRenderer.on('terminal-credentials-updated', handleCredentialsUpdated);
-
-    return () => {
-      window.electron?.ipcRenderer.removeListener('terminal-credentials-updated', handleCredentialsUpdated);
-    };
-  }, []);
-
-  // Listen for terminal-config-updated event (from heartbeat)
-  // This stores branch_id and organization_id from the server
-  useEffect(() => {
-    if (!window.electron?.ipcRenderer) return;
-
-    const handleConfigUpdated = (data: { branch_id?: string; organization_id?: string }) => {
-      console.log('[ConfigGuard] Terminal config updated from heartbeat:', data);
-      if (data?.branch_id) {
-        localStorage.setItem('branch_id', data.branch_id);
-        updateTerminalCredentialCache({ branchId: data.branch_id });
-        console.log('[ConfigGuard] Stored branch_id in localStorage:', data.branch_id);
-      }
-      if (data?.organization_id) {
-        localStorage.setItem('organization_id', data.organization_id);
-        updateTerminalCredentialCache({ organizationId: data.organization_id });
-        console.log('[ConfigGuard] Stored organization_id in localStorage:', data.organization_id);
-      }
+      const cached = getCachedTerminalCredentials();
       setSupabaseContext({
-        terminalId: localStorage.getItem('terminal_id') || undefined,
-        organizationId: data?.organization_id || localStorage.getItem('organization_id') || undefined,
-        branchId: data?.branch_id || localStorage.getItem('branch_id') || undefined,
+        terminalId: cached.terminalId || undefined,
+        organizationId: cached.organizationId || undefined,
+        branchId: cached.branchId || undefined,
         clientType: 'desktop',
       });
     };
 
-    window.electron.ipcRenderer.on('terminal-config-updated', handleConfigUpdated);
+    onEvent('terminal-credentials-updated', handleCredentialsUpdated);
 
     return () => {
-      window.electron?.ipcRenderer.removeListener('terminal-config-updated', handleConfigUpdated);
+      offEvent('terminal-credentials-updated', handleCredentialsUpdated);
+    };
+  }, []);
+
+  // Listen for terminal-config-updated event (from heartbeat)
+  // This updates in-memory terminal identity from server heartbeat
+  useEffect(() => {
+    const handleConfigUpdated = (data: { branch_id?: string; organization_id?: string }) => {
+      console.log('[ConfigGuard] Terminal config updated from heartbeat:', data);
+      if (data?.branch_id) {
+        updateTerminalCredentialCache({ branchId: data.branch_id });
+      }
+      if (data?.organization_id) {
+        updateTerminalCredentialCache({ organizationId: data.organization_id });
+      }
+      const cached = getCachedTerminalCredentials();
+      setSupabaseContext({
+        terminalId: cached.terminalId || undefined,
+        organizationId: cached.organizationId || undefined,
+        branchId: cached.branchId || undefined,
+        clientType: 'desktop',
+      });
+    };
+
+    onEvent('terminal-config-updated', handleConfigUpdated);
+
+    return () => {
+      offEvent('terminal-config-updated', handleConfigUpdated);
     };
   }, []);
 
@@ -295,6 +264,7 @@ function getUpdateStatus(autoUpdater: ReturnType<typeof useAutoUpdater>): Update
 
 function AppContent() {
   const { t } = useI18n();
+  const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
   const { setStaff, clearShift } = useShift();
@@ -363,10 +333,10 @@ function AppContent() {
           }
 
           // For database-backed staff, validate session with main process
-          if (window.electron?.ipcRenderer) {
+          if (!isBrowser()) {
             try {
               // Validate session
-              const validationResult = await window.electron.ipcRenderer.invoke('staff-auth:validate-session');
+              const validationResult = await bridge.staffAuth.validateSession();
 
               if (!validationResult || !validationResult.valid) {
                 console.warn('Session invalid or expired, clearing local storage');
@@ -428,9 +398,9 @@ function AppContent() {
   const handleLogin = async (pin: string) => {
     console.log('[App.tsx handleLogin] Called with PIN:', pin === '' ? '(empty)' : '(provided)');
     try {
-      // Call the secure auth:login IPC handler (pass as object with pin property)
-      console.log('[App.tsx handleLogin] Invoking auth:login IPC...');
-      const result = await (window as any).electronAPI?.ipcRenderer?.invoke('auth:login', { pin });
+      // Call secure auth login through typed bridge
+      console.log('[App.tsx handleLogin] Invoking auth:login bridge method...');
+      const result: any = await bridge.auth.login(pin);
       console.log('[App.tsx handleLogin] IPC result:', JSON.stringify(result, null, 2));
 
       // Handle both response structures:
@@ -480,7 +450,7 @@ function AppContent() {
   // Logout function
   const handleLogout = async () => {
     try {
-      await (window as any).electronAPI?.ipcRenderer?.invoke('auth:logout');
+      await bridge.auth.logout();
     } catch (e) {
       console.error('auth:logout failed', e);
     }

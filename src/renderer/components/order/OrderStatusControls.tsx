@@ -5,6 +5,7 @@ import { useOrderStore } from '../../hooks/useOrderStore';
 import toast from 'react-hot-toast';
 import type { Order, OrderStatus } from '../../types/orders';
 import { isExternalPlatform, getPlatformName } from '../../utils/plugin-icons';
+import { getBridge } from '../../../lib';
 
 interface OrderStatusControlsProps {
   order: Order;
@@ -28,6 +29,7 @@ export function OrderStatusControls({
   onDriverAssign,
   disabled = false,
 }: OrderStatusControlsProps) {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { theme } = useTheme();
   const { updatePreparationProgress } = useOrderStore();
@@ -47,7 +49,7 @@ export function OrderStatusControls({
 
     setIsNotifyingPlatform(true);
     try {
-      await window.electronAPI.notifyPlatformReady(order.id);
+      await bridge.orders.notifyPlatformReady(order.id);
       const platformName = getPlatformName(orderPlugin);
       toast.success(t('orders.messages.platformNotified', { platform: platformName }));
     } catch (error) {
@@ -55,7 +57,7 @@ export function OrderStatusControls({
     } finally {
       setIsNotifyingPlatform(false);
     }
-  }, [order.id, isPlatformOrder, orderPlugin, externalOrderId, t]);
+  }, [bridge.orders, order.id, isPlatformOrder, orderPlugin, externalOrderId, t]);
 
   const handleStatusChange = useCallback(
     async (newStatus: OrderStatus) => {

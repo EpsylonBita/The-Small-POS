@@ -14,6 +14,7 @@ import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
 import { SUPABASE_CONFIG } from '../../../shared/supabase-config';
+import { getBridge } from '../../../lib';
 
 interface StaffShiftModalProps {
   isOpen: boolean;
@@ -51,6 +52,7 @@ interface StaffMember {
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
 
 export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false, isMobileWaiter = false }: StaffShiftModalProps) {
+  const bridge = getBridge();
   console.log('🔄 StaffShiftModal loaded - VERSION 2.0 with SUPABASE_CONFIG');
   const { t } = useTranslation();
   const { staff, activeShift, refreshActiveShift, setStaff, setActiveShiftImmediate } = useShift();
@@ -278,8 +280,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         try {
           // Skip driver earnings backfill on initial load - it's not critical for display
           // Backfill will run during actual checkout if needed
-          const result = await (window as any).electronAPI.getShiftSummary(effectiveShift.id, { skipBackfill: true });
-          // IPC handlers wrap response in { success: true, data: ... }
+          const result = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
+          // shifts.getSummary returns the summary directly (with breakdown, shift, cash_drawer)
           const summary = result?.data || result;
           setShiftSummary(summary);
         } catch (e) {
@@ -299,7 +301,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const map = new Map<string, any>();
     for (const s of staffList) {
       try {
-        const result = await (window as any).electronAPI?.getActiveShift?.(s.id);
+        const result = await bridge.shifts.getActive(s.id);
         // IPC handlers wrap response in { success: true, data: ... }
         // So we need to check result.data, not just result
         const shift = result?.data || result;
@@ -324,20 +326,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // 1) Try hook-provided settings (fast path)
       branchId = getSetting?.('terminal', 'branch_id') as string | undefined;
 
-      // 2) Try IPC getter for a specific setting (existing, stable handler)
-      if (!branchId && (window as any).electronAPI?.getTerminalSetting) {
+      // 2) Try terminal config getter for a specific setting (existing, stable handler)
+      if (!branchId) {
         try {
-          const val = await (window as any).electronAPI.getTerminalSetting('terminal', 'branch_id');
+          const val = await bridge.terminalConfig.getSetting('terminal', 'branch_id');
           if (val) branchId = val as string;
         } catch (e) {
-          console.warn('[StaffShiftModal] getTerminalSetting fallback failed:', e);
+          console.warn('[StaffShiftModal] terminalConfig.getSetting fallback failed:', e);
         }
       }
 
       // 2b) Try local settings store (legacy SettingsService)
       if (!branchId) {
         try {
-          const local = await (window as any).electronAPI?.invoke?.('get-settings');
+          const local = (await bridge.settings.get()) as any;
           const flat = local?.['terminal.branch_id'] ?? local?.terminal?.branch_id;
           if (flat) branchId = flat as string;
         } catch (e) {
@@ -345,13 +347,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
       }
 
-      // 3) Try IPC for branchId
-      if (!branchId && (window as any).electronAPI?.getTerminalBranchId) {
+      // 3) Try direct branch id getter
+      if (!branchId) {
         try {
-          const bid = await (window as any).electronAPI.getTerminalBranchId();
+          const bid = await bridge.terminalConfig.getBranchId();
           if (bid) branchId = bid as string;
         } catch (e) {
-          console.warn('[StaffShiftModal] getTerminalBranchId IPC failed (non-fatal):', e);
+          console.warn('[StaffShiftModal] terminalConfig.getBranchId failed (non-fatal):', e);
         }
       }
 
@@ -366,27 +368,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Use IPC to fetch staff from main process (where Supabase config is available)
       let staffList: StaffMember[] = [];
 
-      // Try the new IPC handler first
-      if ((window as any).electronAPI?.invoke) {
-        try {
-          console.log('[loadStaff] Trying IPC handler shift:list-staff-for-checkin...');
-          const result = await (window as any).electronAPI.invoke('shift:list-staff-for-checkin', branchId);
+      // Try bridge handler first
+      try {
+        console.log('[loadStaff] Trying bridge handler shift:list-staff-for-checkin...');
+        const result = await bridge.invoke('shift:list-staff-for-checkin', branchId);
 
-          // Handle IPC response format
-          const data = result?.data || result;
-          if (Array.isArray(data)) {
-            staffList = data;
-            console.log('[loadStaff] IPC returned', staffList.length, 'staff members');
-          } else if (result?.error) {
-            throw new Error(result.error);
-          }
-        } catch (ipcError: any) {
-          console.warn('[loadStaff] IPC handler failed, falling back to direct fetch:', ipcError?.message || ipcError);
-          // Fall back to direct fetch if IPC fails (for backward compatibility)
-          staffList = await loadStaffDirectFetch(branchId);
+        // Handle IPC response format
+        const data = result?.data || result;
+        if (Array.isArray(data)) {
+          staffList = data;
+          console.log('[loadStaff] bridge returned', staffList.length, 'staff members');
+        } else if (result?.error) {
+          throw new Error(result.error);
+        } else {
+          throw new Error('Invalid staff list response');
         }
-      } else {
-        // No IPC available, use direct fetch
+      } catch (ipcError: any) {
+        console.warn('[loadStaff] bridge handler failed, falling back to direct fetch:', ipcError?.message || ipcError);
+        // Fall back to direct fetch if bridge fails (for backward compatibility)
         staffList = await loadStaffDirectFetch(branchId);
       }
 
@@ -394,8 +393,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       if (staffList.length > 0) {
         const staffIds = staffList.map(s => s.id);
         try {
-          console.log('[loadStaff] Loading roles via IPC for', staffIds.length, 'staff members');
-          const rolesResult = await (window as any).electronAPI?.invoke?.('shift:get-staff-roles', staffIds);
+          console.log('[loadStaff] Loading roles via bridge for', staffIds.length, 'staff members');
+          const rolesResult = await bridge.invoke('shift:get-staff-roles', staffIds);
           const rolesByStaff = rolesResult?.data || rolesResult || {};
 
           // Assign roles to staff members
@@ -547,13 +546,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const sid = shiftId ?? effectiveShift?.id;
     if (!sid) return;
     try {
-      const result = await (window as any).electronAPI.getShiftExpenses(sid);
-      // Handle various response shapes - ensure we always set an array
-      const shiftExpenses = Array.isArray(result)
-        ? result
-        : Array.isArray(result?.data)
-          ? result.data
-          : [];
+      const result = await bridge.shifts.getExpenses(sid);
+      const shiftExpenses = Array.isArray(result) ? result : [];
       setExpenses(shiftExpenses);
     } catch (err) {
       console.error('Failed to load expenses:', err);
@@ -566,7 +560,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const sid = shiftId ?? effectiveShift?.id;
     if (!sid) return;
     try {
-      const payments = await (window as any).electronAPI.getStaffPayments(sid);
+      const payments = await bridge.shifts.getStaffPayments(sid);
       setStaffPaymentsList(payments || []);
     } catch (err) {
       console.error('Failed to load staff payments:', err);
@@ -586,7 +580,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const loadPaymentHistoryForStaff = async (staffId: string, dateStr?: string) => {
     try {
       const targetDate = dateStr || new Date().toISOString().split('T')[0];
-      const payments = await (window.electronAPI as any).invoke('shift:get-staff-payments-by-staff', {
+      const payments = await bridge.shifts.getStaffPaymentsByStaff({
         staffId,
         dateFrom: targetDate,
         dateTo: targetDate
@@ -594,7 +588,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setPaymentHistory(payments || []);
 
       // Calculate daily total
-      const total = await (window.electronAPI as any).invoke('shift:get-staff-payment-total-for-date', staffId, targetDate);
+      const total = await bridge.shifts.getStaffPaymentTotalForDate(staffId, targetDate);
       setDailyPaymentTotal(total || 0);
     } catch (error) {
       console.error('Failed to load payment history:', error);
@@ -643,7 +637,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     try {
       const amount = parseFloat(paymentAmount);
-      const result = await (window as any).electronAPI.recordStaffPayment({
+      const result = await bridge.invoke('shift:record-staff-payment', {
         cashierShiftId: effectiveShift.id,
         paidToStaffId: selectedStaffForPayment.id,
         amount,
@@ -662,8 +656,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const shiftDate = effectiveShift.check_in_time ? new Date(effectiveShift.check_in_time).toISOString().split('T')[0] : undefined;
         await loadPaymentHistoryForStaff(selectedStaffForPayment.id, shiftDate);
 
-        const summaryResult = await (window as any).electronAPI.getShiftSummary(effectiveShift.id, { skipBackfill: true });
-        // IPC handlers wrap response in { success: true, data: ... }
+        const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
         setShiftSummary(summaryResult?.data || summaryResult);
 
         setSuccess(t('modals.staffShift.paymentRecorded', 'Payment recorded successfully'));
@@ -742,47 +735,47 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setError('');
 
     try {
-      // Resolve terminal/branch from settings or IPC
+      // Resolve terminal/branch from settings or bridge
       let branchId: string | undefined = getSetting?.('terminal', 'branch_id') as string | undefined;
       let terminalId: string | undefined = getSetting?.('terminal', 'terminal_id') as string | undefined;
       if (!branchId || !terminalId) {
         try {
-          const local = await (window as any).electronAPI?.invoke?.('get-settings');
+          const local = (await bridge.settings.get()) as any;
           branchId = branchId || (local?.['terminal.branch_id'] ?? local?.terminal?.branch_id);
           terminalId = terminalId || (local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id);
         } catch { }
       }
-      if (!branchId && (window as any).electronAPI?.getTerminalSetting) {
+      if (!branchId) {
         try {
-          const val = await (window as any).electronAPI.getTerminalSetting('terminal', 'branch_id');
+          const val = await bridge.terminalConfig.getSetting('terminal', 'branch_id');
           if (val) branchId = val as string;
         } catch { }
       }
       // Extra fallback: dedicated branch id getter
-      if (!branchId && (window as any).electronAPI?.getTerminalBranchId) {
+      if (!branchId) {
         try {
-          const bid = await (window as any).electronAPI.getTerminalBranchId();
+          const bid = await bridge.terminalConfig.getBranchId();
           if (bid) branchId = bid as string;
         } catch { }
       }
-      if (!terminalId && (window as any).electronAPI?.getTerminalSetting) {
+      if (!terminalId) {
         try {
-          const val = await (window as any).electronAPI.getTerminalSetting('terminal', 'terminal_id');
+          const val = await bridge.terminalConfig.getSetting('terminal', 'terminal_id');
           if (val) terminalId = val as string;
         } catch { }
       }
 
       // Resolve organization_id
       let organizationId: string | undefined = getSetting?.('terminal', 'organization_id') as string | undefined;
-      if (!organizationId && (window as any).electronAPI?.getTerminalOrganizationId) {
+      if (!organizationId) {
         try {
-          const oid = await (window as any).electronAPI.getTerminalOrganizationId();
+          const oid = await bridge.terminalConfig.getOrganizationId();
           if (oid) organizationId = oid as string;
         } catch { }
       }
-      if (!organizationId && (window as any).electronAPI?.getTerminalSetting) {
+      if (!organizationId) {
         try {
-          const val = await (window as any).electronAPI.getTerminalSetting('terminal', 'organization_id');
+          const val = await bridge.terminalConfig.getSetting('terminal', 'organization_id');
           if (val) organizationId = val as string;
         } catch { }
       }
@@ -795,66 +788,68 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return;
       }
 
-      // Prefer Electron IPC (main process handles Supabase + session) when available
-      const hasElectron = typeof (window as any).electronAPI?.invoke === 'function';
-      if (hasElectron) {
-        try {
-          console.log('[StaffShiftModal] PIN submit - IPC call with', { staffId: selectedStaff?.id, branchId, terminalId });
-          const authRes = await (window as any).electronAPI.invoke('staff-auth:authenticate-pin', enteredPin.trim(), selectedStaff?.id, terminalId, branchId);
-          // Main-process handlers may return either raw service payload
-          // or wrapped IPC response: { success, data }.
-          const normalizedAuth = authRes?.data && typeof authRes.data === 'object' ? authRes.data : authRes;
-          const authSucceeded = normalizedAuth?.success === true;
-          const returnedStaffId = normalizedAuth?.staffId ?? normalizedAuth?.staff_id ?? normalizedAuth?.staff?.id;
-          const selectedStaffId = selectedStaff?.id;
-          console.log('[StaffShiftModal] PIN IPC normalized auth', {
-            wrapped: !!authRes?.data,
-            authSucceeded,
-            returnedStaffId,
-            selectedStaffId,
-            error: normalizedAuth?.error
-          });
-          const staffMatches =
-            !returnedStaffId ||
-            !selectedStaffId ||
-            String(returnedStaffId).trim().toLowerCase() === String(selectedStaffId).trim().toLowerCase();
+      try {
+        console.log('[StaffShiftModal] PIN submit - IPC call with', { staffId: selectedStaff?.id, branchId, terminalId });
+        const authRes = await bridge.invoke(
+          'staff-auth:authenticate-pin',
+          enteredPin.trim(),
+          selectedStaff?.id,
+          terminalId,
+          branchId
+        );
+        // Main-process handlers may return either raw service payload
+        // or wrapped IPC response: { success, data }.
+        const normalizedAuth = authRes?.data && typeof authRes.data === 'object' ? authRes.data : authRes;
+        const authSucceeded = normalizedAuth?.success === true;
+        const returnedStaffId = normalizedAuth?.staffId ?? normalizedAuth?.staff_id ?? normalizedAuth?.staff?.id;
+        const selectedStaffId = selectedStaff?.id;
+        console.log('[StaffShiftModal] PIN IPC normalized auth', {
+          wrapped: !!authRes?.data,
+          authSucceeded,
+          returnedStaffId,
+          selectedStaffId,
+          error: normalizedAuth?.error
+        });
+        const staffMatches =
+          !returnedStaffId ||
+          !selectedStaffId ||
+          String(returnedStaffId).trim().toLowerCase() === String(selectedStaffId).trim().toLowerCase();
 
-          if (authSucceeded && staffMatches) {
-            const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
-            setRoleType(staffRole);
-            setCheckInStep('select-role');
-            setError('');
-            return; // done
-          }
-
-          if (authSucceeded && !staffMatches) {
-            console.warn('[StaffShiftModal] PIN auth staff mismatch', {
-              selectedStaffId,
-              returnedStaffId,
-            });
-            setError(t('modals.staffShift.invalidPIN'));
-            setEnteredPin('');
-            return;
-          }
-
-          // If main-process auth returned an explicit failure, trust it and
-          // avoid renderer direct-RPC fallback that depends on renderer env config.
-          if (normalizedAuth && normalizedAuth.success === false) {
-            const errorText = String(normalizedAuth.error || '').toLowerCase();
-            if (errorText.includes('invalid pin') || errorText.includes('not found') || errorText.includes('access denied')) {
-              setError(t('modals.staffShift.invalidPIN'));
-            } else {
-              setError(t('modals.staffShift.verifyPinFailed'));
-            }
-            setEnteredPin('');
-            return;
-          }
-
-          console.log('IPC PIN auth returned unexpected payload (will try direct RPC next):', authRes);
-          // Do not return here; fall through to direct RPC
-        } catch (e) {
-          console.warn('IPC PIN auth error, falling back to direct Supabase RPC:', e);
+        if (authSucceeded && staffMatches) {
+          const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
+          setRoleType(staffRole);
+          setCheckInStep('select-role');
+          setError('');
+          return; // done
         }
+
+        if (authSucceeded && !staffMatches) {
+          console.warn('[StaffShiftModal] PIN auth staff mismatch', {
+            selectedStaffId,
+            returnedStaffId,
+          });
+          setError(t('modals.staffShift.invalidPIN'));
+          setEnteredPin('');
+          return;
+        }
+
+        // If main-process auth returned an explicit failure, trust it and
+        // avoid renderer direct-RPC fallback that depends on renderer env config.
+        if (normalizedAuth && normalizedAuth.success === false) {
+          const errorText = String(normalizedAuth.error || '').toLowerCase();
+          if (errorText.includes('invalid pin') || errorText.includes('not found') || errorText.includes('access denied')) {
+            setError(t('modals.staffShift.invalidPIN'));
+          } else {
+            setError(t('modals.staffShift.verifyPinFailed'));
+          }
+          setEnteredPin('');
+          return;
+        }
+
+        console.log('IPC PIN auth returned unexpected payload (will try direct RPC next):', authRes);
+        // Do not return here; fall through to direct RPC
+      } catch (e) {
+        console.warn('IPC PIN auth error, falling back to direct Supabase RPC:', e);
       }
 
       // Fallback: Use the same server-side RPC to verify PIN and create a session
@@ -936,7 +931,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         const branchId = getSetting?.('terminal', 'branch_id') as string | undefined;
         const terminalId = getSetting?.('terminal', 'terminal_id') as string | undefined;
         if (branchId && terminalId) {
-          const cashier = await (window as any).electronAPI?.getActiveCashierByTerminal?.(branchId, terminalId);
+          const cashier = await bridge.shifts.getActiveCashierByTerminal(branchId, terminalId);
           setActiveCashierExists(!!cashier);
         }
       } catch (e) {
@@ -956,12 +951,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const handleCheckIn = async (bypassZeroConfirm = false) => {
     if (!selectedStaff || !staff) {
       setError(t('modals.staffShift.noStaffSelected'));
-      return;
-    }
-
-    // Check if Electron API is available
-    if (!(window as any).electronAPI?.openShift) {
-      setError(t('modals.staffShift.electronRequired'));
       return;
     }
 
@@ -990,8 +979,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Resolve terminal + branch from TerminalConfig first (avoid stale 'local-branch')
       let resolvedTerminalId = staff.terminalId;
       let resolvedBranchId = staff.branchId;
-      try { resolvedTerminalId = (await (window as any).electronAPI?.getTerminalId?.()) || resolvedTerminalId; } catch { }
-      try { resolvedBranchId = (await (window as any).electronAPI?.getTerminalBranchId?.()) || resolvedBranchId; } catch { }
+      try { resolvedTerminalId = (await bridge.terminalConfig.getTerminalId()) || resolvedTerminalId; } catch { }
+      try { resolvedBranchId = (await bridge.terminalConfig.getBranchId()) || resolvedBranchId; } catch { }
 
       // Cashiers must manually count and enter opening amount - no automatic comparison with previous day
       // Validate that cashiers have entered a valid opening cash amount
@@ -1025,7 +1014,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Cashiers: openingCash represents drawer count
       // Drivers: startingAmount represents cash taken from cashier (separate field for clarity)
       // Other roles: no cash amount needed
-      let usedOpeningCash: number | undefined;
+      let usedOpeningCash = 0;
       let usedStartingAmount: number | undefined;
 
       if (roleType === 'cashier') {
@@ -1036,17 +1025,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
       // Other roles: both remain undefined
 
-      const result = await (window as any).electronAPI.openShift({
+      const result = await bridge.shifts.open({
         staffId: selectedStaff.id,
-        staffName: selectedStaff.name,
         branchId: resolvedBranchId,
         terminalId: resolvedTerminalId,
         roleType,
         openingCash: usedOpeningCash,
         startingAmount: usedStartingAmount
-      });
+      }) as any;
 
       if (result.success) {
+        const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
         setSuccess(t('modals.staffShift.shiftStarted'));
         // Update the global shift context to the checked-in staff so guards lift
         setStaff({
@@ -1058,26 +1047,28 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         });
         // Optimistically mark shift active immediately with a minimal stub, so UI unlocks at once
         try {
-          // opening_cash_amount: for cashiers this is the drawer count, for drivers this is their starting amount
-          const effectiveOpeningAmount = roleType === 'driver'
-            ? (usedStartingAmount ?? 0)
-            : (usedOpeningCash ?? 0);
-          setActiveShiftImmediate({
-            id: result.shiftId,
-            staff_id: selectedStaff.id,
-            branch_id: resolvedBranchId,
-            terminal_id: resolvedTerminalId,
-            role_type: roleType,
-            check_in_time: new Date().toISOString(),
-            opening_cash_amount: effectiveOpeningAmount,
-            status: 'active',
-            total_orders_count: 0,
-            total_sales_amount: 0,
-            total_cash_sales: 0,
-            total_card_sales: 0,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          });
+          if (shiftId) {
+            // opening_cash_amount: for cashiers this is the drawer count, for drivers this is their starting amount
+            const effectiveOpeningAmount = roleType === 'driver'
+              ? (usedStartingAmount ?? 0)
+              : usedOpeningCash;
+            setActiveShiftImmediate({
+              id: String(shiftId),
+              staff_id: selectedStaff.id,
+              branch_id: resolvedBranchId,
+              terminal_id: resolvedTerminalId,
+              role_type: roleType,
+              check_in_time: new Date().toISOString(),
+              opening_cash_amount: effectiveOpeningAmount,
+              status: 'active',
+              total_orders_count: 0,
+              total_sales_amount: 0,
+              total_cash_sales: 0,
+              total_card_sales: 0,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            });
+          }
         } catch { }
         // Also fetch from DB to sync full shift details
         try {
@@ -1124,8 +1115,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // This is critical for accurate variance calculation
       let freshSummary = shiftSummary;
       try {
-        const summaryResult = await (window as any).electronAPI.getShiftSummary(effectiveShift.id, { skipBackfill: false });
-        // IPC handlers wrap response in { success: true, data: ... }
+        const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: false });
         freshSummary = summaryResult?.data || summaryResult;
         setShiftSummary(freshSummary);
       } catch (e) {
@@ -1209,8 +1199,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Refresh summary to ensure latest data
       let freshSummary = shiftSummary;
       try {
-        const sResult = await (window as any).electronAPI.getShiftSummary(effectiveShift.id, { skipBackfill: true });
-        // IPC handlers wrap response in { success: true, data: ... }
+        const sResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
         const s = sResult?.data || sResult;
         if (s) {
           freshSummary = s;
@@ -1249,14 +1238,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return;
     }
 
-    // Check if Electron API is available
-    if (!(window as any).electronAPI?.closeShift) {
-      console.log('❌ Electron API not available');
-      setError(t('modals.staffShift.electronRequired'));
-      return;
-    }
-
-    console.log('✅ All checks passed, calling closeShift...');
+    console.log('✅ All checks passed, calling closeShift via bridge...');
     setLoading(true);
     setError('');
     setSuccess('');
@@ -1272,7 +1254,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           let cashierShiftId = effectiveShift.id;
           if (isKitchenRole && effectiveShift.role_type !== 'cashier') {
             // Kitchen staff: find the active cashier shift for this terminal
-            const cashierShift = await (window as any).electronAPI?.getActiveCashierByTerminal?.(
+            const cashierShift = await bridge.shifts.getActiveCashierByTerminal(
               staff.branchId,
               staff.terminalId
             );
@@ -1287,7 +1269,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           const paidToStaffId = effectiveShift.staff_id || staff.staffId;
           console.log('[Checkout] Recording staff payment:', { cashierShiftId, paidToStaffId, amount: payoutForRecord });
           // Use recordStaffPayment() instead of recordExpense() to avoid creating shift_expenses rows
-          const paymentResult = await (window as any).electronAPI.recordStaffPayment({
+          const paymentResult = await bridge.invoke('shift:record-staff-payment', {
             cashierShiftId,
             paidToStaffId, // The staff being paid (kitchen or the cashier themselves) - use real UUID from shift
             amount: payoutForRecord,
@@ -1308,16 +1290,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const isDriver = effectiveShift.role_type === 'driver';
       const driverPaymentAmount = isDriver ? parseFloat(staffPayment || '0') : undefined;
 
-      const result = await (window as any).electronAPI.closeShift({
+      const result = await bridge.shifts.close({
         shiftId: effectiveShift.id,
         closingCash: closingAmount,
         closedBy: staff.staffId,
         paymentAmount: driverPaymentAmount
-      });
+      }) as any;
       console.log('closeShift result:', result);
 
       if (result.success) {
-        const variance = result.variance || 0;
+        const variance = result?.variance ?? result?.data?.variance ?? 0;
         const varianceText = variance >= 0
           ? `Overage: $${variance.toFixed(2)}`
           : `Shortage: $${Math.abs(variance).toFixed(2)}`;
@@ -1369,12 +1351,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         // Print staff check-out receipt (role-specific)
         try {
           console.log('[StaffShiftModal] Printing checkout for shift:', effectiveShift.id, 'role:', effectiveShift.role_type);
-          const terminalName = await (window as any).electronAPI.getTerminalSetting('terminal', 'name');
-          const printResult = await (window as any).electronAPI.printCheckout(
-            effectiveShift.id,
-            effectiveShift.role_type,
-            terminalName || undefined
-          );
+          const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
+          const printResult = await bridge.invoke('shift:print-checkout', {
+            shiftId: effectiveShift.id,
+            roleType: effectiveShift.role_type,
+            terminalName: terminalName || undefined
+          });
           console.log('[StaffShiftModal] Print checkout result:', printResult);
           if (!printResult?.success) {
             console.warn('[StaffShiftModal] Checkout print failed:', printResult?.error);
@@ -1418,10 +1400,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setError('');
 
     try {
-      const result = await (window as any).electronAPI.recordExpense({
+      const result = await bridge.shifts.recordExpense({
         shiftId: effectiveShift.id,
-        staffId: staff.staffId,
-        branchId: staff.branchId,
         expenseType,
         amount,
         description: expenseDescription,
@@ -1437,8 +1417,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         await loadExpenses();
         // Refresh shiftSummary to update totalExpenses for expected amount calculation
         try {
-          const summaryResult = await (window as any).electronAPI.getShiftSummary(effectiveShift.id, { skipBackfill: true });
-          // IPC handlers wrap response in { success: true, data: ... }
+          const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
           setShiftSummary(summaryResult?.data || summaryResult);
         } catch (e) {
           console.warn('Failed to refresh shift summary after expense:', e);
@@ -1517,6 +1496,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         onClose={onClose}
         title={mode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}
         size="md"
+        className="!max-w-lg"
         closeOnBackdrop={false}
         closeOnEscape={true}
       >
@@ -2121,11 +2101,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         {effectiveShift.staff_name || <span className="capitalize">{effectiveShift.role_type}</span>}
                       </h3>
                       <p className="text-xs text-gray-400 mt-1">
-                        <span className="capitalize">{effectiveShift.role_type}</span> · Total Sales: <span className="text-green-400 font-semibold">${(effectiveShift.total_sales_amount || 0).toFixed(2)}</span>
+                        <span className="capitalize">{effectiveShift.role_type}</span> · Total Sales: <span className="text-green-400 font-semibold">${(shiftSummary?.breakdown?.overall?.totalAmount ?? effectiveShift.total_sales_amount ?? 0).toFixed(2)}</span>
                       </p>
                     </div>
                     <div className="text-right">
-                      <div className="text-2xl font-bold text-blue-300">{effectiveShift.total_orders_count || 0}</div>
+                      <div className="text-2xl font-bold text-blue-300">{shiftSummary?.breakdown?.overall?.totalCount ?? effectiveShift.total_orders_count ?? 0}</div>
                       <p className="text-xs text-gray-400">Orders</p>
                     </div>
                   </div>

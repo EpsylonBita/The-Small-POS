@@ -22,6 +22,7 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface KitchenOrder {
   id: string;
@@ -46,8 +47,10 @@ interface KitchenOrderItem {
 }
 
 type StationType = 'all' | 'grill' | 'cold' | 'hot' | 'dessert' | 'drinks';
+const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 
 const KitchenDisplayPage: React.FC = () => {
+  const bridge = getBridge();
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
@@ -105,11 +108,10 @@ const KitchenDisplayPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const electron = (window as any).electronAPI;
       // Only fetch pending and preparing tickets - completed tickets clear from KDS
       const statusParam = 'pending,preparing';
       // Don't send station_id as it expects UUID - filter client-side instead
-      const result = await electron?.fetchFromApi?.(
+      const result = await bridge.adminApi.fetchFromAdmin(
         `/api/pos/kds?status=${statusParam}`
       );
 
@@ -156,17 +158,55 @@ const KitchenDisplayPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [staff?.organizationId, staff?.branchId, stationFilter, t]);
+  }, [bridge, staff?.organizationId, staff?.branchId, stationFilter, t]);
 
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh from Rust-driven events when enabled.
   useEffect(() => {
     if (!autoRefresh) return;
-    const interval = setInterval(fetchOrders, 30000);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastSyncRefreshAt = Date.now();
+
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        void fetchOrders();
+      }, delayMs);
+    };
+
+    const handleOrderMutation = () => {
+      scheduleRefresh(150);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastSyncRefreshAt < BACKGROUND_SYNC_REFRESH_MIN_MS) {
+        return;
+      }
+      lastSyncRefreshAt = now;
+      scheduleRefresh(300);
+    };
+
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleOrderMutation);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleOrderMutation);
+    };
   }, [autoRefresh, fetchOrders]);
 
   const getTimeSinceOrder = (createdAt: string): string => {
@@ -201,8 +241,7 @@ const KitchenDisplayPage: React.FC = () => {
     }
 
     try {
-      const electron = (window as any).electronAPI;
-      const result = await electron?.fetchFromApi?.(
+      const result = await bridge.adminApi.fetchFromAdmin(
         `/api/pos/kds/${orderId}`,
         {
           method: 'PATCH',

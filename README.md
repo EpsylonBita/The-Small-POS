@@ -1,39 +1,40 @@
 # The Small POS (Tauri Desktop)
 
-Tauri desktop source for **The Small POS**.
+Tauri desktop runtime for The Small POS.
 
-This folder is the desktop release source of truth and is synced to the public repo:
-- Public distribution repo: `EpsylonBita/The-Small-POS`
-- Runtime: Tauri v2 + Rust backend + React UI
-- Release platform: Windows x64 (NSIS)
-- Updater manifest: `latest.json`
+`pos-tauri/` is the desktop source of truth for local development, packaging, updater artifacts, and support operations.
 
-## 1) Scope
+## Status Snapshot (2026-02-23)
 
-This app replaces Electron distribution for desktop updates/releases.
+- Native-only cutover is complete in `pos-tauri` (no desktop runtime dependency on Electron globals or preload surfaces).
+- Desktop runtime path is bridge-only: renderer -> typed bridge -> Tauri commands/events -> Rust services.
+- Offline-first behavior is active: local SQLite write + sync queue first, remote sync deferred while offline, automatic queue drain on reconnect.
+- Security/native migration implementation is complete except for the planned 24-hour staging soak run.
 
-Primary goals:
-- Keep POS behavior and renderer parity.
-- Use Rust backend for local DB, sync, auth, print, diagnostics.
-- Deliver signed updater flow with deterministic release assets.
-- Keep the same visual app identity (icon/branding) as legacy desktop app.
+## Runtime At A Glance
 
-## 2) Project Layout
+- Frontend: React 19 + TypeScript + Vite (`src/renderer/`)
+- Desktop bridge: `src/lib/ipc-adapter.ts`, `src/lib/event-bridge.ts`
+- Backend: Rust command/service modules (`src-tauri/src/commands/`, `src-tauri/src/services/`)
+- Data: SQLite (`pos.db`) + sync queue + keyring-backed credentials
+- Packaging: Windows x64 NSIS bundle + signed updater manifest (`latest.json`)
 
-- `src-tauri/` Tauri + Rust backend, icons, capabilities, config
-- `src/` React + TypeScript renderer and compatibility adapters
-- `scripts/` helper scripts (manifest generation, parity checks)
-- `src-tauri/tauri.conf.json` bundle/updater config
+## Project Layout
 
-## 3) Prerequisites
+- `src-tauri/`: Rust backend, Tauri config/capabilities, build metadata
+- `src/`: React renderer, bridge contracts, runtime adapters
+- `scripts/`: parity/security checks, smoke runner, release helpers
+- `docs/`: security migration artifacts and archived parity material
+
+## Prerequisites
 
 - Node.js 20+
 - npm
 - Rust stable toolchain
 - Windows target: `x86_64-pc-windows-msvc`
-- Windows build tools for native Rust dependencies
+- Visual Studio Build Tools (for Windows native Rust dependencies)
 
-## 4) Local Commands
+## Quick Start
 
 Install:
 
@@ -41,118 +42,64 @@ Install:
 npm ci
 ```
 
-Run dev app:
+Run desktop app in dev:
 
 ```bash
 npm run pos:tauri:dev
 ```
 
-Type-check and build frontend:
+Type-check and production frontend build:
 
 ```bash
 npm run type-check
 npm run build
 ```
 
-Build Windows NSIS installer:
+## Verification Gates
+
+Run these before merge/release:
+
+```bash
+npm run parity:contract
+npm run test:native-runtime
+cargo check --keep-going --manifest-path src-tauri/Cargo.toml
+```
+
+Full packaged verification:
+
+```bash
+npm run pos:tauri:verify:win
+```
+
+## Build, Release, and Updater
+
+Build Windows installer:
 
 ```bash
 npm run pos:tauri:bundle:win
 ```
 
-## 5) Versioning Rules
+Release/manifest/signing details are documented in `RELEASE.md`.
 
-Version must match in all three files:
-- `package.json`
-- `src-tauri/Cargo.toml`
-- `src-tauri/tauri.conf.json`
+## Documentation Map
 
-Release workflow fails on mismatch.
+Current architecture and operations:
 
-## 6) Installer Branding and UX
+- `ARCHITECTURE.md`: runtime topology, offline sync model, security boundaries
+- `RELEASE.md`: release automation, version sync, updater contract
+- `SUPPORT.md`: diagnostics, common incident playbooks, data locations
+- `docs/README.md`: documentation index and ownership
 
-Windows installer is configured for a modern branded setup:
-- NSIS installer
-- LZMA compression
-- Start Menu folder `The Small POS`
-- Per-machine install mode for managed terminal environments
-- Installer icon: `src-tauri/icons/icon.ico`
+Security/native migration program:
 
-Icon identity parity with legacy desktop is enforced in CI.
+- `docs/security-native-migration/README.md`: artifact index and refresh workflow
+- `docs/security-native-migration/EXECUTION_BACKLOG.md`: implementation ledger
+- `docs/security-native-migration/AUDIT_REPORT.md`: findings and risk classes
+- `docs/security-native-migration/SECURITY_VERIFICATION_PACK.md`: regression scenarios
 
-## 7) Auto-Update Contract
+Parity and phase history:
 
-Updater endpoint configured in Tauri app:
-
-```text
-https://github.com/EpsylonBita/The-Small-POS/releases/latest/download/latest.json
-```
-
-Each release publishes:
-- `*.exe` installer
-- matching `*.exe.sig`
-- `latest.json`
-
-`latest.json` includes:
-- `version`
-- `notes`
-- `pub_date`
-- `platforms.windows-x86_64.url`
-- `platforms.windows-x86_64.signature`
-
-## 8) Release Workflow
-
-Workflow: `.github/workflows/pos-tauri-auto-release.yml`
-
-High-level flow:
-1. Validate version sync.
-2. Inject updater pubkey.
-3. Build NSIS bundle.
-4. Sign installer.
-5. Generate `latest.json`.
-6. Sync `pos-tauri/` source to public repo root.
-7. Recreate public release tag and upload assets.
-
-Required repository secrets are documented in `RELEASE.md`.
-
-## 9) Required Secrets
-
-- `POS_RELEASE_TOKEN`
-- `TAURI_SIGNING_PRIVATE_KEY`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (if key is password protected)
-- `TAURI_UPDATER_PUBKEY`
-
-## 10) Admin Download Integration
-
-Admin dashboard uses latest release from `EpsylonBita/The-Small-POS`.
-Fallback env precedence:
-1. `NEXT_PUBLIC_POS_TAURI_WINDOWS_DOWNLOAD_URL`
-2. `NEXT_PUBLIC_POS_WINDOWS_DOWNLOAD_URL`
-
-## 11) Troubleshooting
-
-### `update endpoint did not respond with a successful status code`
-Check:
-- `latest.json` exists on latest public release URL.
-- Latest release includes `.exe`, `.sig`, and `latest.json`.
-- `tauri.conf.json` updater endpoint points to public repo.
-
-### Update download fails after check succeeds
-Check:
-- `latest.json` asset URL matches the real release asset filename.
-- `.sig` matches installer of same version.
-- updater public key matches signing key pair.
-
-### Signing step fails in CI
-Check:
-- `TAURI_SIGNING_PRIVATE_KEY` matches `TAURI_UPDATER_PUBKEY` pair.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is correct.
-
-## 12) Additional Documentation
-
-- `RELEASE.md`
-- `ARCHITECTURE.md`
-- `SUPPORT.md`
-- `PARITY_CHECKLIST.md`
-- `PARITY_GATES.md`
-
+- `PARITY_GATES.md`: active parity gate definitions and execution model
+- `PARITY_CHECKLIST.md`: active parity status tracker
+- `docs/archive/parity/`: archived legacy parity tables and legacy gate document
+- `PHASE2_NOTES.md`, `PHASE4_NOTES.md`, `PHASE8_COMPLETE.md`, `PHASE8_SUMMARY.md`: migration history notes

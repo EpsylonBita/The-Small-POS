@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 15;
+const CURRENT_SCHEMA_VERSION: i32 = 17;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -146,6 +146,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 15 {
         migrate_v15(conn)?;
+    }
+    if current < 16 {
+        migrate_v16(conn)?;
+    }
+    if current < 17 {
+        migrate_v17(conn)?;
     }
 
     Ok(())
@@ -983,6 +989,592 @@ fn migrate_v15(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v16: Update printer_profiles driver_type CHECK to allow 'escpos'.
+///
+/// SQLite does not support ALTER CONSTRAINT, so the table is recreated with the
+/// updated CHECK constraint. All existing data is preserved.
+fn migrate_v16(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE printer_profiles_new (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            driver_type TEXT NOT NULL DEFAULT 'windows'
+                CHECK (driver_type IN ('windows', 'escpos')),
+            printer_name TEXT NOT NULL,
+            paper_width_mm INTEGER NOT NULL DEFAULT 80
+                CHECK (paper_width_mm IN (58, 80)),
+            copies_default INTEGER NOT NULL DEFAULT 1,
+            cut_paper INTEGER NOT NULL DEFAULT 1,
+            open_cash_drawer INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            drawer_mode TEXT NOT NULL DEFAULT 'none'
+                CHECK (drawer_mode IN ('none', 'escpos_tcp')),
+            drawer_host TEXT,
+            drawer_port INTEGER NOT NULL DEFAULT 9100,
+            drawer_pulse_ms INTEGER NOT NULL DEFAULT 200,
+            printer_type TEXT NOT NULL DEFAULT 'system',
+            role TEXT NOT NULL DEFAULT 'receipt',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            character_set TEXT NOT NULL DEFAULT 'PC437_USA',
+            greek_render_mode TEXT DEFAULT 'text',
+            receipt_template TEXT DEFAULT 'classic',
+            fallback_printer_id TEXT,
+            connection_json TEXT
+        );
+
+        INSERT INTO printer_profiles_new
+            SELECT id, name, driver_type, printer_name, paper_width_mm,
+                   copies_default, cut_paper, open_cash_drawer,
+                   created_at, updated_at,
+                   drawer_mode, drawer_host, drawer_port, drawer_pulse_ms,
+                   printer_type, role, is_default, enabled,
+                   character_set, greek_render_mode, receipt_template,
+                   fallback_printer_id, connection_json
+            FROM printer_profiles;
+
+        DROP TABLE printer_profiles;
+
+        ALTER TABLE printer_profiles_new RENAME TO printer_profiles;
+
+        CREATE INDEX IF NOT EXISTS idx_printer_profiles_name
+            ON printer_profiles(printer_name);
+
+        INSERT INTO schema_version (version) VALUES (16);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v16 failed: {e}");
+        format!("migration v16: {e}")
+    })?;
+
+    info!("Applied migration v16 (printer_profiles driver_type CHECK updated for escpos)");
+    Ok(())
+}
+
+/// Migration v17: ECR devices and transactions tables.
+///
+/// Replaces the JSON blob in `local_settings` with proper relational tables
+/// for fiscal cash registers and payment terminals. Migrates existing device
+/// configurations.
+fn migrate_v17(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS ecr_devices (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            device_type TEXT NOT NULL
+                CHECK (device_type IN ('payment_terminal', 'cash_register')),
+            brand TEXT NOT NULL DEFAULT 'generic',
+            protocol TEXT NOT NULL DEFAULT 'generic',
+            connection_type TEXT NOT NULL
+                CHECK (connection_type IN ('bluetooth', 'serial_usb', 'network', 'usb')),
+            connection_details TEXT NOT NULL DEFAULT '{}',
+            terminal_id TEXT,
+            merchant_id TEXT,
+            operator_id TEXT,
+            print_mode TEXT DEFAULT 'register_prints'
+                CHECK (print_mode IN ('register_prints', 'pos_sends_receipt')),
+            tax_rates TEXT DEFAULT '[]',
+            is_default INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            settings TEXT DEFAULT '{}',
+            status TEXT DEFAULT 'disconnected',
+            last_connected_at TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS ecr_transactions (
+            id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            order_id TEXT,
+            transaction_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            currency TEXT DEFAULT 'EUR',
+            status TEXT NOT NULL,
+            authorization_code TEXT,
+            terminal_reference TEXT,
+            fiscal_receipt_number TEXT,
+            card_type TEXT,
+            card_last_four TEXT,
+            entry_method TEXT,
+            receipt_data TEXT,
+            error_message TEXT,
+            raw_response TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (device_id) REFERENCES ecr_devices(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ecr_devices_type
+            ON ecr_devices(device_type);
+        CREATE INDEX IF NOT EXISTS idx_ecr_devices_default
+            ON ecr_devices(is_default);
+        CREATE INDEX IF NOT EXISTS idx_ecr_transactions_device
+            ON ecr_transactions(device_id);
+        CREATE INDEX IF NOT EXISTS idx_ecr_transactions_order
+            ON ecr_transactions(order_id);
+        CREATE INDEX IF NOT EXISTS idx_ecr_transactions_status
+            ON ecr_transactions(status);
+
+        INSERT INTO schema_version (version) VALUES (17);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v17 failed: {e}");
+        format!("migration v17: {e}")
+    })?;
+
+    // Migrate existing ecr_devices from JSON blob to the new table
+    let old_json: Option<String> = conn
+        .query_row(
+            "SELECT setting_value FROM local_settings
+             WHERE setting_category = 'local' AND setting_key = 'ecr_devices'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(json_str) = old_json {
+        if let Ok(devices) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+            for dev in &devices {
+                let id = dev.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = dev
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown");
+                let device_type = dev
+                    .get("deviceType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("payment_terminal");
+                let protocol = dev
+                    .get("protocol")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("generic");
+                let conn_type = dev
+                    .get("connectionType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("network");
+                let conn_details = dev
+                    .get("connectionDetails")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                let terminal_id = dev.get("terminalId").and_then(|v| v.as_str());
+                let merchant_id = dev.get("merchantId").and_then(|v| v.as_str());
+                let is_default = dev
+                    .get("isDefault")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false) as i32;
+                let enabled = dev.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) as i32;
+                let settings = dev
+                    .get("settings")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+
+                if !id.is_empty() {
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO ecr_devices
+                            (id, name, device_type, protocol, connection_type, connection_details,
+                             terminal_id, merchant_id, is_default, enabled, settings)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            id,
+                            name,
+                            device_type,
+                            protocol,
+                            conn_type,
+                            conn_details,
+                            terminal_id,
+                            merchant_id,
+                            is_default,
+                            enabled,
+                            settings,
+                        ],
+                    );
+                }
+            }
+
+            // Remove old JSON blob
+            let _ = conn.execute(
+                "DELETE FROM local_settings
+                 WHERE setting_category = 'local' AND setting_key = 'ecr_devices'",
+                [],
+            );
+
+            info!(
+                "Migrated {} ECR devices from JSON to ecr_devices table",
+                devices.len()
+            );
+        }
+    }
+
+    info!("Applied migration v17 (ecr_devices + ecr_transactions tables)");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ECR device helpers
+// ---------------------------------------------------------------------------
+
+/// Insert a new ECR device.
+pub fn ecr_insert_device(conn: &Connection, dev: &serde_json::Value) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO ecr_devices
+            (id, name, device_type, brand, protocol, connection_type, connection_details,
+             terminal_id, merchant_id, operator_id, print_mode, tax_rates,
+             is_default, enabled, settings)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            dev.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            dev.get("name").and_then(|v| v.as_str()).unwrap_or("Device"),
+            dev.get("deviceType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("payment_terminal"),
+            dev.get("brand")
+                .and_then(|v| v.as_str())
+                .unwrap_or("generic"),
+            dev.get("protocol")
+                .and_then(|v| v.as_str())
+                .unwrap_or("generic"),
+            dev.get("connectionType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("network"),
+            dev.get("connectionDetails")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".into()),
+            dev.get("terminalId").and_then(|v| v.as_str()),
+            dev.get("merchantId").and_then(|v| v.as_str()),
+            dev.get("operatorId").and_then(|v| v.as_str()),
+            dev.get("printMode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("register_prints"),
+            dev.get("taxRates")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "[]".into()),
+            dev.get("isDefault")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false) as i32,
+            dev.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) as i32,
+            dev.get("settings")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".into()),
+        ],
+    )
+    .map_err(|e| format!("ecr_insert_device: {e}"))?;
+    Ok(())
+}
+
+/// Update an existing ECR device.
+pub fn ecr_update_device(
+    conn: &Connection,
+    id: &str,
+    updates: &serde_json::Value,
+) -> Result<(), String> {
+    // Build SET clauses dynamically for provided fields
+    let mut sets = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    macro_rules! maybe_set {
+        ($field:expr, $col:expr) => {
+            if let Some(v) = updates.get($field) {
+                if let Some(s) = v.as_str() {
+                    sets.push(format!("{} = ?", $col));
+                    values.push(Box::new(s.to_string()));
+                }
+            }
+        };
+    }
+
+    macro_rules! maybe_set_json {
+        ($field:expr, $col:expr) => {
+            if let Some(v) = updates.get($field) {
+                sets.push(format!("{} = ?", $col));
+                values.push(Box::new(v.to_string()));
+            }
+        };
+    }
+
+    macro_rules! maybe_set_bool {
+        ($field:expr, $col:expr) => {
+            if let Some(v) = updates.get($field).and_then(|v| v.as_bool()) {
+                sets.push(format!("{} = ?", $col));
+                values.push(Box::new(v as i32));
+            }
+        };
+    }
+
+    maybe_set!("name", "name");
+    maybe_set!("deviceType", "device_type");
+    maybe_set!("brand", "brand");
+    maybe_set!("protocol", "protocol");
+    maybe_set!("connectionType", "connection_type");
+    maybe_set_json!("connectionDetails", "connection_details");
+    maybe_set!("terminalId", "terminal_id");
+    maybe_set!("merchantId", "merchant_id");
+    maybe_set!("operatorId", "operator_id");
+    maybe_set!("printMode", "print_mode");
+    maybe_set_json!("taxRates", "tax_rates");
+    maybe_set_bool!("isDefault", "is_default");
+    maybe_set_bool!("enabled", "enabled");
+    maybe_set_json!("settings", "settings");
+    maybe_set!("status", "status");
+    maybe_set!("lastError", "last_error");
+
+    if sets.is_empty() {
+        return Ok(());
+    }
+
+    sets.push("updated_at = datetime('now')".to_string());
+    let sql = format!("UPDATE ecr_devices SET {} WHERE id = ?", sets.join(", "));
+    values.push(Box::new(id.to_string()));
+
+    let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|b| b.as_ref()).collect();
+    conn.execute(&sql, params.as_slice())
+        .map_err(|e| format!("ecr_update_device: {e}"))?;
+    Ok(())
+}
+
+/// Delete an ECR device.
+pub fn ecr_delete_device(conn: &Connection, id: &str) -> Result<bool, String> {
+    let rows = conn
+        .execute("DELETE FROM ecr_devices WHERE id = ?1", params![id])
+        .map_err(|e| format!("ecr_delete_device: {e}"))?;
+    Ok(rows > 0)
+}
+
+/// Get a single ECR device by ID.
+pub fn ecr_get_device(conn: &Connection, id: &str) -> Option<serde_json::Value> {
+    ecr_query_one(conn, "SELECT * FROM ecr_devices WHERE id = ?1", params![id])
+}
+
+/// List all ECR devices.
+pub fn ecr_list_devices(conn: &Connection) -> Vec<serde_json::Value> {
+    ecr_query_many(
+        conn,
+        "SELECT * FROM ecr_devices ORDER BY is_default DESC, name ASC",
+        [],
+    )
+}
+
+/// List ECR devices by type.
+#[allow(dead_code)]
+pub fn ecr_list_devices_by_type(conn: &Connection, device_type: &str) -> Vec<serde_json::Value> {
+    ecr_query_many(
+        conn,
+        "SELECT * FROM ecr_devices WHERE device_type = ?1 ORDER BY is_default DESC, name ASC",
+        params![device_type],
+    )
+}
+
+/// Get the default ECR device (optionally filtered by type).
+pub fn ecr_get_default_device(
+    conn: &Connection,
+    device_type: Option<&str>,
+) -> Option<serde_json::Value> {
+    if let Some(dt) = device_type {
+        ecr_query_one(
+            conn,
+            "SELECT * FROM ecr_devices WHERE device_type = ?1 AND enabled = 1
+             ORDER BY is_default DESC LIMIT 1",
+            params![dt],
+        )
+    } else {
+        ecr_query_one(
+            conn,
+            "SELECT * FROM ecr_devices WHERE enabled = 1
+             ORDER BY is_default DESC LIMIT 1",
+            [],
+        )
+    }
+}
+
+/// Insert an ECR transaction record.
+pub fn ecr_insert_transaction(conn: &Connection, tx: &serde_json::Value) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO ecr_transactions
+            (id, device_id, order_id, transaction_type, amount, currency, status,
+             authorization_code, terminal_reference, fiscal_receipt_number,
+             card_type, card_last_four, entry_method, receipt_data,
+             error_message, raw_response, started_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            tx.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
+            tx.get("deviceId")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            tx.get("orderId").and_then(|v| v.as_str()),
+            tx.get("transactionType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sale"),
+            tx.get("amount").and_then(|v| v.as_i64()).unwrap_or(0),
+            tx.get("currency").and_then(|v| v.as_str()).unwrap_or("EUR"),
+            tx.get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending"),
+            tx.get("authorizationCode").and_then(|v| v.as_str()),
+            tx.get("terminalReference").and_then(|v| v.as_str()),
+            tx.get("fiscalReceiptNumber").and_then(|v| v.as_str()),
+            tx.get("cardType").and_then(|v| v.as_str()),
+            tx.get("cardLastFour").and_then(|v| v.as_str()),
+            tx.get("entryMethod").and_then(|v| v.as_str()),
+            tx.get("receiptData").map(|v| v.to_string()),
+            tx.get("errorMessage").and_then(|v| v.as_str()),
+            tx.get("rawResponse").map(|v| v.to_string()),
+            tx.get("startedAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            tx.get("completedAt").and_then(|v| v.as_str()),
+        ],
+    )
+    .map_err(|e| format!("ecr_insert_transaction: {e}"))?;
+    Ok(())
+}
+
+/// List ECR transactions with optional filters.
+pub fn ecr_list_transactions(
+    conn: &Connection,
+    device_id: Option<&str>,
+    limit: Option<u32>,
+) -> Vec<serde_json::Value> {
+    let limit_val = limit.unwrap_or(100) as i64;
+    let mut sql = "SELECT * FROM ecr_transactions WHERE 1=1".to_string();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(did) = device_id {
+        sql.push_str(&format!(" AND device_id = ?{}", param_values.len() + 1));
+        param_values.push(Box::new(did.to_string()));
+    }
+    sql.push_str(&format!(
+        " ORDER BY created_at DESC LIMIT ?{}",
+        param_values.len() + 1
+    ));
+    param_values.push(Box::new(limit_val));
+
+    let params: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    let rows = stmt
+        .query_map(params.as_slice(), |row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in column_names.iter().enumerate() {
+                let val: rusqlite::types::Value = row.get(i)?;
+                let json_val = match val {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+                    rusqlite::types::Value::Blob(b) => serde_json::Value::String(
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
+                    ),
+                };
+                // Convert snake_case to camelCase for the frontend
+                let camel = to_camel_case(col);
+                obj.insert(camel, json_val);
+            }
+            Ok(serde_json::Value::Object(obj))
+        })
+        .ok();
+
+    rows.map(|r| r.filter_map(|v| v.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Helper: query one row from ecr tables as JSON.
+fn ecr_query_one<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Option<serde_json::Value> {
+    let mut stmt = conn.prepare(sql).ok()?;
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    stmt.query_row(params, |row| {
+        let mut obj = serde_json::Map::new();
+        for (i, col) in column_names.iter().enumerate() {
+            let val: rusqlite::types::Value = row.get(i)?;
+            let json_val = match val {
+                rusqlite::types::Value::Null => serde_json::Value::Null,
+                rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+                rusqlite::types::Value::Blob(b) => serde_json::Value::String(
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
+                ),
+            };
+            let camel = to_camel_case(col);
+            obj.insert(camel, json_val);
+        }
+        Ok(serde_json::Value::Object(obj))
+    })
+    .ok()
+}
+
+/// Helper: query multiple rows from ecr tables as JSON.
+fn ecr_query_many<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Vec<serde_json::Value> {
+    let mut stmt = match conn.prepare(sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    let rows = stmt
+        .query_map(params, |row| {
+            let mut obj = serde_json::Map::new();
+            for (i, col) in column_names.iter().enumerate() {
+                let val: rusqlite::types::Value = row.get(i)?;
+                let json_val = match val {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+                    rusqlite::types::Value::Blob(b) => serde_json::Value::String(
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &b),
+                    ),
+                };
+                let camel = to_camel_case(col);
+                obj.insert(camel, json_val);
+            }
+            Ok(serde_json::Value::Object(obj))
+        })
+        .ok();
+
+    rows.map(|r| r.filter_map(|v| v.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Convert snake_case to camelCase.
+fn to_camel_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = false;
+    for ch in s.chars() {
+        if ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(ch.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Settings helpers
 // ---------------------------------------------------------------------------
@@ -1522,7 +2114,7 @@ mod tests {
         // Verify CHECK constraint rejects invalid driver_type
         let bad_driver = conn.execute(
             "INSERT INTO printer_profiles (id, name, driver_type, printer_name, created_at, updated_at)
-             VALUES ('pp-bad', 'Bad', 'escpos', 'Printer', datetime('now'), datetime('now'))",
+             VALUES ('pp-bad', 'Bad', 'bluetooth', 'Printer', datetime('now'), datetime('now'))",
             [],
         );
         assert!(

@@ -1,10 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
 import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { discoverBluetoothPrinters, getBluetoothStatus } from '../../utils/web-bluetooth-printer-discovery'
 import { Activity, AlertTriangle, ChefHat, Info, Pencil, Printer, Receipt, Tag, Trash2, Wine } from 'lucide-react'
+import { getBridge, offEvent, onEvent } from '../../../lib'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
@@ -157,7 +158,67 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
 
 const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { t } = useTranslation()
-  const api = (window as any)?.electronAPI
+  const bridge = getBridge()
+  const api = useMemo(() => {
+    return {
+      printerGetAll: async () => {
+        const result: any = await bridge.printer.getAll()
+        if (result && typeof result === 'object' && 'success' in result) {
+          return result
+        }
+        const printers = Array.isArray(result)
+          ? result
+          : Array.isArray(result?.printers)
+          ? result.printers
+          : []
+        return { success: true, printers }
+      },
+      printerGetAllStatuses: async () => {
+        const result: any = await bridge.printer.getAllStatuses()
+        if (result && typeof result === 'object' && 'success' in result) {
+          return result
+        }
+        const statuses = result?.statuses ?? result ?? {}
+        return { success: true, statuses }
+      },
+      onPrinterStatusChanged: (callback: (data: { printerId: string; status: PrinterStatus }) => void) => {
+        const handler = (payload: any) => {
+          const printerId = payload?.printerId ?? payload?.printer_id ?? payload?.id
+          const status = payload?.status ?? payload
+          if (typeof printerId === 'string' && status) {
+            callback({ printerId, status })
+            return
+          }
+          callback(payload)
+        }
+        onEvent('printer:status-changed', handler)
+        return () => offEvent('printer:status-changed', handler)
+      },
+      printerDiscover: async (types?: string[]) => {
+        const result: any = await bridge.printer.discover(types)
+        if (result && typeof result === 'object' && 'success' in result) {
+          return result
+        }
+        const printers = Array.isArray(result)
+          ? result
+          : Array.isArray(result?.printers)
+          ? result.printers
+          : []
+        return { success: true, printers }
+      },
+      printerAdd: (config: any) => bridge.printer.add(config),
+      printerUpdate: (printerId: string, updates: any) => bridge.printer.update(printerId, updates),
+      printerRemove: (printerId: string) => bridge.printer.remove(printerId),
+      printerTest: (printerId: string) => bridge.printer.test(printerId),
+      printerGetDiagnostics: async (printerId: string) => {
+        const result: any = await bridge.printer.diagnostics(printerId)
+        if (result && typeof result === 'object' && 'success' in result) {
+          return result
+        }
+        return { success: true, diagnostics: result?.diagnostics ?? result }
+      },
+    }
+  }, [bridge])
 
   // State
   const [viewMode, setViewMode] = useState<ViewMode>('list')
@@ -216,20 +277,25 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }, [api])
 
-  // Initial load and status polling
+  // Initial load (status updates are pushed by Rust monitor events)
   useEffect(() => {
     if (!isOpen) return
     loadPrinters()
     loadStatuses()
-    const interval = setInterval(loadStatuses, 5000) // Poll every 5 seconds
-    return () => clearInterval(interval)
+    return
   }, [isOpen, loadPrinters, loadStatuses])
 
   // Listen for real-time status changes
   useEffect(() => {
     if (!isOpen) return
-    const unsubscribe = api?.onPrinterStatusChanged?.((data: { printerId: string; status: PrinterStatus }) => {
-      setStatuses(prev => ({ ...prev, [data.printerId]: data.status }))
+    const unsubscribe = api?.onPrinterStatusChanged?.((data: any) => {
+      if (data?.statuses && typeof data.statuses === 'object') {
+        setStatuses(data.statuses)
+        return
+      }
+      if (typeof data?.printerId === 'string' && data?.status) {
+        setStatuses(prev => ({ ...prev, [data.printerId]: data.status }))
+      }
     })
     return () => unsubscribe?.()
   }, [isOpen, api])
@@ -521,7 +587,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     const printerName = printer?.name || 'Printer'
     
     try {
-      const result = await api?.printerTest?.(printerId)
+      const result: any = await api?.printerTest?.(printerId)
       if (result?.success) {
         const latencyInfo = result.latencyMs ? ` (${result.latencyMs}ms)` : ''
         toast.success(`${printerName}: ${t('settings.printer.testPrintSuccess')}${latencyInfo}`)
@@ -1316,6 +1382,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onClose={onClose}
       title={t('settings.printer.title')}
       size="lg"
+      className="!max-w-2xl"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

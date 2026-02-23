@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { getBridge } from '../../../lib';
 
 interface Driver {
   id: string;
@@ -26,6 +27,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
   onDriverAssign,
   onClose
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -44,17 +46,23 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       // Prefer the branchId passed from parent; otherwise use the terminal's configured branch
       let effectiveBranchId = branchId as string | undefined;
       if (!effectiveBranchId) {
-        effectiveBranchId = await (window as any).electronAPI?.getTerminalBranchId?.();
+        effectiveBranchId = await bridge.terminalConfig.getBranchId();
       }
 
-      const result = await (window as any).electronAPI?.getActiveDrivers?.(effectiveBranchId);
-      if (result?.success) {
-        const list = (result.data || []) as Driver[];
-        list.sort((a, b) => (a?.name || '').localeCompare(b?.name || ''));
-        setDrivers(list);
-      } else {
-        setError(result?.error || t('modals.driverAssignment.fetchFailed'));
+      const result = await bridge.drivers.getActive(effectiveBranchId || '');
+      const list = Array.isArray(result)
+        ? result
+        : Array.isArray((result as any)?.data)
+          ? (result as any).data
+          : [];
+
+      if (!Array.isArray(result) && (result as any)?.success === false) {
+        setError((result as any)?.error || t('modals.driverAssignment.fetchFailed'));
+        return;
       }
+
+      const normalized = (list as Driver[]).slice().sort((a, b) => (a?.name || '').localeCompare(b?.name || ''));
+      setDrivers(normalized);
     } catch (err) {
       setError(t('modals.driverAssignment.fetchFailed'));
       console.error('Error fetching drivers:', err);
@@ -81,6 +89,7 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
       onClose={onClose}
       title={t('modals.driverAssignment.title')}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={false}
     >
       <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">

@@ -1,15 +1,6 @@
 // Environment configuration service for POS system
 import { SUPABASE_CONFIG } from '../shared/supabase-config';
-
-// Window interface for electron API
-interface WindowWithElectronAPI {
-  electronAPI?: any;
-  electron?: {
-    ipcRenderer?: {
-      invoke: (channel: string, ...args: any[]) => Promise<any>;
-    };
-  };
-}
+import { getBridge, isBrowser } from '../lib';
 
 export interface EnvironmentConfig {
   NODE_ENV: string;
@@ -134,12 +125,10 @@ export async function updateAdminUrlFromSettings(): Promise<void> {
   if (typeof window === 'undefined') return; // Only in renderer
 
   try {
-    const windowWithElectron = window as WindowWithElectronAPI & Window;
     let resolvedAdminUrl = '';
 
-    // Use window.electron.ipcRenderer which is exposed by preload script
-    if (windowWithElectron.electron?.ipcRenderer) {
-      const adminUrl = await windowWithElectron.electron.ipcRenderer.invoke('settings:get-admin-url');
+    if (!isBrowser()) {
+      const adminUrl = await getBridge().settings.getAdminUrl();
       resolvedAdminUrl = normalizeAdminDashboardUrl((adminUrl || '').toString());
     }
 

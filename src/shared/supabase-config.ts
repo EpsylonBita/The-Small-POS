@@ -21,6 +21,15 @@ const DESKTOP_OPTIONS = {
 
 // Safe accessor for process.env (not available in Vite browser runtime)
 function getEnv(key: string): string | undefined {
+  // Never expose service-role credentials to renderer code.
+  if (
+    key === 'SUPABASE_SERVICE_ROLE_KEY' ||
+    key === 'VITE_SUPABASE_SERVICE_ROLE_KEY' ||
+    key === 'NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY'
+  ) {
+    return undefined;
+  }
+
   // Vite injects import.meta.env for VITE_* prefixed vars
   try {
     const meta = (import.meta as any).env;
@@ -45,15 +54,9 @@ export function getSupabaseConfig(platform: string = 'desktop') {
                      getEnv('VITE_SUPABASE_ANON_KEY') ||
                      getEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
 
-  const envServiceKey = getEnv('SUPABASE_SERVICE_ROLE_KEY');
-  const isElectron = typeof process !== 'undefined' && !!(process as any).versions?.electron;
-  // SECURITY: Never expose service role key inside Electron (desktop) builds.
-  const exposeServiceRoleKey = !!envServiceKey && !isElectron;
-
   return {
     url: envUrl || '',
     anonKey: envAnonKey || '',
-    serviceRoleKey: exposeServiceRoleKey ? envServiceKey : undefined,
     options: DESKTOP_OPTIONS,
   };
 }
@@ -100,23 +103,9 @@ export interface SupabaseContext {
 const storedContext: SupabaseContext = {};
 
 function hydrateContextFromLocalStorage(): void {
-  if (typeof window === 'undefined') return;
-  try {
-    if (!storedContext.terminalId) {
-      const tid = window.localStorage.getItem('terminal_id');
-      if (tid) storedContext.terminalId = tid;
-    }
-    if (!storedContext.organizationId) {
-      const oid = window.localStorage.getItem('organization_id');
-      if (oid) storedContext.organizationId = oid;
-    }
-    if (!storedContext.branchId) {
-      const bid = window.localStorage.getItem('branch_id');
-      if (bid) storedContext.branchId = bid;
-    }
-  } catch {
-    // Ignore storage access errors (e.g., blocked in some contexts)
-  }
+  // Intentionally no-op.
+  // Context must be provided via setSupabaseContext() from secure startup IPC,
+  // not from browser localStorage.
 }
 
 function buildGlobalHeaders(): Record<string, string> {

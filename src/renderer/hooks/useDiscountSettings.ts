@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { getBridge } from '../../lib';
 
 interface UseDiscountSettingsReturn {
   maxDiscountPercentage: number;
@@ -30,6 +31,7 @@ interface UseDiscountSettingsReturn {
  * ```
  */
 export function useDiscountSettings(): UseDiscountSettingsReturn {
+  const bridge = getBridge();
   const [maxDiscountPercentage, setMaxDiscountPercentage] = useState<number>(30); // Default to 30%
   const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24); // Default to 24% (Greek VAT)
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -40,34 +42,25 @@ export function useDiscountSettings(): UseDiscountSettingsReturn {
     setError(null);
 
     try {
-      // Check if we're in Electron or browser mode
-      if (window.electronAPI?.getDiscountMaxPercentage && window.electronAPI?.getTaxRatePercentage) {
-        // Electron mode - use IPC
-        const [discountPercentage, taxRate] = await Promise.all([
-          window.electronAPI.getDiscountMaxPercentage(),
-          window.electronAPI.getTaxRatePercentage()
-        ]);
+      const [discountPercentage, taxRate] = await Promise.all([
+        bridge.settings.getDiscountMax(),
+        bridge.settings.getTaxRate()
+      ]);
 
-        // Validate discount percentage
-        if (typeof discountPercentage === 'number' && discountPercentage >= 0 && discountPercentage <= 100) {
-          setMaxDiscountPercentage(discountPercentage);
-        } else {
-          console.warn('Invalid discount percentage received, using default (30%)');
-          setMaxDiscountPercentage(30);
-        }
-
-        // Validate tax rate
-        if (typeof taxRate === 'number' && taxRate >= 0 && taxRate <= 100) {
-          setTaxRatePercentage(taxRate);
-        } else {
-          console.warn('Invalid tax rate received, using default (24%)');
-          setTaxRatePercentage(24);
-        }
+      // Validate discount percentage
+      if (typeof discountPercentage === 'number' && discountPercentage >= 0 && discountPercentage <= 100) {
+        setMaxDiscountPercentage(discountPercentage);
       } else {
-        // Browser mode - use default values or fetch from API
-        console.log('Browser mode: Using default discount and tax settings');
-        setMaxDiscountPercentage(30); // Default discount
-        setTaxRatePercentage(8.25); // Use the tax rate from database
+        console.warn('Invalid discount percentage received, using default (30%)');
+        setMaxDiscountPercentage(30);
+      }
+
+      // Validate tax rate
+      if (typeof taxRate === 'number' && taxRate >= 0 && taxRate <= 100) {
+        setTaxRatePercentage(taxRate);
+      } else {
+        console.warn('Invalid tax rate received, using default (24%)');
+        setTaxRatePercentage(24);
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch settings';

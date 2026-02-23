@@ -9,6 +9,7 @@ import OrderFlow from '../OrderFlow';
 import { OrderConflictBanner } from '../OrderConflictBanner';
 import { DashboardCard } from '../DashboardCard';
 import { formatTime } from '../../utils/format';
+import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   Calendar,
   Bed,
@@ -43,12 +44,8 @@ interface ServiceMetrics {
   isLoading: boolean;
 }
 
-/**
- * Polling interval for metrics refresh (30 seconds)
- */
-const METRICS_REFRESH_INTERVAL = 30000;
-
 export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { initializeOrders, conflicts, orders } = useOrderStore();
@@ -75,9 +72,9 @@ export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' })
   const loadMetrics = useCallback(async () => {
     try {
       // For hotel businesses, fetch room availability
-      if (isHotel && window.electronAPI?.ipcRenderer) {
+      if (isHotel) {
         try {
-          const roomsResult = await window.electronAPI.ipcRenderer.invoke('rooms:get-availability');
+          const roomsResult = await bridge.invoke('rooms:get-availability');
           if (roomsResult?.success) {
             setMetrics((prev) => ({
               ...prev,
@@ -95,35 +92,31 @@ export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' })
       }
 
       // Fetch appointments metrics
-      if (window.electronAPI?.ipcRenderer) {
-        try {
-          const appointmentsResult = await window.electronAPI.ipcRenderer.invoke(
-            'appointments:get-today-metrics'
-          );
-          if (appointmentsResult?.success) {
-            setMetrics((prev) => ({
-              ...prev,
-              appointmentsToday: appointmentsResult.scheduled || 0,
-              completedToday: appointmentsResult.completed || 0,
-              canceledToday: appointmentsResult.canceled || 0,
-              isLoading: false,
-            }));
-          } else {
-            // API returned notImplemented or failed - derive from orders (expected behavior)
-            deriveMetricsFromOrders();
-          }
-        } catch (err) {
-          // Fallback to orders - this is expected when IPC is unavailable
+      try {
+        const appointmentsResult = await bridge.invoke(
+          'appointments:get-today-metrics'
+        );
+        if (appointmentsResult?.success) {
+          setMetrics((prev) => ({
+            ...prev,
+            appointmentsToday: appointmentsResult.scheduled || 0,
+            completedToday: appointmentsResult.completed || 0,
+            canceledToday: appointmentsResult.canceled || 0,
+            isLoading: false,
+          }));
+        } else {
+          // API returned notImplemented or failed - derive from orders (expected behavior)
           deriveMetricsFromOrders();
         }
-      } else {
+      } catch (err) {
+        // Fallback to orders - this is expected when IPC is unavailable
         deriveMetricsFromOrders();
       }
     } catch (error) {
       console.error('[ServiceDashboard] Failed to load metrics:', error);
       setMetrics((prev) => ({ ...prev, isLoading: false }));
     }
-  }, [isHotel]);
+  }, [bridge, isHotel]);
 
   /**
    * Derive metrics from orders when appointment API is not available
@@ -164,11 +157,36 @@ export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' })
     initializeOrders();
   }, [initializeOrders]);
 
-  // Load metrics on mount and set up polling
+  // Load metrics on mount and refresh from Rust-driven events.
   useEffect(() => {
-    loadMetrics();
-    const interval = setInterval(loadMetrics, METRICS_REFRESH_INTERVAL);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRefresh = () => {
+      if (disposed || refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void loadMetrics();
+      }, 250);
+    };
+
+    void loadMetrics();
+
+    onEvent('sync:status', scheduleRefresh);
+    onEvent('sync:complete', scheduleRefresh);
+    onEvent('order-created', scheduleRefresh);
+    onEvent('order-status-updated', scheduleRefresh);
+    onEvent('order-deleted', scheduleRefresh);
+
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      offEvent('sync:status', scheduleRefresh);
+      offEvent('sync:complete', scheduleRefresh);
+      offEvent('order-created', scheduleRefresh);
+      offEvent('order-status-updated', scheduleRefresh);
+      offEvent('order-deleted', scheduleRefresh);
+    };
   }, [loadMetrics]);
 
   // Re-derive metrics when orders change
@@ -181,9 +199,7 @@ export const ServiceDashboard = memo<ServiceDashboardProps>(({ className = '' })
   // Handle conflict resolution
   const handleResolveConflict = async (conflictId: string, strategy: string) => {
     try {
-      if (window.electronAPI) {
-        await window.electronAPI.ipcRenderer.invoke('orders:resolve-conflict', conflictId, strategy);
-      }
+      await bridge.orders.resolveConflict(conflictId, strategy);
     } catch (error) {
       console.error('Failed to resolve conflict:', error);
       throw error;

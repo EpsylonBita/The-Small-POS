@@ -25,6 +25,21 @@ pub const MAX_LOG_FILES: usize = 10;
 /// Maximum size per log file in bytes (5 MB).
 pub const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticsExportOptions {
+    pub include_logs: bool,
+    pub redact_sensitive: bool,
+}
+
+impl Default for DiagnosticsExportOptions {
+    fn default() -> Self {
+        Self {
+            include_logs: true,
+            redact_sensitive: false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // About info
 // ---------------------------------------------------------------------------
@@ -263,6 +278,16 @@ fn get_last_zreport(conn: &rusqlite::Connection) -> Value {
 /// Collects diagnostics data and writes a zip file to the given directory.
 /// Returns the path to the zip file.
 pub fn export_diagnostics(db: &DbState, output_dir: &Path) -> Result<String, String> {
+    export_diagnostics_with_options(db, output_dir, DiagnosticsExportOptions::default())
+}
+
+/// Collects diagnostics data and writes a zip file to the given directory.
+/// Returns the path to the zip file.
+pub fn export_diagnostics_with_options(
+    db: &DbState,
+    output_dir: &Path,
+    export_options: DiagnosticsExportOptions,
+) -> Result<String, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -273,49 +298,55 @@ pub fn export_diagnostics(db: &DbState, output_dir: &Path) -> Result<String, Str
         .map_err(|e| format!("Failed to create diagnostics zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
 
-    let options = zip::write::SimpleFileOptions::default()
+    let zip_options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
     // 1. About info
-    let about = get_about_info();
-    zip.start_file("about.json", options)
+    let about = redact_value_for_export(get_about_info(), export_options.redact_sensitive);
+    zip.start_file("about.json", zip_options)
         .map_err(|e| e.to_string())?;
     zip.write_all(serde_json::to_string_pretty(&about).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 2. System health
     drop(conn); // Release lock temporarily
-    let health = get_system_health(db)?;
+    let health = redact_value_for_export(get_system_health(db)?, export_options.redact_sensitive);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    zip.start_file("system_health.json", options)
+    zip.start_file("system_health.json", zip_options)
         .map_err(|e| e.to_string())?;
     zip.write_all(serde_json::to_string_pretty(&health).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 3. Pending sync counts by entity type
-    let backlog = get_sync_backlog(&conn);
-    zip.start_file("sync_backlog.json", options)
+    let backlog = redact_value_for_export(get_sync_backlog(&conn), export_options.redact_sensitive);
+    zip.start_file("sync_backlog.json", zip_options)
         .map_err(|e| e.to_string())?;
     zip.write_all(serde_json::to_string_pretty(&backlog).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 4. Last 20 sync errors
-    let errors = get_recent_sync_errors(&conn, 20);
-    zip.start_file("sync_errors.json", options)
+    let errors = redact_value_for_export(
+        json!(get_recent_sync_errors(&conn, 20)),
+        export_options.redact_sensitive,
+    );
+    zip.start_file("sync_errors.json", zip_options)
         .map_err(|e| e.to_string())?;
     zip.write_all(serde_json::to_string_pretty(&errors).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 5. Printer profiles + last print job statuses
-    let printers = get_printer_diagnostics(&conn);
-    zip.start_file("printer_diagnostics.json", options)
+    let printers = redact_value_for_export(
+        get_printer_diagnostics(&conn),
+        export_options.redact_sensitive,
+    );
+    zip.start_file("printer_diagnostics.json", zip_options)
         .map_err(|e| e.to_string())?;
     zip.write_all(serde_json::to_string_pretty(&printers).unwrap().as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 6. Include log files
     let log_dir = get_log_dir();
-    if log_dir.exists() {
+    if export_options.include_logs && !export_options.redact_sensitive && log_dir.exists() {
         if let Ok(entries) = fs::read_dir(&log_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -331,7 +362,7 @@ pub fn export_diagnostics(db: &DbState, output_dir: &Path) -> Result<String, Str
                         .to_string_lossy()
                         .to_string();
                     let zip_entry = format!("logs/{fname}");
-                    if zip.start_file(&zip_entry, options).is_ok() {
+                    if zip.start_file(&zip_entry, zip_options).is_ok() {
                         if let Ok(f) = fs::File::open(&path) {
                             let mut buf = Vec::new();
                             // Cap at 5MB per file to keep zip manageable
@@ -347,6 +378,50 @@ pub fn export_diagnostics(db: &DbState, output_dir: &Path) -> Result<String, Str
     zip.finish().map_err(|e| e.to_string())?;
 
     Ok(zip_path.to_string_lossy().to_string())
+}
+
+fn redact_value_for_export(value: Value, enabled: bool) -> Value {
+    if !enabled {
+        return value;
+    }
+    redact_sensitive_fields(value)
+}
+
+fn redact_sensitive_fields(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut redacted = serde_json::Map::new();
+            for (key, value) in map {
+                if should_redact_key(&key) {
+                    redacted.insert(key, Value::String("[REDACTED]".to_string()));
+                } else {
+                    redacted.insert(key, redact_sensitive_fields(value));
+                }
+            }
+            Value::Object(redacted)
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_sensitive_fields).collect())
+        }
+        other => other,
+    }
+}
+
+fn should_redact_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    let sensitive_markers = [
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "token",
+        "authorization",
+        "cookie",
+        "pin",
+    ];
+    sensitive_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
 fn get_recent_sync_errors(conn: &rusqlite::Connection, limit: i64) -> Vec<Value> {
@@ -544,5 +619,35 @@ mod tests {
         assert!(archive.len() >= 4); // at least about, health, backlog, errors
                                      // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_should_redact_key_matches_sensitive_markers() {
+        assert!(should_redact_key("api_key"));
+        assert!(should_redact_key("Authorization"));
+        assert!(should_redact_key("staff_pin"));
+        assert!(!should_redact_key("status"));
+    }
+
+    #[test]
+    fn test_redact_sensitive_fields_recurses_through_objects() {
+        let value = json!({
+            "token": "secret-token",
+            "nested": {
+                "api_key": "key-value",
+                "status": "ok"
+            },
+            "items": [
+                { "password": "1234" },
+                { "name": "safe" }
+            ]
+        });
+
+        let redacted = redact_sensitive_fields(value);
+        assert_eq!(redacted["token"], json!("[REDACTED]"));
+        assert_eq!(redacted["nested"]["api_key"], json!("[REDACTED]"));
+        assert_eq!(redacted["nested"]["status"], json!("ok"));
+        assert_eq!(redacted["items"][0]["password"], json!("[REDACTED]"));
+        assert_eq!(redacted["items"][1]["name"], json!("safe"));
     }
 }

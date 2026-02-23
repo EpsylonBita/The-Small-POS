@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Check } from 'lucide-react';
 import { LiquidGlassModal } from './ui/pos-glass-components';
 import toast from 'react-hot-toast';
+import { getBridge } from '../../lib';
 
 interface DiagnosticResult {
   total: number;
@@ -27,6 +28,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   isOpen,
   onClose,
 }) => {
+  const bridge = getBridge();
   const [isChecking, setIsChecking] = useState(false);
   const [isFixing, setIsFixing] = useState(false);
   const [result, setResult] = useState<DiagnosticResult | null>(null);
@@ -35,7 +37,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   const handleCheck = async () => {
     setIsChecking(true);
     try {
-      const response = await (window as any).electronAPI?.checkDeliveredOrders();
+      const response = await bridge.invoke('diagnostic:check-delivered-orders');
       if (response?.success) {
         setResult(response.data);
         toast.success(`Found ${response.data.total} delivery orders`);
@@ -58,7 +60,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
 
     setIsFixing(true);
     try {
-      const response = await (window as any).electronAPI?.fixMissingDriverIds(selectedDriverId);
+      const response = await bridge.invoke('diagnostic:fix-missing-driver-ids', selectedDriverId);
       if (response?.success) {
         toast.success(response.message || 'Orders fixed successfully');
         // Re-check to update the display
@@ -75,7 +77,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
   };
 
   return (
-    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg">
+    <LiquidGlassModal isOpen={isOpen} onClose={onClose} title="Driver Orders Diagnostic" size="lg" className="!max-w-2xl">
       <div className="space-y-6">
         {/* Check Button */}
         <div className="flex justify-between items-center">

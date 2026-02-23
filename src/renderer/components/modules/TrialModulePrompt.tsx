@@ -12,6 +12,7 @@ import {
   generateTrialUpgradeUrl,
   getAdminBaseUrl,
 } from '@shared/services/upsellUrlService'
+import { openExternalUrl } from '../../utils/electron-api'
 
 interface TrialModulePromptProps {
   /** Trial end date (ISO timestamp) */
@@ -82,15 +83,34 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
     }
   }, [trialEndsAt])
 
-  // Update countdown periodically
+  // Update countdown on minute boundaries without interval polling
   useEffect(() => {
     if (!trialEndsAt || isDismissed) return
 
-    const interval = setInterval(() => {
-      setCountdown(calculateTrialCountdown(trialEndsAt))
-    }, 60000) // Update every minute
+    let cancelled = false
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
 
-    return () => clearInterval(interval)
+    const scheduleNextMinuteUpdate = () => {
+      const msUntilNextMinute = Math.max(250, 60000 - (Date.now() % 60000))
+      timeoutId = setTimeout(() => {
+        if (cancelled) return
+        const nextCountdown = calculateTrialCountdown(trialEndsAt)
+        setCountdown(nextCountdown)
+        if (!nextCountdown.isExpired) {
+          scheduleNextMinuteUpdate()
+        }
+      }, msUntilNextMinute)
+    }
+
+    setCountdown(calculateTrialCountdown(trialEndsAt))
+    scheduleNextMinuteUpdate()
+
+    return () => {
+      cancelled = true
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
+    }
   }, [trialEndsAt, isDismissed])
 
   // Handle dismiss
@@ -121,11 +141,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
       context: 'trial_countdown',
     })
 
-    if (typeof window !== 'undefined' && window.electronAPI?.openExternal) {
-      window.electronAPI.openExternal(upgradeUrl)
-    } else {
-      window.open(upgradeUrl, '_blank')
-    }
+    void openExternalUrl(upgradeUrl)
 
     // Track analytics
     fetch('/api/analytics/upsell', {

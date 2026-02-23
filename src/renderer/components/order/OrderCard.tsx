@@ -7,6 +7,8 @@ import toast from 'react-hot-toast';
 import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
 import { OrderRoutingBadge } from './OrderRoutingBadge';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
+import { openExternalUrl } from '../../utils/electron-api';
+import { getBridge } from '../../../lib';
 
 interface OrderCardProps {
   order: Order | any;
@@ -29,6 +31,7 @@ export const OrderCard = memo<OrderCardProps>(({
   showQuickActions = false,
   // orderIndex is deprecated, using order.order_number instead
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
 
@@ -209,8 +212,7 @@ export const OrderCard = memo<OrderCardProps>(({
     let cancelled = false;
     (async () => {
       try {
-        const api: any = (window as any).electronAPI;
-        const customer = await api?.customerLookupByPhone?.(String(customerPhoneNormalized));
+        const customer = (await bridge.customers.lookupByPhone(String(customerPhoneNormalized))) as any;
         if (!customer || cancelled) return;
 
         // Priority 1: Check customer_addresses array (new system)
@@ -367,7 +369,7 @@ export const OrderCard = memo<OrderCardProps>(({
                 toast.error(t('orderCard.missingAddress') || 'Delivery address not available');
                 return;
               }
-              try { window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}`, '_blank'); } catch { }
+              void openExternalUrl(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}`);
             }}
             className={`absolute right-0 top-1/2 -translate-y-1/2 p-4 flex items-center justify-center ${hasAddress ? 'cursor-pointer active:scale-95 active:bg-white/10 rounded-full transition-all' : 'cursor-not-allowed opacity-40'}`}
             title={hasAddress ? (t('orderCard.getDirections') || 'Get Directions') + ': ' + addr : (t('orderCard.missingAddress') || 'No address available')}

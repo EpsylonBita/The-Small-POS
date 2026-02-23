@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { getSupabaseClient } from '../../shared/supabase-config'
 import { RealtimeChannel } from '@supabase/supabase-js'
 import { subscriptionManager } from '../services/SubscriptionManager'
+import { emitCompatEvent, getBridge } from '../../lib'
 
 interface MenuSyncState {
   isConnected: boolean
@@ -44,6 +45,14 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
 
   const overrideUnsubRef = useRef<null | (() => void)>(null)
 
+  const notifyMenuUpdate = useCallback((payload: Record<string, unknown>) => {
+    try {
+      emitCompatEvent('menu:sync', payload)
+    } catch (error) {
+      console.debug('Menu update bridge emit failed:', error)
+    }
+  }, [])
+
   // Handle branch-specific menu synchronization overrides
   const handleMenuSyncOverride = useCallback((payload: any) => {
     const row = payload?.new || payload?.old
@@ -76,13 +85,8 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
       table: 'menu_synchronization'
     }
 
-    // Notify main with branch context
-    try {
-      if (typeof window !== 'undefined' && (window as any).electronAPI?.notifyMenuUpdate) {
-        (window as any).electronAPI.notifyMenuUpdate({ ...updatePayload, branchId: row.branch_id })
-      }
-    } catch {}
-  }, [])
+    notifyMenuUpdate({ ...updatePayload, branchId: row.branch_id })
+  }, [notifyMenuUpdate])
 
   const mountedRef = useRef(true)
 
@@ -132,15 +136,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
       syncCount: state.syncCount + 1
     })
 
-    // Notify main process about menu update (if available)
-    try {
-      if (typeof window !== 'undefined' && (window as any).electronAPI?.notifyMenuUpdate) {
-        (window as any).electronAPI.notifyMenuUpdate({ ...updatePayload, branchId: (updatePayload.new?.branch_id || null) })
-      }
-    } catch (error) {
-      // Ignore electron API errors in development
-      console.debug('Electron API not available:', error)
-    }
+    notifyMenuUpdate({ ...updatePayload, branchId: (updatePayload.new?.branch_id || null) })
   }, [onMenuUpdate])
 
   // Handle connection errors
@@ -490,19 +486,16 @@ export function useMenuDataSync() {
       return updated
     })
 
-    // Show notification in POS system (if available)
-    try {
-      if (typeof window !== 'undefined' && (window as any).electronAPI?.showNotification) {
-        (window as any).electronAPI.showNotification({
-          title: 'Menu Updated',
-          body: `${table} ${eventType.toLowerCase()}d from admin dashboard`,
-          icon: 'info'
-        })
-      }
-    } catch (error) {
-      // Ignore electron API errors in development
-      console.debug('Electron notification API not available:', error)
-    }
+    // Show notification in native runtimes (no-op in browser stub).
+    void getBridge().notifications
+      .show({
+        title: 'Menu Updated',
+        body: `${table} ${eventType.toLowerCase()}d from admin dashboard`,
+        icon: 'info'
+      })
+      .catch((error: unknown) => {
+        console.debug('Native notification API not available:', error)
+      })
   }, [])
 
   const syncState = useRealTimeMenuSync({ onMenuUpdate: handleMenuUpdate })

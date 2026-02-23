@@ -6,6 +6,7 @@ import ThemeToggle from "../components/ThemeToggle";
 import logoBlack from "../assets/logo-black.png";
 import logoWhite from "../assets/logo-white.png";
 import { AlertTriangle, Delete as DeleteIcon } from "lucide-react";
+import { getBridge, offEvent, onEvent } from "../../lib";
 
 interface LoginPageProps {
     onLogin: (pin: string) => Promise<boolean>;
@@ -14,6 +15,7 @@ interface LoginPageProps {
 export default function LoginPage({ onLogin }: LoginPageProps) {
     const { t } = useI18n();
     const { resolvedTheme } = useTheme();
+    const bridge = getBridge();
     const isDark = resolvedTheme === 'dark';
     const [pin, setPin] = useState("");
     const [isLoading, setIsLoading] = useState(false);
@@ -34,7 +36,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     useEffect(() => {
         const loadVersion = async () => {
             try {
-                const result = await (window as any).electronAPI?.ipcRenderer?.invoke('app:get-version');
+                const result = await bridge.app.getVersion();
                 const version = typeof result === 'string' ? result : result?.version;
                 if (version) {
                     setAppVersion(version);
@@ -52,7 +54,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             try {
                 console.log('[LoginPage] Loading organization branding...');
                 // Try to get from local settings first (cached)
-                const snapshot = await (window as any).electronAPI?.ipcRenderer?.invoke('settings:get-local');
+                const snapshot = await bridge.settings.getLocal();
                 const cachedLogo = snapshot?.['organization.logo_url'] ?? snapshot?.organization?.logo_url;
                 const cachedName = snapshot?.['organization.name'] ?? snapshot?.organization?.name;
 
@@ -63,7 +65,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 }
 
                 // Also try to get fresh branding from terminal config
-                const terminalSettings = await (window as any).electronAPI?.ipcRenderer?.invoke('terminal-config:get-settings');
+                const terminalSettings = await bridge.terminalConfig.getSettings();
                 const freshLogo = terminalSettings?.organization_branding?.logo_url;
                 const freshName = terminalSettings?.organization_branding?.name;
 
@@ -85,13 +87,35 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
         const checkPin = async () => {
             try {
                 console.log('[LoginPage] Checking if PIN is configured...');
-                const snapshot = await (window as any).electronAPI?.ipcRenderer?.invoke('settings:get-local');
+                const snapshot = await bridge.settings.getLocal();
                 // Check for hashed PINs (new secure format)
                 const adminPinHash = snapshot?.['staff.admin_pin_hash'] ?? snapshot?.staff?.admin_pin_hash;
                 const staffPinHash = snapshot?.['staff.staff_pin_hash'] ?? snapshot?.staff?.staff_pin_hash;
-                // Also check legacy simple_pin for backwards compatibility
-                const simplePin = snapshot?.['staff.simple_pin'] ?? snapshot?.staff?.simple_pin;
-                const noPinConfigured = (!adminPinHash && !staffPinHash) && (!simplePin || simplePin === '');
+                const legacySimplePinFromDb = snapshot?.['staff.simple_pin'] ?? snapshot?.staff?.simple_pin;
+                const legacySimplePinFromStorage = localStorage.getItem('staff.simple_pin') || '';
+
+                let hasPinHashes = !!adminPinHash || !!staffPinHash;
+                if (!hasPinHashes) {
+                    const legacyPin = (legacySimplePinFromDb || legacySimplePinFromStorage || '').toString().trim();
+                    if (legacyPin.length >= 4) {
+                        try {
+                            await bridge.auth.setupPin({
+                                staffPin: legacyPin,
+                            });
+                            await bridge.settings.updateLocal({
+                                settingType: 'staff',
+                                settings: { simple_pin: '' },
+                            });
+                            localStorage.removeItem('staff.simple_pin');
+                            hasPinHashes = true;
+                            console.log('[LoginPage] Migrated legacy simple_pin to hashed staff PIN');
+                        } catch (migrationError) {
+                            console.warn('[LoginPage] Failed to migrate legacy simple_pin:', migrationError);
+                        }
+                    }
+                }
+
+                const noPinConfigured = !hasPinHashes;
                 console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured, 'hasAdminHash:', !!adminPinHash, 'hasStaffHash:', !!staffPinHash);
                 setNoPinSet(noPinConfigured);
 
@@ -125,16 +149,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 checkPin();
             }
         };
-        const ipc = (window as any).electronAPI?.ipcRenderer;
-        if (ipc?.on) {
-            ipc.on('settings:update', handleSettingsUpdate);
-        }
+        onEvent('settings:update', handleSettingsUpdate);
 
         return () => {
             window.removeEventListener('focus', handleFocus);
-            if (ipc?.removeListener) {
-                ipc.removeListener('settings:update', handleSettingsUpdate);
-            }
+            offEvent('settings:update', handleSettingsUpdate);
         };
     }, []);
 
@@ -419,7 +438,7 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                                             try {
                                                 setIsLoading(true);
                                                 // Call the auth service to setup PIN
-                                                const result = await (window as any).electronAPI?.ipcRenderer?.invoke('auth:setup-pin', {
+                                                const result = await bridge.auth.setupPin({
                                                     adminPin: newPin,
                                                     staffPin: newPin // Use same PIN for both initially
                                                 });

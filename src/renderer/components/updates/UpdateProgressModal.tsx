@@ -1,6 +1,6 @@
 import React from 'react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
-import type { ProgressInfo } from 'electron-updater';
+import type { ProgressInfo } from '../../../lib/update-contracts';
 import { useI18n } from '../../contexts/i18n-context';
 
 interface UpdateProgressModalProps {
@@ -26,6 +26,7 @@ export const UpdateProgressModal: React.FC<UpdateProgressModalProps> = ({
             onClose={() => { }} // Prevent closing via backdrop/esc during download
             title={t('updates.title.downloading')}
             size="md"
+            className="!max-w-lg"
             closeOnBackdrop={false}
             closeOnEscape={false}
         >

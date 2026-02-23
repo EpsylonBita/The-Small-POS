@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, CSSProperties } from 'react';
 import { useTheme } from '../contexts/theme-context';
 import { useWindowState } from '../hooks/useWindowState';
+import { getBridge } from '../../lib';
 import {
   Minus,
   Square,
@@ -49,6 +50,7 @@ interface CustomTitleBarProps {
 const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false, onCheckForUpdates }) => {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
+  const bridge = getBridge();
   const { isMaximized, isFullScreen } = useWindowState();
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [isWindows, setIsWindows] = useState(false);
@@ -79,22 +81,16 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
   }, [activeMenu]);
 
   const handleMinimize = async () => {
-    if (window.electronAPI?.ipcRenderer) {
-      await window.electronAPI.ipcRenderer.invoke('window-minimize');
-    }
+    await bridge.window.minimize();
   };
 
   const handleMaximize = async () => {
-    if (window.electronAPI?.ipcRenderer) {
-      await window.electronAPI.ipcRenderer.invoke('window-maximize');
-      // State will be updated automatically by useWindowState hook polling
-    }
+    await bridge.window.maximize();
+    // State will be updated automatically by useWindowState hook polling
   };
 
   const handleClose = async () => {
-    if (window.electronAPI?.ipcRenderer) {
-      await window.electronAPI.ipcRenderer.invoke('window-close');
-    }
+    await bridge.window.close();
   };
 
   const handleMenuClick = (menuName: string) => {
@@ -166,21 +162,21 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
         label: 'Reload',
         accelerator: 'Ctrl+R',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-reload');
+          await bridge.window.reload();
         },
       },
       {
         label: 'Force Reload',
         accelerator: 'Ctrl+Shift+R',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-force-reload');
+          await bridge.window.forceReload();
         },
       },
       {
         label: 'Toggle Developer Tools',
         accelerator: 'Ctrl+Shift+I',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-toggle-devtools');
+          await bridge.window.toggleDevtools();
         },
       },
       { type: 'separator' },
@@ -188,21 +184,21 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
         label: 'Actual Size',
         accelerator: 'Ctrl+0',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-zoom-reset');
+          await bridge.window.zoomReset();
         },
       },
       {
         label: 'Zoom In',
         accelerator: 'Ctrl+=',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-zoom-in');
+          await bridge.window.zoomIn();
         },
       },
       {
         label: 'Zoom Out',
         accelerator: 'Ctrl+-',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-zoom-out');
+          await bridge.window.zoomOut();
         },
       },
       { type: 'separator' },
@@ -210,7 +206,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
         label: 'Toggle Fullscreen',
         accelerator: 'F11',
         action: async () => {
-          await window.electronAPI?.ipcRenderer.invoke('window-toggle-fullscreen');
+          await bridge.window.toggleFullscreen();
         },
       },
     ],
@@ -241,7 +237,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
             if (onCheckForUpdates) {
               onCheckForUpdates();
             } else {
-              await window.electronAPI?.ipcRenderer.invoke('menu:trigger-check-for-updates');
+              await bridge.menu.triggerCheckForUpdates();
             }
           } catch (error) {
             console.error('[CustomTitleBar] Failed to open update dialog:', error);
@@ -280,7 +276,7 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
               onCheckForUpdates();
             } else {
               // Trigger the menu event that useAutoUpdater listens for
-              await window.electronAPI?.ipcRenderer.invoke('menu:trigger-check-for-updates');
+              await bridge.menu.triggerCheckForUpdates();
             }
           } catch (error) {
             console.error('[CustomTitleBar] Failed to trigger update check:', error);

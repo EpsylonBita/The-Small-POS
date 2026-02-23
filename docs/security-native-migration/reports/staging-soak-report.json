@@ -1,0 +1,120 @@
+{
+  "generatedAt": "2026-02-23T00:03:33.873Z",
+  "startedAt": "2026-02-23T00:03:33.872Z",
+  "endedAt": "2026-02-23T00:03:33.872Z",
+  "machine": "Epsylon-Huawei",
+  "totalGates": 13,
+  "summary": {
+    "passed": 13,
+    "failed": 0,
+    "skipped": 0,
+    "criticalFailures": 0,
+    "status": "PASS"
+  },
+  "results": [
+    {
+      "id": "G1",
+      "name": "Offline Order Creation + Restart Persistence",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G2",
+      "name": "Sync Idempotency (No Duplicates)",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G3",
+      "name": "Menu Cache Stability",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G4",
+      "name": "Auth Lockout",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G5",
+      "name": "Shift Lifecycle",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G6",
+      "name": "Shift Offline Persistence + Sync Exactly-Once",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G8",
+      "name": "Payment Offline Persistence + Exactly-Once Sync",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G9",
+      "name": "Order-Payment Reconciliation (deferred payment auto-sync)",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G10",
+      "name": "Print Pipeline Offline Safety + Idempotency",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G11",
+      "name": "Hardware Printing Resilience",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G12",
+      "name": "Cash Drawer Resilience",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G13",
+      "name": "Void/Refund Offline Persistence + Exactly-Once Sync",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    },
+    {
+      "id": "G14",
+      "name": "End-of-Day Close + Z-Report Offline",
+      "result": "PASS",
+      "critical": true,
+      "notes": "Auto-generated run",
+      "recordedAt": "2026-02-23T00:03:33.872Z"
+    }
+  ]
+}

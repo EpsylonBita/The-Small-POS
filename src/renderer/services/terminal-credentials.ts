@@ -1,3 +1,5 @@
+import { getBridge } from '../../lib'
+
 type TerminalCredentialState = {
   terminalId: string
   apiKey: string
@@ -67,74 +69,124 @@ export function getCachedTerminalCredentials(): TerminalCredentialState {
   return { ...state }
 }
 
+function normalizeCredentialValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
 async function invokeSettings(): Promise<TerminalSettingsShape | null> {
   if (typeof window === 'undefined') {
     return null
   }
 
-  const electronBridge = (window as unknown as {
-    electron?: { ipcRenderer?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> } }
-    electronAPI?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> }
-  })
-
   try {
-    if (electronBridge.electron?.ipcRenderer?.invoke) {
-      const settings = await electronBridge.electron.ipcRenderer.invoke('terminal-config:get-settings')
-      return (settings ?? null) as TerminalSettingsShape | null
-    }
-    if (electronBridge.electronAPI?.invoke) {
-      const settings = await electronBridge.electronAPI.invoke('terminal-config:get-settings')
-      return (settings ?? null) as TerminalSettingsShape | null
-    }
+    const settings = await getBridge().terminalConfig.getSettings()
+    return (settings ?? null) as TerminalSettingsShape | null
   } catch {
     return null
   }
-
-  return null
 }
 
-async function invokeTerminalApiKey(): Promise<string> {
+async function invokeSettingByKey(key: string): Promise<string> {
   if (typeof window === 'undefined') {
     return ''
   }
 
-  const electronBridge = (window as unknown as {
-    electron?: { ipcRenderer?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> } }
-    electronAPI?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> }
-  })
+  try {
+    const value = await getBridge().terminalConfig.getSetting('terminal', key)
+    return normalizeCredentialValue(value)
+  } catch {
+    return ''
+  }
+}
+
+type SpecializedTerminalLookup =
+  | 'terminal-config:get-terminal-id'
+  | 'terminal-config:get-branch-id'
+  | 'terminal-config:get-organization-id'
+
+async function invokeSpecialized(channel: SpecializedTerminalLookup): Promise<string> {
+  if (typeof window === 'undefined') {
+    return ''
+  }
 
   try {
-    if (electronBridge.electron?.ipcRenderer?.invoke) {
-      const value = await electronBridge.electron.ipcRenderer.invoke(
-        'terminal-config:get-setting',
-        'terminal',
-        'pos_api_key'
-      )
-      return typeof value === 'string' ? value : ''
-    }
-    if (electronBridge.electronAPI?.invoke) {
-      const value = await electronBridge.electronAPI.invoke(
-        'terminal-config:get-setting',
-        'terminal',
-        'pos_api_key'
-      )
-      return typeof value === 'string' ? value : ''
+    const bridge = getBridge()
+    switch (channel) {
+      case 'terminal-config:get-terminal-id':
+        return normalizeCredentialValue(await bridge.terminalConfig.getTerminalId())
+      case 'terminal-config:get-branch-id':
+        return normalizeCredentialValue(await bridge.terminalConfig.getBranchId())
+      case 'terminal-config:get-organization-id':
+        return normalizeCredentialValue(await bridge.terminalConfig.getOrganizationId())
+      default:
+        return ''
     }
   } catch {
     return ''
   }
+}
 
-  return ''
+async function invokeTerminalApiKey(): Promise<string> {
+  return invokeSettingByKey('pos_api_key')
 }
 
 export async function refreshTerminalCredentialCache(): Promise<TerminalCredentialState> {
   const settings = await invokeSettings()
   const resolved = readFromSettings(settings)
+
+  if (!resolved.terminalId) {
+    resolved.terminalId = await invokeSpecialized('terminal-config:get-terminal-id')
+  }
+  if (!resolved.branchId) {
+    resolved.branchId = await invokeSpecialized('terminal-config:get-branch-id')
+  }
+  if (!resolved.organizationId) {
+    resolved.organizationId = await invokeSpecialized('terminal-config:get-organization-id')
+  }
   if (!resolved.apiKey) {
     resolved.apiKey = await invokeTerminalApiKey()
   }
+  if (!resolved.terminalId) {
+    resolved.terminalId = await invokeSettingByKey('terminal_id')
+  }
+  if (!resolved.branchId) {
+    resolved.branchId = await invokeSettingByKey('branch_id')
+  }
+  if (!resolved.organizationId) {
+    resolved.organizationId = await invokeSettingByKey('organization_id')
+  }
+
   if (resolved.terminalId || resolved.apiKey || resolved.organizationId || resolved.branchId) {
     updateTerminalCredentialCache(resolved)
   }
   return getCachedTerminalCredentials()
+}
+
+export async function getResolvedTerminalCredentials(): Promise<TerminalCredentialState> {
+  const cached = getCachedTerminalCredentials()
+  if (cached.terminalId && cached.apiKey && cached.organizationId && cached.branchId) {
+    return cached
+  }
+  return refreshTerminalCredentialCache()
+}
+
+export async function getResolvedTerminalIdentity(): Promise<{
+  terminalId: string
+  organizationId: string
+  branchId: string
+}> {
+  const creds = await getResolvedTerminalCredentials()
+  return {
+    terminalId: creds.terminalId || '',
+    organizationId: creds.organizationId || '',
+    branchId: creds.branchId || '',
+  }
+}
+
+export async function getPosAuthHeaders(): Promise<Record<string, string>> {
+  const creds = await getResolvedTerminalCredentials()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (creds.apiKey) headers['x-pos-api-key'] = String(creds.apiKey)
+  if (creds.terminalId) headers['x-terminal-id'] = String(creds.terminalId)
+  return headers
 }

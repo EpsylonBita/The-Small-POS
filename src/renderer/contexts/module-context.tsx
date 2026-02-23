@@ -33,6 +33,7 @@ import {
   getCoreModuleIds,
   getRemovedModuleIds,
 } from '../../shared/constants/pos-modules';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 // =============================================
 // TYPES
@@ -215,6 +216,7 @@ const createSimplifiedFeatureChecker = (): FeatureAccessChecker => {
 // =============================================
 
 export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
+  const bridge = getBridge();
   const [businessType, setBusinessType] = useState<BusinessType | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
   const [enabledModules, setEnabledModules] = useState<EnabledModule[]>([]);
@@ -375,11 +377,6 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
    * Requirements: 1.1, 1.2, 2.1, 3.4
    */
   const syncModulesFromAdmin = useCallback(async (): Promise<void> => {
-    if (!window.electron?.ipcRenderer) {
-      console.warn('[ModuleContext] IPC not available, skipping admin sync');
-      return;
-    }
-
     // Prevent concurrent syncs - if already syncing, skip (use ref to avoid re-renders)
     if (isSyncingRef.current) {
       console.log('[ModuleContext] Sync already in progress, skipping');
@@ -390,8 +387,8 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     setIsSyncing(true);
 
     try {
-      // Fetch modules from admin dashboard via IPC
-      const result = await window.electron.ipcRenderer.invoke('modules:fetch-from-admin');
+      // Fetch modules from admin dashboard via typed bridge
+      const result: any = await bridge.modules.fetchFromAdmin();
 
       if (result.success && result.modules) {
         const response = result.modules as POSModulesEnabledResponse;
@@ -452,7 +449,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     }
     // Note: Using refs for apiModules comparison and sync guard to prevent infinite loops
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transformApiModules, businessType, organizationId, saveToCache]);
+  }, [bridge.modules, transformApiModules, businessType, organizationId, saveToCache]);
 
   /**
    * Load cached modules from localStorage.
@@ -583,15 +580,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     setError(null);
 
     try {
-      // Fetch organization ID from main process
-      const orgId = await window.electron?.ipcRenderer.invoke(
-        'terminal-config:get-organization-id'
-      );
-
-      // Fetch business type from main process
-      const bType = await window.electron?.ipcRenderer.invoke(
-        'terminal-config:get-business-type'
-      );
+      // Fetch org configuration via typed bridge
+      const orgId = await bridge.terminalConfig.getOrganizationId();
+      const bType = await bridge.terminalConfig.getBusinessType();
 
       // Handle missing organization ID
       if (!orgId) {
@@ -693,7 +684,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [loadFromCache, saveToCache]);
+  }, [bridge.terminalConfig, loadFromCache, saveToCache]);
 
   /**
    * Force refresh modules
@@ -781,42 +772,32 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
   // Listen for terminal settings updates (Requirement 3.3)
   useEffect(() => {
-    if (!window.electron?.ipcRenderer) return;
-
     const handleSettingsUpdate = () => {
       console.log('[ModuleContext] Terminal settings updated, refreshing modules');
       refreshModules();
       syncModulesFromAdmin();
     };
 
-    window.electron.ipcRenderer.on('terminal-settings-updated', handleSettingsUpdate);
+    onEvent('terminal-settings-updated', handleSettingsUpdate);
 
     return () => {
-      window.electron?.ipcRenderer.removeListener(
-        'terminal-settings-updated',
-        handleSettingsUpdate
-      );
+      offEvent('terminal-settings-updated', handleSettingsUpdate);
     };
   }, [refreshModules, syncModulesFromAdmin]);
 
   // Listen for module refresh events from AdminDashboardSyncService (Requirement 3.1, 3.2)
   // This event is emitted after settings sync to coordinate module updates
   useEffect(() => {
-    if (!window.electron?.ipcRenderer) return;
-
     const handleModuleRefresh = (data: { reason: string; timestamp: string }) => {
       console.log('[ModuleContext] Module refresh requested:', data.reason);
       // Only sync modules, don't do a full refresh to avoid redundant work
       syncModulesFromAdmin();
     };
 
-    window.electron.ipcRenderer.on('modules:refresh-needed', handleModuleRefresh);
+    onEvent('modules:refresh-needed', handleModuleRefresh);
 
     return () => {
-      window.electron?.ipcRenderer.removeListener(
-        'modules:refresh-needed',
-        handleModuleRefresh
-      );
+      offEvent('modules:refresh-needed', handleModuleRefresh);
     };
   }, [syncModulesFromAdmin]);
 

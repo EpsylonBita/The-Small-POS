@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface SyncNotificationManagerProps {
   onSettingsUpdate?: (settings: any) => void;
@@ -26,6 +27,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
   onStaffPermissionUpdate,
   onHardwareConfigUpdate
 }) => {
+  const bridge = getBridge();
   const [pendingUpdates, setPendingUpdates] = useState<SettingsUpdate[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [restartRequired, setRestartRequired] = useState<RestartNotification | null>(null);
@@ -45,7 +47,6 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
   };
 
   useEffect(() => {
-    // Listen for settings updates from main process
     const handleSettingsUpdate = (update: SettingsUpdate) => {
       setPendingUpdates(prev => [...prev, update]);
       setShowNotificationPanel(true);
@@ -82,63 +83,32 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
       console.log('Settings synchronized successfully:', data);
     };
 
-    // Per-category listeners
-    const categories = ['terminal', 'payment', 'tax', 'discount', 'receipt', 'printer', 'inventory', 'staff', 'restaurant'];
-    const unsubscribers: Array<() => void> = [];
+    const handleSettingsEvent = (data: any) => {
+      const category = typeof data?.category === 'string' ? data.category : 'terminal';
+      const update: SettingsUpdate = {
+        id: `settings-${category}-${Date.now()}`,
+        category,
+        description: `${categoryLabels[category] || 'Settings'} updated`,
+        data,
+        timestamp: new Date().toISOString(),
+      };
+      handleSettingsUpdate(update);
+    };
 
-    // Register IPC listeners (if available)
-    if (window.electronAPI) {
-      // General settings update listener
-      window.electronAPI.onSettingsUpdate?.(handleSettingsUpdate);
-      window.electronAPI.onStaffPermissionUpdate?.(handleStaffPermissionUpdate);
-      window.electronAPI.onHardwareConfigUpdate?.(handleHardwareConfigUpdate);
-      window.electronAPI.onRestartRequired?.(handleRestartRequired);
-      window.electronAPI.onSyncError?.(handleSyncError);
-      window.electronAPI.onSyncComplete?.(handleSyncComplete);
-
-      // Category-specific listeners
-      // Note: window.electronAPI is Proxy-backed in Tauri — typeof check
-      // always returns 'function' for unknown props. Guard the return value.
-      categories.forEach(category => {
-        const listenerName = `on${category.charAt(0).toUpperCase() + category.slice(1)}SettingsUpdate`;
-        try {
-          const method = (window.electronAPI as any)[listenerName];
-          if (typeof method !== 'function') return;
-          const unsubscribe = method((data: any) => {
-            const update: SettingsUpdate = {
-              id: `settings-${category}-${Date.now()}`,
-              category,
-              description: `${categoryLabels[category]} updated`,
-              data,
-              timestamp: new Date().toISOString()
-            };
-            setPendingUpdates(prev => [...prev, update]);
-            setShowNotificationPanel(true);
-            if (autoApply) {
-              handleApplyUpdate(update);
-            }
-          });
-          if (typeof unsubscribe === 'function') {
-            unsubscribers.push(unsubscribe);
-          }
-        } catch {
-          // Listener not available in this runtime
-        }
-      });
-    }
+    onEvent('settings:update', handleSettingsEvent);
+    onEvent('staff:permission-update', handleStaffPermissionUpdate);
+    onEvent('hardware-config:update', handleHardwareConfigUpdate);
+    onEvent('app:restart-required', handleRestartRequired);
+    onEvent('sync:error', handleSyncError);
+    onEvent('sync:complete', handleSyncComplete);
 
     return () => {
-      // Cleanup listeners
-      if (window.electronAPI) {
-        window.electronAPI.removeSettingsUpdateListener?.();
-        window.electronAPI.removeStaffPermissionUpdateListener?.();
-        window.electronAPI.removeHardwareConfigUpdateListener?.();
-        window.electronAPI.removeRestartRequiredListener?.();
-        window.electronAPI.removeSyncErrorListener?.();
-        window.electronAPI.removeSyncCompleteListener?.();
-      }
-      // Cleanup category-specific listeners
-      unsubscribers.forEach(unsub => unsub());
+      offEvent('settings:update', handleSettingsEvent);
+      offEvent('staff:permission-update', handleStaffPermissionUpdate);
+      offEvent('hardware-config:update', handleHardwareConfigUpdate);
+      offEvent('app:restart-required', handleRestartRequired);
+      offEvent('sync:error', handleSyncError);
+      offEvent('sync:complete', handleSyncComplete);
     };
   }, [onSettingsUpdate, onStaffPermissionUpdate, onHardwareConfigUpdate, autoApply]);
 
@@ -153,8 +123,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
   };
 
   const handleRestartNow = () => {
-    // Request application restart
-    window.electronAPI?.requestRestart?.();
+    void bridge.app.restart();
     setRestartRequired(null);
   };
 

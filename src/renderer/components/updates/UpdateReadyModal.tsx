@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
-import type { UpdateInfo } from 'electron-updater';
+import type { UpdateInfo } from '../../../lib/update-contracts';
 import { AlertTriangle } from 'lucide-react';
 
 interface UpdateReadyModalProps {
@@ -24,6 +24,7 @@ export const UpdateReadyModal: React.FC<UpdateReadyModalProps> = ({
             onClose={onInstallOnRestart}
             title="Update Ready to Install"
             size="md"
+            className="!max-w-lg"
         >
             <div className="space-y-6 text-center">
                 <div className="flex justify-center mb-4">

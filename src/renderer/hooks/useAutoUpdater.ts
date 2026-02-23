@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { showUpdateToast } from '../components/updates/UpdateToast';
-import type { UpdateInfo, ProgressInfo } from 'electron-updater';
+import type { UpdateInfo, ProgressInfo } from '../../lib/update-contracts';
+import { getBridge, offEvent, onEvent } from '../../lib';
+import type { UpdateState as BridgeUpdateState } from '../../lib';
 
 interface UpdateState {
     checking: boolean;
@@ -12,7 +14,26 @@ interface UpdateState {
     progress: ProgressInfo | undefined;
 }
 
+function normalizeProgress(progress: BridgeUpdateState['progress'] | ProgressInfo | undefined): ProgressInfo | undefined {
+    if (progress === undefined || progress === null) {
+        return undefined;
+    }
+
+    if (typeof progress === 'number') {
+        return {
+            percent: progress,
+            bytesPerSecond: 0,
+            transferred: 0,
+            total: 0,
+            delta: 0,
+        } as ProgressInfo;
+    }
+
+    return progress as ProgressInfo;
+}
+
 export function useAutoUpdater() {
+    const bridge = getBridge();
     const [state, setState] = useState<UpdateState>({
         checking: false,
         available: false,
@@ -33,18 +54,12 @@ export function useAutoUpdater() {
     // State for UpdateDialog visibility (triggered by menu)
     const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
 
-    // Safe access to IPC to prevent errors in non-Electron environments (e.g. basic web view)
-    const ipcRenderer = window.electron?.ipcRenderer;
-    const electronAPI = (window as any).electronAPI;
-
     // Timeout ref for checking state
     const checkingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     // Ref to track if we received a response (to prevent timeout from firing after response)
     const receivedResponseRef = useRef<boolean>(false);
 
     useEffect(() => {
-        if (!ipcRenderer) return;
-
         // Listen for IPC events
         const listeners = {
             'update-checking': () => {
@@ -117,21 +132,32 @@ export function useAutoUpdater() {
         };
 
         // Register listeners
-        console.log('[useAutoUpdater] Registering listeners, ipcRenderer:', !!ipcRenderer);
+        console.log('[useAutoUpdater] Registering listeners via event bridge');
         Object.entries(listeners).forEach(([channel, listener]) => {
             console.log(`[useAutoUpdater] Registering listener for ${channel}`);
-            ipcRenderer.on(channel, listener);
+            onEvent(channel, listener);
         });
 
         // Initialize state check (optional, but good)
-        ipcRenderer.invoke('update:get-state').then((initialState: Partial<UpdateState>) => {
-            // Sync initial state if needed, but usually events drive this.
+        bridge.updates.getState().then((initialState: Partial<BridgeUpdateState>) => {
+            if (initialState) {
+                setState((s) => ({
+                    ...s,
+                    checking: initialState.checking ?? s.checking,
+                    available: initialState.available ?? s.available,
+                    downloading: initialState.downloading ?? s.downloading,
+                    ready: initialState.ready ?? s.ready,
+                    error: initialState.error ?? s.error,
+                    updateInfo: (initialState.updateInfo as UpdateInfo | undefined) ?? s.updateInfo,
+                    progress: initialState.progress !== undefined ? normalizeProgress(initialState.progress) : s.progress,
+                }));
+            }
         }).catch(() => { });
 
         return () => {
             // Cleanup
             Object.entries(listeners).forEach(([channel, listener]) => {
-                ipcRenderer.removeListener(channel, listener);
+                offEvent(channel, listener);
             });
             // Clear timeout on cleanup
             if (checkingTimeoutRef.current) {
@@ -139,12 +165,11 @@ export function useAutoUpdater() {
                 checkingTimeoutRef.current = null;
             }
         };
-    }, [ipcRenderer]);
+    }, [bridge.updates]);
 
     // Fetch current app version on mount
     useEffect(() => {
-        if (!ipcRenderer) return;
-        ipcRenderer.invoke('system:get-info').then((info: any) => {
+        bridge.system.getInfo().then((info: any) => {
             if (info?.version) {
                 setCurrentVersion(info.version);
             }
@@ -152,21 +177,23 @@ export function useAutoUpdater() {
             // Fallback: try to get from package.json or env
             setCurrentVersion('Unknown');
         });
-    }, [ipcRenderer]);
+    }, [bridge.system]);
 
     // Listen for menu-triggered update check event (Requirements: 2.1)
     useEffect(() => {
-        if (!electronAPI?.onMenuCheckForUpdates) return;
-
-        const cleanup = electronAPI.onMenuCheckForUpdates(() => {
+        const handleMenuCheckForUpdates = () => {
             // Open the update dialog and trigger a check
             setUpdateDialogOpen(true);
             // Trigger update check
-            ipcRenderer?.invoke('update:check');
-        });
+            void bridge.updates.check();
+        };
 
-        return cleanup;
-    }, [electronAPI, ipcRenderer]);
+        onEvent('menu:check-for-updates', handleMenuCheckForUpdates);
+
+        return () => {
+            offEvent('menu:check-for-updates', handleMenuCheckForUpdates);
+        };
+    }, [bridge.updates]);
 
     // Track if we've shown a notification for the current version to avoid duplicates
     const notifiedVersionRef = useRef<string | null>(null);
@@ -199,25 +226,25 @@ export function useAutoUpdater() {
     }, [state.available, state.downloading, state.ready, state.updateInfo?.version, dismissedVersion, updateDialogOpen]);
 
     const checkForUpdates = useCallback(() => {
-        ipcRenderer?.invoke('update:check');
-    }, [ipcRenderer]);
+        void bridge.updates.check();
+    }, [bridge.updates]);
 
     const downloadUpdate = useCallback(() => {
-        ipcRenderer?.invoke('update:download');
-    }, [ipcRenderer]);
+        void bridge.updates.download();
+    }, [bridge.updates]);
 
     const cancelDownload = useCallback(() => {
-        ipcRenderer?.invoke('update:cancel-download');
-    }, [ipcRenderer]);
+        void bridge.updates.cancelDownload();
+    }, [bridge.updates]);
 
     const installUpdate = useCallback(() => {
         console.log('[useAutoUpdater] installUpdate called, state.ready:', state.ready);
-        ipcRenderer?.invoke('update:install').then(() => {
+        bridge.updates.install().then(() => {
             console.log('[useAutoUpdater] update:install invoke completed');
         }).catch((err: any) => {
             console.error('[useAutoUpdater] update:install error:', err);
         });
-    }, [ipcRenderer, state.ready]);
+    }, [bridge.updates, state.ready]);
 
     const dismissUpdate = useCallback(() => {
         if (state.updateInfo?.version) {
@@ -235,8 +262,8 @@ export function useAutoUpdater() {
     const openUpdateDialog = useCallback(() => {
         setUpdateDialogOpen(true);
         // Trigger update check when opening dialog
-        ipcRenderer?.invoke('update:check');
-    }, [ipcRenderer]);
+        void bridge.updates.check();
+    }, [bridge.updates]);
 
     // Close the update dialog
     const closeUpdateDialog = useCallback(() => {

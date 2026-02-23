@@ -4,6 +4,7 @@
  */
 
 import { getApiUrl } from '../../config/environment';
+import { getBridge, isBrowser } from '../../lib';
 
 function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -43,17 +44,6 @@ function toAdminApiPath(endpoint: string): string {
   return `/api/${clean}`;
 }
 
-type ElectronApiBridge = {
-  fetchFromApi?: (
-    path: string,
-    options?: {
-      method?: string;
-      body?: unknown;
-      headers?: Record<string, string>;
-    }
-  ) => Promise<{ success: boolean; data?: unknown; error?: string; status?: number }>;
-};
-
 /**
  * Get POS authentication headers for API calls
  * Fetches terminal ID and API key from the main process via IPC
@@ -65,33 +55,27 @@ export async function getPosAuthHeaders(): Promise<Record<string, string>> {
   };
 
   try {
-    const windowWithElectron = window as any;
-    const electronAPI = windowWithElectron.electronAPI || windowWithElectron.electron;
-
-    if (!electronAPI) {
-      console.warn('[api-helpers] electronAPI not available');
+    if (isBrowser()) {
       return headers;
     }
 
-    // Get terminal ID using the exposed method
-    if (electronAPI.getTerminalId) {
-      const terminalId = await electronAPI.getTerminalId();
-      if (terminalId) {
-        headers['x-terminal-id'] = terminalId;
-      }
+    const bridge = getBridge();
+
+    // Get terminal ID from native terminal config
+    const terminalId = await bridge.terminalConfig.getTerminalId().catch(() => null);
+    if (terminalId) {
+      headers['x-terminal-id'] = terminalId;
     }
 
-    // Get API key using the exposed method
-    if (electronAPI.getTerminalApiKey) {
-      const apiKey = await electronAPI.getTerminalApiKey();
-      if (apiKey) {
-        // The API key might be stored as JSON string, parse if needed
-        const parsedKey = typeof apiKey === 'string' && apiKey.startsWith('"')
-          ? JSON.parse(apiKey)
-          : apiKey;
-        if (parsedKey) {
-          headers['x-pos-api-key'] = parsedKey;
-        }
+    // Get API key from native terminal config
+    const apiKey = await bridge.terminalConfig.getSetting('terminal', 'pos_api_key').catch(() => null);
+    if (apiKey) {
+      // The API key might be stored as JSON string, parse if needed
+      const parsedKey = typeof apiKey === 'string' && apiKey.startsWith('"')
+        ? JSON.parse(apiKey)
+        : apiKey;
+      if (parsedKey) {
+        headers['x-pos-api-key'] = String(parsedKey);
       }
     }
   } catch (error) {
@@ -117,13 +101,10 @@ export async function posApiFetch<T = any>(
       ...callerHeaders,
     };
     const method = (options.method || 'GET').toUpperCase();
-    const windowWithElectron = typeof window !== 'undefined' ? (window as any) : undefined;
-    const electronAPI: ElectronApiBridge | undefined = windowWithElectron
-      ? windowWithElectron.electronAPI || windowWithElectron.electron
-      : undefined;
 
-    if (electronAPI?.fetchFromApi) {
-      const ipcResult = await electronAPI.fetchFromApi(toAdminApiPath(endpoint), {
+    if (!isBrowser()) {
+      const bridge = getBridge();
+      const ipcResult = await bridge.adminApi.fetchFromAdmin(toAdminApiPath(endpoint), {
         method,
         body: options.body,
         headers: mergedHeaders,
@@ -139,7 +120,7 @@ export async function posApiFetch<T = any>(
 
       return {
         success: true,
-        data: ipcResult.data as T,
+        data: (ipcResult?.data ?? ipcResult) as T,
         status: ipcResult.status,
       };
     }

@@ -1136,6 +1136,7 @@ export const IntegrationsPage: React.FC = () => {
           onClose={() => setMyDataModalOpen(false)}
           title={t('integrations.mydata.title', 'MyData Configuration')}
           size="md"
+          className="!max-w-lg"
           closeOnBackdrop={!myDataSaving}
           closeOnEscape={!myDataSaving}
         >
@@ -1252,6 +1253,7 @@ export const IntegrationsPage: React.FC = () => {
           }}
           title={activePlugin ? `${activePlugin.name} ${t('integrations.configuration', 'Configuration')}` : t('integrations.pluginConfiguration', 'Plugin configuration')}
           size="lg"
+          className="!max-w-2xl"
           closeOnBackdrop={!pluginSaving}
           closeOnEscape={!pluginSaving}
         >

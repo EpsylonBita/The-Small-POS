@@ -18,7 +18,12 @@ import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, Ref
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
 import { CustomerSearchModal } from '../../../components/modals/CustomerSearchModal';
 import { supabase } from '../../../lib/supabase';
+import { getBridge, isBrowser, offEvent, onEvent } from '../../../../lib';
 import type { Appointment, AppointmentStatus, AppointmentFilters } from '../../../services/AppointmentsService';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../../services/terminal-credentials';
 
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
@@ -33,6 +38,7 @@ const statusConfig: Record<AppointmentStatus, { color: string; label: string }> 
 };
 
 export const AppointmentsView: React.FC = memo(() => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
@@ -40,69 +46,39 @@ export const AppointmentsView: React.FC = memo(() => {
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
   
-  // Load config from multiple sources (same pattern as RoomsView)
   useEffect(() => {
-    const loadConfig = async () => {
-      let bid = localStorage.getItem('branch_id');
-      let oid = localStorage.getItem('organization_id');
-      
-      if ((!bid || !oid) && window.electron?.ipcRenderer) {
-        try {
-          // Try direct IPC calls first
-          if (!bid) {
-            const branchResult = await window.electron.ipcRenderer.invoke('terminal-config:get-branch-id');
-            if (branchResult) {
-              bid = branchResult;
-              localStorage.setItem('branch_id', bid as string);
-            }
-          }
-          if (!oid) {
-            const orgResult = await window.electron.ipcRenderer.invoke('terminal-config:get-organization-id');
-            if (orgResult) {
-              oid = orgResult;
-              localStorage.setItem('organization_id', oid as string);
-            }
-          }
-          // Fallback to full settings object
-          if (!bid || !oid) {
-            const settings = await window.electron.ipcRenderer.invoke('terminal-config:get-settings');
-            if (!bid) {
-              bid = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id || null;
-              if (bid) localStorage.setItem('branch_id', bid);
-            }
-            if (!oid) {
-              oid = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id || null;
-              if (oid) localStorage.setItem('organization_id', oid);
-            }
-          }
-        } catch (err) {
-          console.warn('[AppointmentsView] Failed to get terminal config:', err);
-        }
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
       }
-      
-      console.log('[AppointmentsView] Loaded config - branchId:', bid, 'orgId:', oid);
-      setBranchId(bid);
-      setLocalOrgId(oid);
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
     };
-    
-    loadConfig();
-    
-    // Listen for config updates
+
     const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
-      console.log('[AppointmentsView] Config updated:', data);
-      if (data.branch_id) {
-        setBranchId(data.branch_id);
-        localStorage.setItem('branch_id', data.branch_id);
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
       }
-      if (data.organization_id) {
-        setLocalOrgId(data.organization_id);
-        localStorage.setItem('organization_id', data.organization_id);
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
       }
     };
-    
-    window.electron?.ipcRenderer?.on('terminal-config-updated', handleConfigUpdate);
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
     return () => {
-      window.electron?.ipcRenderer?.removeListener('terminal-config-updated', handleConfigUpdate);
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
     };
   }, []);
 
@@ -163,11 +139,7 @@ export const AppointmentsView: React.FC = memo(() => {
         let resolvedStaff: { id: string; name: string }[] = [];
         let resolvedServices: { id: string; name: string; duration: number }[] = [];
 
-        const invoke =
-          (window as any)?.electronAPI?.invoke ||
-          (window as any)?.electronAPI?.ipcRenderer?.invoke ||
-          (window as any)?.electron?.ipcRenderer?.invoke ||
-          null;
+        const invoke = isBrowser() ? null : bridge.invoke.bind(bridge);
 
         // Prefer terminal-authenticated admin APIs in Electron.
         if (invoke) {
@@ -324,7 +296,7 @@ export const AppointmentsView: React.FC = memo(() => {
     if (showCreateModal) {
       loadDropdownData();
     }
-  }, [branchId, effectiveOrgId, showCreateModal]);
+  }, [bridge, branchId, effectiveOrgId, showCreateModal]);
 
   // Helper: format a Date as YYYY-MM-DD using local timezone
   const toLocalDateStr = (d: Date): string => {

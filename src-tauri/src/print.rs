@@ -307,6 +307,8 @@ fn dispatch_to_printer(
     job_profile_id: Option<&str>,
     html_path: &str,
 ) -> Result<Option<Value>, String> {
+    use crate::escpos;
+
     let profile = printers::resolve_printer_profile(db, job_profile_id)?;
 
     let profile = match profile {
@@ -322,14 +324,133 @@ fn dispatch_to_printer(
     let printer_name = profile["printerName"]
         .as_str()
         .ok_or("Printer profile missing printerName")?;
+    let paper_mm = profile
+        .get("paperWidthMm")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(80) as i32;
+    let should_cut = profile
+        .get("cutPaper")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     match driver_type {
-        "windows" => {
-            printers::print_to_windows(printer_name, html_path)?;
+        // Raw ESC/POS dispatch (default for thermal printers)
+        "windows" | "escpos" => {
+            // Read the HTML receipt and strip to plain text for ESC/POS
+            let html_content = fs::read_to_string(html_path)
+                .map_err(|e| format!("Failed to read receipt file: {e}"))?;
+            let plain_text = strip_html_to_text(&html_content);
+
+            let paper = escpos::PaperWidth::from_mm(paper_mm);
+            let mut builder = escpos::EscPosBuilder::new().with_paper(paper);
+            builder.init();
+
+            // Emit each line of plain text
+            for line in plain_text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    builder.lf();
+                } else {
+                    builder.text(trimmed).lf();
+                }
+            }
+
+            builder.feed(3);
+            if should_cut {
+                builder.cut();
+            }
+
+            let data = builder.build();
+            printers::print_raw_to_windows(printer_name, &data, "POS Receipt")?;
             Ok(Some(profile))
         }
         other => Err(format!("Unsupported driver_type: {other}")),
     }
+}
+
+/// Strip HTML tags from a string and normalize whitespace to produce readable
+/// plain text for ESC/POS printing. This is a lightweight tag stripper, not a
+/// full HTML parser.
+fn strip_html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut last_was_space = false;
+
+    // Insert a newline for block-level tags
+    let block_tags = [
+        "<br", "<p", "<div", "<tr", "<li", "<h1", "<h2", "<h3", "<hr",
+    ];
+
+    let lower = html.to_lowercase();
+    let chars: Vec<char> = html.chars().collect();
+    let lower_chars: Vec<char> = lower.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        if chars[i] == '<' {
+            // Check for block-level tag to insert newline
+            let remaining: String = lower_chars[i..].iter().collect();
+            for tag in &block_tags {
+                if remaining.starts_with(tag) && !last_was_space {
+                    out.push('\n');
+                    last_was_space = true;
+                    break;
+                }
+            }
+            in_tag = true;
+            i += 1;
+            continue;
+        }
+
+        if chars[i] == '>' {
+            in_tag = false;
+            i += 1;
+            continue;
+        }
+
+        if !in_tag {
+            // Decode common HTML entities
+            if chars[i] == '&' {
+                let remaining: String = chars[i..].iter().take(10).collect();
+                if remaining.starts_with("&amp;") {
+                    out.push('&');
+                    i += 5;
+                } else if remaining.starts_with("&lt;") {
+                    out.push('<');
+                    i += 4;
+                } else if remaining.starts_with("&gt;") {
+                    out.push('>');
+                    i += 4;
+                } else if remaining.starts_with("&nbsp;") {
+                    out.push(' ');
+                    i += 6;
+                } else if remaining.starts_with("&#8364;") || remaining.starts_with("&euro;") {
+                    out.push('€');
+                    i += if remaining.starts_with("&#") { 7 } else { 6 };
+                } else {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                last_was_space = false;
+                continue;
+            }
+
+            if chars[i] == '\n' || chars[i] == '\r' {
+                if !last_was_space {
+                    out.push('\n');
+                    last_was_space = true;
+                }
+            } else {
+                out.push(chars[i]);
+                last_was_space = chars[i] == ' ';
+            }
+        }
+
+        i += 1;
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------

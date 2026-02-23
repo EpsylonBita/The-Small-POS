@@ -1,4 +1,3 @@
-/// <reference path="./renderer/types/electron.d.ts" />
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 
@@ -21,19 +20,12 @@ function showFatalError(err: unknown) {
 
 try {
   // IPC abstraction layer -- must run before React renders
-  const { installElectronCompat, startEventBridge } = await import('./lib');
-
-  // Install window.electron / window.electronAPI shim so existing Electron POS
-  // components work unchanged inside Tauri.
-  installElectronCompat();
-
-  // Bridge Tauri push-events into the Electron-compatible eventBus.
-  startEventBridge();
+  const { getBridge } = await import('./lib');
 
   // Hydrate frontend Supabase client with credentials from the secure store.
   // This must happen before React renders so components can use Supabase.
   try {
-    const config = await (window as any).electronAPI?.invoke?.('terminal-config:get-full-config');
+    const config = await getBridge().terminalConfig.getFullConfig();
     const supabaseUrl = toOptionalTrimmedString(config?.supabase_url);
     const supabaseAnonKey = toOptionalTrimmedString(config?.supabase_anon_key);
 
@@ -55,10 +47,14 @@ try {
         organizationId,
         branchId,
       });
-      // Also stash in localStorage for hydration on reload
-      if (terminalId) localStorage.setItem('terminal_id', terminalId);
-      if (organizationId) localStorage.setItem('organization_id', organizationId);
-      if (branchId) localStorage.setItem('branch_id', branchId);
+      // Remove legacy persisted terminal identity cache from localStorage.
+      try {
+        localStorage.removeItem('terminal_id');
+        localStorage.removeItem('organization_id');
+        localStorage.removeItem('branch_id');
+      } catch {
+        // Ignore storage errors in restricted contexts.
+      }
     }
   } catch (e) {
     console.warn('[Startup] Supabase hydration failed (non-fatal):', e);
@@ -72,7 +68,7 @@ try {
   // Ensure screen capture IPC listeners are registered at startup
   await import('./renderer/services/ScreenCaptureHandler');
 
-  // The real POS app from the copied Electron renderer
+  // POS app entry
   const { default: App } = await import('./renderer/App');
 
   ReactDOM.createRoot(document.getElementById('root')!).render(

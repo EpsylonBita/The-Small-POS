@@ -2,17 +2,6 @@
  * IPC Abstraction Layer - Public API
  *
  * Import from this barrel to access all platform bridge functionality.
- *
- * Quick start:
- *   import { installElectronCompat, startEventBridge, getBridge } from './lib';
- *
- *   // At app startup (before React renders):
- *   installElectronCompat();
- *   startEventBridge();
- *
- *   // For new code, prefer the typed bridge:
- *   const bridge = getBridge();
- *   const result = await bridge.auth.login({ pin: '1234' });
  */
 
 // Platform detection
@@ -20,7 +9,6 @@ export {
   detectPlatform,
   getPlatform,
   isTauri,
-  isElectron,
   isBrowser,
   resetPlatformCache,
   type Platform,
@@ -33,7 +21,6 @@ export {
   resetBridge,
   createBridge,
   TauriBridge,
-  ElectronBridge,
   CHANNEL_MAP,
   type PlatformBridge,
   type IpcResult,
@@ -63,12 +50,20 @@ export {
   type PrinterConfig,
 } from './ipc-adapter';
 
-// Electron compatibility shim
-export {
-  installElectronCompat,
-  resetElectronCompat,
-  eventBus,
-} from './electron-compat';
+export type {
+  AuthSetupPinRequest,
+  SettingsConfiguredResponse,
+  SettingsGetRequest,
+  SettingsSetRequest,
+  SettingsUpdateLocalRequest,
+  SyncRemoveInvalidOrdersResponse,
+  SyncValidatePendingOrdersResponse,
+  TerminalConfigGetSettingRequest,
+  DiagnosticsAboutInfo,
+  DiagnosticsSystemHealth,
+  DiagnosticsExportOptions,
+  DiagnosticsExportResponse,
+} from './ipc-contracts';
 
 // Tauri event bridge
 export {

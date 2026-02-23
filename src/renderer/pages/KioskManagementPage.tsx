@@ -25,6 +25,8 @@ import {
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { formatCurrency, formatTime } from '../utils/format';
+import { getBridge } from '../../lib';
+import { openExternalUrl } from '../utils/electron-api';
 
 interface KioskOrder {
   id: string;
@@ -43,6 +45,7 @@ interface KioskStats {
 }
 
 const KioskManagementPage: React.FC = () => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { staff } = useShift();
@@ -68,11 +71,9 @@ const KioskManagementPage: React.FC = () => {
     setError(null);
 
     try {
-      const electron = (window as any).electronAPI;
-
       // Fetch kiosk status using POS endpoint
       // Note: fetchFromApi wraps responses in { success, data, status }
-      const statusResult = await electron?.fetchFromApi?.('/api/pos/kiosk/status');
+      const statusResult = await bridge.adminApi.fetchFromAdmin('/api/pos/kiosk/status');
 
       if (statusResult?.success && statusResult?.data?.success) {
         setIsKioskEnabled(statusResult.data.kiosk_enabled || false);
@@ -81,7 +82,7 @@ const KioskManagementPage: React.FC = () => {
       }
 
       // Fetch recent kiosk orders using POS endpoint
-      const ordersResult = await electron?.fetchFromApi?.('/api/pos/kiosk/orders?limit=10');
+      const ordersResult = await bridge.adminApi.fetchFromAdmin('/api/pos/kiosk/orders?limit=10');
 
       if (ordersResult?.success && ordersResult?.data?.success) {
         setRecentOrders(ordersResult.data.data || []);
@@ -104,7 +105,7 @@ const KioskManagementPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [bridge]);
 
   useEffect(() => {
     fetchKioskData();
@@ -114,8 +115,7 @@ const KioskManagementPage: React.FC = () => {
   const handleToggleKiosk = async () => {
     setIsToggling(true);
     try {
-      const electron = (window as any).electronAPI;
-      const result = await electron?.fetchFromApi?.(
+      const result = await bridge.adminApi.fetchFromAdmin(
         '/api/pos/kiosk/toggle',
         {
           method: 'PATCH',
@@ -137,12 +137,12 @@ const KioskManagementPage: React.FC = () => {
   };
 
   // Open kiosk in browser
-  const handleOpenKiosk = () => {
+  const handleOpenKiosk = async () => {
     if (!branchId) return;
     // Use admin dashboard URL for kiosk page
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://admin.thesmall.app';
     const kioskUrl = `${baseUrl}/kiosk/${branchId}`;
-    window.open(kioskUrl, '_blank');
+    await openExternalUrl(kioskUrl);
   };
 
   if (isLoading) {

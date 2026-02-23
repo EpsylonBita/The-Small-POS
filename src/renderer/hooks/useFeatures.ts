@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 /**
  * Feature flags interface
@@ -74,6 +75,7 @@ const DEFAULT_FEATURES: FeatureFlags = {
 import { FEATURE_KEY_MAPPING, mapServerFeaturesToLocal as mapServerToLocal } from '../../shared/feature-mapping';
 
 export function useFeatures() {
+  const bridge = getBridge();
   const [features, setFeatures] = useState<FeatureFlags>(DEFAULT_FEATURES);
   const [terminalType, setTerminalType] = useState<TerminalType | null>(null);
   const [parentTerminalId, setParentTerminalId] = useState<string | null>(null);
@@ -89,9 +91,7 @@ export function useFeatures() {
       setError(null);
 
       // Get full terminal configuration
-      const config = await (window as any).electronAPI?.ipcRenderer?.invoke(
-        'terminal-config:get-full-config'
-      );
+      const config = await bridge.terminalConfig.getFullConfig();
 
       console.log('[useFeatures] Loaded config:', config);
 
@@ -122,7 +122,7 @@ export function useFeatures() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [bridge]);
 
   /**
    * Refresh features (call after settings sync)
@@ -176,16 +176,11 @@ export function useFeatures() {
     };
 
     // Subscribe to terminal config updates
-    const unsubscribe = (window as any).electronAPI?.ipcRenderer?.on?.(
-      'terminal-config-updated',
-      (_event: any, data: any) => handleConfigUpdate(data)
-    );
+    onEvent('terminal-config-updated', handleConfigUpdate);
 
     return () => {
       mounted = false;
-      if (typeof unsubscribe === 'function') {
-        unsubscribe();
-      }
+      offEvent('terminal-config-updated', handleConfigUpdate);
     };
   }, [loadFeatures]);
 

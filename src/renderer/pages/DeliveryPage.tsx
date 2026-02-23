@@ -17,6 +17,7 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { posApiGet, posApiPost, posApiPatch } from '../utils/api-helpers';
+import { offEvent, onEvent } from '../../lib';
 import {
   Truck,
   MapPin,
@@ -107,6 +108,7 @@ const FILTER_TABS: { id: FilterTab; label: string }[] = [
   { id: 'in_transit', label: 'In Transit' },
   { id: 'delivered', label: 'Completed' },
 ];
+const DELIVERY_REFRESH_MIN_MS = 30000;
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -492,12 +494,48 @@ const DeliveryPage: React.FC = () => {
     loadData();
   }, [fetchDeliveries, fetchDrivers]);
 
-  // Auto-refresh every 30 seconds
+  // Auto-refresh from Rust-driven events.
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchDeliveries();
-    }, 30000);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastSyncRefreshAt = Date.now();
+
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        void fetchDeliveries();
+      }, delayMs);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastSyncRefreshAt < DELIVERY_REFRESH_MIN_MS) {
+        return;
+      }
+      lastSyncRefreshAt = now;
+      scheduleRefresh(300);
+    };
+
+    const handleOrderMutation = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleOrderMutation);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleOrderMutation);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
+    };
   }, [fetchDeliveries]);
 
   // Manual refresh

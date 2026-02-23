@@ -23,6 +23,8 @@ const MAX_FAILED_ATTEMPTS: u32 = 5;
 const LOCKOUT_MINUTES: i64 = 15;
 const SESSION_INACTIVITY_MINUTES: i64 = 30;
 const SESSION_MAX_DURATION_HOURS: i64 = 2;
+const LOCKOUT_ATTEMPTS_KEY: &str = "lockout_attempts";
+const LOCKOUT_LAST_ATTEMPT_KEY: &str = "lockout_last_attempt";
 
 /// Permissions granted to administrators.
 const ADMIN_PERMISSIONS: &[&str] = &[
@@ -159,6 +161,39 @@ fn record_failure(lockout: &mut LockoutEntry) {
 /// Reset the lockout counter (on successful login).
 fn reset_lockout(lockout: &mut LockoutEntry) {
     lockout.attempts = 0;
+    lockout.last_attempt = Utc::now();
+}
+
+/// Load persisted lockout state from local_settings.
+fn load_lockout_from_db(conn: &rusqlite::Connection) -> LockoutEntry {
+    let attempts = db::get_setting(conn, "staff", LOCKOUT_ATTEMPTS_KEY)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let last_attempt = db::get_setting(conn, "staff", LOCKOUT_LAST_ATTEMPT_KEY)
+        .and_then(|v| chrono::DateTime::parse_from_rfc3339(&v).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    LockoutEntry {
+        attempts,
+        last_attempt,
+    }
+}
+
+/// Persist lockout state in local_settings.
+fn persist_lockout_to_db(conn: &rusqlite::Connection, lockout: &LockoutEntry) {
+    let _ = db::set_setting(
+        conn,
+        "staff",
+        LOCKOUT_ATTEMPTS_KEY,
+        &lockout.attempts.to_string(),
+    );
+    let _ = db::set_setting(
+        conn,
+        "staff",
+        LOCKOUT_LAST_ATTEMPT_KEY,
+        &lockout.last_attempt.to_rfc3339(),
+    );
 }
 
 /// Create a new session and register it in the auth state.
@@ -223,21 +258,25 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
         return Err("PIN is required".into());
     }
 
-    // Check lockout
+    // Read PIN hashes and synchronize lockout state from durable storage.
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let persisted_lockout = load_lockout_from_db(&conn);
     {
-        let lockout = auth.lockout.lock().unwrap();
+        let mut lockout = auth.lockout.lock().unwrap();
+        *lockout = persisted_lockout;
         check_lockout(&lockout)?;
     }
 
-    // Read PIN hashes from the database
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let admin_hash = db::get_setting(&conn, "staff", "admin_pin_hash");
     let staff_hash = db::get_setting(&conn, "staff", "staff_pin_hash");
 
     // Try admin PIN first
     if let Some(ref hash) = admin_hash {
         if bcrypt::verify(&pin, hash).unwrap_or(false) {
-            reset_lockout(&mut auth.lockout.lock().unwrap());
+            let mut lockout = auth.lockout.lock().unwrap();
+            reset_lockout(&mut lockout);
+            persist_lockout_to_db(&conn, &lockout);
             info!("admin login successful");
             return Ok(create_session(auth, "admin", "admin-user"));
         }
@@ -246,14 +285,18 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     // Try staff PIN
     if let Some(ref hash) = staff_hash {
         if bcrypt::verify(&pin, hash).unwrap_or(false) {
-            reset_lockout(&mut auth.lockout.lock().unwrap());
+            let mut lockout = auth.lockout.lock().unwrap();
+            reset_lockout(&mut lockout);
+            persist_lockout_to_db(&conn, &lockout);
             info!("staff login successful");
             return Ok(create_session(auth, "staff", "staff-user"));
         }
     }
 
     // Neither matched
-    record_failure(&mut auth.lockout.lock().unwrap());
+    let mut lockout = auth.lockout.lock().unwrap();
+    record_failure(&mut lockout);
+    persist_lockout_to_db(&conn, &lockout);
     Err("Invalid PIN".into())
 }
 
@@ -386,4 +429,111 @@ pub fn track_activity(auth: &AuthState) {
 /// Handle staff-auth:get-current — return current user info or null.
 pub fn get_current_user(auth: &AuthState) -> Value {
     get_session_json(auth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn test_db_state() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    fn lockout_attempts(db_state: &db::DbState) -> u32 {
+        let conn = db_state.conn.lock().expect("db lock");
+        db::get_setting(&conn, "staff", LOCKOUT_ATTEMPTS_KEY)
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn lockout_persists_across_auth_state_restart() {
+        let db_state = test_db_state();
+        let auth_before_restart = AuthState::new();
+
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            let err = login(
+                Some(serde_json::json!({ "pin": "9999" })),
+                &db_state,
+                &auth_before_restart,
+            )
+            .expect_err("invalid login should fail");
+            assert_eq!(err, "Invalid PIN");
+        }
+
+        assert_eq!(lockout_attempts(&db_state), MAX_FAILED_ATTEMPTS);
+
+        let auth_after_restart = AuthState::new();
+        let err = login(
+            Some(serde_json::json!({ "pin": "9999" })),
+            &db_state,
+            &auth_after_restart,
+        )
+        .expect_err("lockout should remain active after restart");
+
+        assert!(
+            err.contains("Too many failed attempts"),
+            "unexpected lockout error message: {err}"
+        );
+        assert_eq!(
+            lockout_attempts(&db_state),
+            MAX_FAILED_ATTEMPTS,
+            "blocked attempt should not increment counter while lockout is active"
+        );
+    }
+
+    #[test]
+    fn successful_login_resets_persisted_lockout_after_restart() {
+        let db_state = test_db_state();
+        {
+            let conn = db_state.conn.lock().expect("db lock");
+            let admin_hash = bcrypt::hash("1234", 4).expect("hash test pin");
+            db::set_setting(&conn, "staff", "admin_pin_hash", &admin_hash)
+                .expect("store admin hash");
+        }
+
+        let auth_before_restart = AuthState::new();
+        for _ in 0..2 {
+            let err = login(
+                Some(serde_json::json!({ "pin": "9999" })),
+                &db_state,
+                &auth_before_restart,
+            )
+            .expect_err("invalid login should fail");
+            assert_eq!(err, "Invalid PIN");
+        }
+        assert_eq!(lockout_attempts(&db_state), 2);
+
+        let auth_after_restart = AuthState::new();
+        let result = login(
+            Some(serde_json::json!({ "pin": "1234" })),
+            &db_state,
+            &auth_after_restart,
+        )
+        .expect("valid login should succeed");
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            lockout_attempts(&db_state),
+            0,
+            "successful login should persist reset lockout counter"
+        );
+
+        let auth_after_second_restart = AuthState::new();
+        let err = login(
+            Some(serde_json::json!({ "pin": "9999" })),
+            &db_state,
+            &auth_after_second_restart,
+        )
+        .expect_err("invalid login should fail after reset");
+        assert_eq!(err, "Invalid PIN");
+        assert_eq!(lockout_attempts(&db_state), 1);
+    }
 }

@@ -6,7 +6,11 @@ import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useTheme } from '../../contexts/theme-context';
-import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
+import { getBridge, offEvent, onEvent } from '../../../lib';
+import {
+  getCachedTerminalCredentials,
+  getResolvedTerminalCredentials,
+} from '../../services/terminal-credentials';
 
 import { inputBase } from '../../styles/designSystem';
 
@@ -64,6 +68,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
+  const bridge = getBridge();
 
   useEffect(() => {
     let cancelled = false;
@@ -76,13 +81,10 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
     const resolveViaMainProcess = async (): Promise<boolean> => {
       try {
-        const electron = (window as any).electronAPI || (window as any).electron;
-        if (electron && typeof electron.invoke === 'function') {
-          const res = await electron.invoke('geo:ip');
-          if (res && res.ok && typeof res.latitude === 'number' && typeof res.longitude === 'number') {
-            setIfNotCancelled(res.latitude, res.longitude);
-            return true;
-          }
+        const res = await bridge.geo.ip();
+        if (res && (res as any).ok && typeof (res as any).latitude === 'number' && typeof (res as any).longitude === 'number') {
+          setIfNotCancelled((res as any).latitude, (res as any).longitude);
+          return true;
         }
       } catch (e) {
         console.warn('[AddressAutocomplete] main-process IP geolocation failed:', e);
@@ -126,23 +128,23 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
   // Resolve branch id from main (Admin-provisioned) - needed for delivery zone validation
   useEffect(() => {
-    let unsub: (() => void) | undefined
-    const electron = (window as any).electronAPI
     const resolveBranch = async () => {
       try {
-        const bid = await electron?.getTerminalBranchId?.()
+        const bid = await bridge.terminalConfig.getBranchId()
         if (bid) setTerminalBranchId(bid)
       } catch { }
     }
-    resolveBranch()
-    if (electron?.onTerminalSettingsUpdated) {
-      unsub = electron.onTerminalSettingsUpdated(async () => {
-        const bid = await electron?.getTerminalBranchId?.()
-        if (bid) setTerminalBranchId(bid)
-      })
+    const handleTerminalSettingsUpdated = () => {
+      void resolveBranch()
     }
-    return () => { if (unsub) unsub() }
-  }, []);
+    resolveBranch()
+    onEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
+    onEvent('terminal-config-updated', handleTerminalSettingsUpdated)
+    return () => {
+      offEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
+      offEvent('terminal-config-updated', handleTerminalSettingsUpdated)
+    }
+  }, [bridge.terminalConfig]);
 
   const searchAddresses = async (input: string) => {
     if (input.length < 3) {
@@ -376,6 +378,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const bridge = getBridge();
 
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const validationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -389,14 +392,23 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const isAddressOnlyMode = isAddAddressMode || isEditAddressMode;
 
   useEffect(() => {
-    const electron = (window as any).electronAPI
     const loadBid = async () => {
-      try { const bid = await electron?.getTerminalBranchId?.(); if (bid) setTerminalBranchId(bid) } catch { }
+      try {
+        const bid = await bridge.terminalConfig.getBranchId();
+        if (bid) setTerminalBranchId(bid);
+      } catch { }
+    }
+    const handleTerminalSettingsUpdated = () => {
+      void loadBid()
     }
     loadBid()
-    const unsub = electron?.onTerminalSettingsUpdated?.(loadBid)
-    return () => { if (typeof unsub === 'function') unsub() }
-  }, []);
+    onEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
+    onEvent('terminal-config-updated', handleTerminalSettingsUpdated)
+    return () => {
+      offEvent('terminal-settings-updated', handleTerminalSettingsUpdated)
+      offEvent('terminal-config-updated', handleTerminalSettingsUpdated)
+    }
+  }, [bridge.terminalConfig]);
 
   const [formData, setFormData] = useState({
     phone: '',
@@ -623,7 +635,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: addr + ', Greece',
-          branchId: terminalBranchId || localStorage.getItem('branch_id') || undefined,
+          branchId: terminalBranchId || getCachedTerminalCredentials().branchId || undefined,
         }),
       });
       if (!searchRes.ok) {
@@ -681,47 +693,34 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       console.log('📡 Calling API:', apiUrl);
 
       // Get API credentials for authentication
-      const electron = (window as any).electronAPI;
       let posKey = '';
       let termId = '';
 
-      // Log available electron methods for debugging
-      console.log('[validateDeliveryAddress] electronAPI available:', !!electron);
-      if (electron) {
-        console.log('[validateDeliveryAddress] getTerminalApiKey available:', typeof electron.getTerminalApiKey);
-        console.log('[validateDeliveryAddress] getTerminalId available:', typeof electron.getTerminalId);
-        console.log('[validateDeliveryAddress] getTerminalSetting available:', typeof electron.getTerminalSetting);
-      }
-
       try {
-        // Try the new dedicated method first
-        if (electron && typeof electron.getTerminalApiKey === 'function') {
-          posKey = (await electron.getTerminalApiKey()) || '';
-          console.log('[validateDeliveryAddress] Got API key from getTerminalApiKey:', posKey ? `(len: ${posKey.length})` : '(empty)');
+        const [apiKeyResult, terminalIdResult] = await Promise.allSettled([
+          bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
+          bridge.terminalConfig.getTerminalId(),
+        ]);
+        if (apiKeyResult.status === 'fulfilled') {
+          posKey = (apiKeyResult.value || '').toString().trim();
+          console.log('[validateDeliveryAddress] Got API key from bridge:', posKey ? `(len: ${posKey.length})` : '(empty)');
         }
-        // Fallback to getTerminalSetting if getTerminalApiKey doesn't exist
-        if (!posKey && electron && typeof electron.getTerminalSetting === 'function') {
-          posKey = (await electron.getTerminalSetting('terminal', 'pos_api_key')) || '';
-          console.log('[validateDeliveryAddress] Got API key from getTerminalSetting:', posKey ? `(len: ${posKey.length})` : '(empty)');
-        }
-        if (electron && typeof electron.getTerminalId === 'function') {
-          termId = (await electron.getTerminalId()) || '';
-          console.log('[validateDeliveryAddress] Got terminal ID from getTerminalId:', termId || '(empty)');
+        if (terminalIdResult.status === 'fulfilled') {
+          termId = (terminalIdResult.value || '').toString().trim();
+          console.log('[validateDeliveryAddress] Got terminal ID from bridge:', termId || '(empty)');
         }
       } catch (e) {
-        console.warn('[validateDeliveryAddress] Error getting credentials from main process:', e);
+        console.warn('[validateDeliveryAddress] Error getting credentials from bridge:', e);
       }
 
-      // Fallback to localStorage
-      const ls = typeof window !== 'undefined' ? window.localStorage : null;
-      const refreshed = await refreshTerminalCredentialCache();
+      const refreshed = await getResolvedTerminalCredentials();
       if (!posKey) {
         posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
         console.log('[validateDeliveryAddress] Got API key from credential cache:', posKey ? '(present)' : '(empty)');
       }
       if (!termId) {
-        termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim();
-        console.log('[validateDeliveryAddress] Got terminal ID from localStorage:', termId || '(empty)');
+        termId = (refreshed.terminalId || getCachedTerminalCredentials().terminalId || '').trim();
+        console.log('[validateDeliveryAddress] Got terminal ID from credential cache:', termId || '(empty)');
       }
 
       console.log('[validateDeliveryAddress] Final credentials - posKey:', posKey ? `(len: ${posKey.length})` : '(empty)', 'termId:', termId || '(empty)');
@@ -741,7 +740,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           address,
           coordinates: coords,
           orderAmount: 0, // Default for customer creation
-          branchId: terminalBranchId || localStorage.getItem('branch_id') || undefined,
+          branchId: terminalBranchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined,
         }),
       });
 
@@ -838,34 +837,28 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     console.log('[AddCustomerModal.handleSubmit] Starting submission...');
 
     try {
-      // Get credentials from main process first (where connection string is stored), then localStorage fallback
-      const ls = typeof window !== 'undefined' ? window.localStorage : null
-      const electron = typeof window !== 'undefined' ? window.electron : undefined
-
+      // Get credentials from secure main-process/IPC context
       let posKey = ''
       let termId = ''
 
-      // Try to get credentials from main process via IPC (most reliable)
+      // Try to get credentials from typed bridge (most reliable)
       try {
-        if (electron?.ipcRenderer) {
-          const [mainTerminalId, mainApiKey] = await Promise.all([
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'terminal_id'),
-            electron.ipcRenderer.invoke('terminal-config:get-setting', 'terminal', 'pos_api_key'),
-          ])
-          termId = (mainTerminalId || '').toString().trim()
-          posKey = (mainApiKey || '').toString().trim()
-        }
+        const [mainTerminalId, mainApiKey] = await Promise.all([
+          bridge.terminalConfig.getTerminalId(),
+          bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
+        ])
+        termId = (mainTerminalId || '').toString().trim()
+        posKey = (mainApiKey || '').toString().trim()
       } catch (e) {
-        console.warn('[AddCustomerModal] Failed to get credentials from main process:', e)
+        console.warn('[AddCustomerModal] Failed to get credentials from bridge:', e)
       }
 
-      // Fallback to localStorage if main process didn't have credentials
-      const refreshed = await refreshTerminalCredentialCache()
+      const refreshed = await getResolvedTerminalCredentials()
       if (!posKey) {
         posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim()
       }
       if (!termId) {
-        termId = (refreshed.terminalId || ls?.getItem('terminal_id') || '').trim()
+        termId = (refreshed.terminalId || getCachedTerminalCredentials().terminalId || '').trim()
       }
 
       // Build headers with authentication
@@ -1011,9 +1004,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             console.log('[AddCustomerModal] No version found, fetching fresh customer data...');
             try {
               // First invalidate cache to ensure we get fresh data
-              await window.electronAPI?.customerInvalidateCache?.(initialCustomer.phone);
+              await bridge.customers.invalidateCache(initialCustomer.phone);
 
-              const freshCustomer = await window.electronAPI?.customerLookupByPhone?.(initialCustomer.phone);
+              const freshCustomer = await bridge.customers.lookupByPhone(initialCustomer.phone);
               console.log('[AddCustomerModal] Fresh customer data:', JSON.stringify(freshCustomer, null, 2));
               if (freshCustomer?.version !== undefined && freshCustomer?.version !== null) {
                 currentVersion = freshCustomer.version;
@@ -1168,7 +1161,8 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       title={getModalTitle()}
-      size="lg"
+      size="sm"
+      className="!max-w-lg"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

@@ -4,17 +4,20 @@ import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
+import CashRegisterSection from '../peripherals/CashRegisterSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
+import { useHardwareManager } from '../../hooks/useHardwareManager';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../../services/terminal-credentials';
+import { getBridge } from '../../../lib';
 
 interface Props {
   isOpen: boolean
@@ -47,6 +50,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
+  const bridge = getBridge()
   const [terminalId, setTerminalId] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [adminDashboardUrl, setAdminDashboardUrl] = useState('')
@@ -72,18 +76,33 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
   const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
 
+  const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
+  // Peripheral settings state
+  const [scaleEnabled, setScaleEnabled] = useState(false)
+  const [scalePort, setScalePort] = useState('COM3')
+  const [scaleBaudRate, setScaleBaudRate] = useState('9600')
+  const [scaleProtocol, setScaleProtocol] = useState('generic')
+  const [displayEnabled, setDisplayEnabled] = useState(false)
+  const [displayConnectionType, setDisplayConnectionType] = useState('serial')
+  const [displayPort, setDisplayPort] = useState('COM4')
+  const [displayBaudRate, setDisplayBaudRate] = useState('9600')
+  const [displayTcpPort, setDisplayTcpPort] = useState('9100')
+  const [scannerEnabled, setScannerEnabled] = useState(false)
+  const [scannerPort, setScannerPort] = useState('COM2')
+  const [scannerBaudRate, setScannerBaudRate] = useState('9600')
+  const [cardReaderEnabled, setCardReaderEnabled] = useState(false)
+  const [loyaltyEnabled, setLoyaltyEnabled] = useState(false)
 
-
+  const { status: hardwareStatus } = useHardwareManager()
 
   useEffect(() => {
     if (!isOpen) return
-    const lsTerminal = localStorage.getItem('terminal_id') || getCachedTerminalCredentials().terminalId || ''
+    const lsTerminal = getCachedTerminalCredentials().terminalId || ''
     const lsApiKey = getCachedTerminalCredentials().apiKey || ''
-    const lsPin = localStorage.getItem('staff.simple_pin') || ''
     setTerminalId(lsTerminal)
     setApiKey(lsApiKey)
     setAdminDashboardUrl(normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || ''))
-    setPin(lsPin)
+    setPin('')
     void refreshTerminalCredentialCache().then((resolved) => {
       if (resolved.terminalId) setTerminalId(resolved.terminalId)
       if (resolved.apiKey) setApiKey(resolved.apiKey)
@@ -91,7 +110,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
     void (async () => {
       try {
-        const stored = await window.electron?.ipcRenderer?.invoke('settings:get-admin-url')
+        const stored = await bridge.settings.getAdminUrl()
         const normalized = normalizeAdminDashboardUrl((stored || '').toString())
         if (normalized) {
           setAdminDashboardUrl(normalized)
@@ -105,10 +124,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     // Load session timeout settings from main process
     const loadSecuritySettings = async () => {
       try {
-        const enabled = await window.electron?.ipcRenderer?.invoke('settings:get', 'system', 'session_timeout_enabled')
-        const minutes = await window.electron?.ipcRenderer?.invoke('settings:get', 'system', 'session_timeout_minutes')
-        setSessionTimeoutEnabled(enabled ?? false)
-        setSessionTimeoutMinutes(String(minutes ?? 15))
+        const enabled = await bridge.settings.get('system', 'session_timeout_enabled')
+        const minutes = await bridge.settings.get('system', 'session_timeout_minutes')
+        const enabledNormalized =
+          enabled === true ||
+          enabled === 1 ||
+          (typeof enabled === 'string' && ['true', '1', 'yes', 'on'].includes(enabled.toLowerCase()))
+        const minutesParsed = Number(minutes)
+        setSessionTimeoutEnabled(enabledNormalized)
+        setSessionTimeoutMinutes(String(Number.isFinite(minutesParsed) && minutesParsed > 0 ? minutesParsed : 15))
       } catch (e) {
         console.warn('Failed to load security settings:', e)
       }
@@ -129,19 +153,18 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
 
     // Check if terminal ID or API key changed
-    const oldTerminalId = localStorage.getItem('terminal_id')
+    const oldTerminalId = getCachedTerminalCredentials().terminalId
     const oldApiKey = getCachedTerminalCredentials().apiKey
     const oldAdminDashboardUrl = normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || '')
     const hasChanged = oldTerminalId !== terminalId || oldApiKey !== apiKey
     const hasAdminUrlChanged = oldAdminDashboardUrl !== normalizedAdminDashboardUrl
 
-    localStorage.setItem('terminal_id', terminalId)
     localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
     updateTerminalCredentialCache({ terminalId, apiKey })
 
     try {
       // Persist under the correct category ('terminal'), not 'pos'
-      await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-local', {
+      await bridge.settings.updateLocal({
         settingType: 'terminal',
         settings: {
           terminal_id: terminalId,
@@ -156,12 +179,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     // Try to pull branch_id from Admin-provisioned terminal config via main process
     try {
       // Ask main to refresh terminal settings (Supabase -> local cache)
-      await (window as any)?.electronAPI?.refreshTerminalSettings?.()
-      const bid = await (window as any)?.electronAPI?.getTerminalBranchId?.()
+      await bridge.terminalConfig.refresh()
+      const bid = await bridge.terminalConfig.getBranchId()
       if (bid) {
-        localStorage.setItem('branch_id', bid)
+        updateTerminalCredentialCache({ branchId: bid })
         try {
-          await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-local', {
+          await bridge.settings.updateLocal({
             settingType: 'terminal',
             settings: { branch_id: bid }
           })
@@ -187,16 +210,16 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         let resolvedAdminDashboardUrl = ''
         try {
           resolvedAdminDashboardUrl =
-            ((await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:get-admin-url')) || '').toString()
+            ((await bridge.settings.getAdminUrl()) || '').toString()
         } catch (resolveError) {
           console.warn('[ConnectionSettings] Failed to resolve admin dashboard URL before credential update:', resolveError)
         }
 
         // Update terminal credentials in the sync service
-        await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-terminal-credentials', {
+        await bridge.settings.updateTerminalCredentials({
           terminalId,
           apiKey,
-          adminDashboardUrl: normalizeAdminDashboardUrl(resolvedAdminDashboardUrl) || normalizedAdminDashboardUrl
+          adminUrl: normalizeAdminDashboardUrl(resolvedAdminDashboardUrl) || normalizedAdminDashboardUrl
         })
 
         toast.success(t('modals.connectionSettings.connectionSaved') + ' - Syncing data...')
@@ -221,15 +244,14 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       toast.error(t('modals.connectionSettings.pinNoMatch'))
       return
     }
-    localStorage.setItem('staff.simple_pin', pin)
-
     try {
-      await (window as any)?.electronAPI?.ipcRenderer?.invoke('settings:update-local', {
-        settingType: 'staff',
-        settings: { simple_pin: pin }
+      await bridge.auth.setupPin({
+        staffPin: pin
       })
     } catch (e) {
-      console.warn('Failed to persist PIN settings to main process:', e)
+      console.warn('Failed to persist secure PIN hash to main process:', e)
+      toast.error(t('modals.connectionSettings.pinSaveError', { defaultValue: 'Failed to save PIN' }))
+      return
     }
 
     toast.success(t('modals.connectionSettings.pinSaved'))
@@ -243,7 +265,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   const handleToggleSessionTimeout = async (enabled: boolean) => {
     try {
-      await window.electron?.ipcRenderer?.invoke('settings:update-local', {
+      await bridge.settings.updateLocal({
         settingType: 'system',
         settings: { session_timeout_enabled: enabled }
       })
@@ -264,7 +286,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       return
     }
     try {
-      await window.electron?.ipcRenderer?.invoke('settings:update-local', {
+      await bridge.settings.updateLocal({
         settingType: 'system',
         settings: { session_timeout_minutes: minutes }
       })
@@ -288,13 +310,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
       // If browser clipboard failed or returned empty, try Electron clipboard (if available)
       if (!clipboardText && typeof window !== 'undefined') {
-        const electronAPI = (window as any).electron || (window as any).electronAPI
-        if (electronAPI && typeof electronAPI.clipboard?.readText === 'function') {
-          try {
-            clipboardText = await electronAPI.clipboard.readText()
-          } catch (electronClipboardError: any) {
-            console.warn('[Paste Both] Electron clipboard failed, will fall back to manual paste:', electronClipboardError?.message)
-          }
+        try {
+          clipboardText = await bridge.clipboard.readText()
+        } catch (bridgeClipboardError: any) {
+          console.warn('[Paste Both] Bridge clipboard failed, will fall back to manual paste:', bridgeClipboardError?.message)
         }
       }
 
@@ -392,7 +411,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setIsResetting(true)
     try {
       // Call the factory reset handler in main process
-      const result = await window.electron?.ipcRenderer?.invoke('settings:factory-reset')
+      const result = await bridge.settings.factoryReset()
 
       if (result?.success) {
         // Clear all localStorage
@@ -404,7 +423,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         // Restart the app to go back to onboarding
         setTimeout(async () => {
           try {
-            await window.electron?.ipcRenderer?.invoke('app:restart')
+            await bridge.app.restart()
           } catch (e) {
             console.error('Failed to restart app, falling back to reload:', e)
             window.location.reload()
@@ -428,6 +447,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onClose={onClose}
       title={t('modals.connectionSettings.title')}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
@@ -789,7 +809,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <button
                     onClick={async () => {
                       try {
-                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all')
+                        const result = await bridge.sync.clearAll() as any
                         if (result?.success) {
                           toast.success(t('settings.database.syncQueueCleared', { count: result.cleared }))
                         } else {
@@ -817,7 +837,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <button
                     onClick={async () => {
                       try {
-                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-old-orders')
+                        const result = await bridge.sync.clearOldOrders() as any
                         if (result?.success) {
                           toast.success(t('settings.database.oldOrdersCleared', { count: result.cleared }) || `Cleared ${result.cleared} old orders`)
                         } else {
@@ -845,7 +865,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <button
                     onClick={async () => {
                       try {
-                        const result = await (window as any)?.electronAPI?.invoke?.('sync:clear-all-orders')
+                        const result = await bridge.sync.clearAllOrders() as any
                         if (result?.success) {
                           toast.success(t('settings.database.allOrdersCleared', `Cleared ${result.cleared} orders`))
                         } else {
@@ -873,7 +893,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <button
                     onClick={async () => {
                       try {
-                        const result = await (window as any)?.electronAPI?.invoke?.('sync:cleanup-deleted-orders')
+                        const result = await bridge.sync.cleanupDeletedOrders() as any
                         if (result?.success) {
                           toast.success(t('settings.database.deletedOrdersSynced', { count: result.deleted, checked: result.checked }) || `Synced: removed ${result.deleted} deleted orders (checked ${result.checked})`)
                         } else {
@@ -922,6 +942,309 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   </button>
                 </div>
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Peripherals Settings */}
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPeripheralsSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+          <button
+            onClick={() => setShowPeripheralsSettings(!showPeripheralsSettings)}
+            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
+          >
+            <div className="flex items-center gap-3">
+              <Cable className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
+              <div className="text-left">
+                <span className="font-medium block">{t('settings.peripherals.title', 'Peripherals')}</span>
+                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.helpText', 'Configure external hardware devices')}</span>
+              </div>
+            </div>
+            <ChevronDown className={`w-5 h-5 transition-transform ${showPeripheralsSettings ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showPeripheralsSettings && (
+            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
+
+              {/* --- Weighing Scale --- */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scale.title', 'Weighing Scale')}</span>
+                    {hardwareStatus?.scale?.connected && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+                        {t('settings.peripherals.scale.connected', 'Connected')}
+                      </span>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={scaleEnabled} onChange={(e) => setScaleEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                {scaleEnabled && (
+                  <div className="grid grid-cols-2 gap-3 pl-1">
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.port', 'COM Port')}</label>
+                      <input value={scalePort} onChange={e => setScalePort(e.target.value)} className="liquid-glass-modal-input" placeholder="COM3" />
+                    </div>
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.baudRate', 'Baud Rate')}</label>
+                      <select value={scaleBaudRate} onChange={e => setScaleBaudRate(e.target.value)} className="liquid-glass-modal-input">
+                        <option value="2400">2400</option>
+                        <option value="4800">4800</option>
+                        <option value="9600">9600</option>
+                        <option value="19200">19200</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scale.protocol', 'Protocol')}</label>
+                      <select value={scaleProtocol} onChange={e => setScaleProtocol(e.target.value)} className="liquid-glass-modal-input">
+                        <option value="generic">{t('settings.peripherals.scale.protocolGeneric', 'Generic')}</option>
+                        <option value="toledo">{t('settings.peripherals.scale.protocolToledo', 'Toledo / Mettler-Toledo')}</option>
+                        <option value="cas">{t('settings.peripherals.scale.protocolCas', 'CAS')}</option>
+                      </select>
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={async () => {
+                          try {
+                            if (hardwareStatus?.scale?.connected) {
+                              await bridge.invoke('scale_disconnect')
+                            } else {
+                              await bridge.invoke('scale_connect', { port: scalePort, baud_rate: Number(scaleBaudRate), protocol: scaleProtocol })
+                            }
+                          } catch (e) { console.error('Scale action failed:', e) }
+                        }}
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                          hardwareStatus?.scale?.connected
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
+                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                        }`}
+                      >
+                        {hardwareStatus?.scale?.connected
+                          ? t('settings.peripherals.scale.disconnect', 'Disconnect')
+                          : t('settings.peripherals.scale.connect', 'Connect')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Customer Display --- */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.display.title', 'Customer Display')}</span>
+                    {hardwareStatus?.customerDisplay?.connected && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+                        {t('settings.peripherals.scale.connected', 'Connected')}
+                      </span>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={displayEnabled} onChange={(e) => setDisplayEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                {displayEnabled && (
+                  <div className="grid grid-cols-2 gap-3 pl-1">
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.connectionType', 'Connection Type')}</label>
+                      <select value={displayConnectionType} onChange={e => setDisplayConnectionType(e.target.value)} className="liquid-glass-modal-input">
+                        <option value="serial">{t('settings.peripherals.display.serial', 'Serial (COM)')}</option>
+                        <option value="network">{t('settings.peripherals.display.network', 'Network (TCP)')}</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.portOrIp', 'Port / IP Address')}</label>
+                      <input value={displayPort} onChange={e => setDisplayPort(e.target.value)} className="liquid-glass-modal-input" placeholder={displayConnectionType === 'network' ? '192.168.1.100' : 'COM4'} />
+                    </div>
+                    {displayConnectionType === 'serial' && (
+                      <div>
+                        <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.baudRate', 'Baud Rate')}</label>
+                        <select value={displayBaudRate} onChange={e => setDisplayBaudRate(e.target.value)} className="liquid-glass-modal-input">
+                          <option value="2400">2400</option>
+                          <option value="4800">4800</option>
+                          <option value="9600">9600</option>
+                          <option value="19200">19200</option>
+                        </select>
+                      </div>
+                    )}
+                    {displayConnectionType === 'network' && (
+                      <div>
+                        <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.display.tcpPort', 'TCP Port')}</label>
+                        <input type="number" value={displayTcpPort} onChange={e => setDisplayTcpPort(e.target.value)} className="liquid-glass-modal-input" placeholder="9100" />
+                      </div>
+                    )}
+                    <div className="flex items-end">
+                      <button
+                        onClick={async () => {
+                          try {
+                            if (hardwareStatus?.customerDisplay?.connected) {
+                              await bridge.invoke('display_disconnect')
+                            } else {
+                              await bridge.invoke('display_connect', {
+                                connection_type: displayConnectionType,
+                                port_or_ip: displayPort,
+                                port_number: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
+                                baud_rate: displayConnectionType === 'serial' ? Number(displayBaudRate) : null,
+                              })
+                            }
+                          } catch (e) { console.error('Display action failed:', e) }
+                        }}
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                          hardwareStatus?.customerDisplay?.connected
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
+                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                        }`}
+                      >
+                        {hardwareStatus?.customerDisplay?.connected
+                          ? t('settings.peripherals.scale.disconnect', 'Disconnect')
+                          : t('settings.peripherals.scale.connect', 'Connect')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Serial Barcode Scanner --- */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.scanner.title', 'Serial Barcode Scanner')}</span>
+                    {hardwareStatus?.serialScanner?.connected && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+                        {t('settings.peripherals.scanner.running', 'Running')}
+                      </span>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={scannerEnabled} onChange={(e) => setScannerEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                <p className={`text-xs liquid-glass-modal-text-muted -mt-1`}>{t('settings.peripherals.scanner.keyboardNote', 'Keyboard-wedge scanners work automatically — no configuration needed')}</p>
+                {scannerEnabled && (
+                  <div className="grid grid-cols-2 gap-3 pl-1">
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scanner.port', 'COM Port')}</label>
+                      <input value={scannerPort} onChange={e => setScannerPort(e.target.value)} className="liquid-glass-modal-input" placeholder="COM2" />
+                    </div>
+                    <div>
+                      <label className={`block text-xs font-medium mb-1 liquid-glass-modal-text-muted`}>{t('settings.peripherals.scanner.baudRate', 'Baud Rate')}</label>
+                      <select value={scannerBaudRate} onChange={e => setScannerBaudRate(e.target.value)} className="liquid-glass-modal-input">
+                        <option value="2400">2400</option>
+                        <option value="4800">4800</option>
+                        <option value="9600">9600</option>
+                        <option value="19200">19200</option>
+                      </select>
+                    </div>
+                    <div className="col-span-2">
+                      <button
+                        onClick={async () => {
+                          try {
+                            if (hardwareStatus?.serialScanner?.connected) {
+                              await bridge.invoke('scanner_serial_stop')
+                            } else {
+                              await bridge.invoke('scanner_serial_start', { port: scannerPort, baud_rate: Number(scannerBaudRate) })
+                            }
+                          } catch (e) { console.error('Scanner action failed:', e) }
+                        }}
+                        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                          hardwareStatus?.serialScanner?.connected
+                            ? 'bg-red-500/20 border border-red-500/50 text-red-300 hover:bg-red-500/30'
+                            : 'bg-cyan-500/20 border border-cyan-500/50 text-cyan-300 hover:bg-cyan-500/30'
+                        }`}
+                      >
+                        {hardwareStatus?.serialScanner?.connected
+                          ? t('settings.peripherals.scanner.stop', 'Stop')
+                          : t('settings.peripherals.scanner.start', 'Start')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Card Reader (MSR) --- */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.cardReader.title', 'Card Reader (MSR)')}</span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={cardReaderEnabled} onChange={(e) => setCardReaderEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.cardReader.plugAndPlay', 'Magnetic stripe readers work via keyboard input — plug and play')}</p>
+              </div>
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Loyalty / NFC Reader --- */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`font-medium text-sm liquid-glass-modal-text`}>{t('settings.peripherals.loyaltyReader.title', 'Loyalty / NFC Reader')}</span>
+                    {hardwareStatus?.loyaltyReader?.connected && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">
+                        {t('settings.peripherals.scanner.running', 'Running')}
+                      </span>
+                    )}
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={loyaltyEnabled} onChange={(e) => setLoyaltyEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                <p className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.loyaltyReader.tapNote', 'NFC readers work via keyboard input — tap card to detect')}</p>
+              </div>
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Cash Register / Fiscal Printer --- */}
+              <CashRegisterSection />
+
+              {/* Save Peripherals Button */}
+              <div className="pt-2 border-t liquid-glass-modal-border">
+                <button
+                  onClick={async () => {
+                    try {
+                      await bridge.settings.updateLocal({
+                        settingType: 'hardware',
+                        settings: {
+                          scale_enabled: scaleEnabled,
+                          scale_port: scalePort,
+                          scale_baud_rate: Number(scaleBaudRate),
+                          scale_protocol: scaleProtocol,
+                          customer_display_enabled: displayEnabled,
+                          display_connection_type: displayConnectionType,
+                          display_port: displayPort,
+                          display_baud_rate: Number(displayBaudRate),
+                          display_tcp_port: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
+                          barcode_scanner_enabled: scannerEnabled,
+                          barcode_scanner_port: scannerPort,
+                          scanner_baud_rate: Number(scannerBaudRate),
+                          card_reader_enabled: cardReaderEnabled,
+                          loyalty_card_reader: loyaltyEnabled,
+                        }
+                      })
+                      toast.success(t('settings.peripherals.saved', 'Peripheral settings saved'))
+                    } catch (e) {
+                      console.error('Failed to save peripheral settings:', e)
+                      toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
+                    }
+                  }}
+                  className={liquidGlassModalButton('primary', 'md')}
+                >
+                  {t('common.actions.save', 'Save')}
+                </button>
+              </div>
+
             </div>
           )}
         </div>
@@ -983,7 +1306,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onConfirm={async () => {
         setIsClearingOperational(true)
         try {
-          const result = await (window as any)?.electronAPI?.ipcRenderer?.invoke('database:clear-operational-data')
+          const result = await bridge.database.clearOperationalData()
           if (result?.success) {
             toast.success(t('settings.database.operationalCleared', 'All operational data cleared successfully'))
             setShowClearOperationalConfirm(false)

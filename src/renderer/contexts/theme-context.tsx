@@ -36,6 +36,26 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
     return (hour >= 6 && hour < 18) ? 'light' : 'dark'
   }
 
+  // In auto mode, theme only changes at 06:00 and 18:00 local time.
+  // Schedule a one-shot timer for the next boundary instead of polling.
+  const getMsUntilNextBoundary = (): number => {
+    const now = new Date()
+    const next = new Date(now)
+    const hour = now.getHours()
+
+    if (hour < 6) {
+      next.setHours(6, 0, 0, 0)
+    } else if (hour < 18) {
+      next.setHours(18, 0, 0, 0)
+    } else {
+      next.setDate(next.getDate() + 1)
+      next.setHours(6, 0, 0, 0)
+    }
+
+    const diff = next.getTime() - now.getTime()
+    return Math.max(diff, 1000)
+  }
+
   // Update resolved theme based on current theme setting
   useEffect(() => {
     const updateResolvedTheme = () => {
@@ -48,14 +68,21 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
 
     updateResolvedTheme()
 
-    // Set up interval to check time every minute for auto theme
-    let interval: NodeJS.Timeout | null = null
+    let timeout: ReturnType<typeof setTimeout> | null = null
+    const scheduleNextAutoUpdate = () => {
+      if (theme !== 'auto') return
+      timeout = setTimeout(() => {
+        updateResolvedTheme()
+        scheduleNextAutoUpdate()
+      }, getMsUntilNextBoundary())
+    }
+
     if (theme === 'auto') {
-      interval = setInterval(updateResolvedTheme, 60000) // Check every minute
+      scheduleNextAutoUpdate()
     }
 
     return () => {
-      if (interval) clearInterval(interval)
+      if (timeout) clearTimeout(timeout)
     }
   }, [theme])
 

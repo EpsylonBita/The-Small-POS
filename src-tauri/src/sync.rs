@@ -14,12 +14,59 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::api;
 use crate::db::DbState;
 use crate::storage;
+
+// ---------------------------------------------------------------------------
+// Auth failure detection
+// ---------------------------------------------------------------------------
+
+fn is_terminal_auth_failure(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("invalid api key for terminal")
+        || lower.contains("terminal identity mismatch")
+        || lower.contains("api key is invalid or expired")
+        || lower.contains("terminal not authorized")
+}
+
+/// Perform a full factory reset triggered by terminal deletion detection.
+/// Clears all operational data, local settings, menu cache, and credentials,
+/// then emits events so the frontend redirects to onboarding.
+fn factory_reset_from_sync(db: &DbState, app: &AppHandle) {
+    warn!("Terminal deleted or deactivated — performing automatic factory reset");
+
+    if let Ok(conn) = db.conn.lock() {
+        let _ = conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM payment_adjustments;
+             DELETE FROM order_payments;
+             DELETE FROM shift_expenses;
+             DELETE FROM cash_drawer_sessions;
+             DELETE FROM staff_shifts;
+             DELETE FROM print_jobs;
+             DELETE FROM z_reports;
+             DELETE FROM sync_queue;
+             DELETE FROM orders;
+             DELETE FROM local_settings;
+             DELETE FROM menu_cache;
+             COMMIT;",
+        );
+    }
+
+    let _ = storage::factory_reset();
+    let _ = app.emit(
+        "app_reset",
+        serde_json::json!({ "reason": "terminal_deleted" }),
+    );
+    let _ = app.emit(
+        "terminal_disabled",
+        serde_json::json!({ "reason": "terminal_deleted" }),
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Sync engine state (managed by Tauri)
@@ -41,6 +88,128 @@ const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
 #[allow(dead_code)]
 const ORDER_DIRECT_FALLBACK_QUEUE_AGE_SEC: i64 = 600;
+
+#[derive(Debug, Clone, Default)]
+struct FinancialSyncStats {
+    pending_payments: i64,
+    failed_payments: i64,
+    pending_adjustments: i64,
+    failed_adjustments: i64,
+    pending_driver_earnings: i64,
+    failed_driver_earnings: i64,
+    pending_staff_payments: i64,
+    failed_staff_payments: i64,
+    pending_shift_expenses: i64,
+    failed_shift_expenses: i64,
+}
+
+impl FinancialSyncStats {
+    fn pending_payment_items(&self) -> i64 {
+        self.pending_payments + self.pending_adjustments
+    }
+
+    fn failed_payment_items(&self) -> i64 {
+        self.failed_payments + self.failed_adjustments
+    }
+
+    fn total_pending(&self) -> i64 {
+        self.pending_payment_items()
+            + self.pending_driver_earnings
+            + self.pending_staff_payments
+            + self.pending_shift_expenses
+    }
+
+    fn total_failed(&self) -> i64 {
+        self.failed_payment_items()
+            + self.failed_driver_earnings
+            + self.failed_staff_payments
+            + self.failed_shift_expenses
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "driver_earnings": {
+                "pending": self.pending_driver_earnings,
+                "failed": self.failed_driver_earnings,
+            },
+            "staff_payments": {
+                "pending": self.pending_staff_payments,
+                "failed": self.failed_staff_payments,
+            },
+            "shift_expenses": {
+                "pending": self.pending_shift_expenses,
+                "failed": self.failed_shift_expenses,
+            },
+            "payments": {
+                "pending": self.pending_payment_items(),
+                "failed": self.failed_payment_items(),
+            },
+            // Compatibility aliases for legacy UI call sites
+            "pendingPayments": self.pending_payments,
+            "failedPayments": self.failed_payments,
+            "pendingAdjustments": self.pending_adjustments,
+            "failedAdjustments": self.failed_adjustments,
+            "pendingPaymentItems": self.pending_payment_items(),
+            "failedPaymentItems": self.failed_payment_items(),
+            "totalPending": self.total_pending(),
+            "totalFailed": self.total_failed(),
+        })
+    }
+}
+
+fn count_sync_queue_rows(conn: &rusqlite::Connection, where_clause: &str) -> i64 {
+    let query = format!("SELECT COUNT(*) FROM sync_queue WHERE {where_clause}");
+    conn.query_row(&query, [], |row| row.get(0)).unwrap_or(0)
+}
+
+fn collect_financial_sync_stats(conn: &rusqlite::Connection) -> FinancialSyncStats {
+    // Include deferred/queued rows because they still represent unsynced work.
+    let pending_states = "('pending', 'in_progress', 'queued_remote', 'deferred')";
+    let failed_states = "('failed')";
+
+    FinancialSyncStats {
+        pending_payments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type IN ('payment', 'order_payment') AND status IN {pending_states}"),
+        ),
+        failed_payments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type IN ('payment', 'order_payment') AND status IN {failed_states}"),
+        ),
+        pending_adjustments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'payment_adjustment' AND status IN {pending_states}"),
+        ),
+        failed_adjustments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'payment_adjustment' AND status IN {failed_states}"),
+        ),
+        pending_driver_earnings: count_sync_queue_rows(
+            conn,
+            &format!("entity_type IN ('driver_earning', 'driver_earnings') AND status IN {pending_states}"),
+        ),
+        failed_driver_earnings: count_sync_queue_rows(
+            conn,
+            &format!("entity_type IN ('driver_earning', 'driver_earnings') AND status IN {failed_states}"),
+        ),
+        pending_staff_payments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'staff_payment' AND status IN {pending_states}"),
+        ),
+        failed_staff_payments: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'staff_payment' AND status IN {failed_states}"),
+        ),
+        pending_shift_expenses: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'shift_expense' AND status IN {pending_states}"),
+        ),
+        failed_shift_expenses: count_sync_queue_rows(
+            conn,
+            &format!("entity_type = 'shift_expense' AND status IN {failed_states}"),
+        ),
+    }
+}
 
 impl SyncState {
     pub fn new() -> Self {
@@ -678,6 +847,8 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         .ok()
         .flatten();
 
+    let financial_stats = collect_financial_sync_stats(&conn);
+
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
     let pending_total = pending + queued_remote;
@@ -698,7 +869,17 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
+        "pendingPaymentItems": financial_stats.pending_payment_items(),
+        "failedPaymentItems": financial_stats.failed_payment_items(),
+        "financialStats": financial_stats.to_json(),
     }))
+}
+
+/// Get financial sync queue statistics in UI-friendly and compatibility formats.
+pub fn get_financial_stats(db: &DbState) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let stats = collect_financial_sync_stats(&conn);
+    Ok(stats.to_json())
 }
 
 /// Quick network check: HEAD request to admin URL.
@@ -754,6 +935,7 @@ pub fn start_sync_loop(
 
     tauri::async_runtime::spawn(async move {
         info!("Sync loop started (interval: {interval_secs}s)");
+        let mut previous_network_online: Option<bool> = None;
 
         loop {
             if !is_running.load(Ordering::SeqCst) {
@@ -767,10 +949,41 @@ pub fn start_sync_loop(
                 break;
             }
 
-            // Only sync if configured
+            // Emit network status every cycle so renderer indicators can
+            // stay event-driven without command polling.
+            let network_status = check_network_status().await;
+            let network_is_online = network_status
+                .get("isOnline")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let _ = app.emit("network_status", &network_status);
+
+            // If terminal is not configured yet, still emit sync status so
+            // UI state remains consistent.
             if !storage::is_configured() {
+                previous_network_online = None;
+                let status = get_sync_status_for_event(&db, &last_sync, network_is_online);
+                let _ = app.emit("sync_status", &status);
+                let _ = app.emit("sync-status-changed", &status);
                 continue;
             }
+
+            if !network_is_online {
+                if previous_network_online != Some(false) {
+                    info!("Network offline; deferring remote sync and keeping queue pending");
+                }
+                previous_network_online = Some(false);
+
+                let status = get_sync_status_for_event(&db, &last_sync, false);
+                let _ = app.emit("sync_status", &status);
+                let _ = app.emit("sync-status-changed", &status);
+                continue;
+            }
+
+            if previous_network_online == Some(false) {
+                info!("Network restored; resuming queued sync");
+            }
+            previous_network_online = Some(true);
 
             // Run payment reconciliation before the main sync cycle
             // so that deferred payments get promoted to pending.
@@ -784,7 +997,7 @@ pub fn start_sync_loop(
                 warn!("Adjustment reconciliation failed: {e}");
             }
 
-            match run_sync_cycle(&db).await {
+            match run_sync_cycle(&db, &app).await {
                 Ok(synced) => {
                     if synced > 0 {
                         info!("Sync cycle complete: {synced} items synced");
@@ -794,6 +1007,12 @@ pub fn start_sync_loop(
                     }
                 }
                 Err(e) => {
+                    if is_terminal_auth_failure(&e) {
+                        factory_reset_from_sync(&db, &app);
+                        is_running.store(false, Ordering::SeqCst);
+                        info!("Sync loop stopped — terminal deleted");
+                        break;
+                    }
                     warn!("Sync cycle failed: {e}");
                 }
             }
@@ -801,7 +1020,7 @@ pub fn start_sync_loop(
             // Emit sync status events to frontend.
             // `sync_status` is the canonical Tauri event consumed by the
             // event bridge; keep `sync-status-changed` for backward compatibility.
-            let status = get_sync_status_for_event(&db, &last_sync);
+            let status = get_sync_status_for_event(&db, &last_sync, network_is_online);
             let _ = app.emit("sync_status", &status);
             let _ = app.emit("sync-status-changed", &status);
         }
@@ -809,12 +1028,16 @@ pub fn start_sync_loop(
 }
 
 /// Trigger an immediate sync cycle (called by `sync_force`).
-pub async fn force_sync(db: &DbState, sync_state: &SyncState) -> Result<(), String> {
+pub async fn force_sync(
+    db: &DbState,
+    sync_state: &SyncState,
+    app: &AppHandle,
+) -> Result<(), String> {
     if !storage::is_configured() {
         return Err("Terminal not configured".into());
     }
 
-    let synced = run_sync_cycle(db).await?;
+    let synced = run_sync_cycle(db, app).await?;
     info!("Force sync complete: {synced} items synced");
 
     if let Ok(mut guard) = sync_state.last_sync.lock() {
@@ -994,6 +1217,17 @@ fn is_transient_order_sync_error(error: &str) -> bool {
 
     // Unknown failures are treated as transient by default.
     true
+}
+
+fn is_transient_receipt_poll_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    is_backpressure_error(error)
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("network error")
+        || lower.contains("cannot reach admin dashboard")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
 }
 
 fn extract_first_numeric_after(haystack: &str, key: &str) -> Option<i64> {
@@ -1401,7 +1635,15 @@ async fn poll_order_receipt_statuses(
                 } else {
                     defer_receipt_poll(db, &receipt_id, DEFAULT_RETRY_DELAY_MS, Some(&e))?;
                 }
-                warn!(receipt_id = %receipt_id, error = %e, "Order receipt poll failed");
+                if is_transient_receipt_poll_error(&e) {
+                    debug!(
+                        receipt_id = %receipt_id,
+                        error = %e,
+                        "Order receipt poll deferred after transient failure"
+                    );
+                } else {
+                    warn!(receipt_id = %receipt_id, error = %e, "Order receipt poll failed");
+                }
             }
         }
     }
@@ -1451,6 +1693,7 @@ async fn reconcile_remote_orders(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
+    app: &AppHandle,
 ) -> Result<usize, String> {
     let mut since_cursor =
         sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
@@ -1526,6 +1769,8 @@ async fn reconcile_remote_orders(
                         .unwrap_or(0);
                     if deleted > 0 {
                         reconciled += 1;
+                        let _ =
+                            app.emit("order_deleted", serde_json::json!({ "orderId": local_id }));
                         info!(
                             remote_id = %remote_id,
                             local_id = %local_id,
@@ -1572,20 +1817,73 @@ async fn reconcile_remote_orders(
                     .and_then(Value::as_str)
                     .unwrap_or("pending");
 
-                let _ = conn.execute(
-                    "UPDATE orders
-                     SET supabase_id = ?1,
-                         status = ?2,
-                         payment_status = ?3,
-                         sync_status = 'synced',
-                         last_synced_at = datetime('now'),
-                         updated_at = ?4
-                     WHERE id = ?5",
-                    params![remote_id, status, payment_status, updated_at, local_id],
-                );
+                // Check if order has genuinely unsynced queue entries rather than
+                // relying on orders.sync_status which can be reset by concurrent edits.
+                let has_pending_queue: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM sync_queue
+                         WHERE entity_type = 'order'
+                           AND entity_id = ?1
+                           AND status IN ('pending', 'in_progress')",
+                        params![local_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
 
+                if has_pending_queue {
+                    // Still set supabase_id (needed for resolution)
+                    let _ = conn.execute(
+                        "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
+                        params![remote_id, local_id],
+                    );
+                    debug!(
+                        local_id = %local_id,
+                        "Skipped reconcile — order has pending sync queue entries"
+                    );
+                } else {
+                    // Only apply remote changes if they're at least as new as local
+                    let local_updated_at: Option<String> = conn
+                        .query_row(
+                            "SELECT updated_at FROM orders WHERE id = ?1",
+                            params![local_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+
+                    let should_update = local_updated_at
+                        .as_ref()
+                        .map(|local| updated_at >= *local)
+                        .unwrap_or(true);
+
+                    if should_update {
+                        let updated = conn
+                            .execute(
+                                "UPDATE orders
+                                 SET supabase_id = ?1,
+                                     status = ?2,
+                                     payment_status = ?3,
+                                     sync_status = 'synced',
+                                     last_synced_at = datetime('now'),
+                                     updated_at = ?4
+                                 WHERE id = ?5",
+                                params![remote_id, status, payment_status, updated_at, local_id],
+                            )
+                            .unwrap_or(0);
+                        if updated > 0 {
+                            reconciled += 1;
+                        }
+                    } else {
+                        // Remote is stale, just ensure supabase_id is set
+                        let _ = conn.execute(
+                            "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
+                            params![remote_id, local_id],
+                        );
+                    }
+                }
+
+                // Always promote payments regardless of reconciliation outcome
                 promote_payments_for_order(&conn, &local_id);
-                reconciled += 1;
             }
         }
 
@@ -1607,7 +1905,7 @@ async fn reconcile_remote_orders(
 ///
 /// Orders and shifts are synced to separate endpoints so a failure in one
 /// category does not block the other.
-async fn run_sync_cycle(db: &DbState) -> Result<usize, String> {
+async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> {
     let admin_url = match storage::get_credential("admin_dashboard_url") {
         Some(url) => url,
         None => return Ok(0),
@@ -1642,7 +1940,7 @@ async fn run_sync_cycle(db: &DbState) -> Result<usize, String> {
     let receipt_updates = poll_order_receipt_statuses(db, &admin_url, &api_key).await?;
     total_progress += receipt_updates;
 
-    let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key).await?;
+    let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
     total_progress += reconciled_orders;
 
     // Read pending items (limit 10)
@@ -3190,41 +3488,52 @@ fn mark_batch_failed(
 }
 
 /// Build sync status JSON for event emission (avoids needing SyncState ref).
-fn get_sync_status_for_event(db: &DbState, last_sync: &std::sync::Mutex<Option<String>>) -> Value {
-    let (pending, queued_remote, errors, in_progress, backpressure_deferred, oldest_next_retry_at) =
-        match db.conn.lock() {
-            Ok(conn) => {
-                let p: i64 = conn
+fn get_sync_status_for_event(
+    db: &DbState,
+    last_sync: &std::sync::Mutex<Option<String>>,
+    is_online: bool,
+) -> Value {
+    let (
+        pending,
+        queued_remote,
+        errors,
+        in_progress,
+        backpressure_deferred,
+        oldest_next_retry_at,
+        financial_stats,
+    ) = match db.conn.lock() {
+        Ok(conn) => {
+            let p: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending', 'in_progress')",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
-                let q: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM sync_queue WHERE status = 'queued_remote'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                let e: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM sync_queue WHERE status = 'failed'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                let ip: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM sync_queue WHERE status = 'in_progress'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                let b: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*)
+            let q: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_queue WHERE status = 'queued_remote'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let e: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_queue WHERE status = 'failed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let ip: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sync_queue WHERE status = 'in_progress'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let b: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*)
                      FROM sync_queue
                      WHERE status IN ('pending', 'queued_remote')
                        AND next_retry_at IS NOT NULL
@@ -3235,31 +3544,32 @@ fn get_sync_status_for_event(db: &DbState, last_sync: &std::sync::Mutex<Option<S
                             OR lower(last_error) LIKE '%queue is backed up%'
                             OR lower(last_error) LIKE '%retry later%'
                        )",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                let oldest: Option<String> = conn
-                    .query_row(
-                        "SELECT MIN(next_retry_at)
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let oldest: Option<String> = conn
+                .query_row(
+                    "SELECT MIN(next_retry_at)
                      FROM sync_queue
                      WHERE status IN ('pending', 'queued_remote')
                        AND next_retry_at IS NOT NULL",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                    .flatten();
-                (p, q, e, ip, b, oldest)
-            }
-            Err(_) => (0, 0, 0, 0, 0, None),
-        };
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            let financial = collect_financial_sync_stats(&conn);
+            (p, q, e, ip, b, oldest, financial)
+        }
+        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default()),
+    };
 
     let last = last_sync.lock().ok().and_then(|g| g.clone());
     let pending_total = pending + queued_remote;
 
     serde_json::json!({
-        "isOnline": storage::is_configured(),
+        "isOnline": is_online,
         "lastSync": last,
         "lastSyncAt": last,
         "pendingItems": pending_total,
@@ -3274,6 +3584,9 @@ fn get_sync_status_for_event(db: &DbState, last_sync: &std::sync::Mutex<Option<S
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
+        "pendingPaymentItems": financial_stats.pending_payment_items(),
+        "failedPaymentItems": financial_stats.failed_payment_items(),
+        "financialStats": financial_stats.to_json(),
     })
 }
 

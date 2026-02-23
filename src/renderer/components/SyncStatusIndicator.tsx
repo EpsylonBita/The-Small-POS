@@ -6,6 +6,7 @@ import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { useFeatures } from '../hooks/useFeatures';
 import { formatDate } from '../utils/format';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface SyncStatus {
   isOnline: boolean;
@@ -32,6 +33,24 @@ const defaultFinancialStats = {
   driver_earnings: { pending: 0, failed: 0 },
   staff_payments: { pending: 0, failed: 0 },
   shift_expenses: { pending: 0, failed: 0 }
+};
+
+const normalizeFinancialStats = (stats: any) => {
+  if (!stats || typeof stats !== 'object') return defaultFinancialStats;
+  return {
+    driver_earnings: {
+      pending: coerceNumber(stats.driver_earnings?.pending, 0),
+      failed: coerceNumber(stats.driver_earnings?.failed, 0),
+    },
+    staff_payments: {
+      pending: coerceNumber(stats.staff_payments?.pending, 0),
+      failed: coerceNumber(stats.staff_payments?.failed, 0),
+    },
+    shift_expenses: {
+      pending: coerceNumber(stats.shift_expenses?.pending, 0),
+      failed: coerceNumber(stats.shift_expenses?.failed, 0),
+    }
+  };
 };
 
 const getNavigatorOnline = () => (typeof navigator !== 'undefined' ? navigator.onLine : true);
@@ -93,6 +112,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   className = '',
   showDetails = false
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => ({
     isOnline: getNavigatorOnline(),
@@ -125,62 +145,46 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const loadFinancialStats = useCallback(async () => {
     try {
-      if (window.electronAPI && typeof (window.electronAPI as any).getFinancialSyncStats === 'function') {
-        const stats = await (window.electronAPI as any).getFinancialSyncStats();
-        if (stats && typeof stats === 'object') {
-          setFinancialStats({
-            driver_earnings: {
-              pending: coerceNumber(stats.driver_earnings?.pending, 0),
-              failed: coerceNumber(stats.driver_earnings?.failed, 0),
-            },
-            staff_payments: {
-              pending: coerceNumber(stats.staff_payments?.pending, 0),
-              failed: coerceNumber(stats.staff_payments?.failed, 0),
-            },
-            shift_expenses: {
-              pending: coerceNumber(stats.shift_expenses?.pending, 0),
-              failed: coerceNumber(stats.shift_expenses?.failed, 0),
-            }
-          });
-        } else {
-          setFinancialStats(defaultFinancialStats);
-        }
-      } else {
-        console.warn('getFinancialSyncStats is not available');
-      }
+      const stats = await bridge.sync.getFinancialStats();
+      setFinancialStats(normalizeFinancialStats(stats));
     } catch (err) {
       console.error('Failed to load financial stats:', err);
     }
-  }, []);
+  }, [bridge.sync]);
 
   const loadSyncStatus = useCallback(async () => {
     try {
-      if (window.electronAPI && typeof window.electronAPI.getSyncStatus === 'function') {
-        const status = await window.electronAPI.getSyncStatus();
-        setSyncStatus(normalizeStatus(status));
+      const status = await bridge.sync.getStatus();
+      setSyncStatus(normalizeStatus(status));
+      const financialStats = (status as any)?.financialStats;
+      if (financialStats) {
+        setFinancialStats(normalizeFinancialStats(financialStats));
       } else {
-        console.warn('getSyncStatus is not available');
+        await loadFinancialStats();
       }
-      await loadFinancialStats();
     } catch (error) {
       console.error('Failed to load sync status:', error);
     }
-  }, [loadFinancialStats]);
+  }, [bridge.sync, loadFinancialStats]);
 
   useEffect(() => {
     loadSyncStatus();
 
     const handleSyncStatusUpdate = async (status: any) => {
       setSyncStatus(normalizeStatus(status));
-      await loadFinancialStats();
+      if (status?.financialStats) {
+        setFinancialStats(normalizeFinancialStats(status.financialStats));
+      } else {
+        await loadFinancialStats();
+      }
     };
 
     const handleNetworkStatus = ({ isOnline }: { isOnline: boolean }) => {
       setSyncStatus(prev => ({ ...prev, isOnline }));
     };
 
-    window.electronAPI?.onSyncStatus?.(handleSyncStatusUpdate);
-    window.electronAPI?.onNetworkStatus?.(handleNetworkStatus);
+    onEvent('sync:status', handleSyncStatusUpdate);
+    onEvent('network:status', handleNetworkStatus);
 
     const handleMenuRefreshed = () => {
       setJustRefreshed(true);
@@ -188,14 +192,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     };
     window.addEventListener('menu-sync:refreshed', handleMenuRefreshed as EventListener);
 
-    const interval = setInterval(async () => {
-      await loadSyncStatus();
-    }, 30000);
-
     return () => {
-      clearInterval(interval);
-      window.electronAPI?.removeSyncStatusListener?.(handleSyncStatusUpdate);
-      window.electronAPI?.removeNetworkStatusListener?.(handleNetworkStatus);
+      offEvent('sync:status', handleSyncStatusUpdate);
+      offEvent('network:status', handleNetworkStatus);
       window.removeEventListener('menu-sync:refreshed', handleMenuRefreshed as EventListener);
     };
   }, [loadSyncStatus, loadFinancialStats]);
@@ -239,19 +238,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const handleForceSync = async () => {
     try {
-      if (window.electronAPI && typeof window.electronAPI.forceSync === 'function') {
-        setSyncStatus(prev => ({ ...prev, syncInProgress: true }));
+      setSyncStatus(prev => ({ ...prev, syncInProgress: true }));
+      await bridge.sync.force();
+      toast.success(t('sync.messages.syncComplete') || 'Sync completed');
 
-        await window.electronAPI.forceSync();
-
-        toast.success(t('sync.messages.syncComplete') || 'Sync completed');
-
-        setTimeout(async () => {
-          await loadSyncStatus();
-        }, 2000);
-      } else {
-        toast.error(t('sync.messages.forceSyncElectronOnly') || 'Sync is only available in Electron mode');
-      }
+      setTimeout(async () => {
+        await loadSyncStatus();
+      }, 2000);
     } catch (error) {
       console.error('Failed to force sync:', error);
       toast.error(t('sync.messages.syncFailed') || 'Sync failed');

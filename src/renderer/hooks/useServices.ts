@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
+import { offEvent, onEvent } from '../../lib';
 import {
   servicesService,
   Service,
@@ -16,6 +17,8 @@ import {
   ServiceFilters,
   ServiceStats,
 } from '../services/ServicesService';
+
+const EVENT_REFRESH_THROTTLE_MS = 5000;
 
 interface UseServicesProps {
   branchId: string;
@@ -62,17 +65,22 @@ export function useServices({
   }, [branchId, organizationId]);
 
   // Fetch services
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (options: { silent?: boolean } = {}) => {
+    const { silent = false } = options;
     if (!branchId || !organizationId) {
       console.log('[useServices] Missing branchId or organizationId, skipping fetch');
       setServices([]);
       setCategories([]);
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
       return;
     }
 
-    setIsLoading(true);
-    setError(null);
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
 
     try {
       console.log('[useServices] Fetching data for branch:', branchId);
@@ -98,10 +106,14 @@ export function useServices({
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load services';
       console.error('[useServices] Error:', message);
-      setError(message);
-      toast.error(message);
+      if (!silent) {
+        setError(message);
+        toast.error(message);
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, [branchId, organizationId, filters]);
 
@@ -110,27 +122,59 @@ export function useServices({
     fetchData();
   }, [fetchData]);
 
-  // Real-time updates
+  // Refresh from native sync/order events with throttling.
   useEffect(() => {
     if (!enableRealtime || !branchId) return;
 
-    servicesService.subscribeToUpdates((updatedService) => {
-      console.log('[useServices] Real-time update received:', updatedService.id);
-      setServices((prev) => {
-        const index = prev.findIndex((s) => s.id === updatedService.id);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = updatedService;
-          return updated;
-        }
-        return [...prev, updatedService];
-      });
-    });
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = 0;
+
+    const scheduleRefresh = () => {
+      if (disposed) return;
+      const now = Date.now();
+      const elapsed = now - lastRefreshAt;
+
+      if (elapsed >= EVENT_REFRESH_THROTTLE_MS) {
+        lastRefreshAt = now;
+        void fetchData({ silent: true });
+        return;
+      }
+
+      if (pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        if (disposed) return;
+        lastRefreshAt = Date.now();
+        void fetchData({ silent: true });
+      }, EVENT_REFRESH_THROTTLE_MS - elapsed);
+    };
+
+    const handleSyncStatus = (status?: { inProgress?: boolean }) => {
+      if (status?.inProgress) return;
+      scheduleRefresh();
+    };
+    const handleSyncComplete = () => scheduleRefresh();
+    const handleOrderMutation = () => scheduleRefresh();
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
 
     return () => {
-      servicesService.unsubscribeFromUpdates();
+      disposed = true;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+      }
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
     };
-  }, [enableRealtime, branchId]);
+  }, [enableRealtime, branchId, fetchData]);
 
   // Calculate stats
   const stats = useMemo(() => {

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useTheme } from '../../contexts/theme-context';
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
+import { getBridge } from '../../../lib';
 
 interface OrderItem {
   id: string;
@@ -37,6 +38,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const bridge = getBridge();
   const [items, setItems] = useState<OrderItem[]>(initialItems);
   const [orderNotes, setOrderNotes] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -46,7 +48,8 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
   const fetchOrderItems = useCallback(async (id: string): Promise<OrderItem[]> => {
     try {
       // First try to get order from local DB
-      const localOrder = await window.electronAPI?.invoke('order:get-by-id', { orderId: id });
+      const localOrderResponse: any = await bridge.orders.getById(id);
+      const localOrder = localOrderResponse?.data ?? localOrderResponse;
       if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
         console.log('[EditOrderItemsModal] Loaded items from local DB:', localOrder.items.length);
         return localOrder.items.map((item: any) => ({
@@ -62,8 +65,9 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       }
 
       // Fallback: fetch from Supabase
-      const supabaseItems = await window.electronAPI?.invoke('order:fetch-items-from-supabase', { orderId: id });
-      if (supabaseItems && Array.isArray(supabaseItems) && supabaseItems.length > 0) {
+      const supabaseResult: any = await bridge.orders.fetchItemsFromSupabase(id);
+      const supabaseItems = Array.isArray(supabaseResult) ? supabaseResult : supabaseResult?.data;
+      if (Array.isArray(supabaseItems) && supabaseItems.length > 0) {
         console.log('[EditOrderItemsModal] Loaded items from Supabase:', supabaseItems.length);
         return supabaseItems.map((item: any) => ({
           id: item.id,
@@ -82,7 +86,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       console.error('[EditOrderItemsModal] Failed to fetch items:', error);
       return [];
     }
-  }, []);
+  }, [bridge.orders]);
 
   // Reset form and fetch items when modal opens
   useEffect(() => {
@@ -184,7 +188,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
       size="lg"
       closeOnBackdrop={false}
       closeOnEscape={true}
-      className="max-h-[90vh]"
+      className="!max-w-2xl max-h-[90vh]"
     >
       <p className="mb-6 liquid-glass-modal-text-muted">
         {t('modals.editOrderItems.message', { count: orderCount })}

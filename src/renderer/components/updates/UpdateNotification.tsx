@@ -1,7 +1,7 @@
 import React from 'react';
 import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
-import type { UpdateInfo } from 'electron-updater';
+import type { UpdateInfo } from '../../../lib/update-contracts';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatDate } from '../../utils/format';
 
@@ -37,6 +37,7 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
             onClose={onClose}
             title={t('updates.title.available')}
             size="md"
+            className="!max-w-lg"
         >
             <div className="space-y-4">
                 <div className="flex items-center space-x-3 text-cyan-400">
@@ -45,9 +46,11 @@ export const UpdateNotification: React.FC<UpdateNotificationProps> = ({
                     </svg>
                     <div>
                         <h3 className="text-lg font-bold text-white">{t('updates.available.version', { version: updateInfo.version })}</h3>
-                        <p className="text-sm text-gray-300">
-                            {t('updates.available.released', { date: formatDate(updateInfo.releaseDate) })}
-                        </p>
+                        {updateInfo.releaseDate && (
+                            <p className="text-sm text-gray-300">
+                                {t('updates.available.released', { date: formatDate(updateInfo.releaseDate) })}
+                            </p>
+                        )}
                     </div>
                 </div>
 

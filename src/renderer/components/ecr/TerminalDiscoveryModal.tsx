@@ -115,6 +115,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
       onClose={onClose}
       title={t('ecr.discovery.title', 'Discover Payment Terminals')}
       size="md"
+      className="!max-w-lg"
     >
       <div className="space-y-6">
         {/* Search type toggles */}

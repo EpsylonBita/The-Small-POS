@@ -1,4 +1,5 @@
-import { getSupabaseClient } from '../../shared/supabase-config'
+import { getBridge, offEvent, onEvent } from '../../lib'
+import type { ScreenCaptureSignal, ScreenCaptureSignalBatchPayload } from '../../lib/ipc-contracts'
 
 interface ScreenCaptureConfig {
   requestId: string
@@ -9,36 +10,161 @@ interface ScreenCaptureConfig {
 class ScreenCaptureHandler {
   private peerConnection: RTCPeerConnection | null = null
   private screenStream: MediaStream | null = null
-  private supabase: any
   private config: ScreenCaptureConfig | null = null
   private isStreaming = false
   private isStarting = false
-  private answerChannel: any | null = null
+  private answerChannel: { unsubscribe: () => Promise<void> } | null = null
   private answerSet = false
-  private pendingCandidates: any[] = []
+  private pendingCandidates: RTCIceCandidateInit[] = []
+  private lastSignalTimestamp: string | null = null
+  private seenSignalIds = new Set<string>()
   private controlChannel: RTCDataChannel | null = null
+  private eventUnsubscribers: Array<() => void> = []
+  private bridge = getBridge()
 
   constructor() {
-    this.supabase = getSupabaseClient()
     this.setupIPCListeners()
   }
 
-  private setupIPCListeners(): void {
-    const electron = (window as any).electron
-    if (!electron) {
-      console.warn('[ScreenCapture] Electron IPC not available')
+  private async fetchFromAdmin(path: string, options?: { method?: string; body?: unknown }): Promise<any> {
+    const result = await this.bridge.adminApi.fetchFromAdmin(path, options)
+    if (!result?.success) {
+      throw new Error(result?.error || `Admin API request failed for ${path}`)
+    }
+    return result?.data ?? result
+  }
+
+  private async sendSignal(requestId: string, type: 'offer' | 'candidate', data: unknown): Promise<void> {
+    const payload = await this.fetchFromAdmin('/api/pos/screen-share/terminal', {
+      method: 'POST',
+      body: { requestId, type, data },
+    })
+
+    if (payload?.success === false) {
+      throw new Error(payload?.error || payload?.message || `Failed to send ${type} signal`)
+    }
+  }
+
+  private async updateRequestStatus(
+    requestId: string,
+    status: 'active' | 'failed' | 'stopped',
+    errorMessage?: string
+  ): Promise<void> {
+    const payload = await this.fetchFromAdmin('/api/pos/screen-share/terminal', {
+      method: 'PATCH',
+      body: {
+        requestId,
+        status,
+        errorMessage: errorMessage || null,
+      },
+    })
+
+    if (payload?.success === false) {
+      throw new Error(payload?.error || payload?.message || `Failed to set status ${status}`)
+    }
+  }
+
+  private async applyIncomingSignals(signals: ScreenCaptureSignal[]): Promise<void> {
+    for (const signal of signals) {
+      if (!signal?.id || this.seenSignalIds.has(signal.id)) {
+        continue
+      }
+
+      this.seenSignalIds.add(signal.id)
+
+      if (typeof signal.created_at === 'string') {
+        if (!this.lastSignalTimestamp || signal.created_at > this.lastSignalTimestamp) {
+          this.lastSignalTimestamp = signal.created_at
+        }
+      }
+
+      if (signal.sender !== 'admin') {
+        continue
+      }
+
+      const signalData = signal.data
+      if (!signalData || typeof signalData !== 'object') {
+        continue
+      }
+
+      if (signal.type === 'answer') {
+        try {
+          await this.peerConnection?.setRemoteDescription(
+            new RTCSessionDescription(signalData as RTCSessionDescriptionInit)
+          )
+          this.answerSet = true
+          if (this.pendingCandidates.length) {
+            for (const cand of this.pendingCandidates) {
+              try {
+                await this.peerConnection?.addIceCandidate(new RTCIceCandidate(cand))
+              } catch (iceErr) {
+                console.warn('[ScreenCapture] Failed to add queued ICE candidate', iceErr)
+              }
+            }
+            this.pendingCandidates = []
+          }
+        } catch (err) {
+          console.error('[ScreenCapture] setRemoteDescription failed', err)
+        }
+      } else if (signal.type === 'candidate') {
+        if (this.peerConnection) {
+          if (this.answerSet || this.peerConnection.remoteDescription) {
+            try {
+              await this.peerConnection.addIceCandidate(
+                new RTCIceCandidate(signalData as RTCIceCandidateInit)
+              )
+            } catch (iceErr) {
+              console.warn('[ScreenCapture] addIceCandidate failed (will queue)', iceErr)
+              this.pendingCandidates.push(signalData as RTCIceCandidateInit)
+            }
+          } else {
+            this.pendingCandidates.push(signalData as RTCIceCandidateInit)
+          }
+        }
+      }
+    }
+  }
+
+  private async handleSignalBatchPayload(payload: ScreenCaptureSignalBatchPayload): Promise<void> {
+    if (typeof payload?.lastSignalTimestamp === 'string') {
+      if (!this.lastSignalTimestamp || payload.lastSignalTimestamp > this.lastSignalTimestamp) {
+        this.lastSignalTimestamp = payload.lastSignalTimestamp
+      }
+    }
+
+    const requestStatus = typeof payload?.request?.status === 'string'
+      ? payload.request.status
+      : null
+    if (requestStatus === 'stopped' || requestStatus === 'failed') {
+      if (this.isStreaming || this.isStarting) {
+        void this.stopCapture({ status: requestStatus })
+      }
       return
     }
 
-    electron.ipcRenderer.on('screen-capture:start', async (data: ScreenCaptureConfig) => {
+    const signals = Array.isArray(payload?.signals) ? payload.signals : []
+    if (signals.length === 0) {
+      return
+    }
+
+    await this.applyIncomingSignals(signals)
+  }
+
+  private setupIPCListeners(): void {
+    const startHandler = async (data: ScreenCaptureConfig) => {
       console.log('[ScreenCapture] Received start command:', data)
       await this.startCapture(data)
-    })
+    }
 
-    electron.ipcRenderer.on('screen-capture:stop', async () => {
+    const stopHandler = async () => {
       console.log('[ScreenCapture] Received stop command')
       await this.stopCapture()
-    })
+    }
+
+    onEvent('screen-capture:start', startHandler)
+    onEvent('screen-capture:stop', stopHandler)
+    this.eventUnsubscribers.push(() => offEvent('screen-capture:start', startHandler))
+    this.eventUnsubscribers.push(() => offEvent('screen-capture:stop', stopHandler))
   }
 
   private async startCapture(config: ScreenCaptureConfig): Promise<void> {
@@ -55,16 +181,14 @@ class ScreenCaptureHandler {
       // This ensures the user is aware and consents to screen capture enumeration
       let primaryScreenId: string | null = null
       try {
-        const electron = (window as any).electron
-        if (electron?.ipcRenderer?.invoke) {
-          const result = await electron.ipcRenderer.invoke('screen-capture:get-sources', { types: ['screen'] })
-          if (result?.success && result.sources?.length > 0) {
-            // Prefer the source whose display_id matches primary display (if exposed)
-            const primary = result.sources.find((s: any) => (s as any)?.display_id === 'primary') || result.sources[0]
-            primaryScreenId = primary.id
-          } else if (!result?.success) {
-            throw new Error(result?.error || 'User denied screen capture access')
-          }
+        const result = await this.bridge.screenCapture.getSources({ types: ['screen'] })
+        const sources = Array.isArray(result?.sources) ? result.sources : []
+        if (result?.success && sources.length > 0) {
+          // Prefer the source whose display_id matches primary display (if exposed)
+          const primary = sources.find((s) => s?.display_id === 'primary') || sources[0]
+          primaryScreenId = primary.id
+        } else if (!result?.success) {
+          throw new Error(result?.error || 'User denied screen capture access')
         }
       } catch (dcErr) {
         console.warn('[ScreenCapture] Failed to get sources with consent:', dcErr)
@@ -113,15 +237,9 @@ class ScreenCaptureHandler {
       console.log('[ScreenCapture] Streaming started')
     } catch (error) {
       console.error('[ScreenCapture] Failed to start capture:', error)
-      if (this.config && this.supabase) {
-        await this.supabase
-          .from('screen_share_requests')
-          .update({ status: 'failed', error_message: error instanceof Error ? error.message : 'Unknown error' })
-          .eq('id', this.config.requestId)
-      }
-      this.isStreaming = false
-      this.isStarting = false
-      this.config = null
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown capture startup error'
+      await this.stopCapture({ status: 'failed', errorMessage })
     }
   }
 
@@ -151,12 +269,16 @@ class ScreenCaptureHandler {
 
     this.answerSet = false
     this.pendingCandidates = []
+    this.lastSignalTimestamp = null
+    this.seenSignalIds.clear()
 
     this.peerConnection.onicecandidate = async (event) => {
       if (event.candidate && this.config) {
-        await this.supabase
-          .from('screen_share_signals')
-          .insert({ request_id: this.config.requestId, type: 'candidate', data: event.candidate, sender: 'terminal' })
+        try {
+          await this.sendSignal(this.config.requestId, 'candidate', event.candidate)
+        } catch (signalError) {
+          console.warn('[ScreenCapture] Failed to send ICE candidate', signalError)
+        }
       }
     }
 
@@ -164,16 +286,19 @@ class ScreenCaptureHandler {
       const state = this.peerConnection?.connectionState
       console.log('[ScreenCapture] Connection state:', state)
       if (state === 'disconnected' || state === 'failed') {
-        this.stopCapture()
+        void this.stopCapture()
       }
     }
 
     const offer = await this.peerConnection.createOffer()
     await this.peerConnection.setLocalDescription(offer)
 
-    await this.supabase
-      .from('screen_share_signals')
-      .insert({ request_id: this.config.requestId, type: 'offer', data: offer, sender: 'terminal' })
+    const localOffer = this.peerConnection.localDescription
+      ? { type: this.peerConnection.localDescription.type, sdp: this.peerConnection.localDescription.sdp }
+      : { type: offer.type, sdp: offer.sdp }
+
+    await this.sendSignal(this.config.requestId, 'offer', localOffer)
+    await this.updateRequestStatus(this.config.requestId, 'active')
 
     console.log('[ScreenCapture] WebRTC offer sent')
     this.listenForWebRTCAnswer()
@@ -183,45 +308,70 @@ class ScreenCaptureHandler {
     if (!this.config) return
     if (this.answerChannel) return
 
-    this.answerChannel = this.supabase
-      .channel(`screen_share_signals:${this.config.requestId}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'screen_share_signals', filter: `request_id=eq.${this.config.requestId}` },
-        async (payload: any) => {
-          if (payload.new && payload.new.sender === 'admin') {
-            const signalData = payload.new.data
-            if (payload.new.type === 'answer') {
-              try {
-                await this.peerConnection?.setRemoteDescription(new RTCSessionDescription(signalData))
-                this.answerSet = true
-                if (this.pendingCandidates.length) {
-                  for (const cand of this.pendingCandidates) {
-                    try { await this.peerConnection?.addIceCandidate(new RTCIceCandidate(cand)) } catch (iceErr) {
-                      console.warn('[ScreenCapture] Failed to add queued ICE candidate', iceErr)
-                    }
-                  }
-                  this.pendingCandidates = []
-                }
-              } catch (err) {
-                console.error('[ScreenCapture] setRemoteDescription failed', err)
-              }
-            } else if (payload.new.type === 'candidate') {
-              if (this.peerConnection) {
-                if (this.answerSet || this.peerConnection.remoteDescription) {
-                  try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(signalData)) } catch (iceErr) {
-                    console.warn('[ScreenCapture] addIceCandidate failed (will queue)', iceErr)
-                    this.pendingCandidates.push(signalData)
-                  }
-                } else {
-                  this.pendingCandidates.push(signalData)
-                }
-              }
-            }
-          }
+    const requestId = this.config.requestId
+    const signalBatchHandler = (payload: ScreenCaptureSignalBatchPayload) => {
+      if (payload?.requestId && payload.requestId !== requestId) {
+        return
+      }
+      void this.handleSignalBatchPayload(payload)
+    }
+    const signalPollErrorHandler = (payload: any) => {
+      if (payload?.requestId && payload.requestId !== requestId) {
+        return
+      }
+      console.warn('[ScreenCapture] Native signal polling error', payload?.error || payload)
+    }
+    const signalPollStoppedHandler = (payload: { requestId?: string }) => {
+      if (payload?.requestId && payload.requestId !== requestId) {
+        return
+      }
+      if (this.isStreaming || this.isStarting) {
+        console.warn('[ScreenCapture] Native signal polling stopped unexpectedly')
+        void this.stopCapture({
+          status: 'failed',
+          errorMessage: 'Native signal polling stopped unexpectedly',
+        })
+      }
+    }
+
+    onEvent('screen-capture:signal-batch', signalBatchHandler)
+    onEvent('screen-capture:signal-poll-error', signalPollErrorHandler)
+    onEvent('screen-capture:signal-poll-stopped', signalPollStoppedHandler)
+
+    this.answerChannel = {
+      unsubscribe: async () => {
+        offEvent('screen-capture:signal-batch', signalBatchHandler)
+        offEvent('screen-capture:signal-poll-error', signalPollErrorHandler)
+        offEvent('screen-capture:signal-poll-stopped', signalPollStoppedHandler)
+        try {
+          await this.bridge.screenCapture.stopSignalPolling(requestId)
+        } catch (stopError) {
+          console.warn('[ScreenCapture] Failed to stop native signal polling', stopError)
         }
-      )
-      .subscribe()
+      },
+    }
+
+    void (async () => {
+      try {
+        const result = await this.bridge.screenCapture.startSignalPolling(
+          requestId,
+          this.lastSignalTimestamp || undefined
+        )
+        if (result?.success === false) {
+          throw new Error(result?.error || 'Native screen-share signal polling start rejected')
+        }
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : 'Native screen-share signal polling failed'
+        console.error('[ScreenCapture] Native polling start failed', error)
+        try {
+          await this.updateRequestStatus(requestId, 'failed', errorMessage)
+        } catch (statusError) {
+          console.warn('[ScreenCapture] Failed to report native polling startup failure', statusError)
+        }
+        await this.stopCapture({ status: null })
+      }
+    })()
   }
 
   private handleControlMessage(_raw: any): void {
@@ -236,8 +386,13 @@ class ScreenCaptureHandler {
     console.warn('[ScreenCapture] Remote input is disabled for security reasons')
   }
 
-  private async stopCapture(): Promise<void> {
+  private async stopCapture(options?: {
+    status?: 'stopped' | 'failed' | null
+    errorMessage?: string
+  }): Promise<void> {
+    const status = options?.status === undefined ? 'stopped' : options.status
     console.log('[ScreenCapture] Stopping capture...')
+    const requestId = this.config?.requestId ?? null
     this.isStreaming = false
     this.isStarting = false
 
@@ -259,10 +414,32 @@ class ScreenCaptureHandler {
     this.config = null
     this.answerSet = false
     this.pendingCandidates = []
+    this.lastSignalTimestamp = null
+    this.seenSignalIds.clear()
+
+    if (requestId && status) {
+      try {
+        await this.updateRequestStatus(
+          requestId,
+          status,
+          status === 'failed' ? options?.errorMessage : undefined
+        )
+      } catch (statusError) {
+        if (status === 'failed') {
+          console.warn('[ScreenCapture] Failed to mark screen share as failed', statusError)
+        } else {
+          console.warn('[ScreenCapture] Failed to mark screen share as stopped', statusError)
+        }
+      }
+    }
   }
 
   cleanup(): void {
-    this.stopCapture()
+    this.eventUnsubscribers.forEach((unsub) => {
+      try { unsub() } catch {}
+    })
+    this.eventUnsubscribers = []
+    void this.stopCapture()
   }
 }
 

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import { Package, Coffee, Eye, EyeOff, Search, RefreshCw } from 'lucide-react';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 // Types
 interface MenuItem {
@@ -44,6 +45,7 @@ interface Category {
 }
 
 export const MenuManagementPage: React.FC = () => {
+  const bridge = getBridge();
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const language = i18n.language;
@@ -64,18 +66,16 @@ export const MenuManagementPage: React.FC = () => {
 
   // Real-time sync listener
   useEffect(() => {
-    if (!window.electronAPI) return;
-
-    const handleMenuSync = (event: any, data: any) => {
+    const handleMenuSync = (data: any) => {
       console.log('📡 Menu sync received:', data);
       // Reload current tab data
       loadData();
     };
 
-    window.electronAPI.ipcRenderer.on('menu:sync', handleMenuSync);
+    onEvent('menu:sync', handleMenuSync);
 
     return () => {
-      window.electronAPI.ipcRenderer.removeListener('menu:sync', handleMenuSync);
+      offEvent('menu:sync', handleMenuSync);
     };
   }, [activeTab]);
 
@@ -100,10 +100,16 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const loadCategories = async () => {
-    if (!window.electronAPI) return;
     try {
-      const result = await window.electronAPI.ipcRenderer.invoke('menu:get-categories');
-      setCategories(result || []);
+      const result = await bridge.menu.getCategories();
+      const mapped: Category[] = (result || []).map((cat: any) => ({
+        id: cat.id,
+        name: cat.name || cat.name_en || cat.name_el || '',
+        name_en: cat.name_en || cat.name || '',
+        name_el: cat.name_el || cat.name || '',
+        is_active: cat.is_active !== false,
+      }));
+      setCategories(mapped);
     } catch (error) {
       console.error('Error loading categories:', error);
       toast.error('Failed to load categories');
@@ -111,9 +117,8 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const loadMenuItems = async () => {
-    if (!window.electronAPI) return;
     try {
-      const result = await window.electronAPI.ipcRenderer.invoke('menu:get-subcategories');
+      const result = await bridge.menu.getSubcategories();
       setMenuItems(result || []);
     } catch (error) {
       console.error('Error loading menu items:', error);
@@ -122,9 +127,8 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const loadIngredients = async () => {
-    if (!window.electronAPI) return;
     try {
-      const result = await window.electronAPI.ipcRenderer.invoke('menu:get-ingredients');
+      const result = await bridge.menu.getIngredients();
       setIngredients(result || []);
     } catch (error) {
       console.error('Error loading ingredients:', error);
@@ -133,9 +137,8 @@ export const MenuManagementPage: React.FC = () => {
   };
 
   const loadCombos = async () => {
-    if (!window.electronAPI) return;
     try {
-      const result = await window.electronAPI.ipcRenderer.invoke('menu:get-combos');
+      const result = await bridge.menu.getCombos();
       setCombos(result || []);
     } catch (error) {
       console.error('Error loading combos:', error);
@@ -149,11 +152,8 @@ export const MenuManagementPage: React.FC = () => {
     setCategories(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
 
     try {
-      if (!window.electronAPI) throw new Error('Electron API not available');
-      
-      await window.electronAPI.ipcRenderer.invoke('menu:update-category', {
-        id,
-        is_active: !currentStatus
+      await bridge.menu.updateCategory(id, {
+        is_active: !currentStatus,
       });
 
       toast.success('Category updated successfully');
@@ -170,11 +170,8 @@ export const MenuManagementPage: React.FC = () => {
     setMenuItems(prev => prev.map(item => item.id === id ? { ...item, is_available: !currentStatus } : item));
 
     try {
-      if (!window.electronAPI) throw new Error('Electron API not available');
-      
-      await window.electronAPI.ipcRenderer.invoke('menu:update-subcategory', {
-        id,
-        is_available: !currentStatus
+      await bridge.menu.updateSubcategory(id, {
+        is_available: !currentStatus,
       });
 
       toast.success('Menu item updated successfully');
@@ -191,11 +188,8 @@ export const MenuManagementPage: React.FC = () => {
     setIngredients(prev => prev.map(ing => ing.id === id ? { ...ing, is_available: !currentStatus } : ing));
 
     try {
-      if (!window.electronAPI) throw new Error('Electron API not available');
-
-      await window.electronAPI.ipcRenderer.invoke('menu:update-ingredient', {
-        id,
-        is_available: !currentStatus
+      await bridge.menu.updateIngredient(id, {
+        is_available: !currentStatus,
       });
 
       toast.success('Ingredient updated successfully');
@@ -212,11 +206,8 @@ export const MenuManagementPage: React.FC = () => {
     setCombos(prev => prev.map(c => c.id === id ? { ...c, is_active: !currentStatus } : c));
 
     try {
-      if (!window.electronAPI) throw new Error('Electron API not available');
-
-      await window.electronAPI.ipcRenderer.invoke('menu:update-combo', {
-        id,
-        is_active: !currentStatus
+      await bridge.menu.updateCombo(id, {
+        is_active: !currentStatus,
       });
 
       toast.success('Offer updated successfully');

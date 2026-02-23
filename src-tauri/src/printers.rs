@@ -9,10 +9,59 @@
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+use std::time::Instant;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{self, DbState};
+
+// ---------------------------------------------------------------------------
+// System printer list cache (avoids calling EnumPrintersW on every poll)
+// ---------------------------------------------------------------------------
+
+/// Cached system printer list with a 10-second TTL.
+///
+/// Initialized lazily on first access. Uses `OnceLock` (stable since 1.70)
+/// to hold the `Mutex`, avoiding the `LazyLock` MSRV requirement (1.80).
+static PRINTER_CACHE: std::sync::OnceLock<Mutex<(Instant, Vec<String>)>> =
+    std::sync::OnceLock::new();
+static PRINTER_ENUM_LOG_STATE: std::sync::OnceLock<Mutex<Option<u64>>> = std::sync::OnceLock::new();
+
+fn printer_cache() -> &'static Mutex<(Instant, Vec<String>)> {
+    PRINTER_CACHE.get_or_init(|| {
+        Mutex::new((
+            Instant::now() - std::time::Duration::from_secs(60),
+            Vec::new(),
+        ))
+    })
+}
+
+fn printer_enum_log_state() -> &'static Mutex<Option<u64>> {
+    PRINTER_ENUM_LOG_STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn printer_inventory_hash(names: &[String]) -> u64 {
+    let mut normalized = names.to_vec();
+    normalized.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn log_printer_inventory_if_changed(names: &[String]) {
+    let current_hash = printer_inventory_hash(names);
+    if let Ok(mut previous_hash) = printer_enum_log_state().lock() {
+        if previous_hash.map(|value| value != current_hash).unwrap_or(true) {
+            *previous_hash = Some(current_hash);
+            info!(count = names.len(), "Windows printer inventory changed");
+        }
+    }
+}
+
+const PRINTER_CACHE_TTL_SECS: u64 = 10;
 
 // ---------------------------------------------------------------------------
 // Windows printer enumeration (compile-time gated)
@@ -22,11 +71,32 @@ use crate::db::{self, DbState};
 ///
 /// Uses the `winspool.drv` `EnumPrintersW` API (level 2).  Falls back to an
 /// empty list if the call fails or if compiled on a non-Windows target.
+///
+/// Results are cached for [`PRINTER_CACHE_TTL_SECS`] seconds to avoid
+/// hammering the Win32 API on frequent status polls.
 #[cfg(target_os = "windows")]
 pub fn list_system_printers() -> Vec<String> {
+    // Check cache first
+    if let Ok(cache) = printer_cache().lock() {
+        if cache.0.elapsed().as_secs() < PRINTER_CACHE_TTL_SECS {
+            return cache.1.clone();
+        }
+    }
+
+    let names = enumerate_windows_printers();
+
+    // Update cache
+    if let Ok(mut cache) = printer_cache().lock() {
+        *cache = (Instant::now(), names.clone());
+    }
+
+    names
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_windows_printers() -> Vec<String> {
     use std::ptr;
 
-    // Win32 constants
     const PRINTER_ENUM_LOCAL: u32 = 0x00000002;
     const PRINTER_ENUM_CONNECTIONS: u32 = 0x00000004;
 
@@ -73,7 +143,6 @@ pub fn list_system_printers() -> Vec<String> {
     let mut needed: u32 = 0;
     let mut returned: u32 = 0;
 
-    // First call: determine buffer size
     unsafe {
         EnumPrintersW(
             flags,
@@ -127,7 +196,7 @@ pub fn list_system_printers() -> Vec<String> {
         names.push(name);
     }
 
-    info!(count = names.len(), "Enumerated Windows printers");
+    log_printer_inventory_if_changed(&names);
     names
 }
 
@@ -138,51 +207,140 @@ pub fn list_system_printers() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Print to Windows spooler
+// Print raw bytes to Windows spooler (winspool API)
 // ---------------------------------------------------------------------------
 
-/// Send an HTML file to a Windows printer by spawning a headless print via
-/// `rundll32 mshtml.dll,PrintHTML`.
+/// Send raw binary data (ESC/POS) to a Windows printer via the winspool API.
 ///
-/// This is the simplest approach that works without external deps.
-/// Returns Ok(()) on successful dispatch or Err with a descriptive message.
+/// Uses `OpenPrinterW` → `StartDocPrinterA(RAW)` → `StartPagePrinter` →
+/// `WritePrinter` → cleanup to push bytes directly to the printer spooler
+/// without any rendering.  This is the correct method for thermal receipt
+/// printers which expect ESC/POS binary.
 #[cfg(target_os = "windows")]
-pub fn print_to_windows(printer_name: &str, html_path: &str) -> Result<(), String> {
-    use std::process::Command;
+pub fn print_raw_to_windows(printer_name: &str, data: &[u8], doc_name: &str) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::ptr;
 
-    // Validate the file exists
-    if !std::path::Path::new(html_path).exists() {
-        return Err(format!("Receipt file not found: {html_path}"));
+    #[allow(clippy::upper_case_acronyms)]
+    type HANDLE = *mut std::ffi::c_void;
+
+    #[repr(C)]
+    #[allow(non_snake_case, non_camel_case_types)]
+    struct DOC_INFO_1A {
+        pDocName: *const i8,
+        pOutputFile: *const i8,
+        pDatatype: *const i8,
     }
 
-    // Use PowerShell to print HTML via the default browser's print capability
-    // This approach sends to a specific printer reliably
-    let ps_script = format!(
-        r#"
-        $printer = "{}"
-        $file = "{}"
-        Start-Process -FilePath $file -Verb PrintTo -ArgumentList $printer -WindowStyle Hidden -Wait
-        "#,
-        printer_name.replace('"', "`\""),
-        html_path.replace('"', "`\"").replace('/', "\\"),
+    #[link(name = "winspool")]
+    extern "system" {
+        fn OpenPrinterW(
+            pPrinterName: *const u16,
+            phPrinter: *mut HANDLE,
+            pDefault: *const u8,
+        ) -> i32;
+        fn ClosePrinter(hPrinter: HANDLE) -> i32;
+        fn StartDocPrinterA(hPrinter: HANDLE, Level: u32, pDocInfo: *const DOC_INFO_1A) -> u32;
+        fn EndDocPrinter(hPrinter: HANDLE) -> i32;
+        fn StartPagePrinter(hPrinter: HANDLE) -> i32;
+        fn EndPagePrinter(hPrinter: HANDLE) -> i32;
+        fn WritePrinter(hPrinter: HANDLE, pBuf: *const u8, cbBuf: u32, pcWritten: *mut u32) -> i32;
+    }
+
+    // Convert printer name to null-terminated UTF-16
+    let wide_name: Vec<u16> = printer_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut h_printer: HANDLE = ptr::null_mut();
+
+    // Open printer (no defaults — pass null for PRINTER_DEFAULTS)
+    let ok = unsafe { OpenPrinterW(wide_name.as_ptr(), &mut h_printer, ptr::null()) };
+    if ok == 0 || h_printer.is_null() {
+        return Err(format!("OpenPrinter failed for \"{printer_name}\""));
+    }
+
+    // Prepare DOC_INFO_1A with RAW data type
+    let c_doc_name = CString::new(doc_name).unwrap_or_else(|_| CString::new("POS Print").unwrap());
+    let c_datatype = CString::new("RAW").unwrap();
+
+    let doc_info = DOC_INFO_1A {
+        pDocName: c_doc_name.as_ptr(),
+        pOutputFile: ptr::null(),
+        pDatatype: c_datatype.as_ptr(),
+    };
+
+    let doc_id = unsafe { StartDocPrinterA(h_printer, 1, &doc_info) };
+    if doc_id == 0 {
+        unsafe {
+            ClosePrinter(h_printer);
+        }
+        return Err(format!("StartDocPrinter failed for \"{printer_name}\""));
+    }
+
+    let page_ok = unsafe { StartPagePrinter(h_printer) };
+    if page_ok == 0 {
+        unsafe {
+            EndDocPrinter(h_printer);
+            ClosePrinter(h_printer);
+        }
+        return Err(format!("StartPagePrinter failed for \"{printer_name}\""));
+    }
+
+    let mut written: u32 = 0;
+    let write_ok =
+        unsafe { WritePrinter(h_printer, data.as_ptr(), data.len() as u32, &mut written) };
+
+    // Always clean up
+    unsafe {
+        EndPagePrinter(h_printer);
+        EndDocPrinter(h_printer);
+        ClosePrinter(h_printer);
+    }
+
+    if write_ok == 0 {
+        return Err(format!(
+            "WritePrinter failed for \"{printer_name}\": wrote {written}/{} bytes",
+            data.len()
+        ));
+    }
+
+    info!(
+        printer = %printer_name,
+        bytes = data.len(),
+        doc = %doc_name,
+        "Sent raw data to Windows print spooler"
     );
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-        .output()
-        .map_err(|e| format!("Failed to spawn print process: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Print command failed: {stderr}"));
-    }
-
-    info!(printer = %printer_name, file = %html_path, "Sent to Windows print spooler");
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn print_to_windows(_printer_name: &str, _html_path: &str) -> Result<(), String> {
+pub fn print_raw_to_windows(
+    _printer_name: &str,
+    _data: &[u8],
+    _doc_name: &str,
+) -> Result<(), String> {
+    Err("Windows raw printing not available on this platform".into())
+}
+
+#[allow(dead_code)]
+/// Legacy: Send an HTML file to a Windows printer via PowerShell `PrintTo`.
+///
+/// **Deprecated** — use [`print_raw_to_windows`] with ESC/POS binary instead.
+/// Kept for non-thermal printers that accept rendered documents.
+#[cfg(target_os = "windows")]
+pub fn print_html_to_windows(printer_name: &str, html_path: &str) -> Result<(), String> {
+    warn!(
+        printer = %printer_name,
+        file = %html_path,
+        "Blocked legacy HTML PowerShell print path for security. Use raw ESC/POS printing instead."
+    );
+    Err("Legacy HTML print path is disabled for security; use native/raw printer flow".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn print_html_to_windows(_printer_name: &str, _html_path: &str) -> Result<(), String> {
     Err("Windows printing not available on this platform".into())
 }
 
@@ -287,8 +445,10 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .or_else(|| profile.get("connection_json"))
         .and_then(|v| v.as_str());
 
-    if driver_type != "windows" {
-        return Err(format!("Unsupported driver_type: {driver_type}"));
+    if driver_type != "windows" && driver_type != "escpos" {
+        return Err(format!(
+            "Unsupported driver_type: {driver_type}. Must be 'windows' or 'escpos'"
+        ));
     }
     if paper_width_mm != 58 && paper_width_mm != 80 {
         return Err(format!(
@@ -1024,10 +1184,24 @@ mod tests {
             &serde_json::json!({
                 "name": "Bad",
                 "printerName": "Printer",
-                "driverType": "escpos",
+                "driverType": "bluetooth",
             }),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_escpos_driver_type_accepted() {
+        let db = test_db();
+        let result = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Thermal",
+                "printerName": "ThermalPrinter",
+                "driverType": "escpos",
+            }),
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

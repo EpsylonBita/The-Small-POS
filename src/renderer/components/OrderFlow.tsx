@@ -23,6 +23,11 @@ import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { AlertTriangle } from 'lucide-react';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../services/terminal-credentials';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 
 interface OrderFlowProps {
@@ -64,6 +69,7 @@ interface Customer {
  * Handles the full order creation workflow from type selection to completion
  */
 const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = false }) => {
+  const bridge = getBridge();
   const { t } = useI18n();
   const { isFeatureEnabled } = useFeatures();
   const canCreateOrders = isFeatureEnabled('orderCreation');
@@ -102,25 +108,54 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Module-based feature flags
   const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
 
-  // Get organizationId and businessType from module context (with localStorage fallback)
+  // Get organizationId and businessType from module context (with credential cache fallback)
   const { organizationId: moduleOrgId, businessType } = useModules();
 
   // Check if this is a retail vertical (uses product catalog instead of menu)
   // forceRetailMode allows ProductCatalogView to force retail mode regardless of businessType
   const isRetailVertical = forceRetailMode || businessType === 'retail';
   
-  // Get branchId and organizationId from localStorage (set during terminal setup)
+  // Get branchId and organizationId from terminal credential cache / IPC
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
   
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    const storedOrgId = localStorage.getItem('organization_id');
-    setBranchId(storedBranchId);
-    setLocalOrgId(storedOrgId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
-  // Use module context organizationId if available, otherwise fall back to localStorage
+  // Use module context organizationId if available, otherwise fall back to cache
   const organizationId = moduleOrgId || localOrgId;
 
   // Fetch tables for table orders - use actual IDs
@@ -602,9 +637,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       // Ensure a cashier shift is active before allowing order creation
       try {
-        const branchId = staff?.branchId || await (window as any).electronAPI.getTerminalBranchId();
-        const terminalId = staff?.terminalId || await (window as any).electronAPI.getTerminalId();
-        const activeCashier = await (window as any).electronAPI.getActiveCashierByTerminal(branchId, terminalId);
+        const resolvedBranchId = staff?.branchId || await bridge.terminalConfig.getBranchId();
+        const resolvedTerminalId = staff?.terminalId || await bridge.terminalConfig.getTerminalId();
+        if (!resolvedBranchId || !resolvedTerminalId) {
+          throw new Error('Missing branch or terminal id');
+        }
+        const activeCashier = await bridge.shifts.getActiveCashierByTerminal(resolvedBranchId, resolvedTerminalId);
         if (!activeCashier) {
           toast.error(t('orderFlow.noActiveCashierShift') || 'Cannot create orders until a cashier opens the day.');
           setIsProcessingOrder(false);
@@ -632,7 +670,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         // Record payment in local DB (fire-and-forget — don't block order flow)
         if (orderData.paymentData && result.orderId) {
           try {
-            await window.electronAPI.recordPayment({
+            await bridge.payments.recordPayment({
               orderId: result.orderId,
               method: orderData.paymentData.method || 'cash',
               amount: total_amount,
@@ -647,6 +685,14 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           }
         }
 
+        // Cash register / fiscal print (fire-and-forget, non-blocking)
+        if (result.orderId) {
+          try {
+            bridge.ecr.fiscalPrint(result.orderId)
+              .catch((e: any) => console.warn('[OrderFlow] Cash register print error (non-blocking):', e));
+          } catch {}
+        }
+
         // Record driver earnings for delivery orders
         if (selectedOrderType === 'delivery' && orderData.paymentData?.driverId && activeShift?.id) {
           try {
@@ -654,7 +700,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             const cashCollected = paymentMethod === 'cash' ? (orderData.paymentData.cashReceived || total_amount) : 0;
             const cardAmount = paymentMethod === 'card' ? total_amount : 0;
 
-            const earningResult = await window.electronAPI.recordDriverEarning({
+            const earningResult = await bridge.drivers.recordEarning({
               driverId: orderData.paymentData.driverId,
               shiftId: activeShift.id,
               orderId: (result.orderId || displayOrderNumber),
@@ -716,6 +762,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         isOpen={isOrderTypeModalOpen}
         onClose={() => setIsOrderTypeModalOpen(false)}
         title={t('orderFlow.selectOrderType')}
+        size="sm"
+        className="!max-w-md"
       >
         <div>
           {isTransitioning ? (
@@ -729,7 +777,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               {hasDeliveryModule && (
                 <button
                   onClick={() => handleSelectOrderType('delivery')}
-                  className="group relative p-8 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
+                  className="group relative p-6 rounded-2xl border-2 border-yellow-400/30 bg-gradient-to-br from-yellow-500/10 to-yellow-600/5 hover:from-yellow-500/20 hover:to-yellow-600/10 hover:border-yellow-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-yellow-500/20"
                 >
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-16 h-16 flex items-center justify-center">
@@ -752,7 +800,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               {/* Pickup Button - Green (always available) */}
               <button
                 onClick={() => handleSelectOrderType('pickup')}
-                className="group relative p-8 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
+                className="group relative p-6 rounded-2xl border-2 border-green-400/30 bg-gradient-to-br from-green-500/10 to-green-600/5 hover:from-green-500/20 hover:to-green-600/10 hover:border-green-400/50 transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-green-500/20"
               >
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-16 h-16 flex items-center justify-center">
@@ -840,6 +888,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           isOpen={showZoneAlert}
           onClose={() => setShowZoneAlert(false)}
           title={t('orderFlow.deliveryZoneValidation')}
+          className="!max-w-lg"
         >
           <ZoneValidationAlert
             validationResult={deliveryZoneInfo}

@@ -4,6 +4,7 @@ import { useTheme } from '../../contexts/theme-context';
 import { History, X, Package, Truck, ShoppingBag, Store, ChevronRight, RefreshCw } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { formatCurrency, formatDateTime } from '../../utils/format';
+import { getBridge } from '../../../lib';
 
 interface CustomerOrder {
     id: string;
@@ -33,6 +34,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
 }) => {
     const { t } = useTranslation();
     const { resolvedTheme } = useTheme();
+    const bridge = getBridge();
     const [orders, setOrders] = useState<CustomerOrder[]>([]);
     const [loading, setLoading] = useState(false);
 
@@ -45,15 +47,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
     const loadCustomerOrders = async () => {
         try {
             setLoading(true);
-            const api = (window as any).electronAPI;
-
-            // Try the new IPC handler first, fall back to invoice method
-            let result = await api?.getOrdersByCustomerPhone?.(customerPhone);
-
-            if (!result) {
-                // Fallback: use existing order fetch with phone filter
-                result = await window.electron?.ipcRenderer.invoke('order:get-by-customer-phone', customerPhone);
-            }
+            const result = await bridge.orders.getByCustomerPhone(customerPhone);
 
             if (result?.success && result.orders) {
                 setOrders(result.orders);

@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import type { Order, OrderItem } from '../../types/orders';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
+import { getBridge } from '../../../lib';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -105,16 +106,12 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
     return [];
   }
 
-  const api: any = (window as any).electronAPI;
-  if (!api?.invoke) {
-    console.log('[OrderApprovalPanel] electronAPI not available');
-    return [];
-  }
+  const bridge = getBridge();
 
   // 2. Fetch from local DB by order ID
   try {
     console.log('[OrderApprovalPanel] Fetching from local DB for order:', order.id);
-    const response = await api.invoke('order:get-by-id', { orderId: order.id });
+    const response: any = await bridge.orders.getById(order.id);
     const fetchedOrder = response?.data || response;
 
     if (fetchedOrder) {
@@ -133,7 +130,7 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
     const supabaseId = order.supabase_id || (order as any).supabaseId || order.id;
     console.log('[OrderApprovalPanel] Fetching from Supabase for order:', supabaseId);
 
-    const response = await api.invoke('order:fetch-items-from-supabase', { orderId: supabaseId });
+    const response: any = await bridge.orders.fetchItemsFromSupabase(supabaseId);
     const itemsResult = response?.data || response;
 
     if (Array.isArray(itemsResult) && itemsResult.length > 0) {
@@ -155,6 +152,7 @@ export function OrderApprovalPanel({
   onClose,
   viewOnly = false,
 }: OrderApprovalPanelProps) {
+  const bridge = getBridge();
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const [estimatedTime, setEstimatedTime] = useState(20);
@@ -231,10 +229,9 @@ export function OrderApprovalPanel({
     if (!phone || typeof window === 'undefined') return;
     (async () => {
       try {
-        const api: any = (window as any).electronAPI;
-        const customer = await api?.customerLookupByPhone?.(String(phone));
+        const customer: any = await getBridge().customers.lookupByPhone(String(phone));
         if (!customer) return;
-        const addr = Array.isArray(customer.addresses) && customer.addresses.length > 0
+        const addr: any = Array.isArray(customer.addresses) && customer.addresses.length > 0
           ? (customer.addresses.find((a: any) => a.is_default) || customer.addresses[0])
           : null;
         if (addr) {
@@ -462,31 +459,20 @@ export function OrderApprovalPanel({
     console.log('[OrderApprovalPanel] Print button clicked, order ID:', order.id);
     setIsPrinting(true);
     try {
-      const api: any = (window as any).electronAPI;
-      console.log('[OrderApprovalPanel] electronAPI available:', !!api);
-      console.log('[OrderApprovalPanel] printReceipt available:', !!api?.printReceipt);
-
-      if (api?.printReceipt) {
-        console.log('[OrderApprovalPanel] Calling printReceipt with order ID:', order.id);
-        const result = await api.printReceipt(order.id);
-        console.log('[OrderApprovalPanel] printReceipt result:', result);
-        toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
-      } else if (api?.printOrder) {
-        console.log('[OrderApprovalPanel] Using printOrder fallback');
-        await api.printOrder(order.id);
-        toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
-      } else {
-        console.log('[OrderApprovalPanel] No print API available, using window.print()');
-        // Fallback to browser print
-        window.print();
+      console.log('[OrderApprovalPanel] Calling bridge.payments.printReceipt with order ID:', order.id);
+      const result = await bridge.payments.printReceipt(order.id);
+      console.log('[OrderApprovalPanel] printReceipt result:', result);
+      if (result?.success === false) {
+        throw new Error(result.error || 'Print command returned failure');
       }
+      toast.success(t('orderApprovalPanel.printSuccess') || 'Receipt printed successfully');
     } catch (error) {
       console.error('[OrderApprovalPanel] Print error:', error);
       toast.error(t('orderApprovalPanel.printFailed') || 'Failed to print receipt');
     } finally {
       setIsPrinting(false);
     }
-  }, [order.id, t]);
+  }, [bridge.payments, order.id, t]);
 
 
   const getOrderTypeLabel = (type: string) => {

@@ -9,8 +9,9 @@
  * Updated: Multi-service appointment support
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel, isSupabaseConfigured } from '../../shared/supabase';
+import { supabase, isSupabaseConfigured } from '../../shared/supabase';
 import { posApiGet, posApiPost, posApiPatch } from '../utils/api-helpers';
+import { isBrowser } from '../../lib';
 
 // Types
 export type AppointmentStatus = 'scheduled' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled' | 'no_show';
@@ -225,22 +226,14 @@ function transformFromAPI(data: any): Appointment {
 class AppointmentsService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: any = null;
-  private pollingInterval: ReturnType<typeof setInterval> | null = null;
   private useApiPrimary: boolean = true; // Use API as primary, fallback to Supabase
 
-  private hasElectronIpc(): boolean {
-    if (typeof window === 'undefined') return false;
-    const w = window as any;
-    return Boolean(
-      typeof w?.electronAPI?.invoke === 'function' ||
-      typeof w?.electronAPI?.ipcRenderer?.invoke === 'function' ||
-      typeof w?.electron?.ipcRenderer?.invoke === 'function'
-    );
+  private hasDesktopBridge(): boolean {
+    return !isBrowser();
   }
 
   private canUseSupabaseFallback(): boolean {
-    return !this.hasElectronIpc() && isSupabaseConfigured();
+    return !this.hasDesktopBridge() && isSupabaseConfigured();
   }
 
   /**
@@ -722,56 +715,6 @@ class AppointmentsService {
     });
 
     return Array.from(staffMap.entries()).map(([id, name]) => ({ id, name }));
-  }
-
-  /**
-   * Subscribe to real-time appointment updates
-   * Uses polling as primary method since API doesn't support WebSockets
-   */
-  subscribeToUpdates(callback: (appointment: Appointment) => void, intervalMs: number = 30000): void {
-    // Clear existing subscriptions
-    this.unsubscribeFromUpdates();
-
-    // Start polling
-    console.log('[AppointmentsService] Starting polling for updates, interval:', intervalMs);
-    this.pollingInterval = setInterval(async () => {
-      try {
-        const appointments = await this.fetchAppointments({ includeServices: true });
-        // Note: Ideally we'd track changes and only callback for modified appointments
-        // For now, this is a simple full refresh approach
-        appointments.forEach(callback);
-      } catch (error) {
-        console.error('[AppointmentsService] Polling error:', error);
-      }
-    }, intervalMs);
-
-    // Use Supabase realtime backup only in non-Electron environments with valid Supabase config.
-    if (this.canUseSupabaseFallback()) {
-      this.realtimeChannel = subscribeToTable(
-        'appointments',
-        (payload: any) => {
-          if (payload.new) {
-            callback(transformFromAPI(payload.new));
-          }
-        },
-        `branch_id=eq.${this.branchId}`
-      );
-    }
-  }
-
-  /**
-   * Unsubscribe from real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
-    }
-
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-    }
   }
 
   /**

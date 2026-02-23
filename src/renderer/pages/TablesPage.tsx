@@ -45,6 +45,7 @@ import {
   Search,
   ChevronDown,
 } from 'lucide-react';
+import { getBridge } from '../../lib';
 
 // ============================================================
 // CONSTANTS
@@ -500,6 +501,7 @@ StatusChangeModal.displayName = 'StatusChangeModal';
 // ============================================================
 
 const TablesPage: React.FC = () => {
+  const bridge = getBridge();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -510,15 +512,17 @@ const TablesPage: React.FC = () => {
   const [branchId, setBranchId] = useState<string | null>(null);
   const [organizationId, setOrganizationId] = useState<string | null>(null);
 
-  // Resolve IDs from Electron
+  // Resolve IDs from terminal config bridge
   useEffect(() => {
-    const api = (window as any)?.electronAPI;
-    if (api?.getTerminalBranchId) {
-      api.getTerminalBranchId().then((bid: string | null) => setBranchId(bid));
-    }
-    if (api?.getTerminalOrganizationId) {
-      api.getTerminalOrganizationId().then((oid: string | null) => setOrganizationId(oid));
-    }
+    bridge.terminalConfig
+      .getBranchId()
+      .then((bid: string | null) => setBranchId(bid ?? null))
+      .catch(() => setBranchId(null));
+
+    bridge.terminalConfig
+      .getOrganizationId()
+      .then((oid: string | null) => setOrganizationId(oid ?? null))
+      .catch(() => setOrganizationId(null));
   }, []);
 
   // Use tables hook

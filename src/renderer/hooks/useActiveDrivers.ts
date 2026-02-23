@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface ActiveDriver {
   id: string;
@@ -13,6 +14,7 @@ interface UseActiveDriversReturn {
   error: string | null;
   refreshDrivers: () => Promise<void>;
 }
+const DRIVER_REFRESH_MIN_MS = 30000;
 
 /**
  * Custom hook for fetching active drivers in a branch
@@ -46,6 +48,7 @@ export function useActiveDrivers(
   branchId: string,
   autoRefresh: boolean = false
 ): UseActiveDriversReturn {
+  const bridge = getBridge();
   const [drivers, setDrivers] = useState<ActiveDriver[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -61,17 +64,7 @@ export function useActiveDrivers(
     setError(null);
 
     try {
-      // Check if electronAPI is available (supports either getActiveDrivers or drivers:get-active)
-      if (!window.electronAPI?.getActiveDrivers && !window.electronAPI?.driversGetActive) {
-        console.warn('electronAPI.getActiveDrivers not available');
-        setDrivers([]);
-        setIsLoading(false);
-        return;
-      }
-
-      const result = window.electronAPI.getActiveDrivers
-        ? await window.electronAPI.getActiveDrivers(branchId)
-        : await window.electronAPI.driversGetActive(branchId);
+      const result = await bridge.drivers.getActive(branchId);
 
       // Normalize response: accept array or { success, data, error }
       let list: any[] = [];
@@ -101,7 +94,7 @@ export function useActiveDrivers(
     } finally {
       setIsLoading(false);
     }
-  }, [branchId]);
+  }, [branchId, bridge.drivers]);
 
   // Fetch drivers when branchId changes
   useEffect(() => {
@@ -114,14 +107,41 @@ export function useActiveDrivers(
       return;
     }
 
-    // Refresh every 30 seconds
-    const intervalId = setInterval(() => {
-      fetchDrivers();
-    }, 30000);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastSyncRefreshAt = Date.now();
 
-    // Cleanup interval on unmount
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        void fetchDrivers();
+      }, delayMs);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastSyncRefreshAt < DRIVER_REFRESH_MIN_MS) {
+        return;
+      }
+      lastSyncRefreshAt = now;
+      scheduleRefresh(300);
+    };
+
+    const handleShiftUpdated = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleShiftUpdated);
+    onEvent('shift-updated', handleShiftUpdated);
+
     return () => {
-      clearInterval(intervalId);
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleShiftUpdated);
+      offEvent('shift-updated', handleShiftUpdated);
     };
   }, [autoRefresh, branchId, fetchDrivers]);
 

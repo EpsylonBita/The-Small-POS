@@ -14,6 +14,11 @@ import { useModules } from '../../../contexts/module-context';
 import { useDriveThru } from '../../../hooks/useDriveThru';
 import { Car, Clock, CheckCircle, AlertCircle, Volume2, VolumeX, RefreshCw } from 'lucide-react';
 import type { DriveThruOrder, DriveThruOrderStatus } from '../../../services/DriveThruService';
+import { offEvent, onEvent } from '../../../../lib';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../../services/terminal-credentials';
 
 const STAGES: DriveThruOrderStatus[] = ['waiting', 'preparing', 'ready', 'served'];
 
@@ -34,14 +39,58 @@ export const DriveThruView: React.FC = memo(() => {
   const [, setTick] = useState(0);
   
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    setBranchId(storedBranchId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
-  // Update timer every second
+  // Update timer on second boundaries without interval polling
   useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 1000);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleTick = () => {
+      const msUntilNextSecond = Math.max(50, 1000 - (Date.now() % 1000));
+      timeoutId = setTimeout(() => {
+        if (disposed) return;
+        setTick(t => t + 1);
+        scheduleTick();
+      }, msUntilNextSecond);
+    };
+
+    scheduleTick();
+
+    return () => {
+      disposed = true;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, []);
 
   const isDark = resolvedTheme === 'dark';

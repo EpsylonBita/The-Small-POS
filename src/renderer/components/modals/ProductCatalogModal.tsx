@@ -17,6 +17,11 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { PaymentModal } from './PaymentModal';
 import type { Product, ProductFilters } from '../../services/ProductCatalogService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
+import { offEvent, onEvent } from '../../../lib';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../services/terminal-credentials';
 
 // Debounce hook for search input
 function useDebounce<T>(value: T, delay: number): T {
@@ -91,13 +96,42 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
 
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    const storedOrgId = localStorage.getItem('organization_id');
-    setBranchId(storedBranchId);
-    setLocalOrgId(storedOrgId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
-  // Use module context organizationId if available, otherwise fall back to localStorage
+  // Use module context organizationId if available, otherwise fall back to cache
   const organizationId = moduleOrgId || localOrgId;
 
   // Memoize filters to avoid unnecessary re-renders

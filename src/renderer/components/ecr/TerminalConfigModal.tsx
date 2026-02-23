@@ -221,6 +221,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
           : t('ecr.config.addTitle', 'Add Payment Terminal')
       }
       size="md"
+      className="!max-w-lg"
     >
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Basic Info */}

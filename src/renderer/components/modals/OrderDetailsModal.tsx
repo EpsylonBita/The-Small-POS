@@ -7,6 +7,7 @@ import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import RefundVoidModal from './RefundVoidModal';
+import { getBridge } from '../../../lib';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -25,6 +26,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   onPrintReceipt,
   onShowCustomerHistory,
 }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [orderData, setOrderData] = useState<any>(null);
@@ -42,8 +44,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const loadOrderData = async () => {
     try {
       setLoading(true);
-      const api = (window as any).electronAPI;
-      const result = await api?.getOrderById?.(orderId);
+      const result = await bridge.orders.getById(orderId);
       if (result) {
         setOrderData(result);
       }
@@ -299,7 +300,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
       isOpen={isOpen}
       onClose={onClose}
       size="lg"
-      className="max-w-4xl"
+      className="!max-w-4xl"
       contentClassName="p-0 overflow-hidden"
       ariaLabel={t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
       header={modalHeader}

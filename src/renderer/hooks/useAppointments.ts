@@ -16,6 +16,7 @@ import {
   AppointmentStats,
   AppointmentStatus,
 } from '../services/AppointmentsService';
+import { offEvent, onEvent } from '../../lib';
 
 interface UseAppointmentsProps {
   branchId: string;
@@ -53,6 +54,7 @@ interface UseAppointmentsReturn {
   // Filters
   setFilters: (filters: AppointmentFilters) => void;
 }
+const APPOINTMENTS_REFRESH_MIN_MS = 30000;
 
 export function useAppointments({
   branchId,
@@ -108,24 +110,59 @@ export function useAppointments({
     fetchAppointments();
   }, [fetchAppointments]);
 
-  // Polling refresh — refetch with the CURRENT date filters every 30s
-  // (replaces the old unfiltered subscribeToUpdates which leaked all-date data)
+  // Event-driven refresh with a minimum cadence, always using CURRENT date filters.
+  // (replaces the old unfiltered subscription flow which could leak out-of-range data)
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
   useEffect(() => {
     if (!enableRealtime || !branchId || branchId.trim() === '') return;
 
-    const intervalId = setInterval(async () => {
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = Date.now();
+
+    const refreshWithCurrentFilters = async () => {
       try {
         const data = await appointmentsService.fetchAppointments(filtersRef.current);
-        setAppointments(data);
+        if (!disposed) {
+          setAppointments(data);
+        }
       } catch (err) {
-        console.error('[useAppointments] Polling refresh error:', err);
+        console.error('[useAppointments] Event-driven refresh error:', err);
       }
-    }, 30000);
+    };
 
-    return () => clearInterval(intervalId);
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        lastRefreshAt = Date.now();
+        void refreshWithCurrentFilters();
+      }, delayMs);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < APPOINTMENTS_REFRESH_MIN_MS) {
+        return;
+      }
+      scheduleRefresh(300);
+    };
+
+    const handleSyncComplete = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+    };
   }, [branchId, enableRealtime]);
 
   // Calculate stats

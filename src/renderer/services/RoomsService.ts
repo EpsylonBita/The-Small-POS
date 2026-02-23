@@ -6,6 +6,7 @@
  *
  * @since 2.1.0 - Migrated from direct Supabase to API via IPC
  */
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 // Types
 export type RoomStatus = 'available' | 'occupied' | 'cleaning' | 'maintenance' | 'reserved';
@@ -88,11 +89,8 @@ function transformFromAPI(data: RoomFromAPI): Room {
   };
 }
 
-function getIpcRenderer() {
-  return (window as any).electronAPI?.ipcRenderer ?? (window as any).electron?.ipcRenderer;
-}
-
 class RoomsService {
+  private bridge = getBridge();
   private branchId: string = '';
   private organizationId: string = '';
   private realtimeUnsubscribe: (() => void) | null = null;
@@ -127,11 +125,7 @@ class RoomsService {
       }
 
       // Use IPC to fetch rooms via API (proper auth & audit logging)
-      const ipc = getIpcRenderer();
-      if (!ipc) {
-        throw new Error('IPC renderer not available');
-      }
-      const result = await ipc.invoke('sync:fetch-rooms', options);
+      const result = await this.bridge.sync.fetchRooms(options);
 
       if (!result.success) {
         console.error('[RoomsService] API error:', result.error);
@@ -163,11 +157,7 @@ class RoomsService {
       console.log('[RoomsService] Updating room status via API:', roomId, newStatus);
 
       // Use IPC to update room via API (proper auth & audit logging)
-      const ipc = getIpcRenderer();
-      if (!ipc) {
-        throw new Error('IPC renderer not available');
-      }
-      const result = await ipc.invoke('sync:update-room-status', roomId, newStatus);
+      const result = await this.bridge.sync.updateRoomStatus(roomId, newStatus);
 
       if (!result.success) {
         console.error('[RoomsService] API error:', result.error);
@@ -224,23 +214,17 @@ class RoomsService {
       return;
     }
 
-    const ipc = getIpcRenderer();
-    if (!ipc) {
-      console.warn('[RoomsService] IPC not available for room update subscription');
-      return;
-    }
-
-    // Listen for room updates from the main process (if Supabase realtime is set up there)
-    const handler = (_event: any, payload: { room: RoomFromAPI }) => {
+    // Listen for room updates from compat event bridge (if emitted).
+    const handler = (payload: { room: RoomFromAPI }) => {
       if (payload.room) {
         console.log('[RoomsService] Received room update via IPC');
         callback(transformFromAPI(payload.room));
       }
     };
 
-    ipc.on('rooms:updated', handler);
+    onEvent('rooms:updated', handler);
     this.realtimeUnsubscribe = () => {
-      ipc.removeListener('rooms:updated', handler);
+      offEvent('rooms:updated', handler);
     };
 
     console.log('[RoomsService] Subscribed to room updates via IPC');

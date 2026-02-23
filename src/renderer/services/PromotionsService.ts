@@ -8,7 +8,7 @@
  * Requirements: 10.5, 10.7
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { supabase } from '../../shared/supabase';
 import type {
   POSPromotion,
   CartItem,
@@ -159,7 +159,6 @@ function transformPromotionFromAPI(data: PromotionFromAPI): POSPromotion {
 class PromotionsService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: ReturnType<typeof supabase.channel> | null = null;
   private cachedPromotions: POSPromotion[] = [];
   private lastFetchTime: number = 0;
   private cacheTTL: number = 60000; // 1 minute cache
@@ -332,35 +331,6 @@ class PromotionsService {
     } catch (error) {
       console.error('Failed to record redemption:', error);
       return false;
-    }
-  }
-
-  /**
-   * Subscribe to real-time promotion updates
-   */
-  subscribeToUpdates(callback: () => void): void {
-    if (this.realtimeChannel) {
-      this.unsubscribeFromUpdates();
-    }
-
-    this.realtimeChannel = subscribeToTable(
-      'product_promotions',
-      () => {
-        // Clear cache on any change
-        this.lastFetchTime = 0;
-        callback();
-      },
-      `organization_id=eq.${this.organizationId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
     }
   }
 

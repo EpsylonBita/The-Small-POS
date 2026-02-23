@@ -28,6 +28,7 @@ import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
 import AboutPage from '../pages/AboutPage';
 import SystemHealthPage from '../pages/SystemHealthPage';
+import { getBridge } from '../../lib';
 
 import { ExpenseModal } from './modals/ExpenseModal';
 
@@ -147,6 +148,7 @@ interface RefactoredMainLayoutProps {
 }
 
 export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className = '', onLogout }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { enabledModules, lockedModules } = useModules();
@@ -330,10 +332,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           onOpenZReport={() => setShowZReport(true)}
           isZReportOpen={showZReport}
           onOpenSettings={() => {
-            try {
-              const electron = (window as any).electronAPI
-              electron?.refreshTerminalSettings?.()
-            } catch { }
+            bridge.terminalConfig.refresh().catch(() => {
+              // Ignore refresh errors and continue to settings modal.
+            });
             setShowConnectionSettings(true)
           }}
         />

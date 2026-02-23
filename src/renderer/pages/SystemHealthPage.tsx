@@ -14,51 +14,19 @@ import {
   Clock,
   FolderOpen,
 } from 'lucide-react';
-
-interface SystemHealth {
-  schemaVersion: number;
-  syncBacklog: Record<string, Record<string, number>>;
-  lastSyncTimes: Record<string, string | null>;
-  printerStatus: {
-    configured: boolean;
-    profileCount: number;
-    defaultProfile: string | null;
-    recentJobs: Array<{
-      id: string;
-      entityType: string;
-      status: string;
-      createdAt: string;
-      warningCode: string | null;
-    }>;
-  };
-  lastZReport: {
-    id: string;
-    shiftId: string;
-    generatedAt: string;
-    syncState: string;
-    totalGrossSales: number;
-    totalNetSales: number;
-  } | null;
-  pendingOrders: number;
-  dbSizeBytes: number;
-  invalidOrders?: {
-    count: number;
-    details: Array<{
-      order_id: string;
-      queue_id: number;
-      invalid_menu_items: string[];
-      created_at: string | null;
-      reason: string;
-    }>;
-  };
-  isOnline: boolean;
-  lastSyncTime: string | null;
-}
+import {
+  getBridge,
+  offEvent,
+  onEvent,
+  type DiagnosticsExportOptions,
+  type DiagnosticsSystemHealth,
+} from '../../lib';
 
 const SystemHealthPage: React.FC = () => {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
-  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const bridge = getBridge();
+  const [health, setHealth] = useState<DiagnosticsSystemHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [exportPath, setExportPath] = useState<string | null>(null);
@@ -66,29 +34,46 @@ const SystemHealthPage: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const api = (window as any).electronAPI;
-      const data = await api?.invoke?.('diagnostics:get-system-health');
+      const data = await bridge.diagnostics.getSystemHealth();
       setHealth(data);
     } catch (err) {
       console.error('Failed to load system health:', err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [bridge]);
 
   useEffect(() => {
-    refresh();
-    // Auto-refresh every 30s
-    const interval = setInterval(refresh, 30000);
-    return () => clearInterval(interval);
+    let disposed = false;
+
+    const handleHealthUpdate = (payload: any) => {
+      if (disposed) return;
+      // Support both legacy `{ success, data }` and direct health payloads.
+      const candidate = payload?.data && payload?.success ? payload.data : payload;
+      if (candidate && typeof candidate === 'object') {
+        setHealth(candidate as DiagnosticsSystemHealth);
+        setLoading(false);
+      }
+    };
+
+    void refresh();
+    onEvent('database-health-update', handleHealthUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('database-health-update', handleHealthUpdate);
+    };
   }, [refresh]);
 
   const handleExport = async () => {
     setExporting(true);
     setExportPath(null);
     try {
-      const api = (window as any).electronAPI;
-      const result = await api?.invoke?.('diagnostics:export');
+      const options: DiagnosticsExportOptions = {
+        includeLogs: true,
+        redactSensitive: false,
+      };
+      const result = await bridge.diagnostics.export(options);
       if (result?.success && result?.path) {
         setExportPath(result.path);
       }
@@ -102,10 +87,9 @@ const SystemHealthPage: React.FC = () => {
   const handleOpenExportDir = async () => {
     if (!exportPath) return;
     try {
-      const dir = exportPath.substring(0, exportPath.lastIndexOf('\\') || exportPath.lastIndexOf('/'));
-      const { open } = await import('@tauri-apps/plugin-shell');
-      await open(dir);
-    } catch {
+      await bridge.diagnostics.openExportDir(exportPath);
+    } catch (error) {
+      console.warn('Failed to open diagnostics export folder:', error);
       // fallback: do nothing
     }
   };
@@ -114,9 +98,8 @@ const SystemHealthPage: React.FC = () => {
     if (!health?.invalidOrders?.details?.length) return;
 
     try {
-      const api = (window as any).electronAPI;
       const orderIds = health.invalidOrders.details.map(o => o.order_id);
-      const result = await api?.invoke?.('sync:remove-invalid-orders', orderIds);
+      const result = await bridge.sync.removeInvalidOrders(orderIds);
       if (result?.success) {
         // Refresh to show updated status
         await refresh();

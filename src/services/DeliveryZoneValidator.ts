@@ -18,6 +18,7 @@ import type {
   ValidationEvent
 } from '../shared/types/delivery-validation';
 import { environment } from '../config/environment';
+import { getBridge } from '../lib';
 
 interface ValidatorConfig {
   branchId: string;
@@ -41,6 +42,17 @@ export class DeliveryZoneValidator {
   private cache: Map<string, CachedValidation> = new Map();
   private readonly CACHE_KEY = 'pos_delivery_validation_cache';
   private readonly DEFAULT_CACHE_EXPIRY = 30 * 60 * 1000; // 30 minutes
+
+  private getBridge() {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    try {
+      return getBridge();
+    } catch {
+      return null;
+    }
+  }
 
   constructor(config: ValidatorConfig) {
     this.config = {
@@ -204,9 +216,13 @@ export class DeliveryZoneValidator {
       const response = await this.validationService.requestDeliveryOverride(request);
 
       // Track override request
-      if (this.config.enableAnalytics && window.electronAPI) {
+      if (this.config.enableAnalytics) {
+        const bridge = this.getBridge();
+        if (!bridge) {
+          return response;
+        }
         try {
-          await window.electronAPI.requestDeliveryOverride({
+          await bridge.deliveryZones.requestOverride({
             orderId,
             address,
             reason,
@@ -239,8 +255,9 @@ export class DeliveryZoneValidator {
     orderAmount: number | undefined,
     responseTimeMs: number
   ): Promise<void> {
-    if (!window.electronAPI) {
-      console.warn('[DeliveryZoneValidator] electronAPI not available for analytics');
+    const bridge = this.getBridge();
+    if (!bridge) {
+      console.warn('[DeliveryZoneValidator] Bridge not available for analytics');
       return;
     }
 
@@ -270,7 +287,7 @@ export class DeliveryZoneValidator {
         timestamp: new Date().toISOString()
       };
 
-      await window.electronAPI.trackDeliveryValidation(event);
+      await bridge.deliveryZones.trackValidation(event);
     } catch (error) {
       console.error('[DeliveryZoneValidator] Error tracking validation:', error);
     }
@@ -285,7 +302,8 @@ export class DeliveryZoneValidator {
     responseTimeMs: number,
     error: unknown
   ): Promise<void> {
-    if (!window.electronAPI) return;
+    const bridge = this.getBridge();
+    if (!bridge) return;
 
     try {
       const event: ValidationEvent = {
@@ -301,7 +319,7 @@ export class DeliveryZoneValidator {
         timestamp: new Date().toISOString()
       };
 
-      await window.electronAPI.trackDeliveryValidation(event);
+      await bridge.deliveryZones.trackValidation(event);
     } catch (err) {
       console.error('[DeliveryZoneValidator] Error tracking validation error:', err);
     }

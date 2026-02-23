@@ -3,23 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { MapPin, Home, User, Phone, Mail } from 'lucide-react';
 import { getApiUrl } from '../../../config/environment';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
-
-// Helper to get POS auth headers
-const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
-  const ls = typeof window !== 'undefined' ? window.localStorage : null;
-  const refreshed = await refreshTerminalCredentialCache();
-  const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
-  let termId = '';
-  try {
-    const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
-    termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '');
-  } catch {}
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (posKey) headers['x-pos-api-key'] = String(posKey);
-  if (termId) headers['x-terminal-id'] = String(termId);
-  return headers;
-};
+import { getPosAuthHeaders } from '../../services/terminal-credentials';
 
 interface Customer {
   id: string;
@@ -245,6 +229,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       onClose={onClose}
       title={t('modals.addNewAddress.title')}
       size="lg"
+      className="!max-w-2xl"
     >
 
         <div className="p-6">

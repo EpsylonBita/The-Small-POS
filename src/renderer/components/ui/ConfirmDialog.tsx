@@ -86,7 +86,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             isOpen={isOpen}
             onClose={onClose}
             size="sm"
-            className="border-none"
+            className="!max-w-md border-none"
             ariaLabel={title}
         >
             <div className="flex flex-col gap-6">

@@ -1,7 +1,7 @@
 import React from 'react';
 import DOMPurify from 'dompurify';
 import { LiquidGlassModal, POSGlassButton } from './ui/pos-glass-components';
-import type { UpdateInfo, ProgressInfo } from 'electron-updater';
+import type { UpdateInfo, ProgressInfo } from '../../lib/update-contracts';
 import { useI18n } from '../contexts/i18n-context';
 import { formatDate } from '../utils/format';
 
@@ -128,6 +128,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
       onClose={canClose ? onClose : () => { }}
       title={getTitle()}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={canClose}
       closeOnEscape={canClose}
     >

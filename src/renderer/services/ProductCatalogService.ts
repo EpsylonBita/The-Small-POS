@@ -2,13 +2,14 @@
  * ProductCatalogService - POS Product Catalog Service
  * 
  * Provides product catalog functionality for the POS system (Retail Vertical).
- * Uses direct Supabase connection for real-time data.
+ * Uses admin/API and direct data fetch paths; refresh orchestration is handled by native sync events.
  * 
  * Task 17.5: Create POS product catalog interface
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { supabase, isSupabaseConfigured } from '../../shared/supabase';
 import { posApiGet, posApiPatch } from '../utils/api-helpers';
+import { isBrowser } from '../../lib';
 
 // Types
 export interface Product {
@@ -171,9 +172,15 @@ function transformLowStockProductFromAPI(data: any): LowStockProduct {
 class ProductCatalogService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: any = null;
-  private supplierRealtimeChannel: any = null;
   private useApiPrimary: boolean = true;
+
+  private hasDesktopBridge(): boolean {
+    return !isBrowser();
+  }
+
+  private canUseSupabaseFallback(): boolean {
+    return !this.hasDesktopBridge() && isSupabaseConfigured();
+  }
 
   /**
    * Set the current branch and organization context
@@ -207,6 +214,10 @@ class ProductCatalogService {
         if (apiProducts !== null) {
           return apiProducts;
         }
+        if (!this.canUseSupabaseFallback()) {
+          console.warn('ProductCatalogService: API fetch failed and Supabase fallback is disabled for desktop runtime');
+          return [];
+        }
         console.warn('ProductCatalogService: API fetch failed, falling back to Supabase');
       }
 
@@ -233,6 +244,10 @@ class ProductCatalogService {
         const apiProduct = await this.fetchProductByBarcodeFromApi(barcode);
         if (apiProduct !== null) {
           return apiProduct;
+        }
+        if (!this.canUseSupabaseFallback()) {
+          console.warn('ProductCatalogService: API barcode lookup failed and Supabase fallback is disabled for desktop runtime');
+          return null;
         }
         console.warn('ProductCatalogService: API barcode lookup failed, falling back to Supabase');
       }
@@ -261,6 +276,10 @@ class ProductCatalogService {
         if (apiCategories !== null) {
           return apiCategories;
         }
+        if (!this.canUseSupabaseFallback()) {
+          console.warn('ProductCatalogService: API categories fetch failed and Supabase fallback is disabled for desktop runtime');
+          return [];
+        }
         console.warn('ProductCatalogService: API categories fetch failed, falling back to Supabase');
       }
 
@@ -281,6 +300,9 @@ class ProductCatalogService {
         const apiUpdated = await this.updateQuantityViaApi(productId, newQuantity);
         if (apiUpdated !== null) {
           return apiUpdated;
+        }
+        if (!this.canUseSupabaseFallback()) {
+          throw new Error('API updateQuantity failed and Supabase fallback is disabled for desktop runtime');
         }
         console.warn('ProductCatalogService: API updateQuantity failed, falling back to Supabase');
       }
@@ -314,36 +336,6 @@ class ProductCatalogService {
     return stats;
   }
 
-  /**
-   * Subscribe to real-time product updates
-   * Uses retail_products table
-   */
-  subscribeToUpdates(callback: (product: Product) => void): void {
-    if (this.realtimeChannel) {
-      this.unsubscribeFromUpdates();
-    }
-
-    this.realtimeChannel = subscribeToTable(
-      'retail_products',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformProductFromAPI(payload.new));
-        }
-      },
-      `organization_id=eq.${this.organizationId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-    }
-  }
-
   // ===========================================================================
   // PRODUCT-SUPPLIER METHODS
   // ===========================================================================
@@ -363,6 +355,10 @@ class ProductCatalogService {
         const apiSuppliers = await this.fetchProductSuppliersFromApi(productId);
         if (apiSuppliers !== null) {
           return apiSuppliers;
+        }
+        if (!this.canUseSupabaseFallback()) {
+          console.warn('ProductCatalogService: API suppliers fetch failed and Supabase fallback is disabled for desktop runtime');
+          return [];
         }
         console.warn('ProductCatalogService: API suppliers fetch failed, falling back to Supabase');
       }
@@ -388,6 +384,10 @@ class ProductCatalogService {
         const apiLowStock = await this.fetchLowStockProductsFromApi();
         if (apiLowStock !== null) {
           return apiLowStock;
+        }
+        if (!this.canUseSupabaseFallback()) {
+          console.warn('ProductCatalogService: API low-stock fetch failed and Supabase fallback is disabled for desktop runtime');
+          return [];
         }
         console.warn('ProductCatalogService: API low-stock fetch failed, falling back to Supabase');
       }
@@ -744,46 +744,10 @@ class ProductCatalogService {
   }
 
   /**
-   * Subscribe to real-time product-supplier updates
-   */
-  subscribeToSupplierUpdates(callback: (data: { type: string; payload: any }) => void): void {
-    if (this.supplierRealtimeChannel) {
-      this.unsubscribeFromSupplierUpdates();
-    }
-
-    if (!this.branchId || !this.organizationId) {
-      console.warn('ProductCatalogService: Cannot subscribe to supplier updates without context');
-      return;
-    }
-
-    this.supplierRealtimeChannel = subscribeToTable(
-      'product_suppliers',
-      (payload: any) => {
-        callback({
-          type: payload.eventType || 'UPDATE',
-          payload: payload.new ? transformProductSupplierFromAPI(payload.new) : payload.old,
-        });
-      },
-      `branch_id=eq.${this.branchId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from real-time supplier updates
-   */
-  unsubscribeFromSupplierUpdates(): void {
-    if (this.supplierRealtimeChannel) {
-      unsubscribeFromChannel(this.supplierRealtimeChannel);
-      this.supplierRealtimeChannel = null;
-    }
-  }
-
-  /**
    * Cleanup all realtime subscriptions
    */
   cleanup(): void {
-    this.unsubscribeFromUpdates();
-    this.unsubscribeFromSupplierUpdates();
+    // Realtime channels removed; kept for backward compatibility.
   }
 }
 

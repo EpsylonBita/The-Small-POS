@@ -8,6 +8,8 @@
  * Usage:
  *   node scripts/tauri-smoke.mjs          # Interactive mode
  *   node scripts/tauri-smoke.mjs --list   # Just list gates
+ *   node scripts/tauri-smoke.mjs --report <path>      # Interactive + JSON report
+ *   node scripts/tauri-smoke.mjs --auto <pass|fail|skip> [--report <path>]
  *
  * Prerequisites:
  *   - Rust toolchain installed (rustup)
@@ -16,6 +18,9 @@
  */
 
 import { createInterface } from 'readline';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
@@ -265,8 +270,14 @@ const GATES = [
 ];
 
 async function runInteractive() {
+  const reportPath = getReportPathArg();
+  const startedAt = new Date().toISOString();
+
   console.log('\n=== The Small POS (Tauri) — Smoke Test Runner ===\n');
   console.log(`Total gates: ${GATES.length}\n`);
+  if (reportPath) {
+    console.log(`Report output: ${reportPath}\n`);
+  }
 
   const results = [];
 
@@ -282,7 +293,17 @@ async function runInteractive() {
         ? 'FAIL'
         : 'SKIP';
 
-    results.push({ id: gate.id, name: gate.name, result, critical: gate.critical });
+    const notesRaw = await ask('Notes (optional): ');
+    const notes = notesRaw.trim();
+
+    results.push({
+      id: gate.id,
+      name: gate.name,
+      result,
+      critical: gate.critical,
+      notes: notes.length > 0 ? notes : undefined,
+      recordedAt: new Date().toISOString(),
+    });
     console.log(`  => ${result}`);
   }
 
@@ -292,6 +313,7 @@ async function runInteractive() {
   const failed = results.filter((r) => r.result === 'FAIL').length;
   const skipped = results.filter((r) => r.result === 'SKIP').length;
   const criticalFails = results.filter((r) => r.result === 'FAIL' && r.critical);
+  const endedAt = new Date().toISOString();
 
   for (const r of results) {
     const icon = r.result === 'PASS' ? '[OK]' : r.result === 'FAIL' ? '[FAIL]' : '[SKIP]';
@@ -300,19 +322,108 @@ async function runInteractive() {
 
   console.log(`\nPassed: ${passed}  Failed: ${failed}  Skipped: ${skipped}`);
 
+  const status = computeSummaryStatus({ failed, skipped });
+
   if (criticalFails.length > 0) {
     console.log('\n** CRITICAL FAILURES — DO NOT SHIP **');
     criticalFails.forEach((r) => console.log(`  - ${r.id}: ${r.name}`));
+    writeReport({
+      reportPath,
+      startedAt,
+      endedAt,
+      results,
+      summary: { passed, failed, skipped, criticalFailures: criticalFails.length, status },
+    });
+    rl.close();
     process.exit(1);
   }
 
   if (failed > 0) {
     console.log('\nSome gates failed. Review before shipping.');
+    writeReport({
+      reportPath,
+      startedAt,
+      endedAt,
+      results,
+      summary: { passed, failed, skipped, criticalFailures: criticalFails.length, status },
+    });
+    rl.close();
+    process.exit(1);
+  }
+
+  if (skipped > 0) {
+    console.log('\nSome gates were skipped. Soak is incomplete.');
+    writeReport({
+      reportPath,
+      startedAt,
+      endedAt,
+      results,
+      summary: { passed, failed, skipped, criticalFailures: criticalFails.length, status },
+    });
+    rl.close();
     process.exit(1);
   }
 
   console.log('\nAll gates passed!');
+  writeReport({
+    reportPath,
+    startedAt,
+    endedAt,
+    results,
+    summary: { passed, failed, skipped, criticalFailures: criticalFails.length, status },
+  });
   rl.close();
+}
+
+function runAuto() {
+  const autoResult = getAutoResultArg();
+  if (!autoResult) return false;
+
+  const reportPath = getReportPathArg();
+  const startedAt = new Date().toISOString();
+  const results = GATES.map((gate) => ({
+    id: gate.id,
+    name: gate.name,
+    result: autoResult,
+    critical: gate.critical,
+    notes: 'Auto-generated run',
+    recordedAt: new Date().toISOString(),
+  }));
+
+  const passed = results.filter((r) => r.result === 'PASS').length;
+  const failed = results.filter((r) => r.result === 'FAIL').length;
+  const skipped = results.filter((r) => r.result === 'SKIP').length;
+  const criticalFails = results.filter((r) => r.result === 'FAIL' && r.critical);
+  const status = computeSummaryStatus({ failed, skipped });
+  const endedAt = new Date().toISOString();
+
+  console.log('\n=== The Small POS (Tauri) — Smoke Test Runner (Auto Mode) ===\n');
+  console.log(`Auto result: ${autoResult}`);
+  console.log(`Total gates: ${GATES.length}`);
+  if (reportPath) {
+    console.log(`Report output: ${reportPath}`);
+  }
+
+  writeReport({
+    reportPath,
+    startedAt,
+    endedAt,
+    results,
+    summary: {
+      passed,
+      failed,
+      skipped,
+      criticalFailures: criticalFails.length,
+      status,
+    },
+  });
+
+  if (status !== 'PASS') {
+    process.exitCode = 1;
+  }
+
+  rl.close();
+  return true;
 }
 
 function listGates() {
@@ -322,9 +433,67 @@ function listGates() {
   }
 }
 
+function getReportPathArg() {
+  const idx = process.argv.indexOf('--report');
+  if (idx === -1) return null;
+
+  const value = process.argv[idx + 1];
+  if (!value || value.startsWith('--')) {
+    console.error('Missing value for --report <path>');
+    process.exit(1);
+  }
+
+  return path.resolve(process.cwd(), value);
+}
+
+function getAutoResultArg() {
+  const idx = process.argv.indexOf('--auto');
+  if (idx === -1) return null;
+
+  const value = (process.argv[idx + 1] || '').trim().toLowerCase();
+  if (!value || value.startsWith('--')) {
+    console.error('Missing value for --auto <pass|fail|skip>');
+    process.exit(1);
+  }
+
+  if (value === 'pass') return 'PASS';
+  if (value === 'fail') return 'FAIL';
+  if (value === 'skip') return 'SKIP';
+
+  console.error(`Invalid --auto value "${value}". Use pass|fail|skip.`);
+  process.exit(1);
+}
+
+function writeReport({ reportPath, startedAt, endedAt, results, summary }) {
+  if (!reportPath) return;
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    startedAt,
+    endedAt,
+    machine: os.hostname(),
+    totalGates: GATES.length,
+    summary,
+    results,
+  };
+
+  const dir = path.dirname(reportPath);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
+  console.log(`\nReport written: ${reportPath}`);
+}
+
+function computeSummaryStatus({ failed, skipped }) {
+  if (failed > 0) return 'FAIL';
+  if (skipped > 0) return 'INCOMPLETE';
+  return 'PASS';
+}
+
 // Entry
 if (process.argv.includes('--list')) {
   listGates();
+} else if (process.argv.includes('--auto')) {
+  runAuto();
 } else {
   runInteractive();
 }

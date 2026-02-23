@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface TopSeller {
   menuItemId: string;
@@ -49,24 +50,21 @@ const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
  * ```
  */
 export function useFeaturedItems(branchId: string | null): UseFeaturedItemsReturn {
+  const bridge = getBridge();
   const [topSellerIds, setTopSellerIds] = useState<Set<string>>(new Set());
   const [topSellers, setTopSellers] = useState<TopSeller[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoRefreshAtRef = useRef<number>(0);
 
   const loadTopSellers = useCallback(async () => {
-    // Check if electronAPI is available
-    if (!window.electronAPI?.getWeeklyTopItems) {
-      console.warn('[useFeaturedItems] electronAPI.getWeeklyTopItems not available');
-      return;
-    }
-
     setIsLoading(true);
     setError(null);
 
     try {
-      const result = await window.electronAPI.getWeeklyTopItems({
+      const result = await bridge.reports.getWeeklyTopItems({
         branchId: branchId || '',
         limit: 20
       });
@@ -95,6 +93,7 @@ export function useFeaturedItems(branchId: string | null): UseFeaturedItemsRetur
       setTopSellers(items);
       setTopSellerIds(ids);
       setLastUpdated(new Date());
+      lastAutoRefreshAtRef.current = Date.now();
 
       console.log(`[useFeaturedItems] Loaded ${items.length} top sellers for Featured category`);
     } catch (err) {
@@ -105,20 +104,54 @@ export function useFeaturedItems(branchId: string | null): UseFeaturedItemsRetur
     } finally {
       setIsLoading(false);
     }
-  }, [branchId]);
+  }, [branchId, bridge.reports]);
 
   // Load on mount and when branchId changes
   useEffect(() => {
     loadTopSellers();
   }, [loadTopSellers]);
 
-  // Auto-refresh every 6 hours
+  // Event-driven refresh with 6-hour throttling to avoid unnecessary recomputation.
   useEffect(() => {
-    const timer = setInterval(() => {
-      loadTopSellers();
-    }, REFRESH_INTERVAL_MS);
+    const scheduleRefresh = (delayMs = 250, force = false) => {
+      if (pendingRefreshRef.current) return;
+      pendingRefreshRef.current = setTimeout(() => {
+        pendingRefreshRef.current = null;
+        if (!force) {
+          const now = Date.now();
+          if (now - lastAutoRefreshAtRef.current < REFRESH_INTERVAL_MS) {
+            return;
+          }
+        }
+        void loadTopSellers();
+      }, delayMs);
+    };
 
-    return () => clearInterval(timer);
+    const handleSyncStatus = () => {
+      scheduleRefresh(300, false);
+    };
+
+    const handleSyncComplete = () => {
+      scheduleRefresh(200, false);
+    };
+
+    const handleMenuSync = () => {
+      scheduleRefresh(200, false);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+    onEvent('menu:sync', handleMenuSync);
+
+    return () => {
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+      offEvent('menu:sync', handleMenuSync);
+      if (pendingRefreshRef.current) {
+        clearTimeout(pendingRefreshRef.current);
+        pendingRefreshRef.current = null;
+      }
+    };
   }, [loadTopSellers]);
 
   // Helper function to check if an item is a top seller

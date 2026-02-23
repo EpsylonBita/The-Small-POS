@@ -36,7 +36,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
             onClose={onClose}
             title={title}
             size="lg"
-            className="h-[90vh] flex flex-col"
+            className="!max-w-2xl h-[90vh] flex flex-col"
         >
             <div className="flex flex-col h-full gap-4">
                 {/* Toolbar */}

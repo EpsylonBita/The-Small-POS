@@ -1794,6 +1794,103 @@
       "selectTimezone": "Select timezone",
       "dateFormat": "Date Format",
       "timeFormat": "Time Format"
+    },
+    "peripherals": {
+      "title": "Peripherals",
+      "helpText": "Configure external hardware devices",
+      "saved": "Peripheral settings saved",
+      "saveFailed": "Failed to save peripheral settings",
+      "scale": {
+        "title": "Weighing Scale",
+        "port": "COM Port",
+        "baudRate": "Baud Rate",
+        "protocol": "Protocol",
+        "protocolGeneric": "Generic",
+        "protocolToledo": "Toledo / Mettler-Toledo",
+        "protocolCas": "CAS",
+        "connect": "Connect",
+        "disconnect": "Disconnect",
+        "connected": "Connected",
+        "disconnected": "Disconnected"
+      },
+      "display": {
+        "title": "Customer Display",
+        "connectionType": "Connection Type",
+        "serial": "Serial (COM)",
+        "network": "Network (TCP)",
+        "portOrIp": "Port / IP Address",
+        "tcpPort": "TCP Port",
+        "baudRate": "Baud Rate",
+        "connect": "Connect",
+        "disconnect": "Disconnect"
+      },
+      "scanner": {
+        "title": "Serial Barcode Scanner",
+        "port": "COM Port",
+        "baudRate": "Baud Rate",
+        "start": "Start",
+        "stop": "Stop",
+        "running": "Running",
+        "keyboardNote": "Keyboard-wedge scanners work automatically — no configuration needed"
+      },
+      "cardReader": {
+        "title": "Card Reader (MSR)",
+        "plugAndPlay": "Magnetic stripe readers work via keyboard input — plug and play"
+      },
+      "loyaltyReader": {
+        "title": "Loyalty / NFC Reader",
+        "tapNote": "NFC readers work via keyboard input — tap card to detect",
+        "start": "Start",
+        "stop": "Stop"
+      },
+      "cashRegister": {
+        "title": "Cash Register / Fiscal Printer",
+        "addDevice": "Add Device",
+        "editDevice": "Edit Device",
+        "noDevices": "No cash register devices configured",
+        "name": "Device Name",
+        "namePlaceholder": "My Cash Register",
+        "deviceType": "Device Type",
+        "cashRegister": "Fiscal Cash Register",
+        "paymentTerminal": "Payment Terminal",
+        "brand": "Brand",
+        "protocol": "Protocol",
+        "connectionType": "Connection Type",
+        "serialUsb": "Serial / USB",
+        "network": "Network (TCP)",
+        "bluetooth": "Bluetooth",
+        "comPort": "COM Port",
+        "baudRate": "Baud Rate",
+        "ipAddress": "IP Address",
+        "tcpPort": "TCP Port",
+        "macAddress": "MAC Address",
+        "printMode": "Print Mode",
+        "registerPrints": "Cash register prints its own receipt",
+        "posSendsReceipt": "POS sends simplified receipt",
+        "taxRates": "Tax Rates",
+        "taxCode": "Code",
+        "taxRate": "Rate %",
+        "taxLabel": "Label",
+        "operatorId": "Operator ID",
+        "operatorIdPlaceholder": "Optional",
+        "setAsDefault": "Set as default device",
+        "enabled": "Enabled",
+        "testConnection": "Test Connection",
+        "testPrint": "Test Print",
+        "connectionOk": "Connection successful",
+        "connectionFailed": "Connection failed",
+        "printOk": "Test print sent",
+        "printFailed": "Test print failed",
+        "deleteConfirm": "Delete this device?",
+        "deleteConfirmText": "This will remove the device and all its settings.",
+        "connected": "Connected",
+        "disconnected": "Disconnected",
+        "error": "Error",
+        "default": "Default",
+        "disabled": "Disabled",
+        "save": "Save Device",
+        "cancel": "Cancel"
+      }
     }
   },
   "sync": {
@@ -1988,7 +2085,12 @@
       "editOrder": "Edit Order",
       "editModeMessage": "You are editing an existing order. Add, remove, or modify items as needed.",
       "editFailed": "Failed to save changes. Please try again.",
-      "saveChanges": "Save Changes"
+      "saveChanges": "Save Changes",
+      "addCustomer": "Add Customer",
+      "customerInfo": "Customer Info (Optional)",
+      "customerName": "Name",
+      "customerPhone": "Phone",
+      "customerNotes": "Notes"
     },
     "payment": {
       "title": "Payment",
@@ -2167,7 +2269,7 @@
       "totalPickupOrders": "Total Pickup Orders",
       "totalDeliveryOrders": "Total Delivery Orders",
       "totalCashOrders": "Total Cash Orders",
-      "addExpense": "+ Add Expense",
+      "addExpense": "Add Expense",
       "noExpensesRecorded": "No expenses recorded for this shift",
       "driverCheckout": "Driver Checkout",
       "startingAmount": "Starting Amount (from drawer)",
@@ -2365,7 +2467,7 @@
       "recordFailed": "Failed to record expense",
       "totalExpenses": "Total Expenses",
       "noExpenses": "No expenses recorded for this shift",
-      "addButton": "+ Add Expense"
+      "addButton": "Add Expense"
     },
     "orderCancellation": {
       "title": "Cancel Orders",

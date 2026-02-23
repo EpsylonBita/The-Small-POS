@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, createElement } from 'react';
 import { toast } from 'react-hot-toast';
 import { useI18n } from '../contexts/i18n-context';
 import { AlertTriangle, Power, RefreshCw, Ban, CheckCircle, Clock } from 'lucide-react';
+import { offEvent, onEvent } from '../../lib';
 
 interface UseAppEventsProps {
     onLogout: () => void;
@@ -22,8 +23,6 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
     }, [onLogout, t]);
 
     useEffect(() => {
-        if (!window.electron?.ipcRenderer) return;
-
         // Use refs inside handlers to get latest values without re-subscribing
         const handleAppClose = () => {
             // Handle graceful shutdown if needed
@@ -89,49 +88,27 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
         };
 
         // List of channels we're subscribing to
-        const channels = [
-            'app-close',
-            'control-command-received',
-            'app-shutdown-initiated',
-            'app-restart-initiated',
-            'terminal-disabled',
-            'terminal-enabled',
-            'session-timeout',
-            'terminal-settings-updated',
-        ];
+        const handlers: Record<string, (data?: any) => void> = {
+            'app-close': handleAppClose,
+            'control-command-received': handleControlCommand,
+            'app-shutdown-initiated': handleShutdownInitiated,
+            'app-restart-initiated': handleRestartInitiated,
+            'terminal-disabled': handleTerminalDisabled,
+            'terminal-enabled': handleTerminalEnabled,
+            'session-timeout': handleSessionTimeout,
+            'terminal-settings-updated': handleTerminalSettingsUpdated,
+        };
+        const channels = Object.keys(handlers);
 
-        // Note: update-available, update-downloaded, update-error are managed by useAutoUpdater
-        // We don't clear those listeners here to avoid conflicts
-
-        // Clear any existing listeners first to prevent duplicates
-        // But NOT update channels - those are managed by useAutoUpdater
+        // Register listeners via typed event bridge
         channels.forEach(channel => {
-            try {
-                window.electron?.ipcRenderer.removeAllListeners(channel);
-            } catch {
-                // Ignore errors if channel doesn't exist
-            }
+            onEvent(channel, handlers[channel]);
         });
 
-        // Register listeners
-        window.electron.ipcRenderer.on('app-close', handleAppClose);
-        window.electron.ipcRenderer.on('control-command-received', handleControlCommand);
-        window.electron.ipcRenderer.on('app-shutdown-initiated', handleShutdownInitiated);
-        window.electron.ipcRenderer.on('app-restart-initiated', handleRestartInitiated);
-        window.electron.ipcRenderer.on('terminal-disabled', handleTerminalDisabled);
-        window.electron.ipcRenderer.on('terminal-enabled', handleTerminalEnabled);
-        // Don't register update listeners here - useAutoUpdater handles them
-        window.electron.ipcRenderer.on('session-timeout', handleSessionTimeout);
-        window.electron.ipcRenderer.on('terminal-settings-updated', handleTerminalSettingsUpdated);
-
         return () => {
-            // Cleanup all listeners on unmount
+            // Cleanup listeners on unmount
             channels.forEach(channel => {
-                try {
-                    window.electron?.ipcRenderer.removeAllListeners(channel);
-                } catch {
-                    // Ignore errors
-                }
+                offEvent(channel, handlers[channel]);
             });
         };
     }, []); // Empty deps - only run once on mount

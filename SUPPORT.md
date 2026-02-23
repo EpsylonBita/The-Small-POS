@@ -1,165 +1,140 @@
-# The Small POS — Support & Diagnostics Guide
+# The Small POS - Support and Diagnostics Guide
 
-## Quick Diagnostics
+## Scope
 
-### Export Diagnostics Bundle
+This guide covers operational support for the native-only `pos-tauri` desktop runtime.
 
-1. Open the app and navigate to **System Health** (Activity icon in sidebar)
-2. Click **Export Diagnostics**
-3. A `.zip` file is saved to the app data directory
-4. Click **Open Folder** to locate the file
-5. Send the zip to support
+## Fast Triage Checklist
 
-The diagnostics bundle includes:
-- `about.json` — version, build timestamp, git SHA, platform
-- `system_health.json` — connection status, sync backlog, printer config, last z-report
-- `sync_backlog.json` — pending sync counts by entity type
-- `sync_errors.json` — last 20 sync errors with timestamps
-- `printer_diagnostics.json` — printer profiles and recent print jobs
-- `logs/` — recent application log files
+1. Confirm app version from About screen.
+2. Open System Health and capture current status cards.
+3. Export diagnostics bundle.
+4. Collect reproduction steps and timestamps.
+5. Attach bundle + observations to support escalation.
 
-### Manual Log Location
+## Export Diagnostics Bundle
 
-Log files are stored at:
+1. Open **System Health** (Activity icon).
+2. Click **Export Diagnostics**.
+3. Confirm generated `.zip` path.
+4. Click **Open Folder** and attach the file for support.
 
-```
-%LOCALAPPDATA%\com.thesmall.pos\logs\
-```
+Bundle contents:
 
-Log files use daily rotation (e.g., `pos.2026-02-16`). Up to 10 files are retained automatically.
+- `about.json`: app/build/platform metadata
+- `system_health.json`: runtime health snapshot
+- `sync_backlog.json`: queue counts by entity type
+- `sync_errors.json`: recent sync failures
+- `printer_diagnostics.json`: printer profiles and print-job state
+- `logs/`: recent application log files
 
-## System Health Screen
+## Runtime Health Surface
 
-The System Health screen shows:
+System Health exposes:
 
-| Card | What it shows |
-|------|---------------|
-| **Connection** | Online/Offline status, last successful sync time |
-| **Sync Backlog** | Count of pending items by entity type (orders, payments, adjustments) |
-| **Printers** | Configured printer count, default profile, recent job statuses |
-| **Last Z-Report** | When generated, gross/net sales, sync state |
-| **Database** | Schema version, file size |
-| **Pending Sync Queue** | Total items waiting to sync |
-| **Last Sync by Entity** | Per-entity-type last successful sync timestamp |
+- connection online/offline state,
+- sync backlog and pending queue,
+- printer configuration/recent status,
+- last z-report status,
+- database schema/file info,
+- last successful sync timestamps by entity.
 
-The screen auto-refreshes every 30 seconds.
+Health data is emitted by backend monitors and reflected in the UI continuously.
 
-## Common Issues
+## Common Incidents
 
-### App won't start
+### App fails to start
 
-1. Check Windows Event Viewer for crash logs
-2. Check `%LOCALAPPDATA%\com.thesmall.pos\logs\` for recent log files
-3. Try renaming the database: rename `pos.db` to `pos.db.backup` in `%LOCALAPPDATA%\com.thesmall.pos\`
-4. Restart the app
+1. Inspect `%LOCALAPPDATA%\com.thesmall.pos\logs\` for startup errors.
+2. Check Windows Event Viewer for crash entries.
+3. Rename `%LOCALAPPDATA%\com.thesmall.pos\pos.db` to `pos.db.backup` (only if corruption suspected).
+4. Re-launch app and re-test.
 
-### Dev build fails with Access is denied / cannot remove `the-small-pos.exe`
-
-If hot-reload or rebuild fails because the executable is still locked, stop any stale process and rerun dev:
+### Dev build lock (`the-small-pos.exe` in use)
 
 ```powershell
 Get-Process the-small-pos -ErrorAction SilentlyContinue | Stop-Process -Force
-```
-
-Then run:
-
-```powershell
 npm run pos:tauri:dev
 ```
 
-### Dev startup fails because port `1420` is in use
-
-`npm run pos:tauri:dev` now runs a precheck and will stop early if Vite port `1420` is already bound.
-
-Inspect and resolve the port owner manually:
+### Dev port 1420 already in use
 
 ```powershell
 Get-NetTCPConnection -LocalPort 1420 | Format-Table -AutoSize
 Get-Process -Id <PID> | Stop-Process -Force
-```
-
-Then rerun:
-
-```powershell
 npm run pos:tauri:dev
 ```
 
-### Terminal not connecting to admin
+### Terminal cannot connect to admin
 
-1. Open System Health — check if "Online" or "Offline"
-2. Open Settings (gear icon) and verify:
-   - Admin dashboard URL is correct
-   - API key is valid
-   - Terminal ID matches
-3. Check `sync_errors.json` in the diagnostics export for HTTP error details
-4. Ensure the admin dashboard is reachable from the POS machine's network
+1. Validate terminal settings (admin URL, terminal ID, API key).
+2. Confirm network reachability from terminal host.
+3. Review `sync_errors.json` for HTTP/auth errors.
+4. If identity mismatch appears, re-run onboarding with current admin-issued credentials.
 
 ### Orders not syncing
 
-1. Open System Health — check "Sync Backlog" card
-2. If items are pending, the sync loop runs every 15 seconds
-3. If items are in "failed" state, check the diagnostics export `sync_errors.json`
-4. Force a sync: the sync engine automatically retries with exponential backoff
-5. If stuck, export diagnostics and contact support
+1. Review System Health backlog/pending counts.
+2. Confirm network state transitions (offline deferral, online resume).
+3. Check `sync_errors.json` for persistent failures.
+4. Verify queue drains after reconnect; if not, attach diagnostics and logs.
 
-### Menu is empty / menu not syncing
+### Menu data missing
 
-1. Check `%LOCALAPPDATA%\\com.thesmall.pos\\logs\\pos.YYYY-MM-DD` for menu/auth errors.
-2. If logs contain `Invalid API key for terminal` or `Terminal identity mismatch`, the app now forces onboarding reset for safety.
-3. Reconnect the terminal from onboarding with the latest connection/API key from admin.
-4. After reconnect, open the menu screen and trigger **Sync Now** once.
-5. If still empty, export diagnostics and include the latest log file.
+1. Inspect logs for menu/auth failures.
+2. Validate terminal identity and API key.
+3. Trigger manual menu refresh once connectivity is restored.
+4. Escalate with diagnostics if cache remains empty.
 
-### Printer not working
+### Printer issues
 
-1. Open System Health — check "Printers" card
-2. Verify a printer profile is configured (profile count > 0)
-3. Check recent print job statuses for "failed" entries
-4. Verify the Windows printer name matches the system printer
-5. Test from Windows: print a test page to the same printer
-6. Check for `warning_code: "drawer_kick_failed"` which indicates the cash drawer couldn't open (non-blocking)
+1. Verify printer profile exists and default assignment is correct.
+2. Validate Windows printer name and OS test-page success.
+3. Review recent print jobs in diagnostics.
+4. Treat `drawer_kick_failed` warnings as non-blocking unless cash drawer behavior is itself the incident.
 
-### Z-Report not generating
+### Z-report or shift-close anomalies
 
-1. Ensure a shift is active and has been closed
-2. Z-reports are generated at shift close time
-3. Check System Health > "Last Z-Report" card
-4. If sync state is "pending", the report is waiting to sync to admin
-5. Export diagnostics to see the full `system_health.json`
+1. Confirm shift state and close sequence completed.
+2. Check z-report sync state in System Health.
+3. Validate pending queue and sync errors.
+4. Export diagnostics for reconciliation analysis.
 
 ## Data Locations
 
-| Data | Path |
-|------|------|
-| SQLite database | `%LOCALAPPDATA%\com.thesmall.pos\pos.db` |
-| Log files | `%LOCALAPPDATA%\com.thesmall.pos\logs\` |
-| Receipt files | `%LOCALAPPDATA%\com.thesmall.pos\receipts\` |
-| Diagnostics exports | `%LOCALAPPDATA%\com.thesmall.pos\` |
-| Credentials | Windows Credential Manager (keyring) |
+| Data | Location |
+|---|---|
+| SQLite DB | `%LOCALAPPDATA%\com.thesmall.pos\pos.db` |
+| Logs | `%LOCALAPPDATA%\com.thesmall.pos\logs\` |
+| Receipts | `%LOCALAPPDATA%\com.thesmall.pos\receipts\` |
+| Diagnostics bundles | `%LOCALAPPDATA%\com.thesmall.pos\` |
+| Credentials | Windows Credential Manager (`the-small-pos:*`) |
 
-## Log Rotation
+## Log Behavior
 
-- **Format**: Daily rolling files (`pos.YYYY-MM-DD`)
-- **Retention**: 10 most recent files kept, older files pruned at startup
-- **Max size**: Individual entries are not size-capped, but the daily rotation prevents unbounded growth
-- **Location**: `%LOCALAPPDATA%\com.thesmall.pos\logs\`
+- Daily rolling log files (`pos.YYYY-MM-DD`).
+- Retention pruning keeps recent files and removes old logs at startup.
+- Printer inventory log entries are emitted only on inventory changes to reduce periodic noise.
 
-## Credential Storage
+## Credential Storage and Reset
 
-Terminal credentials (API key, terminal ID, etc.) are stored in the Windows Credential Manager via the `keyring` crate. They are not stored in the SQLite database or in plain-text files.
+- Terminal credentials are stored via OS keyring integration (Windows Credential Manager).
+- Secrets are not expected in renderer local storage.
+- Reset path: app **Factory Reset** or manual credential deletion in Credential Manager.
 
-To view stored credentials:
-1. Open Windows Credential Manager
-2. Look under "Generic Credentials"
-3. Entries are prefixed with `the-small-pos:`
+## Escalation Package
 
-To reset credentials:
-1. Use the app's Settings > Factory Reset
-2. Or manually delete entries from Windows Credential Manager
+Always include:
 
-## Getting Help
+1. diagnostics zip,
+2. app version and terminal ID (masked if required),
+3. exact issue timestamp and timezone,
+4. reproduction steps,
+5. whether terminal was offline/online at incident time.
 
-- Export diagnostics and share the zip file
-- Include the app version (visible on About screen)
-- Describe the steps to reproduce the issue
-- Note the time when the issue occurred (for log correlation)
+## References
+
+- `README.md`
+- `ARCHITECTURE.md`
+- `RELEASE.md`
+- `docs/security-native-migration/SECURITY_VERIFICATION_PACK.md`

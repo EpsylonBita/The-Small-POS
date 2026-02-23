@@ -7,7 +7,7 @@
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
-use tracing::{error, info, warn};
+use tracing::{error, trace, warn};
 
 use crate::api;
 use crate::db::DbState;
@@ -94,6 +94,35 @@ fn mask_terminal_id(terminal_id: &str) -> String {
     format!("***{suffix}")
 }
 
+fn validate_terminal_id_for_query(value: &str) -> Result<&str, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Terminal not configured: missing terminal ID".to_string());
+    }
+    if trimmed.len() > 128 {
+        return Err("Terminal ID is too long".to_string());
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Terminal ID contains unsupported characters".to_string());
+    }
+    Ok(trimmed)
+}
+
+fn is_menu_connectivity_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("cannot reach admin dashboard")
+        || lower.contains("network error")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("failed to lookup address")
+        || lower.contains("dns")
+}
+
 // ---------------------------------------------------------------------------
 // Sync from admin dashboard
 // ---------------------------------------------------------------------------
@@ -124,11 +153,12 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
         let _ = storage::set_credential("pos_api_key", api_key.trim());
     }
 
+    let terminal_id_for_query = validate_terminal_id_for_query(&terminal_id)?;
     let path = format!(
-        "/api/pos/menu-sync?terminal_id={terminal_id}&last_sync=1970-01-01T00%3A00%3A00.000Z&include_inactive=false"
+        "/api/pos/menu-sync?terminal_id={terminal_id_for_query}&last_sync=1970-01-01T00%3A00%3A00.000Z&include_inactive=false"
     );
     let masked_terminal_id = mask_terminal_id(&terminal_id);
-    info!(
+    trace!(
         terminal_id = %masked_terminal_id,
         path = %path,
         "menu_sync: requesting menu payload from admin"
@@ -136,12 +166,14 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
     let resp = match api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await {
         Ok(response) => response,
         Err(error) => {
-            warn!(
-                terminal_id = %masked_terminal_id,
-                path = %path,
-                error = %error,
-                "menu_sync: admin request failed"
-            );
+            if !is_menu_connectivity_error(&error) {
+                warn!(
+                    terminal_id = %masked_terminal_id,
+                    path = %path,
+                    error = %error,
+                    "menu_sync: admin request failed"
+                );
+            }
             return Err(error);
         }
     };
@@ -210,7 +242,7 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
             .flatten();
 
         if cached_version.as_deref() == Some(version) {
-            info!(
+            trace!(
                 terminal_id = %masked_terminal_id,
                 version = version,
                 categories = category_count,
@@ -251,7 +283,7 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
         .map_err(|e| format!("upsert menu_cache[{section}]: {e}"))?;
     }
 
-    info!(
+    trace!(
         terminal_id = %masked_terminal_id,
         version = version,
         categories = category_count,

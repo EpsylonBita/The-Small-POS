@@ -35,6 +35,12 @@ import type { Order } from '../types/orders';
 import type { RestaurantTable, TableStatus } from '../types/tables';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
+import { openExternalUrl } from '../utils/electron-api';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../services/terminal-credentials';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface OrderDashboardProps {
   className?: string;
@@ -42,6 +48,7 @@ interface OrderDashboardProps {
 }
 
 export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', orderFilter }) => {
+  const bridge = getBridge();
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const {
@@ -74,21 +81,50 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Delivery validation hook
   const { validateAddress: validateDeliveryAddress } = useDeliveryValidation();
 
-  // Get organizationId from module context (with localStorage fallback)
+  // Get organizationId from module context (with terminal cache fallback)
   const { organizationId: moduleOrgId } = useModules();
 
-  // Get branchId and organizationId from localStorage (set during terminal setup)
+  // Get branchId and organizationId from terminal credential cache / IPC
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
 
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    const storedOrgId = localStorage.getItem('organization_id');
-    setBranchId(storedBranchId);
-    setLocalOrgId(storedOrgId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
-  // Use module context organizationId if available, otherwise fall back to localStorage
+  // Use module context organizationId if available, otherwise fall back to cache
   const organizationId = moduleOrgId || localOrgId;
 
   // Fetch tables for the Tables tab - use actual IDs
@@ -173,8 +209,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Refs for click-outside detection to auto-close bulk actions bar
   const bulkActionsBarRef = useRef<HTMLDivElement>(null);
   const orderGridRef = useRef<HTMLDivElement>(null);
-  const alertIntervalRef = useRef<number | null>(null);
+  const alertTimeoutRef = useRef<number | null>(null);
   const alertingOrderIdRef = useRef<string | null>(null);
+  const shiftRefreshArmedRef = useRef(false);
 
   // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
   const isMenuModalOpenRef = React.useRef(false);
@@ -225,30 +262,27 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     };
   }, [selectedOrders.length]);
 
-  // Silent refresh of orders grid every 15 seconds
-  // Uses silentRefresh which doesn't trigger loading states or flash the UI
-  // Note: Interval increased to prevent 429 rate limiting from admin API
-  // IMPORTANT: We skip refresh when menu modals are open to prevent ingredient
-  // selection state from being reset due to parent re-renders
+  // Shift activation refresh (event-driven steady state)
+  // We avoid continuous polling and perform a single silent refresh when a
+  // shift becomes active (or when blocked modals close after activation).
   const { isShiftActive } = useShift();
   useEffect(() => {
-    // Do not refresh while shift is inactive
-    if (!isShiftActive) return;
+    if (!isShiftActive) {
+      shiftRefreshArmedRef.current = false;
+      return;
+    }
 
-    const intervalId = setInterval(() => {
-      // Skip refresh if menu modals are open to prevent ingredient selection reset
-      // When orders state updates, it causes re-renders that propagate to MenuItemModal
-      // where the selectedIngredients useEffect gets triggered and resets the selection
-      // Using ref to avoid recreating interval when modal state changes
-      if (isMenuModalOpenRef.current) {
-        return;
-      }
-      // Silent refresh - no loading state, no flash
-      silentRefresh();
-    }, 15000); // 15 seconds to avoid rate limiting
+    if (isMenuModalOpenRef.current) {
+      return;
+    }
 
-    return () => clearInterval(intervalId);
-  }, [silentRefresh, isShiftActive]);
+    if (shiftRefreshArmedRef.current) {
+      return;
+    }
+
+    shiftRefreshArmedRef.current = true;
+    void silentRefresh();
+  }, [isShiftActive, showMenuModal, showEditMenuModal, silentRefresh]);
 
   // Auto-open approval panel for external pending orders (queue)
   const playExternalOrderAlert = useCallback(() => {
@@ -277,18 +311,28 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   }, []);
 
   const startAlertLoop = useCallback((orderId: string) => {
-    if (alertIntervalRef.current) {
-      clearInterval(alertIntervalRef.current);
+    if (alertTimeoutRef.current) {
+      clearTimeout(alertTimeoutRef.current);
+      alertTimeoutRef.current = null;
     }
+
     alertingOrderIdRef.current = orderId;
-    playExternalOrderAlert();
-    alertIntervalRef.current = window.setInterval(playExternalOrderAlert, 2500);
+
+    const tick = () => {
+      if (alertingOrderIdRef.current !== orderId) {
+        return;
+      }
+      playExternalOrderAlert();
+      alertTimeoutRef.current = window.setTimeout(tick, 2500);
+    };
+
+    tick();
   }, [playExternalOrderAlert]);
 
   const stopAlertLoop = useCallback(() => {
-    if (alertIntervalRef.current) {
-      clearInterval(alertIntervalRef.current);
-      alertIntervalRef.current = null;
+    if (alertTimeoutRef.current) {
+      clearTimeout(alertTimeoutRef.current);
+      alertTimeoutRef.current = null;
     }
     alertingOrderIdRef.current = null;
   }, []);
@@ -316,15 +360,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       return;
     }
 
-    if (alertingOrderIdRef.current !== activeOrderId) {
+    if (alertingOrderIdRef.current !== activeOrderId || !alertTimeoutRef.current) {
       startAlertLoop(activeOrderId);
-      return;
     }
+  }, [showApprovalPanel, isViewOnlyMode, selectedOrderForApproval, startAlertLoop, stopAlertLoop]);
 
-    if (!alertIntervalRef.current) {
-      alertIntervalRef.current = window.setInterval(playExternalOrderAlert, 2500);
-    }
-  }, [showApprovalPanel, isViewOnlyMode, selectedOrderForApproval, playExternalOrderAlert, startAlertLoop, stopAlertLoop]);
+  useEffect(() => () => {
+    stopAlertLoop();
+  }, [stopAlertLoop]);
 
   // Update computed values when dependencies change
   useEffect(() => {
@@ -1159,8 +1202,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           const customerId = existingCustomer?.id || orderData.customer?.id;
           console.log('[OrderDashboard.handleOrderComplete] Attempting database fallback for customerId:', customerId);
           try {
-            const api: any = (window as any).electronAPI;
-            const dbCustomer = await api?.customerLookupById?.(customerId);
+            const dbCustomer = (await bridge.customers.lookupById(customerId)) as any;
             if (dbCustomer) {
               console.log('[OrderDashboard.handleOrderComplete] Database customer found:', dbCustomer);
               // Check customer.addresses array first
@@ -1317,23 +1359,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // Auto-print receipt/ticket for new orders (fire-and-forget - don't block UI)
         if (result.orderId) {
           console.log('[OrderDashboard] Starting auto-print for order:', result.orderId);
-          const api: any = (window as any).electronAPI;
-          console.log('[OrderDashboard] electronAPI available:', !!api, 'printReceipt:', !!api?.printReceipt);
+          bridge.payments.printReceipt(result.orderId)
+            .then((printResult: any) => console.log('[OrderDashboard] Receipt print result:', printResult))
+            .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
 
-          if (api?.printReceipt) {
-            // Fire-and-forget printing - order is already saved by createOrder
-            console.log('[OrderDashboard] Calling printReceipt for order:', result.orderId);
-            api.printReceipt(result.orderId)
-              .then((printResult: any) => console.log('[OrderDashboard] Receipt print result:', printResult))
-              .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
-          } else if (api?.printOrder) {
-            console.log('[OrderDashboard] Calling printOrder for order:', result.orderId);
-            api.printOrder(result.orderId)
-              .then(() => console.log('[OrderDashboard] Order ticket printed for order:', result.orderId))
-              .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
-          } else {
-            console.warn('[OrderDashboard] No print API available');
-          }
+          // Cash register / fiscal print (fire-and-forget, non-blocking)
+          bridge.ecr.fiscalPrint(result.orderId)
+            .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
+            .catch((e: any) => console.warn('[OrderDashboard] Cash register print error (non-blocking):', e));
         } else {
           console.warn('[OrderDashboard] No orderId in result, skipping auto-print');
         }
@@ -1370,13 +1403,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       if (action === 'receipt') {
         if (selectedOrders.length === 1) {
           try {
-            const api = (window as any).electronAPI;
-            const result = await api?.getReceiptPreview(selectedOrders[0]);
-            if (result?.success && result?.html) {
-              setReceiptPreviewHtml(result.html);
+            const result = await bridge.payments.getReceiptPreview(selectedOrders[0]);
+            const html = (result as any)?.html ?? (result as any)?.data?.html;
+            if ((result as any)?.success !== false && html) {
+              setReceiptPreviewHtml(html);
               setShowReceiptPreview(true);
             } else {
-              toast.error(result?.error || 'Failed to generate receipt preview');
+              toast.error((result as any)?.error || 'Failed to generate receipt preview');
             }
           } catch (err) {
             console.error('Receipt preview failed:', err);
@@ -1432,10 +1465,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
         const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
 
-        // Handle pickup orders immediately (mark as delivered)
+        // Handle pickup orders immediately (mark as completed)
         if (pickupOrders.length > 0) {
           for (const order of pickupOrders) {
-            const success = await updateOrderStatus(order.id, 'delivered');
+            const success = await updateOrderStatus(order.id, 'completed');
             if (!success) {
               toast.error(t('orderDashboard.markDeliveredFailed', { orderNumber: order.orderNumber }));
               return;
@@ -1486,8 +1519,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           try {
             for (const addr of addresses) {
               const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`;
-              // Use window.open; main process will route via shell.openExternal
-              window.open(url, '_blank');
+              const opened = await openExternalUrl(url);
+              if (!opened) throw new Error('Failed to open external map URL');
             }
             toast.success(t('orderDashboard.openedInMaps', { count: addresses.length }));
           } catch (e) {
@@ -1636,7 +1669,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     try {
       // Update order items for all pending edit orders
       for (const orderId of pendingEditOrders) {
-        const result = await window.electronAPI?.invoke('order:update-items', {
+        const result = await bridge.invoke('order:update-items', {
           orderId,
           items,
           orderNotes
@@ -1677,7 +1710,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     notes?: string;
   }) => {
     try {
-      const result = await window.electronAPI?.invoke('order:update-items', {
+      const result = await bridge.invoke('order:update-items', {
         orderId: orderData.orderId,
         items: orderData.items,
         orderNotes: orderData.notes
@@ -1897,6 +1930,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         isOpen={showOrderTypeModal}
         onClose={() => setShowOrderTypeModal(false)}
         title={t('orderFlow.selectOrderType') || 'Select Order Type'}
+        className="!max-w-lg"
       >
         <div className="p-2">
           {isOrderTypeTransitioning ? (

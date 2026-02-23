@@ -56,6 +56,7 @@ const UpgradePromptModal: React.FC<UpgradePromptModalProps> = ({
       onClose={onClose}
       title={t('modules.upgradeRequired', { defaultValue: 'Upgrade Required' })}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

@@ -4,7 +4,8 @@ import { posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import toast from 'react-hot-toast';
-import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../services/terminal-credentials';
+import { getPosAuthHeaders, getResolvedTerminalCredentials } from '../services/terminal-credentials';
+import { getBridge, offEvent, onEvent } from '../../lib';
 import {
   Users,
   Search,
@@ -54,6 +55,7 @@ interface CustomerAddress {
 }
 
 const UsersPage: React.FC = () => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -74,7 +76,7 @@ const UsersPage: React.FC = () => {
     loadUsers();
 
     // Listen for real-time customer updates from the main process
-    const handleCustomerUpdate = (_event: any, data: any) => {
+    const handleCustomerUpdate = (data: any) => {
       // Add null check for data
       if (!data) {
         console.warn('Received customer update event with undefined data');
@@ -90,18 +92,13 @@ const UsersPage: React.FC = () => {
       }
     };
 
-    // Subscribe to IPC events for customer updates
-    if (window.electronAPI?.on) {
-      window.electronAPI.on('customer-updated', handleCustomerUpdate);
-      window.electronAPI.on('customer-realtime-update', handleCustomerUpdate);
-    }
+    onEvent('customer-updated', handleCustomerUpdate);
+    onEvent('customer-realtime-update', handleCustomerUpdate);
 
     // Cleanup
     return () => {
-      if (window.electronAPI?.removeListener) {
-        window.electronAPI.removeListener('customer-updated', handleCustomerUpdate);
-        window.electronAPI.removeListener('customer-realtime-update', handleCustomerUpdate);
-      }
+      offEvent('customer-updated', handleCustomerUpdate);
+      offEvent('customer-realtime-update', handleCustomerUpdate);
     };
   }, []);
 
@@ -109,20 +106,15 @@ const UsersPage: React.FC = () => {
     setLoading(true);
     try {
       // Fetch customers via IPC for performance
-      const customers = await window.electronAPI?.customerSearch?.('') || [];
+      const customers = (await bridge.customers.search('')) || [];
 
       // Fetch app users using POS-auth endpoint to avoid admin cookie requirement
       const params = new URLSearchParams({ page: '1', limit: '100', sortBy: 'created_at', sortOrder: 'desc' })
 
-      // Resolve POS API key and terminal id like AddCustomerModal
-      const ls = typeof window !== 'undefined' ? window.localStorage : null
-      const refreshed = await refreshTerminalCredentialCache()
-      const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim()
-      let termId = ''
-      try {
-        const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined)
-        termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '')
-      } catch {}
+      // Resolve POS API key and terminal id from secure IPC/cache context
+      const resolved = await getResolvedTerminalCredentials()
+      const posKey = (resolved.apiKey || '').trim()
+      const termId = (resolved.terminalId || '').trim()
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
       if (posKey) headers['x-pos-api-key'] = String(posKey)
@@ -174,22 +166,6 @@ const UsersPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  // Helper to get POS auth headers
-  const getPosAuthHeaders = async (): Promise<Record<string, string>> => {
-    const ls = typeof window !== 'undefined' ? window.localStorage : null;
-    const refreshed = await refreshTerminalCredentialCache();
-    const posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
-    let termId = '';
-    try {
-      const electron = (typeof window !== 'undefined' ? (window as any).electronAPI : undefined);
-      termId = (await electron?.getTerminalId?.()) || refreshed.terminalId || (ls?.getItem('terminal_id') || '');
-    } catch {}
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (posKey) headers['x-pos-api-key'] = String(posKey);
-    if (termId) headers['x-terminal-id'] = String(termId);
-    return headers;
   };
 
   const handleViewUser = async (user: UserProfile) => {
@@ -468,7 +444,7 @@ const UsersPage: React.FC = () => {
 
       // Update in Supabase via customer:update-ban-status
       const newBanStatus = !currentBanStatus;
-      const result = await window.electronAPI?.invoke?.('customer:update-ban-status', userId, newBanStatus);
+      const result = await bridge.customers.updateBanStatus(userId, newBanStatus);
 
       console.log('Ban status update result:', result);
 

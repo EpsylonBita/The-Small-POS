@@ -41,6 +41,7 @@ export const OrderCancellationModal: React.FC<OrderCancellationModalProps> = ({
       onClose={handleClose}
       title={t('modals.orderCancellation.title')}
       size="md"
+      className="!max-w-lg"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >

@@ -8,6 +8,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'react-hot-toast'
+import { getBridge, offEvent, onEvent } from '../../../lib'
 import {
   ArrowLeft,
   CreditCard,
@@ -76,50 +77,126 @@ interface TerminalStats {
   error: number
 }
 
+const asDeviceState = (value: unknown): DeviceState => {
+  const normalized = String(value || '').toLowerCase()
+  if (
+    normalized === 'disconnected' ||
+    normalized === 'connecting' ||
+    normalized === 'connected' ||
+    normalized === 'busy' ||
+    normalized === 'error'
+  ) {
+    return normalized
+  }
+  return 'disconnected'
+}
+
+const extractDeviceId = (payload: any): string | null => {
+  if (typeof payload === 'string' && payload.trim()) return payload.trim()
+  const candidate = payload?.deviceId ?? payload?.device_id ?? payload?.id
+  return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
+}
+
+const toDeviceList = (payload: any): ECRDevice[] => {
+  if (Array.isArray(payload)) return payload as ECRDevice[]
+  if (Array.isArray(payload?.devices)) return payload.devices as ECRDevice[]
+  if (Array.isArray(payload?.data?.devices)) return payload.data.devices as ECRDevice[]
+  return []
+}
+
+const toStatusMap = (payload: any): Record<string, ECRDeviceStatus> => {
+  const map: Record<string, ECRDeviceStatus> = {}
+  const statusItems = Array.isArray(payload?.statuses)
+    ? payload.statuses
+    : Array.isArray(payload)
+      ? payload
+      : []
+
+  for (const item of statusItems) {
+    const deviceId = extractDeviceId(item)
+    if (!deviceId) continue
+    const state = asDeviceState(item?.state ?? item?.status)
+    map[deviceId] = {
+      deviceId,
+      state,
+      isOnline: item?.isOnline ?? item?.connected ?? state === 'connected',
+      lastSeen: item?.lastSeen ? new Date(item.lastSeen) : undefined,
+      errorMessage: item?.errorMessage ?? item?.error,
+    }
+  }
+
+  if (Object.keys(map).length === 0 && payload && typeof payload === 'object') {
+    for (const [key, value] of Object.entries(payload)) {
+      if (!value || typeof value !== 'object') continue
+      const state = asDeviceState((value as any).state ?? (value as any).status)
+      map[key] = {
+        deviceId: key,
+        state,
+        isOnline: (value as any).isOnline ?? (value as any).connected ?? state === 'connected',
+        lastSeen: (value as any).lastSeen ? new Date((value as any).lastSeen) : undefined,
+        errorMessage: (value as any).errorMessage ?? (value as any).error,
+      }
+    }
+  }
+
+  return map
+}
+
 // ============================================================
 // IPC API
 // ============================================================
 
 const ecrAPI = {
   discoverDevices: async (types?: ConnectionType[]): Promise<DiscoveredDevice[]> => {
-    const result = await (window as any).electronAPI?.invoke('ecr:discover-devices', types)
-    return result?.devices || []
+    const result = await getBridge().ecr.discoverDevices(types)
+    return toDeviceList(result) as unknown as DiscoveredDevice[]
   },
   getDevices: async (): Promise<ECRDevice[]> => {
-    const result = await (window as any).electronAPI?.invoke('ecr:get-devices')
-    return result?.devices || []
+    const result = await getBridge().ecr.getDevices()
+    return toDeviceList(result)
   },
   addDevice: async (
     config: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<ECRDevice> => {
-    return (window as any).electronAPI?.invoke('ecr:add-device', config)
+    const result: any = await getBridge().ecr.addDevice(config)
+    if (result?.success === false) {
+      throw new Error(result?.error || 'Failed to add device')
+    }
+    return (result?.device ?? result) as ECRDevice
   },
   updateDevice: async (
     deviceId: string,
     updates: Partial<ECRDevice>
   ): Promise<ECRDevice | null> => {
-    return (window as any).electronAPI?.invoke('ecr:update-device', deviceId, updates)
+    const result: any = await getBridge().ecr.updateDevice(deviceId, updates)
+    if (result?.success === false) return null
+    return (result?.device ?? result ?? null) as ECRDevice | null
   },
   removeDevice: async (deviceId: string): Promise<boolean> => {
-    return (window as any).electronAPI?.invoke('ecr:remove-device', deviceId)
+    const result: any = await getBridge().ecr.removeDevice(deviceId)
+    if (typeof result === 'boolean') return result
+    return result?.success === true || result?.removed > 0
   },
   connectDevice: async (deviceId: string): Promise<void> => {
-    return (window as any).electronAPI?.invoke('ecr:connect-device', deviceId)
+    const result: any = await getBridge().ecr.connectDevice(deviceId)
+    if (result?.success === false) {
+      throw new Error(result?.error || 'Failed to connect device')
+    }
   },
   disconnectDevice: async (deviceId: string): Promise<void> => {
-    return (window as any).electronAPI?.invoke('ecr:disconnect-device', deviceId)
+    const result: any = await getBridge().ecr.disconnectDevice(deviceId)
+    if (result?.success === false) {
+      throw new Error(result?.error || 'Failed to disconnect device')
+    }
   },
   getDeviceStatus: async (deviceId: string): Promise<ECRDeviceStatus | null> => {
-    return (window as any).electronAPI?.invoke('ecr:get-device-status', deviceId)
+    const result: any = await getBridge().ecr.getDeviceStatus(deviceId)
+    const normalized = toStatusMap([result])[deviceId]
+    return normalized || null
   },
   getAllStatuses: async (): Promise<Record<string, ECRDeviceStatus>> => {
-    const result = await (window as any).electronAPI?.invoke('ecr:get-all-statuses')
-    const arr: any[] = result?.statuses || []
-    const map: Record<string, ECRDeviceStatus> = {}
-    for (const s of arr) {
-      if (s?.deviceId) map[s.deviceId] = s
-    }
-    return map
+    const result = await getBridge().ecr.getAllStatuses()
+    return toStatusMap(result)
   },
 }
 
@@ -240,7 +317,9 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
 
   // Set up event listeners for status updates
   useEffect(() => {
-    const handleDeviceConnected = (deviceId: string) => {
+    const handleDeviceConnected = (payload: any) => {
+      const deviceId = extractDeviceId(payload)
+      if (!deviceId) return
       setStatuses((prev) => ({
         ...prev,
         [deviceId]: {
@@ -254,7 +333,9 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
       toast.success(t('ecr.status.connected', 'Terminal connected'))
     }
 
-    const handleDeviceDisconnected = (deviceId: string) => {
+    const handleDeviceDisconnected = (payload: any) => {
+      const deviceId = extractDeviceId(payload)
+      if (!deviceId) return
       setStatuses((prev) => ({
         ...prev,
         [deviceId]: {
@@ -266,26 +347,31 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
       }))
     }
 
-    const handleStatusChanged = (deviceId: string, status: ECRDeviceStatus) => {
+    const handleStatusChanged = (payload: any) => {
+      const deviceId = extractDeviceId(payload)
+      if (!deviceId) return
+      const state = asDeviceState(payload?.state ?? payload?.status)
       setStatuses((prev) => ({
         ...prev,
-        [deviceId]: status,
+        [deviceId]: {
+          ...prev[deviceId],
+          deviceId,
+          state,
+          isOnline: payload?.isOnline ?? payload?.connected ?? state === 'connected',
+          lastSeen: payload?.lastSeen ? new Date(payload.lastSeen) : prev[deviceId]?.lastSeen,
+          errorMessage: payload?.errorMessage ?? payload?.error,
+        },
       }))
     }
 
-    const api = (window as any).electronAPI
-    if (api?.ipcRenderer) {
-      api.ipcRenderer.on('ecr:event:device-connected', handleDeviceConnected)
-      api.ipcRenderer.on('ecr:event:device-disconnected', handleDeviceDisconnected)
-      api.ipcRenderer.on('ecr:event:device-status-changed', handleStatusChanged)
-    }
+    onEvent('ecr:event:device-connected', handleDeviceConnected)
+    onEvent('ecr:event:device-disconnected', handleDeviceDisconnected)
+    onEvent('ecr:event:device-status-changed', handleStatusChanged)
 
     return () => {
-      if (api?.ipcRenderer) {
-        api.ipcRenderer.removeListener('ecr:event:device-connected', handleDeviceConnected)
-        api.ipcRenderer.removeListener('ecr:event:device-disconnected', handleDeviceDisconnected)
-        api.ipcRenderer.removeListener('ecr:event:device-status-changed', handleStatusChanged)
-      }
+      offEvent('ecr:event:device-connected', handleDeviceConnected)
+      offEvent('ecr:event:device-disconnected', handleDeviceDisconnected)
+      offEvent('ecr:event:device-status-changed', handleStatusChanged)
     }
   }, [t])
 

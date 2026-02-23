@@ -7,6 +7,7 @@ import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '..
 import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';
 import type { Order } from '../../shared/types/orders';
 import { OrderService } from '../../services/OrderService';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
@@ -113,6 +114,7 @@ let isStoreInitialized = false;
 
 // Error handler instance
 const errorHandler = ErrorHandler.getInstance();
+const bridge = getBridge();
 
 const INTERNAL_PLUGINS = new Set(['pos', 'web', 'android-ios', 'kiosk']);
 
@@ -258,24 +260,7 @@ const splitOrdersForState = (orders: Order[]): { orders: Order[]; pendingExterna
 };
 
 const invokeElectronIpc = async (channel: string, ...args: any[]): Promise<any> => {
-  if (typeof window === 'undefined') {
-    throw new Error('Electron IPC is unavailable outside renderer context');
-  }
-
-  const electronAPI = (window as any).electronAPI;
-  if (typeof electronAPI?.invoke === 'function') {
-    return electronAPI.invoke(channel, ...args);
-  }
-  if (typeof electronAPI?.ipcRenderer?.invoke === 'function') {
-    return electronAPI.ipcRenderer.invoke(channel, ...args);
-  }
-
-  const electron = (window as any).electron;
-  if (typeof electron?.ipcRenderer?.invoke === 'function') {
-    return electron.ipcRenderer.invoke(channel, ...args);
-  }
-
-  throw new Error(`Electron IPC channel not available: ${channel}`);
+  return bridge.invoke(channel, ...args);
 };
 
 const findOrderInState = (state: Pick<OrderStore, 'orders' | 'pendingExternalOrders'>, orderId: string): Order | null => {
@@ -367,318 +352,284 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
     },
 
     _setupRealtimeListeners: () => {
-      // Check if we're in Electron environment
-      if (typeof window !== 'undefined' && window.electronAPI) {
-        console.log('📡 Setting up real-time order update listeners...');
+      if (typeof window === 'undefined') {
+        console.log('⚠️ Renderer context unavailable, skipping real-time listeners setup');
+        return;
+      }
 
-        // Listen for real-time order updates from main process
-        const handleOrderRealtimeUpdate = (orderData: any) => {
-          console.log('📡 Received real-time order update (remote wins):', orderData);
+      console.log('📡 Setting up real-time order update listeners...');
 
-          // Always accept remote: merge/overwrite local snapshot with remote payload
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const existingOrderIndex = combined.findIndex(order =>
-              order.id === orderData.id ||
-              (order as any).supabase_id === orderData.id ||
-              ((order as any).order_number && orderData.order_number && (order as any).order_number === orderData.order_number)
-            );
+      // Listen for real-time order updates from main process
+      const handleOrderRealtimeUpdate = (orderData: any) => {
+        console.log('📡 Received real-time order update (remote wins):', orderData);
 
-            if (existingOrderIndex >= 0) {
-              const current: any = combined[existingOrderIndex] as any;
-              // Do not overwrite local pending changes
-              if ((current as any).sync_status === 'pending' || (current as any).syncStatus === 'pending') {
-                return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
-              }
-              // Only accept newer remote updates
-              const currentTs = new Date((current as any).updatedAt || (current as any).updated_at || 0).getTime();
-              const incomingTs = new Date((orderData as any).updated_at || (orderData as any).updatedAt || 0).getTime();
-              if (incomingTs && currentTs && incomingTs <= currentTs) {
-                return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
-              }
-              const updatedOrders = [...combined];
-              const mappedStatus = (orderData as any).status ? mapStatusForPOS((orderData as any).status as any) : (current as any).status;
-              const currentStatus = (current as any).status as string;
-              // Treat delivered and cancelled as final and sticky; do not revert them due to incoming non-final statuses
-              const currentFinal = ['completed','cancelled','delivered'].includes(currentStatus);
-              const incomingFinal = ['completed','cancelled','delivered'].includes(mappedStatus as any);
-              const nextStatus = currentFinal && !incomingFinal ? currentStatus : mappedStatus;
-              updatedOrders[existingOrderIndex] = {
-                ...updatedOrders[existingOrderIndex],
-                ...orderData,
-                status: nextStatus
-              };
-              const split = splitOrdersForQueue(updatedOrders as Order[]);
-              return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
-            } else {
-              // Do not add remote-only orders; trigger refresh instead
+        // Always accept remote: merge/overwrite local snapshot with remote payload
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const existingOrderIndex = combined.findIndex(order =>
+            order.id === orderData.id ||
+            (order as any).supabase_id === orderData.id ||
+            ((order as any).order_number && orderData.order_number && (order as any).order_number === orderData.order_number)
+          );
+
+          if (existingOrderIndex >= 0) {
+            const current: any = combined[existingOrderIndex] as any;
+            // Do not overwrite local pending changes
+            if ((current as any).sync_status === 'pending' || (current as any).syncStatus === 'pending') {
               return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
             }
-          });
-
-          get()._invalidateCache();
-        };
-
-        // Listen for order status updates
-        const handleOrderStatusUpdate = ({ orderId, status }: { orderId: string; status: string }) => {
-          console.log('📡 Received order status update:', { orderId, status });
-
-          const incomingMapped = mapStatusForPOS(status as any);
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const updated = combined.map(order =>
-              order.id === orderId
-                ? {
-                    ...order,
-                    // Preserve delivered/cancelled status from reverting due to any non-final push
-                    status: (order.status === 'delivered' || order.status === 'cancelled') ? order.status : (incomingMapped as any),
-                    updatedAt: new Date().toISOString()
-                  }
-                : order
-            );
-            const split = splitOrdersForQueue(updated as Order[]);
+            // Only accept newer remote updates
+            const currentTs = new Date((current as any).updatedAt || (current as any).updated_at || 0).getTime();
+            const incomingTs = new Date((orderData as any).updated_at || (orderData as any).updatedAt || 0).getTime();
+            if (incomingTs && currentTs && incomingTs <= currentTs) {
+              return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
+            }
+            const updatedOrders = [...combined];
+            const mappedStatus = (orderData as any).status ? mapStatusForPOS((orderData as any).status as any) : (current as any).status;
+            const currentStatus = (current as any).status as string;
+            // Treat delivered and cancelled as final and sticky; do not revert them due to incoming non-final statuses
+            const currentFinal = ['completed', 'cancelled', 'delivered'].includes(currentStatus);
+            const incomingFinal = ['completed', 'cancelled', 'delivered'].includes(mappedStatus as any);
+            const nextStatus = currentFinal && !incomingFinal ? currentStatus : mappedStatus;
+            updatedOrders[existingOrderIndex] = {
+              ...updatedOrders[existingOrderIndex],
+              ...orderData,
+              status: nextStatus
+            };
+            const split = splitOrdersForQueue(updatedOrders as Order[]);
             return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
-          });
-
-          get()._invalidateCache();
-        };
-
-        // Listen for new orders from OTHER terminals (order_save_from_remote only).
-        // Self-created orders are added to state directly in createOrder().
-        const handleOrderCreated = (orderData: any) => {
-          if (!orderData || !orderData.id) {
-            console.warn('⚠️ [useOrderStore] Invalid order data received:', orderData);
-            return;
-          }
-
-          // Skip self-created orders (safety net)
-          if (_recentlyCreatedOrderIds.has(orderData.id)) return;
-
-          console.log('📡 [useOrderStore] Received remote order:', orderData.id);
-
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const existingOrderIndex = findOrderIndex(combined, orderData);
-
-            if (existingOrderIndex >= 0) {
-              const updatedOrders = [...combined];
-              updatedOrders[existingOrderIndex] = { ...updatedOrders[existingOrderIndex], ...orderData };
-              return splitOrdersForState(updatedOrders as Order[]);
-            }
-
-            return splitOrdersForState([orderData, ...combined] as Order[]);
-          });
-
-          get()._invalidateCache();
-
-          // Show toast for remote orders only
-          toast.success(`New order #${orderData.order_number || orderData.id.slice(0, 8)} received!`, {
-            duration: 5000,
-            icon: createElement(Bell, { className: 'w-4 h-4 text-blue-500' })
-          });
-        };
-
-        // Listen for order updates (e.g., after editing items)
-        const handleOrderUpdated = (orderData: any) => {
-          console.log('📡 [useOrderStore] Received order updated:', orderData);
-
-          // Validate order data
-          if (!orderData || !orderData.id) {
-            console.warn('⚠️ [useOrderStore] Invalid order update data received:', orderData);
-            return;
-          }
-
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const existingOrderIndex = findOrderIndex(combined, orderData);
-
-            if (existingOrderIndex >= 0) {
-              console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
-              const updatedOrders = [...combined];
-              updatedOrders[existingOrderIndex] = {
-                ...updatedOrders[existingOrderIndex],
-                ...orderData,
-                items: orderData.items || updatedOrders[existingOrderIndex].items,
-                totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
-              };
-              return splitOrdersForState(updatedOrders as Order[]);
-            }
-
-            console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
+          } else {
+            // Do not add remote-only orders; trigger refresh instead
             return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
-          });
+          }
+        });
 
+        get()._invalidateCache();
+      };
 
+      // Listen for order status updates
+      const handleOrderStatusUpdate = ({ orderId, status }: { orderId: string; status: string }) => {
+        console.log('📡 Received order status update:', { orderId, status });
 
-          get()._invalidateCache();
-        };
+        const incomingMapped = mapStatusForPOS(status as any);
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updated = combined.map(order =>
+            order.id === orderId
+              ? {
+                  ...order,
+                  // Preserve delivered/cancelled status from reverting due to any non-final push
+                  status: (order.status === 'delivered' || order.status === 'cancelled') ? order.status : (incomingMapped as any),
+                  updatedAt: new Date().toISOString()
+                }
+              : order
+          );
+          const split = splitOrdersForQueue(updated as Order[]);
+          return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
+        });
 
-        // Listen for order deletions (handles both direct orderId and realtime payload formats)
-        const handleOrderDelete = (data: { orderId?: string; old?: { id: string } }) => {
-          // Support both formats: { orderId } or { old: { id } } from realtime
-          const orderId = data.orderId || data.old?.id;
+        get()._invalidateCache();
+      };
 
-          if (!orderId) {
-            console.warn('📡 Received order deletion with no orderId:', data);
-            return;
+      // Listen for new orders from OTHER terminals (order_save_from_remote only).
+      // Self-created orders are added to state directly in createOrder().
+      const handleOrderCreated = (orderData: any) => {
+        if (!orderData || !orderData.id) {
+          console.warn('⚠️ [useOrderStore] Invalid order data received:', orderData);
+          return;
+        }
+
+        // Skip self-created orders (safety net)
+        if (_recentlyCreatedOrderIds.has(orderData.id)) return;
+
+        console.log('📡 [useOrderStore] Received remote order:', orderData.id);
+
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const existingOrderIndex = findOrderIndex(combined, orderData);
+
+          if (existingOrderIndex >= 0) {
+            const updatedOrders = [...combined];
+            updatedOrders[existingOrderIndex] = { ...updatedOrders[existingOrderIndex], ...orderData };
+            return splitOrdersForState(updatedOrders as Order[]);
           }
 
-          console.log('📡 Received order deletion:', { orderId });
+          return splitOrdersForState([orderData, ...combined] as Order[]);
+        });
 
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const updatedOrders = combined.filter(order => order.id !== orderId);
+        get()._invalidateCache();
+
+        // Show toast for remote orders only
+        toast.success(`New order #${orderData.order_number || orderData.id.slice(0, 8)} received!`, {
+          duration: 5000,
+          icon: createElement(Bell, { className: 'w-4 h-4 text-blue-500' })
+        });
+      };
+
+      // Listen for order updates (e.g., after editing items)
+      const handleOrderUpdated = (orderData: any) => {
+        console.log('📡 [useOrderStore] Received order updated:', orderData);
+
+        // Validate order data
+        if (!orderData || !orderData.id) {
+          console.warn('⚠️ [useOrderStore] Invalid order update data received:', orderData);
+          return;
+        }
+
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const existingOrderIndex = findOrderIndex(combined, orderData);
+
+          if (existingOrderIndex >= 0) {
+            console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
+            const updatedOrders = [...combined];
+            updatedOrders[existingOrderIndex] = {
+              ...updatedOrders[existingOrderIndex],
+              ...orderData,
+              items: orderData.items || updatedOrders[existingOrderIndex].items,
+              totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
+            };
             return splitOrdersForState(updatedOrders as Order[]);
-          });
-
-
-
-          get()._invalidateCache();
-        };
-
-        // Listen for payment status updates
-        const handlePaymentUpdate = ({ orderId, paymentStatus, paymentMethod, transactionId }: any) => {
-          console.log('📡 Received payment update:', { orderId, paymentStatus });
-
-          set((state) => {
-            const combined = [...state.orders, ...state.pendingExternalOrders];
-            const updatedOrders = combined.map(order =>
-              order.id === orderId
-                ? {
-                    ...order,
-                    paymentStatus,
-                    paymentMethod: paymentMethod || order.paymentMethod,
-                    paymentTransactionId: transactionId || order.paymentTransactionId,
-                    updatedAt: new Date().toISOString()
-                  }
-                : order
-            );
-            return splitOrdersForState(updatedOrders as Order[]);
-          });
-
-
-
-          get()._invalidateCache();
-        };
-
-        // Listen for sync conflicts
-        const handleSyncConflict = async (conflictData: any) => {
-          console.log('⚠️ Received sync conflict — auto accepting remote:', conflictData);
-
-          // Try resolving via main if available
-          try {
-            if (window.electronAPI?.resolveOrderConflict) {
-              await window.electronAPI.resolveOrderConflict(conflictData.id ?? conflictData.orderId, 'remote_wins');
-            } else if (window.electronAPI?.resolveOrderConflictAlias) {
-              await window.electronAPI.resolveOrderConflictAlias(conflictData.id ?? conflictData.orderId, 'remote_wins');
-            } else if (window.electronAPI?.resolveOrderConflictAlt) {
-              await window.electronAPI.resolveOrderConflictAlt(conflictData.id ?? conflictData.orderId, 'remote_wins');
-            }
-          } catch (e) {
-            console.warn('Auto-resolve via main failed, will refresh orders:', e);
           }
 
-          // Always refresh from server to ensure remote wins locally
-          try {
-            await get().loadOrders();
-          } catch {}
+          console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
+          return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
+        });
 
-          // Clear any existing conflicts from UI state
-          set({ conflicts: [] });
-        };
+        get()._invalidateCache();
+      };
 
-        // Listen for conflict resolutions
-        const handleConflictResolved = ({ conflictId, orderId, strategy }: any) => {
-          console.log('✅ Conflict resolved:', { conflictId, orderId, strategy });
+      // Listen for order deletions (handles both direct orderId and realtime payload formats)
+      const handleOrderDelete = (data: { orderId?: string; old?: { id: string } }) => {
+        // Support both formats: { orderId } or { old: { id } } from realtime
+        const orderId = data.orderId || data.old?.id;
 
-          // Remove resolved conflict from state
-          set((state) => ({
-            ...state,
-            conflicts: state.conflicts.filter(c => c.id !== conflictId && c.orderId !== orderId)
-          }));
+        if (!orderId) {
+          console.warn('📡 Received order deletion with no orderId:', data);
+          return;
+        }
 
-          get()._invalidateCache();
+        console.log('📡 Received order deletion:', { orderId });
 
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updatedOrders = combined.filter(order => order.id !== orderId);
+          return splitOrdersForState(updatedOrders as Order[]);
+        });
 
-          toast.success(`Conflict resolved using ${strategy} strategy`);
-        };
+        get()._invalidateCache();
+      };
 
-        // Listen for retry scheduling
-        const handleRetryScheduled = ({ orderId, nextRetryAt, retryDelayMs, attempts }: any) => {
-          console.log('🔄 Retry scheduled:', { orderId, nextRetryAt, retryDelayMs, attempts });
+      // Listen for payment status updates
+      const handlePaymentUpdate = ({ orderId, paymentStatus, paymentMethod, transactionId }: any) => {
+        console.log('📡 Received payment update:', { orderId, paymentStatus });
 
-          set((state) => {
-            const newRetries = new Map(state.syncRetries);
-            newRetries.set(orderId, {
-              orderId,
-              nextRetryAt,
-              retryDelayMs,
-              attempts: attempts || (state.syncRetries.get(orderId)?.attempts || 0) + 1,
-              maxAttempts: 5
-            });
-            return { syncRetries: newRetries };
+        set((state) => {
+          const combined = [...state.orders, ...state.pendingExternalOrders];
+          const updatedOrders = combined.map(order =>
+            order.id === orderId
+              ? {
+                  ...order,
+                  paymentStatus,
+                  paymentMethod: paymentMethod || order.paymentMethod,
+                  paymentTransactionId: transactionId || order.paymentTransactionId,
+                  updatedAt: new Date().toISOString()
+                }
+              : order
+          );
+          return splitOrdersForState(updatedOrders as Order[]);
+        });
+
+        get()._invalidateCache();
+      };
+
+      // Listen for sync conflicts
+      const handleSyncConflict = async (conflictData: any) => {
+        console.log('⚠️ Received sync conflict — auto accepting remote:', conflictData);
+
+        // Try resolving via main
+        try {
+          const conflictId = conflictData?.id ?? conflictData?.orderId;
+          if (conflictId) {
+            await bridge.orders.resolveConflict(conflictId, 'remote_wins');
+          }
+        } catch (e) {
+          console.warn('Auto-resolve via main failed, will refresh orders:', e);
+        }
+
+        // Always refresh from server to ensure remote wins locally
+        try {
+          await get().loadOrders();
+        } catch {}
+
+        // Clear any existing conflicts from UI state
+        set({ conflicts: [] });
+      };
+
+      // Listen for conflict resolutions
+      const handleConflictResolved = ({ conflictId, orderId, strategy }: any) => {
+        console.log('✅ Conflict resolved:', { conflictId, orderId, strategy });
+
+        // Remove resolved conflict from state
+        set((state) => ({
+          ...state,
+          conflicts: state.conflicts.filter(c => c.id !== conflictId && c.orderId !== orderId)
+        }));
+
+        get()._invalidateCache();
+        toast.success(`Conflict resolved using ${strategy} strategy`);
+      };
+
+      // Listen for retry scheduling
+      const handleRetryScheduled = ({ orderId, nextRetryAt, retryDelayMs, attempts }: any) => {
+        console.log('🔄 Retry scheduled:', { orderId, nextRetryAt, retryDelayMs, attempts });
+
+        set((state) => {
+          const newRetries = new Map(state.syncRetries);
+          newRetries.set(orderId, {
+            orderId,
+            nextRetryAt,
+            retryDelayMs,
+            attempts: attempts || (state.syncRetries.get(orderId)?.attempts || 0) + 1,
+            maxAttempts: 5
           });
-        };
+          return { syncRetries: newRetries };
+        });
+      };
 
-        // Register IPC listeners
-        window.electronAPI.onOrderRealtimeUpdate(handleOrderRealtimeUpdate);
-        window.electronAPI.onOrderStatusUpdated(handleOrderStatusUpdate);
-        window.electronAPI.onOrderPaymentUpdated(handlePaymentUpdate);
+      // Listen for orders cleared event
+      const handleOrdersCleared = () => {
+        console.log('🗑️  Orders cleared, refreshing...');
+        set({ orders: [], pendingExternalOrders: [], conflicts: [] });
+        get()._invalidateCache();
+      };
 
-        // Register listener for new orders
-        let unsubscribeOrderCreated: (() => void) | undefined;
-        if (window.electronAPI.onOrderCreated) {
-          unsubscribeOrderCreated = window.electronAPI.onOrderCreated(handleOrderCreated);
-          console.log('✅ Registered order-created listener');
-        }
+      onEvent('order-realtime-update', handleOrderRealtimeUpdate);
+      onEvent('order-status-updated', handleOrderStatusUpdate);
+      onEvent('order-payment-updated', handlePaymentUpdate);
+      onEvent('order-created', handleOrderCreated);
+      onEvent('order-updated', handleOrderUpdated);
+      onEvent('order-deleted', handleOrderDelete);
+      onEvent('order-sync-conflict', handleSyncConflict);
+      onEvent('order-conflict-resolved', handleConflictResolved);
+      onEvent('sync-retry-scheduled', handleRetryScheduled);
+      onEvent('orders-cleared', handleOrdersCleared);
 
-        // Register listener for order updates (e.g., after editing items)
-        let unsubscribeOrderUpdated: (() => void) | undefined;
-        if (window.electronAPI.onOrderUpdated) {
-          unsubscribeOrderUpdated = window.electronAPI.onOrderUpdated(handleOrderUpdated);
-          console.log('✅ Registered order-updated listener');
-        }
+      // Store cleanup functions
+      eventListeners.push(
+        () => offEvent('order-realtime-update', handleOrderRealtimeUpdate),
+        () => offEvent('order-status-updated', handleOrderStatusUpdate),
+        () => offEvent('order-payment-updated', handlePaymentUpdate),
+        () => offEvent('order-created', handleOrderCreated),
+        () => offEvent('order-updated', handleOrderUpdated),
+        () => offEvent('order-deleted', handleOrderDelete),
+        () => offEvent('order-sync-conflict', handleSyncConflict),
+        () => offEvent('order-conflict-resolved', handleConflictResolved),
+        () => offEvent('sync-retry-scheduled', handleRetryScheduled),
+        () => offEvent('orders-cleared', handleOrdersCleared)
+      );
 
-        // Register listener for order deletions
-        if (window.electronAPI.onOrderDeleted) {
-          window.electronAPI.onOrderDeleted(handleOrderDelete);
-          console.log('✅ Registered order-deleted listener');
-        }
-
-        // Listen for orders cleared event
-        const handleOrdersCleared = () => {
-          console.log('🗑️  Orders cleared, refreshing...');
-          set({ orders: [], pendingExternalOrders: [], conflicts: [] });
-          get()._invalidateCache();
-        };
-
-        // Register conflict and retry listeners
-        if (window.electronAPI.ipcRenderer) {
-          // Preload wrapper passes only the data argument to callbacks
-          window.electronAPI.ipcRenderer.on('order-sync-conflict', handleSyncConflict);
-          window.electronAPI.ipcRenderer.on('order-conflict-resolved', handleConflictResolved);
-          window.electronAPI.ipcRenderer.on('sync-retry-scheduled', handleRetryScheduled);
-          window.electronAPI.ipcRenderer.on('orders-cleared', handleOrdersCleared);
-        }
-
-        // Store cleanup functions
-        eventListeners.push(
-          () => window.electronAPI?.removeOrderRealtimeUpdateListener?.(handleOrderRealtimeUpdate),
-          () => window.electronAPI?.removeOrderStatusUpdatedListener?.(handleOrderStatusUpdate),
-          () => window.electronAPI?.removeOrderDeletedListener?.(handleOrderDelete),
-          () => window.electronAPI?.removeOrderPaymentUpdatedListener?.(handlePaymentUpdate),
-          () => unsubscribeOrderCreated?.(),
-          () => unsubscribeOrderUpdated?.(),
-          () => window.electronAPI?.ipcRenderer?.removeAllListeners('order-sync-conflict'),
-          () => window.electronAPI?.ipcRenderer?.removeAllListeners('order-conflict-resolved'),
-          () => window.electronAPI?.ipcRenderer?.removeAllListeners('sync-retry-scheduled'),
-          () => window.electronAPI?.ipcRenderer?.removeAllListeners('orders-cleared')
-        );
-
-        console.log('✅ Real-time order update listeners set up successfully');
-      } else {
-        console.log('⚠️ Electron API not available, skipping real-time listeners setup');
-      }
+      console.log('✅ Real-time order update listeners set up successfully');
     },
 
     initializeOrders: async () => {
@@ -925,7 +876,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         // Save order for retry if it's a network/timeout error
         let savedForRetry = false;
         try {
-          const resp = await window.electronAPI?.saveOrderForRetry?.(orderData);
+          const resp = await bridge.orders.saveForRetry(orderData as any);
           savedForRetry = !!resp?.success;
         } catch {}
 
@@ -1166,7 +1117,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `approveOrder_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const result = await window.electronAPI?.approveOrder?.(orderId, estimatedTime);
+        const result = await bridge.orders.approve(orderId, estimatedTime);
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
@@ -1198,7 +1149,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `declineOrder_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const result = await window.electronAPI?.declineOrder?.(orderId, reason);
+        const result = await bridge.orders.decline(orderId, reason);
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
@@ -1230,13 +1181,14 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `assignDriver_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const result = await window.electronAPI?.assignDriverToOrder?.(orderId, driverId, notes);
+        const result = await bridge.orders.assignDriver(orderId, driverId, notes);
+        const driverName = (result as any)?.driverName || (result as any)?.data?.driverName || driverId;
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
         const updatedOrders = combined.map(order =>
           order.id === orderId
-            ? { ...order, status: 'completed', driverId, driverName: result.driverName, updatedAt: new Date().toISOString() }
+            ? { ...order, status: 'completed', driverId, driverName, updatedAt: new Date().toISOString() }
             : order
         );
         return splitOrdersForState(updatedOrders as Order[]);
@@ -1245,12 +1197,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
           // Persist final status via dedicated IPC
           try {
-            await window.electronAPI?.invoke?.('order:update-status', { orderId, status: 'completed' });
+            await bridge.orders.updateStatus(orderId, 'completed');
           } catch (e) {
             console.warn('[useOrderStore] update-status failed after driver assignment', e);
           }
           get()._invalidateCache();
-          toast.success(`Driver assigned: ${result.driverName}`);
+          toast.success(`Driver assigned: ${driverName}`);
           return true;
         }
         throw new Error(result?.error || 'Failed to assign driver');
@@ -1268,14 +1220,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `convertToPickup_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const resp = (await (window.electronAPI?.updateOrderType
-          ? window.electronAPI.updateOrderType(orderId, 'pickup')
-          : window.electronAPI?.invoke?.('order:update-type', orderId, 'pickup')));
+        const resp = await bridge.orders.updateType(orderId, 'pickup');
         if (resp?.success) {
+      const updatedOrderId = (resp as any)?.orderId || (resp as any)?.data?.orderId || orderId;
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
         const updatedOrders = combined.map(order =>
-          order.id === (resp.orderId || orderId)
+          order.id === updatedOrderId
             ? { ...order, orderType: 'pickup', driverId: undefined, updatedAt: new Date().toISOString() }
             : order
         );
@@ -1287,9 +1238,10 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           toast.success('Converted to Pickup');
           return true;
         }
-        const errMsg = typeof resp?.error === 'string'
-          ? resp.error
-          : (resp?.error?.userMessage || resp?.error?.message || (resp?.error ? JSON.stringify(resp.error) : 'Failed to convert'));
+        const rawError = (resp as any)?.error;
+        const errMsg = typeof rawError === 'string'
+          ? rawError
+          : (rawError?.userMessage || rawError?.message || (rawError ? JSON.stringify(rawError) : 'Failed to convert'));
         throw new Error(errMsg);
       } catch (error: any) {
         const message = error?.message || 'Failed to convert to Pickup';
@@ -1308,7 +1260,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `updateProgress_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const result = await window.electronAPI?.updateOrderPreparation?.(orderId, stage, progress);
+        const result = await bridge.orders.updatePreparation(orderId, stage, progress);
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
@@ -1340,28 +1292,14 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     resolveConflict: async (conflictId: string, strategy: string) => {
       try {
-        if (
-          window.electronAPI?.resolveOrderConflict ||
-          window.electronAPI?.resolveOrderConflictAlias ||
-          window.electronAPI?.resolveOrderConflictAlt
-        ) {
-          const result = window.electronAPI.resolveOrderConflict
-            ? await window.electronAPI.resolveOrderConflict(conflictId, strategy)
-            : window.electronAPI.resolveOrderConflictAlias
-            ? await window.electronAPI.resolveOrderConflictAlias(conflictId, strategy)
-            : await window.electronAPI.resolveOrderConflictAlt(conflictId, strategy);
-          if (result) {
-            // Remove resolved conflict from state
-            set((state) => ({
-              ...state,
-              conflicts: state.conflicts.filter(c => c.id !== conflictId)
-            }));
-
-
-
-
-            return true;
-          }
+        const result = await bridge.orders.resolveConflict(conflictId, strategy);
+        if ((result as any)?.success !== false) {
+          // Remove resolved conflict from state
+          set((state) => ({
+            ...state,
+            conflicts: state.conflicts.filter(c => c.id !== conflictId)
+          }));
+          return true;
         }
         return false;
       } catch (error) {
@@ -1391,25 +1329,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     forceRetrySync: async (orderId: string) => {
       try {
-        if (
-          window.electronAPI?.forceOrderSyncRetry ||
-          window.electronAPI?.forceOrderSyncRetryAlias ||
-          window.electronAPI?.forceOrderSyncRetryAlt
-        ) {
-          const result = window.electronAPI.forceOrderSyncRetry
-            ? await window.electronAPI.forceOrderSyncRetry(orderId)
-            : window.electronAPI.forceOrderSyncRetryAlias
-            ? await window.electronAPI.forceOrderSyncRetryAlias(orderId)
-            : await window.electronAPI.forceOrderSyncRetryAlt(orderId);
-          if (result) {
-            // Remove from retry map
-            set((state) => {
-              const newRetries = new Map(state.syncRetries);
-              newRetries.delete(orderId);
-              return { syncRetries: newRetries };
-            });
-            return true;
-          }
+        const result = await bridge.orders.forceSyncRetry(orderId);
+        if ((result as any)?.success !== false) {
+          // Remove from retry map
+          set((state) => {
+            const newRetries = new Map(state.syncRetries);
+            newRetries.delete(orderId);
+            return { syncRetries: newRetries };
+          });
+          return true;
         }
         return false;
       } catch (error) {

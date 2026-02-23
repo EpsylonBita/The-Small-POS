@@ -9,6 +9,7 @@ import OrderFlow from '../OrderFlow';
 import { OrderConflictBanner } from '../OrderConflictBanner';
 import { DashboardCard } from '../DashboardCard';
 import { formatTime } from '../../utils/format';
+import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   Package,
   Barcode,
@@ -44,12 +45,8 @@ interface ProductMetrics {
   isLoading: boolean;
 }
 
-/**
- * Polling interval for metrics refresh (30 seconds)
- */
-const METRICS_REFRESH_INTERVAL = 30000;
-
 export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' }) => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { initializeOrders, conflicts, orders } = useOrderStore();
@@ -74,9 +71,9 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
   const loadMetrics = useCallback(async () => {
     try {
       // Fetch inventory metrics if inventory module is enabled
-      if (isModuleEnabled('inventory' as ModuleId) && window.electronAPI?.ipcRenderer) {
+      if (isModuleEnabled('inventory' as ModuleId)) {
         try {
-          const inventoryResult = await window.electronAPI.ipcRenderer.invoke(
+          const inventoryResult = await bridge.invoke(
             'inventory:get-stock-metrics'
           );
           if (inventoryResult?.success) {
@@ -96,9 +93,9 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       }
 
       // Fetch product catalog count if product_catalog module is enabled
-      if (isModuleEnabled('product_catalog' as ModuleId) && window.electronAPI?.ipcRenderer) {
+      if (isModuleEnabled('product_catalog' as ModuleId)) {
         try {
-          const catalogResult = await window.electronAPI.ipcRenderer.invoke(
+          const catalogResult = await bridge.invoke(
             'products:get-catalog-count'
           );
           if (catalogResult?.success) {
@@ -122,7 +119,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       console.error('[ProductDashboard] Failed to load metrics:', error);
       setMetrics((prev) => ({ ...prev, isLoading: false }));
     }
-  }, [isModuleEnabled]);
+  }, [bridge, isModuleEnabled]);
 
   /**
    * Derive metrics from orders
@@ -165,11 +162,36 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
     initializeOrders();
   }, [initializeOrders]);
 
-  // Load metrics on mount and set up polling
+  // Load metrics on mount and refresh from Rust-driven events.
   useEffect(() => {
-    loadMetrics();
-    const interval = setInterval(loadMetrics, METRICS_REFRESH_INTERVAL);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRefresh = () => {
+      if (disposed || refreshTimer) return;
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void loadMetrics();
+      }, 250);
+    };
+
+    void loadMetrics();
+
+    onEvent('sync:status', scheduleRefresh);
+    onEvent('sync:complete', scheduleRefresh);
+    onEvent('order-created', scheduleRefresh);
+    onEvent('order-status-updated', scheduleRefresh);
+    onEvent('order-deleted', scheduleRefresh);
+
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      offEvent('sync:status', scheduleRefresh);
+      offEvent('sync:complete', scheduleRefresh);
+      offEvent('order-created', scheduleRefresh);
+      offEvent('order-status-updated', scheduleRefresh);
+      offEvent('order-deleted', scheduleRefresh);
+    };
   }, [loadMetrics]);
 
   // Re-derive metrics when orders change
@@ -182,9 +204,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
   // Handle conflict resolution
   const handleResolveConflict = async (conflictId: string, strategy: string) => {
     try {
-      if (window.electronAPI) {
-        await window.electronAPI.ipcRenderer.invoke('orders:resolve-conflict', conflictId, strategy);
-      }
+      await bridge.orders.resolveConflict(conflictId, strategy);
     } catch (error) {
       console.error('Failed to resolve conflict:', error);
       throw error;

@@ -17,6 +17,7 @@ import { useRealTimeMenuSync } from '../hooks/useRealTimeMenuSync';
 import { useFeaturedItems } from '../hooks/useFeaturedItems';
 import { getMenuItemPrice, type OrderType } from '../../shared/services/PricingService';
 import { Utensils } from 'lucide-react';
+import { getBridge } from '../../lib';
 
 interface SelectedIngredient {
   ingredient: Ingredient;
@@ -49,6 +50,7 @@ interface CustomerInfo {
 }
 
 const MenuPage: React.FC = () => {
+  const bridge = getBridge();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { t } = useTranslation();
@@ -232,16 +234,9 @@ const MenuPage: React.FC = () => {
   }, []);
   // Resolve branchId from Electron main (TerminalConfigService)
   useEffect(() => {
-    try {
-      const api = (window as any)?.electronAPI
-      if (api?.getTerminalBranchId) {
-        api.getTerminalBranchId()
-          .then((bid: string | null) => setBranchId(bid || null))
-          .catch(() => setBranchId(null))
-      }
-    } catch {
-      setBranchId(null)
-    }
+    bridge.terminalConfig.getBranchId()
+      .then((bid: string | null) => setBranchId(bid || null))
+      .catch(() => setBranchId(null));
   }, [])
 
   // POS real-time sync (overrides preloaded when branchId available)

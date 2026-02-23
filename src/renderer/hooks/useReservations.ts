@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
+import { offEvent, onEvent } from '../../lib';
 import {
   reservationsService,
   Reservation,
@@ -15,6 +16,8 @@ import {
   ReservationStatus,
   CreateReservationDto,
 } from '../services/ReservationsService';
+
+const EVENT_REFRESH_THROTTLE_MS = 5000;
 
 interface UseReservationsProps {
   branchId: string;
@@ -62,21 +65,28 @@ export function useReservations({
   }, [branchId, organizationId]);
 
   // Fetch reservations when filters change
-  const fetchReservations = useCallback(async () => {
+  const fetchReservations = useCallback(async (options: { silent?: boolean } = {}) => {
+    const { silent = false } = options;
     if (!branchId) return;
 
-    setIsLoading(true);
-    setError(null);
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
 
     try {
       const data = await reservationsService.fetchReservations(filters);
       setReservations(data);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch reservations';
-      setError(message);
+      if (!silent) {
+        setError(message);
+      }
       console.error('Error fetching reservations:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, [branchId, filters.dateFrom, filters.dateTo, filters.statusFilter, filters.searchTerm]);
 
@@ -85,31 +95,60 @@ export function useReservations({
     fetchReservations();
   }, [fetchReservations]);
 
-  // Real-time subscription
+  // Refresh from native sync/order events with throttling.
   useEffect(() => {
     if (!enableRealtime || !branchId) return;
 
-    reservationsService.subscribeToUpdates((updatedReservation) => {
-      setReservations((prev) => {
-        const index = prev.findIndex((r) => r.id === updatedReservation.id);
-        if (index >= 0) {
-          // Update existing reservation
-          const updated = [...prev];
-          updated[index] = updatedReservation;
-          return updated;
-        } else {
-          // Add new reservation
-          return [...prev, updatedReservation].sort(
-            (a, b) => new Date(a.reservationDatetime).getTime() - new Date(b.reservationDatetime).getTime()
-          );
-        }
-      });
-    });
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = 0;
+
+    const scheduleRefresh = () => {
+      if (disposed) return;
+
+      const now = Date.now();
+      const elapsed = now - lastRefreshAt;
+      if (elapsed >= EVENT_REFRESH_THROTTLE_MS) {
+        lastRefreshAt = now;
+        void fetchReservations({ silent: true });
+        return;
+      }
+
+      if (pendingTimer) return;
+
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        if (disposed) return;
+        lastRefreshAt = Date.now();
+        void fetchReservations({ silent: true });
+      }, EVENT_REFRESH_THROTTLE_MS - elapsed);
+    };
+
+    const handleSyncStatus = (status?: { inProgress?: boolean }) => {
+      if (status?.inProgress) return;
+      scheduleRefresh();
+    };
+    const handleSyncComplete = () => scheduleRefresh();
+    const handleOrderMutation = () => scheduleRefresh();
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
 
     return () => {
-      reservationsService.unsubscribeFromUpdates();
+      disposed = true;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+      }
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
     };
-  }, [branchId, enableRealtime]);
+  }, [branchId, enableRealtime, fetchReservations]);
 
   // Calculate stats
   const stats = useMemo(() => {

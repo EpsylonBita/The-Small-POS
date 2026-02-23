@@ -2,14 +2,13 @@
  * DriveThruService - POS Drive-Through Service
  *
  * Provides drive-through lane and order queue management for the POS system (Fast-food Vertical).
- * Uses the Admin Dashboard API via IPC for proper authentication and audit logging.
- * Real-time updates still use Supabase Realtime (with RLS).
+ * Uses the Admin Dashboard API via IPC for authentication/audit and native sync events for refresh orchestration.
  *
  * @since 2.2.0 - Migrated from direct Supabase to API via IPC (security fix)
  * Task 17.3: Create POS drive-through interface
  */
 
-import { subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { getBridge } from '../../lib';
 
 // Types
 export type DriveThruOrderStatus = 'waiting' | 'preparing' | 'ready' | 'served';
@@ -88,15 +87,10 @@ function transformOrderFromAPI(data: any): DriveThruOrder {
   };
 }
 
-function getIpcRenderer() {
-  return (window as any).electronAPI?.ipcRenderer ?? (window as any).electron?.ipcRenderer;
-}
-
 class DriveThruService {
+  private bridge = getBridge();
   private branchId: string = '';
   private organizationId: string = '';
-  private lanesChannel: any = null;
-  private ordersChannel: any = null;
 
   /**
    * Set the current branch and organization context
@@ -118,11 +112,7 @@ class DriveThruService {
 
       console.log('[DriveThruService] Fetching lanes via API');
 
-      const ipc = getIpcRenderer();
-      if (!ipc) {
-        throw new Error('IPC renderer not available');
-      }
-      const result = await ipc.invoke('sync:fetch-drive-thru', {});
+      const result = await this.bridge.sync.fetchDriveThru({});
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
@@ -153,11 +143,7 @@ class DriveThruService {
         options.lane_id = laneId;
       }
 
-      const ipc = getIpcRenderer();
-      if (!ipc) {
-        throw new Error('IPC renderer not available');
-      }
-      const result = await ipc.invoke('sync:fetch-drive-thru', options);
+      const result = await this.bridge.sync.fetchDriveThru(options);
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
@@ -178,15 +164,7 @@ class DriveThruService {
     try {
       console.log('[DriveThruService] Updating order status via API:', { orderId, status });
 
-      const ipc = getIpcRenderer();
-      if (!ipc) {
-        throw new Error('IPC renderer not available');
-      }
-      const result = await ipc.invoke(
-        'sync:update-drive-thru-order-status',
-        orderId,
-        status
-      );
+      const result = await this.bridge.sync.updateDriveThruOrderStatus(orderId, status);
 
       if (!result.success) {
         console.error('[DriveThruService] API error:', result.error);
@@ -260,57 +238,6 @@ class DriveThruService {
     return 'red';
   }
 
-  /**
-   * Subscribe to real-time lane updates
-   */
-  subscribeToLaneUpdates(callback: (lane: DriveThruLane) => void): void {
-    if (this.lanesChannel) {
-      unsubscribeFromChannel(this.lanesChannel);
-    }
-
-    this.lanesChannel = subscribeToTable(
-      'drive_thru_lanes',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformLaneFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
-  }
-
-  /**
-   * Subscribe to real-time order updates
-   */
-  subscribeToOrderUpdates(callback: (order: DriveThruOrder) => void): void {
-    if (this.ordersChannel) {
-      unsubscribeFromChannel(this.ordersChannel);
-    }
-
-    this.ordersChannel = subscribeToTable(
-      'drive_thru_orders',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformOrderFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from all real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.lanesChannel) {
-      unsubscribeFromChannel(this.lanesChannel);
-      this.lanesChannel = null;
-    }
-    if (this.ordersChannel) {
-      unsubscribeFromChannel(this.ordersChannel);
-      this.ordersChannel = null;
-    }
-  }
 }
 
 // Export singleton instance

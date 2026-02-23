@@ -1,5 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { StaffShift } from '../types';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../services/terminal-credentials';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface StaffData {
   staffId: string;
@@ -23,6 +28,7 @@ interface ShiftContextType {
 const ShiftContext = createContext<ShiftContextType | undefined>(undefined);
 
 export function ShiftProvider({ children }: { children: ReactNode }) {
+  const bridge = getBridge();
   const [staff, setStaffState] = useState<StaffData | null>(null);
   const [activeShift, setActiveShift] = useState<StaffShift | null>(null);
 
@@ -43,9 +49,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     try {
       // Resolve branchId with multiple fallbacks
       let branchId: string | null = null;
-      try { branchId = await (window as any).electronAPI?.getTerminalBranchId?.(); } catch { }
+      try { branchId = await bridge.terminalConfig.getBranchId(); } catch { }
       if (!branchId) {
-        try { branchId = await (window as any).electronAPI?.getTerminalSetting?.('terminal', 'branch_id'); } catch { }
+        try { branchId = (await bridge.terminalConfig.getSetting('terminal', 'branch_id')) as string | null; } catch { }
       }
       if (!branchId) {
         branchId = staff?.branchId
@@ -56,9 +62,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       // Resolve terminalId with multiple fallbacks
       let terminalId: string | null = null;
-      try { terminalId = await (window as any).electronAPI?.getTerminalId?.(); } catch { }
+      try { terminalId = await bridge.terminalConfig.getTerminalId(); } catch { }
       if (!terminalId) {
-        try { terminalId = await (window as any).electronAPI?.getTerminalSetting?.('terminal', 'terminal_id'); } catch { }
+        try { terminalId = (await bridge.terminalConfig.getSetting('terminal', 'terminal_id')) as string | null; } catch { }
       }
       if (!terminalId) {
         terminalId = staff?.terminalId
@@ -69,9 +75,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       // Resolve organizationId with multiple fallbacks
       let organizationId: string | null = null;
-      try { organizationId = await (window as any).electronAPI?.getTerminalOrganizationId?.(); } catch { }
+      try { organizationId = await bridge.terminalConfig.getOrganizationId(); } catch { }
       if (!organizationId) {
-        try { organizationId = await (window as any).electronAPI?.getTerminalSetting?.('terminal', 'organization_id'); } catch { }
+        try { organizationId = (await bridge.terminalConfig.getSetting('terminal', 'organization_id')) as string | null; } catch { }
       }
       if (!organizationId) {
         organizationId = staff?.organizationId
@@ -84,7 +90,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return false;
       }
 
-      let result = await (window as any).electronAPI?.getActiveShiftByTerminal?.(branchId, terminalId);
+      let result = await bridge.shifts.getActiveByTerminal(branchId, terminalId);
       // Handle wrapped IPC response - extract data from { success, data } format
       let s = result?.data ?? result;
 
@@ -92,7 +98,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         // Loose fallback: try by terminal only (handles branchId mismatches between local and admin)
         try {
           console.warn('[ShiftContext] attemptRestoreByTerminal: strict lookup failed; trying terminal-only fallback', { terminalId });
-          const looseResult = await (window as any).electronAPI?.getActiveShiftByTerminalLoose?.(terminalId);
+          const looseResult = await bridge.shifts.getActiveByTerminalLoose(terminalId);
           s = looseResult?.data ?? looseResult;
           if (s && s.status === 'active') console.log('[ShiftContext] Restored active shift by terminal (loose)', { terminalId, shiftId: s.id, branchIdFromRow: s.branch_id });
         } catch (e) {
@@ -159,7 +165,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
                 return;
               }
 
-              const result = await (window as any).electronAPI?.getActiveShift?.(parsed.staff_id);
+              const result = await bridge.shifts.getActive(parsed.staff_id);
               // Handle wrapped IPC response - extract data from { success, data } format
               const latest = result?.data ?? result;
 
@@ -240,7 +246,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     try {
       console.log('[ShiftContext] refreshActiveShift -> querying staffId:', sid);
-      const result = await (window as any).electronAPI.getActiveShift(sid);
+      const result = await bridge.shifts.getActive(sid);
       console.log('[ShiftContext] refreshActiveShift -> result:', result);
 
       // Handle wrapped IPC response - extract data from { success, data } format
@@ -277,13 +283,14 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
   // Re-attempt restore when terminal settings are updated (they may arrive after app start)
   useEffect(() => {
-    const unsubscribe = (window as any).electronAPI?.onTerminalSettingsUpdated?.(() => {
+    const handleTerminalSettingsUpdated = () => {
       if (!activeShift || activeShift.status !== 'active') {
         attemptRestoreByTerminal();
       }
-    });
+    };
+    onEvent('terminal-settings-updated', handleTerminalSettingsUpdated);
     return () => {
-      try { unsubscribe && unsubscribe(); } catch { }
+      offEvent('terminal-settings-updated', handleTerminalSettingsUpdated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShift?.id]);
@@ -307,21 +314,28 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
   // Monitor terminal ID changes and clear shifts when it changes
   useEffect(() => {
-    const currentTerminalId = localStorage.getItem('terminal_id');
-    const lastTerminalId = localStorage.getItem('last_known_terminal_id');
+    let disposed = false;
 
-    if (currentTerminalId && lastTerminalId && currentTerminalId !== lastTerminalId) {
-      console.log('[ShiftContext] Terminal ID changed, clearing shifts', {
-        from: lastTerminalId,
-        to: currentTerminalId
-      });
-      clearShift();
-    }
+    const monitorTerminalSwitch = async () => {
+      const cachedTerminalId = getCachedTerminalCredentials().terminalId || '';
+      const refreshed = await refreshTerminalCredentialCache();
+      const currentTerminalId = (refreshed.terminalId || cachedTerminalId || '').trim();
+      if (disposed || !currentTerminalId) return;
 
-    // Update last known terminal ID
-    if (currentTerminalId) {
+      const lastTerminalId = localStorage.getItem('last_known_terminal_id');
+      if (lastTerminalId && currentTerminalId !== lastTerminalId) {
+        console.log('[ShiftContext] Terminal ID changed, clearing shifts', {
+          from: lastTerminalId,
+          to: currentTerminalId
+        });
+        clearShift();
+      }
+
       localStorage.setItem('last_known_terminal_id', currentTerminalId);
-    }
+    };
+
+    void monitorTerminalSwitch();
+    return () => { disposed = true; };
   }, []);
 
   const isShiftActive = activeShift !== null && activeShift.status === 'active';

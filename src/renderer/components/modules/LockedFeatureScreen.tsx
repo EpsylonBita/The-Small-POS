@@ -12,6 +12,7 @@ import {
   formatUpsellCurrency,
   calculateAnnualSavings,
 } from '@shared/services/upsellUrlService'
+import { openExternalUrl } from '../../utils/electron-api'
 
 interface LockedFeatureScreenProps {
   /** Module ID that's locked */
@@ -142,11 +143,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
 
       if (response.ok && data.checkout_url) {
         // Open checkout in external browser
-        if (window.electronAPI?.openExternal) {
-          window.electronAPI.openExternal(data.checkout_url)
-        } else {
-          window.open(data.checkout_url, '_blank')
-        }
+        await openExternalUrl(data.checkout_url)
       } else {
         throw new Error(data.error || 'Failed to create checkout')
       }
@@ -158,11 +155,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         context: 'feature_gate',
       })
 
-      if (window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(purchaseUrl)
-      } else {
-        window.open(purchaseUrl, '_blank')
-      }
+      await openExternalUrl(purchaseUrl)
     } finally {
       setIsCheckoutLoading(false)
     }
@@ -295,6 +288,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
             onClose={() => setShowLearnMore(false)}
             title={`${moduleInfo.display_name} Features`}
             size="md"
+            className="!max-w-lg"
           >
             <div className="space-y-6">
               {/* Description */}

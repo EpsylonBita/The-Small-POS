@@ -14,6 +14,7 @@ interface MenuItemGridProps {
   orderType?: 'pickup' | 'delivery' | 'dine-in';
   onSyncMenu?: () => void;
   onQuickAdd?: (item: MenuItem, quantity: number) => void;
+  searchQuery?: string;
   // Combo mode
   comboMode?: boolean;
   combos?: MenuCombo[];
@@ -27,6 +28,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   orderType = 'pickup',
   onSyncMenu,
   onQuickAdd,
+  searchQuery = '',
   comboMode = false,
   combos = [],
   onComboSelect,
@@ -104,7 +106,14 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
           return acc;
         }, [] as MenuItem[]);
 
-        setMenuItems(uniqueItems);
+        // Filter by search query
+        const searchFiltered = searchQuery.trim()
+          ? uniqueItems.filter(item =>
+              item.name?.toLowerCase().includes(searchQuery.trim().toLowerCase())
+            )
+          : uniqueItems;
+
+        setMenuItems(searchFiltered);
       } catch (err) {
         console.error('Error loading menu items:', err);
         setError(t('menu.grid.error'));
@@ -125,7 +134,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
       console.error('Error setting up real-time subscription:', error);
       // Continue without real-time updates
     }
-  }, [selectedCategory, selectedSubcategory]);
+  }, [selectedCategory, selectedSubcategory, searchQuery]);
 
   // Combo mode - render combo cards instead of menu items
   if (comboMode && onComboSelect) {

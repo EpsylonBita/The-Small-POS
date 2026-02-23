@@ -4,6 +4,7 @@ import { OrderDashboard } from '../OrderDashboard';
 import OrderFlow from '../OrderFlow';
 import { OrderConflictBanner } from '../OrderConflictBanner';
 import type { Order } from '../../types/orders';
+import { getBridge } from '../../../lib';
 
 /**
  * Food Business Category Dashboard
@@ -19,6 +20,7 @@ interface FoodDashboardProps {
 }
 
 export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
+  const bridge = getBridge();
   const { initializeOrders, conflicts } = useOrderStore();
 
   const foodOrderFilter = useCallback((order: Order): boolean => {
@@ -49,9 +51,7 @@ export const FoodDashboard = memo<FoodDashboardProps>(({ className = '' }) => {
   // Handle conflict resolution
   const handleResolveConflict = async (conflictId: string, strategy: string) => {
     try {
-      if (window.electronAPI) {
-        await window.electronAPI.ipcRenderer.invoke('orders:resolve-conflict', conflictId, strategy);
-      }
+      await bridge.orders.resolveConflict(conflictId, strategy);
     } catch (error) {
       console.error('Failed to resolve conflict:', error);
       throw error;

@@ -1,4 +1,9 @@
 import { Customer } from '../../shared/types/customer';
+import { getBridge, offEvent, onEvent } from '../../lib';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from './terminal-credentials';
 
 /**
  * CustomerService - Renderer-side customer service
@@ -10,13 +15,19 @@ import { Customer } from '../../shared/types/customer';
  * for UI components to interact with customer data.
  */
 class CustomerService {
+  private bridge = getBridge();
   private terminalId: string = '';
   private lastUpdate: { customerId: string; timestamp: number } | null = null;
 
   constructor() {
-    // Get terminal ID from localStorage or generate one
+    // Initialize from in-memory secure credential cache, then refresh via IPC.
     if (typeof window !== 'undefined') {
-      this.terminalId = localStorage.getItem('terminal_id') || '';
+      this.terminalId = getCachedTerminalCredentials().terminalId || '';
+      void refreshTerminalCredentialCache().then((resolved) => {
+        if (resolved.terminalId) {
+          this.terminalId = resolved.terminalId;
+        }
+      });
     }
   }
 
@@ -68,7 +79,7 @@ class CustomerService {
    */
   async lookupByPhone(phone: string): Promise<Customer | null> {
     try {
-      const customer = await window.electronAPI?.customerLookupByPhone?.(phone);
+      const customer = await this.bridge.customers.lookupByPhone(phone) as any;
       return customer || null;
     } catch (error) {
       console.error('Customer lookup failed:', error);
@@ -85,8 +96,8 @@ class CustomerService {
    */
   async searchCustomers(query: string, limit: number = 10): Promise<Customer[]> {
     try {
-      const customers = await window.electronAPI?.customerSearch?.(query);
-      return customers || [];
+      const customers = await this.bridge.customers.search(query) as any[];
+      return customers.slice(0, limit) as Customer[];
     } catch (error) {
       console.error('Customer search failed:', error);
       return [];
@@ -98,7 +109,7 @@ class CustomerService {
    */
   async clearExpiredCache(): Promise<void> {
     try {
-      await window.electronAPI?.customerClearCache?.();
+      await this.bridge.customers.clearCache();
     } catch (error) {
       console.error('Failed to clear expired cache:', error);
     }
@@ -113,7 +124,7 @@ class CustomerService {
     valid: number;
   }> {
     try {
-      const stats = await window.electronAPI?.customerGetCacheStats?.();
+      const stats = await this.bridge.customers.getCacheStats();
       return stats || { total: 0, expired: 0, valid: 0 };
     } catch (error) {
       console.error('Failed to get cache stats:', error);
@@ -128,7 +139,7 @@ class CustomerService {
    */
   async invalidateCache(phone: string): Promise<void> {
     try {
-      await window.electronAPI?.customerInvalidateCache?.(phone);
+      await this.bridge.customers.invalidateCache(phone);
     } catch (error) {
       console.error('Failed to invalidate cache:', error);
     }
@@ -154,44 +165,51 @@ class CustomerService {
   }
   // Create customer
   async createCustomer(data: Partial<Customer>): Promise<Customer> {
-    const created = await window.electronAPI?.customerCreate?.(data)
-    return created as Customer
+    const result = await this.bridge.customers.create(data as any);
+    const created = (result?.data ?? (result as any)?.customer ?? result) as Customer;
+    if (created?.id) {
+      this.trackUpdate(created.id);
+    }
+    return created;
   }
 
   // Update customer with optimistic locking
   async updateCustomer(customerId: string, updates: Partial<Customer>, currentVersion: number): Promise<any> {
-    const result = await window.electronAPI?.customerUpdate?.(customerId, updates, currentVersion)
-    return result
+    const result = await this.bridge.customers.update(customerId, updates as any, currentVersion);
+    if ((result as any)?.success !== false) {
+      this.trackUpdate(customerId);
+    }
+    return result;
   }
 
   // Add customer address
   async addCustomerAddress(customerId: string, address: any): Promise<any> {
-    const created = await window.electronAPI?.customerAddAddress?.(customerId, address)
-    return created
+    const created = await this.bridge.customers.addAddress(customerId, address);
+    return created;
   }
 
   // Update customer address with optimistic locking
   async updateCustomerAddress(addressId: string, updates: any, currentVersion: number): Promise<any> {
-    const result = await window.electronAPI?.customerUpdateAddress?.(addressId, updates, currentVersion)
-    return result
+    const result = await this.bridge.customers.updateAddress(addressId, updates, currentVersion);
+    return result;
   }
 
   // Resolve conflict
   async resolveCustomerConflict(conflictId: string, strategy: string, data?: Partial<Customer>): Promise<any> {
-    return await window.electronAPI?.customerResolveConflict?.(conflictId, strategy, data)
+    return await this.bridge.customers.resolveConflict(conflictId, strategy, data);
   }
 
   // Get conflicts
   async getCustomerConflicts(filters?: any): Promise<any[]> {
-    const conflicts = await window.electronAPI?.customerGetConflicts?.(filters)
-    return conflicts || []
+    const conflicts = await this.bridge.customers.getConflicts(filters);
+    return conflicts || [];
   }
 
   // Listen for conflict detected
   onConflictDetected(callback: (conflict: any) => void): () => void {
-    const listener = (data: any) => callback(data)
-    window.electronAPI?.onCustomerConflictDetected?.(listener)
-    return () => window.electronAPI?.removeCustomerConflictDetectedListener?.(listener)
+    const listener = (data: any) => callback(data);
+    onEvent('customer-sync-conflict', listener);
+    return () => offEvent('customer-sync-conflict', listener);
   }
 
   /**
@@ -210,10 +228,10 @@ class CustomerService {
       }
       callback(data);
     };
-    window.electronAPI?.onCustomerCreated?.(listener);
+    onEvent('customer-created', listener);
 
     return () => {
-      window.electronAPI?.removeCustomerCreatedListener?.(listener);
+      offEvent('customer-created', listener);
     };
   }
 
@@ -233,10 +251,10 @@ class CustomerService {
       }
       callback(data);
     };
-    window.electronAPI?.onCustomerUpdated?.(listener);
+    onEvent('customer-updated', listener);
 
     return () => {
-      window.electronAPI?.removeCustomerUpdatedListener?.(listener);
+      offEvent('customer-updated', listener);
     };
   }
 
@@ -258,10 +276,10 @@ class CustomerService {
       }
       callback(data);
     };
-    window.electronAPI?.onCustomerDeleted?.(listener);
+    onEvent('customer-deleted', listener);
 
     return () => {
-      window.electronAPI?.removeCustomerDeletedListener?.(listener);
+      offEvent('customer-deleted', listener);
     };
   }
 }

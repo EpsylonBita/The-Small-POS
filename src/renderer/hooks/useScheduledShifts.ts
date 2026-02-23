@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { ScheduledShift, GetScheduledShiftsParams } from '../types/shift';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface UseScheduledShiftsOptions {
   branchId: string;
@@ -27,6 +28,7 @@ interface UseScheduledShiftsResult {
  * These are pre-planned shifts that staff should follow
  */
 export function useScheduledShifts(options: UseScheduledShiftsOptions): UseScheduledShiftsResult {
+  const bridge = getBridge();
   const {
     branchId,
     startDate,
@@ -65,7 +67,7 @@ export function useScheduledShifts(options: UseScheduledShiftsOptions): UseSched
         staffId,
       };
 
-      const result = await window.electron?.ipcRenderer.invoke('shift:get-scheduled-shifts', params);
+      const result: any = await bridge.shifts.getScheduledShifts(params);
 
       if (Array.isArray(result)) {
         setScheduledShifts(result);
@@ -82,7 +84,7 @@ export function useScheduledShifts(options: UseScheduledShiftsOptions): UseSched
     } finally {
       setLoading(false);
     }
-  }, [branchId, startDate, endDate, staffId]);
+  }, [branchId, startDate, endDate, staffId, bridge.shifts]);
 
   // Initial fetch
   useEffect(() => {
@@ -93,8 +95,42 @@ export function useScheduledShifts(options: UseScheduledShiftsOptions): UseSched
   useEffect(() => {
     if (!autoRefresh || !branchId) return;
 
-    const interval = setInterval(fetchScheduledShifts, refreshInterval);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = Date.now();
+
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        lastRefreshAt = Date.now();
+        void fetchScheduledShifts();
+      }, delayMs);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastRefreshAt < refreshInterval) {
+        return;
+      }
+      scheduleRefresh(300);
+    };
+
+    const handleShiftUpdated = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleShiftUpdated);
+    onEvent('shift-updated', handleShiftUpdated);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleShiftUpdated);
+      offEvent('shift-updated', handleShiftUpdated);
+    };
   }, [autoRefresh, refreshInterval, branchId, fetchScheduledShifts]);
 
   return {
@@ -110,6 +146,7 @@ export function useScheduledShifts(options: UseScheduledShiftsOptions): UseSched
  * Convenience hook for quick access to today's schedule
  */
 export function useTodayScheduledShifts(branchId: string): UseScheduledShiftsResult {
+  const bridge = getBridge();
   const [scheduledShifts, setScheduledShifts] = useState<ScheduledShift[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -124,7 +161,7 @@ export function useTodayScheduledShifts(branchId: string): UseScheduledShiftsRes
     setError(null);
 
     try {
-      const result = await window.electron?.ipcRenderer.invoke('shift:get-today-scheduled-shifts', branchId);
+      const result: any = await bridge.shifts.getTodayScheduledShifts(branchId);
 
       if (Array.isArray(result)) {
         setScheduledShifts(result);
@@ -141,7 +178,7 @@ export function useTodayScheduledShifts(branchId: string): UseScheduledShiftsRes
     } finally {
       setLoading(false);
     }
-  }, [branchId]);
+  }, [branchId, bridge.shifts]);
 
   useEffect(() => {
     fetchTodayShifts();

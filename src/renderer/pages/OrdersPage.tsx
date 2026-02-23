@@ -21,6 +21,7 @@ import OrderDetailsModal from '../components/modals/OrderDetailsModal';
 import { formatCurrency } from '../utils/format';
 import CustomerOrderHistoryModal from '../components/modals/CustomerOrderHistoryModal';
 import { getOrderStatusBadgeClasses } from '../utils/orderStatus';
+import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
 interface OrderItem {
   id: string;
@@ -191,9 +192,12 @@ const mergeHybridOrders = (localOrders: Order[], remoteOrders: Order[]): Order[]
   return merged;
 };
 
+const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
+
 const OrdersPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const bridge = getBridge();
 
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -247,7 +251,7 @@ const OrdersPage: React.FC = () => {
   }, [currentPage, pageSize]);
 
   const fetchOrders = useCallback(async () => {
-    if (!window.electron?.ipcRenderer) {
+    if (isBrowser()) {
       console.error('[OrdersPage] Electron API not available');
       toast.error('Electron API not available');
       setLoading(false);
@@ -263,7 +267,7 @@ const OrdersPage: React.FC = () => {
       if (dateFrom) remoteOptions.date_from = dateFrom;
       if (dateTo) remoteOptions.date_to = dateTo;
 
-      const localRaw = await window.electron.ipcRenderer.invoke('order:get-all');
+      const localRaw = await bridge.orders.getAll();
       const localOrders = (Array.isArray(localRaw) ? localRaw : [])
         .map((entry: any) => normalizeOrder(entry, 'local'))
         .filter((entry: Order | null): entry is Order => !!entry);
@@ -276,7 +280,7 @@ const OrdersPage: React.FC = () => {
       setOrders(paginateOrders(filtered));
 
       try {
-        const remoteResult = await window.electron.ipcRenderer.invoke('sync:fetch-orders', remoteOptions);
+        const remoteResult = await bridge.sync.fetchOrders(remoteOptions);
         if (remoteResult?.success) {
           const remoteOrders = (Array.isArray(remoteResult.orders) ? remoteResult.orders : [])
             .map((entry: any) => normalizeOrder(entry, 'remote'))
@@ -311,18 +315,56 @@ const OrdersPage: React.FC = () => {
     dateTo,
     applyFilters,
     paginateOrders,
+    bridge.orders,
+    bridge.sync,
   ]);
 
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
 
-  // Auto-refresh every 30 seconds
+  // Refresh from Rust-driven events instead of renderer polling.
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchOrders();
-    }, 30000);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastSyncRefreshAt = Date.now();
+
+    const scheduleFetch = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        void fetchOrders();
+      }, delayMs);
+    };
+
+    const handleOrderMutation = () => {
+      scheduleFetch(150);
+    };
+
+    const handleSyncStatus = () => {
+      const now = Date.now();
+      if (now - lastSyncRefreshAt < BACKGROUND_SYNC_REFRESH_MIN_MS) {
+        return;
+      }
+      lastSyncRefreshAt = now;
+      scheduleFetch(300);
+    };
+
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleOrderMutation);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleOrderMutation);
+    };
   }, [fetchOrders]);
 
   const getStatusBadge = (status: string) => getOrderStatusBadgeClasses(status);

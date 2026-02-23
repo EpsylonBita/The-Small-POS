@@ -28,6 +28,11 @@ import {
   BedDouble,
 } from 'lucide-react';
 import type { Reservation, ReservationStatus, ReservationFilters } from '../../../services/ReservationsService';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../../services/terminal-credentials';
+import { offEvent, onEvent } from '../../../../lib';
 
 type QuickFilter = 'today' | 'tomorrow' | 'week';
 type ViewMode = 'timeline' | 'list';
@@ -49,15 +54,44 @@ export const ReservationsView: React.FC = memo(() => {
   const { organizationId } = useModules();
   const { hasTablesModule, hasRoomsModule } = useAcquiredModules();
   
-  // Get branchId from localStorage (set during terminal setup)
+  // Get branchId from terminal credential cache / IPC
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
   
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    const storedOrgId = localStorage.getItem('organization_id');
-    setBranchId(storedBranchId);
-    setLocalOrgId(storedOrgId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
   // Use module context organizationId if available, otherwise fall back to localStorage

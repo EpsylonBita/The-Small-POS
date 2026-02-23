@@ -1,5 +1,8 @@
 import { useCallback, useState } from 'react'
 import { errorHandler, ErrorDetails, ErrorHandlerOptions } from '../../shared/services/ErrorHandlingService'
+import { getBridge } from '../../lib'
+
+const bridge = getBridge()
 
 interface UseErrorHandlerReturn {
   handleError: (error: any, context: string, options?: ErrorHandlerOptions) => Promise<ErrorDetails>
@@ -16,14 +19,13 @@ interface UseErrorHandlerReturn {
 
 // POS-specific notification function (since we don't have react-hot-toast in Electron)
 function showPOSNotification(message: string, type: 'info' | 'warning' | 'error' = 'info') {
-  // Check if we're in Electron environment
-  if (window.electronAPI?.showNotification) {
-    window.electronAPI.showNotification({
+  try {
+    void bridge.notifications.show({
       title: type === 'error' ? 'Error' : type === 'warning' ? 'Warning' : 'Information',
       body: message,
       type
     })
-  } else {
+  } catch {
     // Fallback to browser notification or console
     console.log(`[${type.toUpperCase()}] ${message}`)
     
@@ -34,7 +36,7 @@ function showPOSNotification(message: string, type: 'info' | 'warning' | 'error'
         icon: type === 'error' ? '/error-icon.png' : '/info-icon.png'
       })
     }
-  }
+  } 
 }
 
 export function useErrorHandler(): UseErrorHandlerReturn {
@@ -263,9 +265,9 @@ export function usePOSErrorRecovery() {
     // POS-specific error recovery logic
     if (errorDetails.retryable) {
       // Save order to local storage for retry
-      if (window.electronAPI?.saveOrderForRetry) {
-        window.electronAPI.saveOrderForRetry(orderData)
-      } else {
+      try {
+        await bridge.orders.saveForRetry(orderData)
+      } catch {
         localStorage.setItem('pendingOrder', JSON.stringify(orderData))
       }
       
@@ -298,11 +300,10 @@ export function usePOSErrorRecovery() {
   const recoverPendingOrders = useCallback(async () => {
     try {
       let pendingOrders = []
-      
-      // Try to get from Electron API first
-      if (window.electronAPI?.getPendingOrders) {
-        pendingOrders = await window.electronAPI.getPendingOrders()
-      } else {
+
+      try {
+        pendingOrders = await bridge.orders.getRetryQueue()
+      } catch {
         // Fallback to localStorage
         const stored = localStorage.getItem('pendingOrder')
         if (stored) {

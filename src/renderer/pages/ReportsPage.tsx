@@ -33,9 +33,11 @@ import {
   PaymentMethodChart,
   OrderTypeChart
 } from '../components/reports/ReportCharts';
+import { getBridge } from '../../lib';
 
 
 const ReportsPage: React.FC = () => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [selectedPeriod, setSelectedPeriod] = useState('today');
@@ -59,42 +61,37 @@ const ReportsPage: React.FC = () => {
     const fetchReportData = async () => {
       setLoading(true);
       try {
-        // Temporary fallback if preload is not exposing report APIs yet
-        if (!window.electronAPI?.getTodayStatistics) {
-          setTodayStats({ totalOrders: 0, totalSales: 0, avgOrderValue: 0, completionRate: 0, cashSales: 0, cardSales: 0 } as any);
-          setSalesData([]);
-          setTopItems([]);
-          setHourlySales([]);
-          setPaymentBreakdown({ cash: { count: 0, total: 0 }, card: { count: 0, total: 0 } });
-          setOrderTypeBreakdown({ delivery: { count: 0, total: 0 }, instore: { count: 0, total: 0 } });
-          return;
-        }
-
         // IPC handlers wrap response in { success: true, data: ... }
-        const statsResult = await window.electronAPI?.getTodayStatistics?.(staff.branchId);
+        const statsResult = await bridge.reports.getTodayStatistics({ branchId: staff.branchId });
         setTodayStats(statsResult?.data || statsResult || null);
 
         const days = selectedPeriod === 'today' ? 5 : selectedPeriod === 'week' ? 7 : selectedPeriod === 'month' ? 30 : 90;
-        const trendResult = await window.electronAPI?.getSalesTrend?.({ branchId: staff.branchId, days });
+        const trendResult = await bridge.reports.getSalesTrend({ branchId: staff.branchId, days });
         setSalesData(trendResult?.data || trendResult || []);
 
-        const itemsResult = await window.electronAPI?.getTopItems?.({ branchId: staff.branchId, limit: 5 });
+        const itemsResult = await bridge.reports.getTopItems({ branchId: staff.branchId, limit: 5 });
         setTopItems(itemsResult?.data || itemsResult || []);
 
-        // Fetch new analytics data
-        if (window.electronAPI?.getHourlySales) {
-          const hourlyResult = await window.electronAPI.getHourlySales({ branchId: staff.branchId });
+        // Optional analytics commands may not be available in all runtime builds.
+        try {
+          const hourlyResult = await bridge.invoke('report:get-hourly-sales', { branchId: staff.branchId });
           setHourlySales(hourlyResult?.data || hourlyResult || []);
+        } catch {
+          setHourlySales([]);
         }
 
-        if (window.electronAPI?.getPaymentMethodBreakdown) {
-          const paymentResult = await window.electronAPI.getPaymentMethodBreakdown({ branchId: staff.branchId });
+        try {
+          const paymentResult = await bridge.invoke('report:get-payment-method-breakdown', { branchId: staff.branchId });
           setPaymentBreakdown(paymentResult?.data || paymentResult || null);
+        } catch {
+          setPaymentBreakdown(null);
         }
 
-        if (window.electronAPI?.getOrderTypeBreakdown) {
-          const orderTypeResult = await window.electronAPI.getOrderTypeBreakdown({ branchId: staff.branchId });
+        try {
+          const orderTypeResult = await bridge.invoke('report:get-order-type-breakdown', { branchId: staff.branchId });
           setOrderTypeBreakdown(orderTypeResult?.data || orderTypeResult || null);
+        } catch {
+          setOrderTypeBreakdown(null);
         }
       } catch (error) {
         console.error('Failed to fetch report data:', error);
@@ -104,7 +101,7 @@ const ReportsPage: React.FC = () => {
       }
     };
     fetchReportData();
-  }, [staff?.branchId, selectedPeriod, t]);
+  }, [staff?.branchId, selectedPeriod, t, bridge]);
 
   // Metric card component
   const MetricCard = ({

@@ -25,6 +25,7 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
       onClose={onClose}
       title={t('modals.editOptions.title')}
       size="md"
+      className="!max-w-lg"
     >
             <p className="liquid-glass-modal-text-muted mb-6">
               {t('modals.editOptions.message', { count: orderCount })}

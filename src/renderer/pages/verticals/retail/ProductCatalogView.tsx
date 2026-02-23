@@ -16,6 +16,11 @@ import { OrderConflictBanner } from '../../../components/OrderConflictBanner';
 import { useModules } from '../../../contexts/module-context';
 import { useProductCatalog } from '../../../hooks/useProductCatalog';
 import type { Order } from '../../../types/orders';
+import { offEvent, onEvent } from '../../../../lib';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../../services/terminal-credentials';
 
 export const ProductCatalogView: React.FC = memo(() => {
   const { conflicts, resolveConflict } = useOrderStore();
@@ -24,10 +29,39 @@ export const ProductCatalogView: React.FC = memo(() => {
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
 
   useEffect(() => {
-    const storedBranchId = localStorage.getItem('branch_id');
-    const storedOrgId = localStorage.getItem('organization_id');
-    setBranchId(storedBranchId);
-    setLocalOrgId(storedOrgId);
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
+      }
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
+    };
+
+    const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
+      }
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
+      }
+    };
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
+    return () => {
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
+    };
   }, []);
 
   const organizationId = moduleOrgId || localOrgId || '';

@@ -21,6 +21,11 @@ import {
 } from 'lucide-react';
 import type { Room, RoomStatus, RoomFilters } from '../../../services/RoomsService';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
+import { getBridge, offEvent, onEvent } from '../../../../lib';
+import {
+  getCachedTerminalCredentials,
+  refreshTerminalCredentialCache,
+} from '../../../services/terminal-credentials';
 
 const statusConfig: Record<RoomStatus, { color: string; bgClass: string; icon: typeof Bed; label: string }> = {
   available: { color: 'text-emerald-500', bgClass: 'bg-emerald-500/10 border-emerald-500/30', icon: Sparkles, label: 'Available' },
@@ -66,6 +71,7 @@ const mapPaymentMethod = (method: 'cash' | 'card' | 'transfer'): 'cash' | 'card'
 };
 
 export const RoomsView: React.FC = memo(() => {
+  const bridge = getBridge();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
@@ -102,63 +108,39 @@ export const RoomsView: React.FC = memo(() => {
     notes: '',
   });
 
-  // Load config from multiple sources
   useEffect(() => {
-    const loadConfig = async () => {
-      let bid = localStorage.getItem('branch_id');
-      let oid = localStorage.getItem('organization_id');
-      
-      if ((!bid || !oid) && window.electron?.ipcRenderer) {
-        try {
-          if (!bid) {
-            const branchResult = await window.electron.ipcRenderer.invoke('terminal-config:get-branch-id');
-            if (branchResult) {
-              bid = branchResult;
-              localStorage.setItem('branch_id', bid as string);
-            }
-          }
-          if (!oid) {
-            const orgResult = await window.electron.ipcRenderer.invoke('terminal-config:get-organization-id');
-            if (orgResult) {
-              oid = orgResult;
-              localStorage.setItem('organization_id', oid as string);
-            }
-          }
-          if (!bid || !oid) {
-            const settings = await window.electron.ipcRenderer.invoke('terminal-config:get-settings');
-            if (!bid) {
-              bid = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id || null;
-              if (bid) localStorage.setItem('branch_id', bid);
-            }
-            if (!oid) {
-              oid = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id || null;
-              if (oid) localStorage.setItem('organization_id', oid);
-            }
-          }
-        } catch (err) {
-          console.warn('[RoomsView] Failed to get terminal config:', err);
-        }
+    let disposed = false;
+
+    const hydrateTerminalIdentity = async () => {
+      const cached = getCachedTerminalCredentials();
+      if (!disposed) {
+        setBranchId(cached.branchId || null);
+        setLocalOrgId(cached.organizationId || null);
       }
-      setBranchId(bid);
-      setLocalOrgId(oid);
+
+      const refreshed = await refreshTerminalCredentialCache();
+      if (!disposed) {
+        setBranchId(refreshed.branchId || null);
+        setLocalOrgId(refreshed.organizationId || null);
+      }
     };
-    
-    loadConfig();
-    
+
     const handleConfigUpdate = (data: { branch_id?: string; organization_id?: string }) => {
-      if (data.branch_id) {
-        setBranchId(data.branch_id);
-        localStorage.setItem('branch_id', data.branch_id);
+      if (disposed) return;
+      if (typeof data?.branch_id === 'string' && data.branch_id.trim()) {
+        setBranchId(data.branch_id.trim());
       }
-      if (data.organization_id) {
-        setLocalOrgId(data.organization_id);
-        localStorage.setItem('organization_id', data.organization_id);
+      if (typeof data?.organization_id === 'string' && data.organization_id.trim()) {
+        setLocalOrgId(data.organization_id.trim());
       }
     };
-    
-    window.electron?.ipcRenderer?.on('terminal-config-updated', handleConfigUpdate);
+
+    hydrateTerminalIdentity();
+    onEvent('terminal-config-updated', handleConfigUpdate);
+
     return () => {
-      window.electron?.ipcRenderer?.removeListener('terminal-config-updated', handleConfigUpdate);
+      disposed = true;
+      offEvent('terminal-config-updated', handleConfigUpdate);
     };
   }, [organizationId]);
 
@@ -428,13 +410,12 @@ export const RoomsView: React.FC = memo(() => {
       notes: params.notes || params.description,
     } as any);
 
-    const printApi: any = (window as any).electronAPI;
-    if (order?.id && printApi?.printReceipt) {
-      await printApi.printReceipt(order.id, 'customer');
+    if (order?.id) {
+      await bridge.payments.printReceipt(order.id, 'customer');
     }
 
     return order;
-  }, []);
+  }, [bridge]);
 
   // Calculate total for check-in
   const updateCheckinTotal = useCallback((nights: number, roomId: string) => {

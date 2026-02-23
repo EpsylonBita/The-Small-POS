@@ -188,6 +188,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       onClose={handleClose}
       title={t('modals.editCustomer.title')}
       size="xl"
+      className="!max-w-3xl"
     >
       <div className="overflow-y-auto max-h-[70vh]">
           <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">

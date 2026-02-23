@@ -1,23 +1,35 @@
 /**
  * IPC Abstraction Layer for The Small POS
  *
- * Provides a platform-agnostic bridge between the React renderer and the
- * native backend (Tauri or Electron). Existing Electron components call
- * `window.electron.ipcRenderer.invoke(channel, ...args)` -- the compat shim
- * in `electron-compat.ts` routes those calls through this adapter so the
- * same React code runs on both runtimes.
+ * Provides a typed bridge between the React renderer and the native Tauri
+ * backend. In desktop runtime this adapter always uses
+ * `@tauri-apps/api/core` `invoke`.
  *
  * Architecture:
  *   PlatformBridge (interface)
- *     ├── TauriBridge    (uses @tauri-apps/api/core invoke)
- *     ├── ElectronBridge (passthrough to real Electron IPC)
- *     └── BrowserStub    (rejects all calls with descriptive errors)
- *
- * Each sub-bridge groups commands by namespace matching the Electron IPC
- * channel naming convention: `namespace:action`.
+ *     ├── TauriBridge (native desktop runtime)
+ *     └── BrowserStub (non-desktop safety/dev runtime)
  */
 
 import { detectPlatform } from './platform-detect';
+import type {
+  AuthSetupPinRequest,
+  DiagnosticsAboutInfo,
+  DiagnosticsExportOptions,
+  DiagnosticsExportResponse,
+  DiagnosticsOpenExportDirResponse,
+  DiagnosticsSystemHealth,
+  ScreenCaptureGetSourcesRequest,
+  ScreenCaptureGetSourcesResponse,
+  ScreenCaptureSignalPollingResponse,
+  SettingsConfiguredResponse,
+  SettingsGetRequest,
+  SettingsSetRequest,
+  SettingsUpdateLocalRequest,
+  SyncRemoveInvalidOrdersResponse,
+  SyncValidatePendingOrdersResponse,
+  TerminalConfigGetSettingRequest,
+} from './ipc-contracts';
 
 // ============================================================================
 // Payload & Response Types
@@ -66,8 +78,123 @@ export interface UpdateTerminalCredentialsPayload {
   terminalId: string;
   apiKey: string;
   adminUrl?: string;
+  adminDashboardUrl?: string;
   branchId?: string;
   organizationId?: string;
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
+}
+
+type SettingsGetInput = string | SettingsGetRequest;
+type SettingsSetInput = string | SettingsSetRequest;
+type SettingsUpdateLocalInput = string | SettingsUpdateLocalRequest;
+type TerminalConfigGetSettingInput = string | TerminalConfigGetSettingRequest;
+type AuthSetupPinInput = string | AuthSetupPinRequest;
+
+function buildAuthSetupPinArg(input: AuthSetupPinInput): AuthSetupPinRequest {
+  if (typeof input === 'string') {
+    return { staffPin: input };
+  }
+  return input;
+}
+
+function buildSettingsGetInvoke(
+  request?: SettingsGetInput,
+  key?: string,
+  defaultValue?: unknown
+): { channel: 'get-settings' | 'settings:get'; args: unknown[] } {
+  if (request === undefined && key === undefined && defaultValue === undefined) {
+    return { channel: 'get-settings', args: [] };
+  }
+
+  if (typeof request === 'string') {
+    if (key === undefined && defaultValue === undefined) {
+      return { channel: 'settings:get', args: [request] };
+    }
+    if (defaultValue === undefined) {
+      return { channel: 'settings:get', args: [request, key] };
+    }
+    return { channel: 'settings:get', args: [request, key, defaultValue] };
+  }
+
+  const payload: Record<string, unknown> = request ? { ...request } : {};
+  if (typeof key === 'string' && payload.key === undefined && payload.settingKey === undefined) {
+    payload.key = key;
+  }
+  if (
+    defaultValue !== undefined &&
+    payload.defaultValue === undefined &&
+    payload.default === undefined
+  ) {
+    payload.defaultValue = defaultValue;
+  }
+
+  return { channel: 'settings:get', args: Object.keys(payload).length ? [payload] : [] };
+}
+
+function buildSettingsSetArgs(input: SettingsSetInput, value?: unknown): unknown[] {
+  if (typeof input === 'string') {
+    return [input, value];
+  }
+
+  if (value !== undefined && input.value === undefined && input.settingValue === undefined) {
+    return [{ ...input, value }];
+  }
+
+  return [input];
+}
+
+function buildSettingsUpdateLocalArgs(
+  input: SettingsUpdateLocalInput,
+  value?: unknown
+): unknown[] {
+  if (typeof input === 'string') {
+    return [input, value];
+  }
+
+  if ('key' in input) {
+    return [input.key, input.value];
+  }
+
+  if ('category' in input) {
+    return [input.category, input.settings];
+  }
+
+  return [{ settingType: input.settingType, settings: input.settings }];
+}
+
+function buildTerminalConfigGetSettingArgs(
+  input: TerminalConfigGetSettingInput,
+  key?: string
+): unknown[] {
+  if (typeof input === 'string') {
+    if (typeof key === 'string') {
+      return [input, key];
+    }
+    return [input];
+  }
+
+  if (typeof key === 'string' && input.key === undefined && input.settingKey === undefined) {
+    return [{ ...input, key }];
+  }
+
+  return [input];
+}
+
+function buildDiagnosticsExportArgs(options?: DiagnosticsExportOptions): unknown[] {
+  if (!options) {
+    return [];
+  }
+
+  const payload: Record<string, boolean> = {};
+  if (typeof options.includeLogs === 'boolean') {
+    payload.includeLogs = options.includeLogs;
+  }
+  if (typeof options.redactSensitive === 'boolean') {
+    payload.redactSensitive = options.redactSensitive;
+  }
+
+  return Object.keys(payload).length ? [payload] : [];
 }
 
 // -- Orders ------------------------------------------------------------------
@@ -294,11 +421,10 @@ export interface PrinterConfig {
 /**
  * The canonical interface for all backend commands.
  *
- * Each namespace mirrors the Electron IPC channel prefix.
+ * Each namespace mirrors the IPC channel naming used by the Rust command surface.
  * Implementations convert calls to the native invoke mechanism.
  *
- * Every method from the Electron preload's allowedInvokes list plus
- * the convenience wrappers on `window.electronAPI` is represented here.
+ * Every method required by renderer consumers is represented here.
  */
 export interface PlatformBridge {
   // -- App lifecycle ---------------------------------------------------------
@@ -312,6 +438,7 @@ export interface PlatformBridge {
   // -- System ----------------------------------------------------------------
   system: {
     getInfo(): Promise<{ platform: string; arch: string; version: string }>;
+    openExternalUrl(url: string): Promise<{ success: boolean; host: string; scheme: string }>;
   };
 
   // -- Auth ------------------------------------------------------------------
@@ -322,7 +449,7 @@ export interface PlatformBridge {
     validateSession(): Promise<SessionValidationResponse>;
     hasPermission(permission: string): Promise<boolean>;
     getSessionStats(): Promise<any>;
-    setupPin(pin: string): Promise<IpcResult>;
+    setupPin(request: AuthSetupPinInput): Promise<IpcResult>;
   };
 
   // -- Staff auth ------------------------------------------------------------
@@ -397,9 +524,11 @@ export interface PlatformBridge {
     rediscoverParent(): Promise<IpcResult>;
     fetchTables(): Promise<any>;
     fetchReservations(): Promise<any>;
+    validatePendingOrders(): Promise<SyncValidatePendingOrdersResponse>;
+    removeInvalidOrders(orderIds: string[]): Promise<SyncRemoveInvalidOrdersResponse>;
     fetchSuppliers(): Promise<any>;
     fetchAnalytics(): Promise<any>;
-    fetchOrders(): Promise<any>;
+    fetchOrders(options?: any): Promise<any>;
     fetchRooms(options?: any): Promise<any>;
     updateRoomStatus(roomId: string, status: string): Promise<any>;
     fetchDriveThru(options?: any): Promise<any>;
@@ -425,27 +554,27 @@ export interface PlatformBridge {
 
   // -- Settings --------------------------------------------------------------
   settings: {
-    get(key?: string): Promise<any>;
+    get(request?: SettingsGetInput, key?: string, defaultValue?: unknown): Promise<unknown>;
     getLocal(key?: string): Promise<any>;
-    updateLocal(key: string, value: any): Promise<IpcResult>;
-    set(key: string, value: any): Promise<IpcResult>;
+    updateLocal(request: SettingsUpdateLocalInput, value?: unknown): Promise<IpcResult>;
+    set(request: SettingsSetInput, value?: unknown): Promise<IpcResult>;
     getDiscountMax(): Promise<number>;
     setDiscountMax(percentage: number): Promise<IpcResult>;
     getTaxRate(): Promise<number>;
     setTaxRate(percentage: number): Promise<IpcResult>;
     getLanguage(): Promise<string>;
     setLanguage(lang: string): Promise<IpcResult>;
-    getAdminUrl(): Promise<string>;
+    getAdminUrl(): Promise<string | null>;
     clearConnection(): Promise<IpcResult>;
     updateTerminalCredentials(payload: UpdateTerminalCredentialsPayload): Promise<IpcResult>;
-    isConfigured(): Promise<boolean>;
+    isConfigured(): Promise<SettingsConfiguredResponse>;
     factoryReset(): Promise<IpcResult>;
   };
 
   // -- Terminal config -------------------------------------------------------
   terminalConfig: {
     getSettings(): Promise<TerminalSettings>;
-    getSetting(section: string, key: string): Promise<any>;
+    getSetting(request: TerminalConfigGetSettingInput, key?: string): Promise<unknown>;
     getBranchId(): Promise<string>;
     getTerminalId(): Promise<string>;
     refresh(): Promise<IpcResult>;
@@ -458,6 +587,7 @@ export interface PlatformBridge {
   shifts: {
     open(params: OpenShiftParams): Promise<IpcResult>;
     close(params: CloseShiftParams): Promise<IpcResult>;
+    printCheckout(params: { shiftId: string; roleType?: string; terminalName?: string }): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
     getActiveByTerminalLoose(terminalId: string): Promise<any>;
@@ -497,8 +627,12 @@ export interface PlatformBridge {
     getSalesTrend(params: { branchId: string; days: number }): Promise<any>;
     getTopItems(params: { branchId: string; date?: string; limit?: number }): Promise<any>;
     getWeeklyTopItems(params: { branchId: string; limit?: number }): Promise<any>;
+    getHourlySales(params: { branchId: string; date?: string }): Promise<any>;
+    getPaymentMethodBreakdown(params: { branchId: string; date?: string }): Promise<any>;
+    getOrderTypeBreakdown(params: { branchId: string; date?: string }): Promise<any>;
     generateZReport(params: { branchId: string; date?: string }): Promise<any>;
     getDailyStaffPerformance(params: { branchId: string; date?: string }): Promise<any>;
+    printZReport(params: { zReportId?: string; snapshot?: any; terminalName?: string }): Promise<IpcResult>;
     submitZReport(params: { branchId: string; date?: string }): Promise<IpcResult>;
   };
 
@@ -549,6 +683,27 @@ export interface PlatformBridge {
     reprintJob(jobId: string): Promise<IpcResult>;
   };
 
+  // -- Hardware --------------------------------------------------------------
+  hardware: {
+    scaleConnect(params: { port: string; baud?: number; protocol?: string }): Promise<IpcResult>;
+    scaleDisconnect(): Promise<IpcResult>;
+    scaleReadWeight(): Promise<any>;
+    scaleTare(): Promise<IpcResult>;
+    displayConnect(params: { connectionType: string; target: string; portNumber?: number; baudRate?: number }): Promise<IpcResult>;
+    displayDisconnect(): Promise<IpcResult>;
+    displayShowLine(line1: string, line2?: string): Promise<IpcResult>;
+    displayShowItem(params: { name: string; price: number; qty?: number; currency?: string }): Promise<IpcResult>;
+    displayShowTotal(params: { subtotal: number; tax?: number; total: number; currency?: string }): Promise<IpcResult>;
+    displayClear(): Promise<IpcResult>;
+    scannerSerialStart(params: { port: string; baud?: number }): Promise<IpcResult>;
+    scannerSerialStop(): Promise<IpcResult>;
+    loyaltyReaderStart(): Promise<IpcResult>;
+    loyaltyReaderStop(): Promise<IpcResult>;
+    loyaltyProcessCard(uid: string): Promise<IpcResult>;
+    getStatus(): Promise<any>;
+    reconnect(deviceType: string): Promise<IpcResult>;
+  };
+
   // -- ECR (Payment Terminal) ------------------------------------------------
   ecr: {
     discoverDevices(connectionTypes?: string[], timeout?: number): Promise<any[]>;
@@ -571,6 +726,9 @@ export interface PlatformBridge {
     queryTransactions(filters: any): Promise<any[]>;
     getTransactionStats(filters?: any): Promise<any>;
     getTransactionForOrder(orderId: string): Promise<any>;
+    testConnection(deviceId: string): Promise<IpcResult>;
+    testPrint(deviceId: string): Promise<IpcResult>;
+    fiscalPrint(orderId: string): Promise<IpcResult>;
   };
 
   // -- Modules ---------------------------------------------------------------
@@ -631,7 +789,12 @@ export interface PlatformBridge {
 
   // -- Screen capture --------------------------------------------------------
   screenCapture: {
-    getSources(options: { types: string[] }): Promise<any>;
+    getSources(options: ScreenCaptureGetSourcesRequest): Promise<ScreenCaptureGetSourcesResponse>;
+    startSignalPolling(
+      requestId: string,
+      after?: string
+    ): Promise<ScreenCaptureSignalPollingResponse>;
+    stopSignalPolling(requestId?: string): Promise<ScreenCaptureSignalPollingResponse>;
   };
 
   // -- Geolocation -----------------------------------------------------------
@@ -664,9 +827,12 @@ export interface PlatformBridge {
 
   // -- Diagnostics -----------------------------------------------------------
   diagnostics: {
-    getAbout(): Promise<any>;
-    getSystemHealth(): Promise<any>;
-    export(): Promise<IpcResult<{ path: string }>>;
+    getAbout(): Promise<DiagnosticsAboutInfo>;
+    getSystemHealth(): Promise<DiagnosticsSystemHealth>;
+    export(options?: DiagnosticsExportOptions): Promise<DiagnosticsExportResponse>;
+    openExportDir(path: string): Promise<DiagnosticsOpenExportDirResponse>;
+    checkDeliveredOrders(): Promise<any>;
+    fixMissingDriverIds(driverId: string): Promise<any>;
   };
 
   /**
@@ -681,9 +847,8 @@ export interface PlatformBridge {
 // ============================================================================
 
 /**
- * Maps every known Electron IPC channel to its PlatformBridge path.
- * Used by the compatibility shim to route `ipcRenderer.invoke(channel, ...args)`
- * calls to typed bridge methods.
+ * Maps every supported IPC channel to its PlatformBridge path.
+ * Used by typed runtime adapters and parity checks.
  */
 export const CHANNEL_MAP: Record<string, string> = {
   // App
@@ -694,6 +859,7 @@ export const CHANNEL_MAP: Record<string, string> = {
 
   // System
   'system:get-info': 'system.getInfo',
+  'system:open-external-url': 'system.openExternalUrl',
 
   // Auth
   'auth:login': 'auth.login',
@@ -842,6 +1008,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'shift:get-scheduled-shifts': 'shifts.getScheduledShifts',
   'shift:get-today-scheduled-shifts': 'shifts.getTodayScheduledShifts',
   'shift:backfill-driver-earnings': 'shifts.backfillDriverEarnings',
+  'shift:print-checkout': 'shifts.printCheckout',
 
   // Drivers
   'driver:record-earning': 'drivers.recordEarning',
@@ -859,8 +1026,12 @@ export const CHANNEL_MAP: Record<string, string> = {
   'report:get-sales-trend': 'reports.getSalesTrend',
   'report:get-top-items': 'reports.getTopItems',
   'report:get-weekly-top-items': 'reports.getWeeklyTopItems',
+  'report:get-hourly-sales': 'reports.getHourlySales',
+  'report:get-payment-method-breakdown': 'reports.getPaymentMethodBreakdown',
+  'report:get-order-type-breakdown': 'reports.getOrderTypeBreakdown',
   'report:generate-z-report': 'reports.generateZReport',
   'report:get-daily-staff-performance': 'reports.getDailyStaffPerformance',
+  'report:print-z-report': 'reports.printZReport',
   'report:submit-z-report': 'reports.submitZReport',
 
   // Product dashboard metrics
@@ -911,6 +1082,25 @@ export const CHANNEL_MAP: Record<string, string> = {
   'printer:get-default-profile': 'printer.getDefaultProfile',
   'print:reprint-job': 'printer.reprintJob',
 
+  // Hardware
+  'scale_connect': 'hardware.scaleConnect',
+  'scale_disconnect': 'hardware.scaleDisconnect',
+  'scale_read_weight': 'hardware.scaleReadWeight',
+  'scale_tare': 'hardware.scaleTare',
+  'display_connect': 'hardware.displayConnect',
+  'display_disconnect': 'hardware.displayDisconnect',
+  'display_show_line': 'hardware.displayShowLine',
+  'display_show_item': 'hardware.displayShowItem',
+  'display_show_total': 'hardware.displayShowTotal',
+  'display_clear': 'hardware.displayClear',
+  'scanner_serial_start': 'hardware.scannerSerialStart',
+  'scanner_serial_stop': 'hardware.scannerSerialStop',
+  'loyalty_reader_start': 'hardware.loyaltyReaderStart',
+  'loyalty_reader_stop': 'hardware.loyaltyReaderStop',
+  'loyalty_process_card': 'hardware.loyaltyProcessCard',
+  'hardware:get-status': 'hardware.getStatus',
+  'hardware:reconnect': 'hardware.reconnect',
+
   // ECR
   'ecr:discover-devices': 'ecr.discoverDevices',
   'ecr:get-devices': 'ecr.getDevices',
@@ -932,6 +1122,9 @@ export const CHANNEL_MAP: Record<string, string> = {
   'ecr:query-transactions': 'ecr.queryTransactions',
   'ecr:get-transaction-stats': 'ecr.getTransactionStats',
   'ecr:get-transaction-for-order': 'ecr.getTransactionForOrder',
+  'ecr:test-connection': 'ecr.testConnection',
+  'ecr:test-print': 'ecr.testPrint',
+  'ecr:fiscal-print': 'ecr.fiscalPrint',
 
   // Modules
   'modules:fetch-from-admin': 'modules.fetchFromAdmin',
@@ -977,6 +1170,8 @@ export const CHANNEL_MAP: Record<string, string> = {
 
   // Screen capture
   'screen-capture:get-sources': 'screenCapture.getSources',
+  'screen-capture:start-signal-polling': 'screenCapture.startSignalPolling',
+  'screen-capture:stop-signal-polling': 'screenCapture.stopSignalPolling',
 
   // Refunds / Adjustments
   'refund:payment': 'refunds.refundPayment',
@@ -987,6 +1182,9 @@ export const CHANNEL_MAP: Record<string, string> = {
   'diagnostics:get-about': 'diagnostics.getAbout',
   'diagnostics:get-system-health': 'diagnostics.getSystemHealth',
   'diagnostics:export': 'diagnostics.export',
+  'diagnostics:open-export-dir': 'diagnostics.openExportDir',
+  'diagnostic:check-delivered-orders': 'diagnostics.checkDeliveredOrders',
+  'diagnostic:fix-missing-driver-ids': 'diagnostics.fixMissingDriverIds',
 
   // Service dashboard metrics
   'rooms:get-availability': 'rooms.getAvailability',
@@ -1008,9 +1206,9 @@ export const CHANNEL_MAP: Record<string, string> = {
  * Tauri implementation of PlatformBridge.
  *
  * Maps each typed method to a Tauri `invoke()` call. The Rust command names
- * use snake_case by convention, derived from the Electron channel names.
+ * use snake_case by convention, derived from IPC channel names.
  *
- * Example: Electron `auth:login` -> Tauri command `auth_login`
+ * Example: `auth:login` -> `auth_login`
  */
 export class TauriBridge implements PlatformBridge {
   private tauriInvoke: (cmd: string, args?: Record<string, unknown>) => Promise<any>;
@@ -1050,6 +1248,7 @@ export class TauriBridge implements PlatformBridge {
 
   system = {
     getInfo: () => this.inv('system:get-info'),
+    openExternalUrl: (url: string) => this.inv('system:open-external-url', { url }),
   };
 
   auth = {
@@ -1059,7 +1258,7 @@ export class TauriBridge implements PlatformBridge {
     validateSession: () => this.inv('auth:validate-session'),
     hasPermission: (p: string) => this.inv('auth:has-permission', p),
     getSessionStats: () => this.inv('auth:get-session-stats'),
-    setupPin: (pin: string) => this.inv('auth:setup-pin', pin),
+    setupPin: (request: AuthSetupPinInput) => this.inv('auth:setup-pin', buildAuthSetupPinArg(request)),
   };
 
   staffAuth = {
@@ -1120,7 +1319,12 @@ export class TauriBridge implements PlatformBridge {
     clearAllOrders: () => this.inv('sync:clear-all-orders'),
     cleanupDeletedOrders: () => this.inv('sync:cleanup-deleted-orders'),
     getFinancialStats: () => this.inv('sync:get-financial-stats'),
-    getFailedFinancialItems: (limit?: number) => this.inv('sync:get-failed-financial-items', limit),
+    getFailedFinancialItems: async (limit?: number) => {
+      const result = await this.inv('sync:get-failed-financial-items', limit);
+      if (Array.isArray(result)) return result;
+      if (result && Array.isArray((result as any).items)) return (result as any).items;
+      return [];
+    },
     retryFinancialItem: (id: string) => this.inv('sync:retry-financial-item', id),
     retryAllFailedFinancial: () => this.inv('sync:retry-all-failed-financial'),
     getUnsyncedFinancialSummary: () => this.inv('sync:get-unsynced-financial-summary'),
@@ -1130,9 +1334,12 @@ export class TauriBridge implements PlatformBridge {
     rediscoverParent: () => this.inv('sync:rediscover-parent'),
     fetchTables: () => this.inv('sync:fetch-tables'),
     fetchReservations: () => this.inv('sync:fetch-reservations'),
+    validatePendingOrders: () => this.inv('sync:validate-pending-orders'),
+    removeInvalidOrders: (orderIds: string[]) => this.inv('sync:remove-invalid-orders', orderIds),
     fetchSuppliers: () => this.inv('sync:fetch-suppliers'),
     fetchAnalytics: () => this.inv('sync:fetch-analytics'),
-    fetchOrders: () => this.inv('sync:fetch-orders'),
+    fetchOrders: (opts?: any) =>
+      opts === undefined ? this.inv('sync:fetch-orders') : this.inv('sync:fetch-orders', opts),
     fetchRooms: (opts?: any) => this.inv('sync:fetch-rooms', opts),
     updateRoomStatus: (roomId: string, status: string) => this.inv('sync:update-room-status', roomId, status),
     fetchDriveThru: (opts?: any) => this.inv('sync:fetch-drive-thru', opts),
@@ -1156,10 +1363,15 @@ export class TauriBridge implements PlatformBridge {
   };
 
   settings = {
-    get: (k?: string) => k ? this.inv('settings:get', k) : this.inv('get-settings'),
+    get: (request?: SettingsGetInput, key?: string, defaultValue?: unknown) => {
+      const target = buildSettingsGetInvoke(request, key, defaultValue);
+      return this.inv(target.channel, ...target.args);
+    },
     getLocal: (k?: string) => k ? this.inv('settings:get-local', k) : this.inv('settings:get-local'),
-    updateLocal: (k: string, v: any) => this.inv('settings:update-local', k, v),
-    set: (k: string, v: any) => this.inv('settings:set', k, v),
+    updateLocal: (request: SettingsUpdateLocalInput, value?: unknown) =>
+      this.inv('settings:update-local', ...buildSettingsUpdateLocalArgs(request, value)),
+    set: (request: SettingsSetInput, value?: unknown) =>
+      this.inv('settings:set', ...buildSettingsSetArgs(request, value)),
     getDiscountMax: () => this.inv('settings:get-discount-max'),
     setDiscountMax: (p: number) => this.inv('settings:set-discount-max', p),
     getTaxRate: () => this.inv('settings:get-tax-rate'),
@@ -1175,7 +1387,8 @@ export class TauriBridge implements PlatformBridge {
 
   terminalConfig = {
     getSettings: () => this.inv('terminal-config:get-settings'),
-    getSetting: (s: string, k: string) => this.inv('terminal-config:get-setting', s, k),
+    getSetting: (request: TerminalConfigGetSettingInput, key?: string) =>
+      this.inv('terminal-config:get-setting', ...buildTerminalConfigGetSettingArgs(request, key)),
     getBranchId: () => this.inv('terminal-config:get-branch-id'),
     getTerminalId: () => this.inv('terminal-config:get-terminal-id'),
     refresh: () => this.inv('terminal-config:refresh'),
@@ -1187,6 +1400,7 @@ export class TauriBridge implements PlatformBridge {
   shifts = {
     open: (p: OpenShiftParams) => this.inv('shift:open', p),
     close: (p: CloseShiftParams) => this.inv('shift:close', p),
+    printCheckout: (p: { shiftId: string; roleType?: string; terminalName?: string }) => this.inv('shift:print-checkout', p),
     getActive: (staffId: string) => this.inv('shift:get-active', staffId),
     getActiveByTerminal: (b: string, t: string) => this.inv('shift:get-active-by-terminal', b, t),
     getActiveByTerminalLoose: (t: string) => this.inv('shift:get-active-by-terminal-loose', t),
@@ -1223,8 +1437,12 @@ export class TauriBridge implements PlatformBridge {
     getSalesTrend: (p: { branchId: string; days: number }) => this.inv('report:get-sales-trend', p),
     getTopItems: (p: { branchId: string; date?: string; limit?: number }) => this.inv('report:get-top-items', p),
     getWeeklyTopItems: (p: { branchId: string; limit?: number }) => this.inv('report:get-weekly-top-items', p),
+    getHourlySales: (p: { branchId: string; date?: string }) => this.inv('report:get-hourly-sales', p),
+    getPaymentMethodBreakdown: (p: { branchId: string; date?: string }) => this.inv('report:get-payment-method-breakdown', p),
+    getOrderTypeBreakdown: (p: { branchId: string; date?: string }) => this.inv('report:get-order-type-breakdown', p),
     generateZReport: (p: { branchId: string; date?: string }) => this.inv('report:generate-z-report', p),
     getDailyStaffPerformance: (p: { branchId: string; date?: string }) => this.inv('report:get-daily-staff-performance', p),
+    printZReport: (p: { zReportId?: string; snapshot?: any; terminalName?: string }) => this.inv('report:print-z-report', p),
     submitZReport: (p: { branchId: string; date?: string }) => this.inv('report:submit-z-report', p),
   };
 
@@ -1272,6 +1490,29 @@ export class TauriBridge implements PlatformBridge {
     reprintJob: (id: string) => this.inv('print:reprint-job', id),
   };
 
+  hardware = {
+    scaleConnect: (p: { port: string; baud?: number; protocol?: string }) => this.inv('scale_connect', p),
+    scaleDisconnect: () => this.inv('scale_disconnect'),
+    scaleReadWeight: () => this.inv('scale_read_weight'),
+    scaleTare: () => this.inv('scale_tare'),
+    displayConnect: (p: { connectionType: string; target: string; portNumber?: number; baudRate?: number }) =>
+      this.inv('display_connect', p),
+    displayDisconnect: () => this.inv('display_disconnect'),
+    displayShowLine: (line1: string, line2?: string) => this.inv('display_show_line', line1, line2),
+    displayShowItem: (p: { name: string; price: number; qty?: number; currency?: string }) =>
+      this.inv('display_show_item', p),
+    displayShowTotal: (p: { subtotal: number; tax?: number; total: number; currency?: string }) =>
+      this.inv('display_show_total', p),
+    displayClear: () => this.inv('display_clear'),
+    scannerSerialStart: (p: { port: string; baud?: number }) => this.inv('scanner_serial_start', p),
+    scannerSerialStop: () => this.inv('scanner_serial_stop'),
+    loyaltyReaderStart: () => this.inv('loyalty_reader_start'),
+    loyaltyReaderStop: () => this.inv('loyalty_reader_stop'),
+    loyaltyProcessCard: (uid: string) => this.inv('loyalty_process_card', uid),
+    getStatus: () => this.inv('hardware:get-status'),
+    reconnect: (deviceType: string) => this.inv('hardware:reconnect', deviceType),
+  };
+
   ecr = {
     discoverDevices: (types?: string[], timeout?: number) => this.inv('ecr:discover-devices', types, timeout),
     getDevices: () => this.inv('ecr:get-devices'),
@@ -1293,6 +1534,9 @@ export class TauriBridge implements PlatformBridge {
     queryTransactions: (f: any) => this.inv('ecr:query-transactions', f),
     getTransactionStats: (f?: any) => this.inv('ecr:get-transaction-stats', f),
     getTransactionForOrder: (oid: string) => this.inv('ecr:get-transaction-for-order', oid),
+    testConnection: (did: string) => this.inv('ecr:test-connection', did),
+    testPrint: (did: string) => this.inv('ecr:test-print', did),
+    fiscalPrint: (oid: string) => this.inv('ecr:fiscal-print', oid),
   };
 
   modules = {
@@ -1345,7 +1589,15 @@ export class TauriBridge implements PlatformBridge {
   };
 
   screenCapture = {
-    getSources: (opts: { types: string[] }) => this.inv('screen-capture:get-sources', opts),
+    getSources: (opts: ScreenCaptureGetSourcesRequest) =>
+      this.inv('screen-capture:get-sources', opts),
+    startSignalPolling: (requestId: string, after?: string) =>
+      this.inv('screen-capture:start-signal-polling', { requestId, after }),
+    stopSignalPolling: (requestId?: string) =>
+      this.inv(
+        'screen-capture:stop-signal-polling',
+        requestId ? { requestId } : undefined
+      ),
   };
 
   geo = {
@@ -1367,363 +1619,11 @@ export class TauriBridge implements PlatformBridge {
   diagnostics = {
     getAbout: () => this.inv('diagnostics:get-about'),
     getSystemHealth: () => this.inv('diagnostics:get-system-health'),
-    export: () => this.inv('diagnostics:export'),
-  };
-}
-
-// ============================================================================
-// ElectronBridge Implementation
-// ============================================================================
-
-/**
- * Electron passthrough bridge.
- *
- * Delegates every call to the real `window.electron.ipcRenderer.invoke()`.
- * This is used when running inside the existing Electron shell so the typed
- * interface still works but no behavior changes.
- */
-export class ElectronBridge implements PlatformBridge {
-  private ipc(channel: string, ...args: any[]): Promise<any> {
-    const electron =
-      (window as any).electron?.ipcRenderer ??
-      (window as any).electronAPI?.ipcRenderer;
-    if (!electron) {
-      return Promise.reject(new Error(`Electron IPC not available for channel: ${channel}`));
-    }
-    return electron.invoke(channel, ...args);
-  }
-
-  async invoke(channel: string, ...args: any[]): Promise<any> {
-    return this.ipc(channel, ...args);
-  }
-
-  app = {
-    shutdown: () => this.ipc('app:shutdown'),
-    restart: () => this.ipc('app:restart'),
-    getVersion: () => this.ipc('app:get-version'),
-    getShutdownStatus: () => this.ipc('app:get-shutdown-status'),
-  };
-
-  system = {
-    getInfo: () => this.ipc('system:get-info'),
-  };
-
-  auth = {
-    login: (pin: string) => this.ipc('auth:login', pin),
-    logout: () => this.ipc('auth:logout'),
-    getCurrentSession: () => this.ipc('auth:get-current-session'),
-    validateSession: () => this.ipc('auth:validate-session'),
-    hasPermission: (p: string) => this.ipc('auth:has-permission', p),
-    getSessionStats: () => this.ipc('auth:get-session-stats'),
-    setupPin: (pin: string) => this.ipc('auth:setup-pin', pin),
-  };
-
-  staffAuth = {
-    authenticatePin: (pin: string) => this.ipc('staff-auth:authenticate-pin', pin),
-    getSession: () => this.ipc('staff-auth:get-session'),
-    getCurrent: () => this.ipc('staff-auth:get-current'),
-    hasPermission: (p: string) => this.ipc('staff-auth:has-permission', p),
-    hasAnyPermission: (ps: string[]) => this.ipc('staff-auth:has-any-permission', ps),
-    logout: () => this.ipc('staff-auth:logout'),
-    validateSession: () => this.ipc('staff-auth:validate-session'),
-    trackActivity: () => this.ipc('staff-auth:track-activity'),
-  };
-
-  orders = {
-    getAll: () => this.ipc('order:get-all'),
-    getById: (id: string) => this.ipc('order:get-by-id', id),
-    getByCustomerPhone: (phone: string) => this.ipc('order:get-by-customer-phone', phone),
-    create: (p: CreateOrderPayload) => this.ipc('order:create', p),
-    updateStatus: (id: string, s: string) => this.ipc('order:update-status', id, s),
-    updateItems: (id: string, items: OrderItem[]) => this.ipc('order:update-items', id, items),
-    delete: (id: string) => this.ipc('order:delete', id),
-    saveFromRemote: (o: any) => this.ipc('order:save-from-remote', o),
-    saveForRetry: (o: any) => this.ipc('order:save-for-retry', o),
-    getRetryQueue: () => this.ipc('order:get-retry-queue'),
-    processRetryQueue: () => this.ipc('order:process-retry-queue'),
-    approve: (id: string, t?: number) => this.ipc('order:approve', id, t),
-    decline: (id: string, r: string) => this.ipc('order:decline', id, r),
-    assignDriver: (id: string, d: string, n?: string) => this.ipc('order:assign-driver', id, d, n),
-    notifyPlatformReady: (id: string) => this.ipc('order:notify-platform-ready', id),
-    updatePreparation: (id: string, s: string, p: number, m?: string) => this.ipc('order:update-preparation', id, s, p, m),
-    updateType: (id: string, t: string) => this.ipc('order:update-type', id, t),
-    fetchItemsFromSupabase: (id: string) => this.ipc('order:fetch-items-from-supabase', id),
-    getConflicts: () => this.ipc('orders:get-conflicts'),
-    resolveConflict: (cid: string, s: string, d?: any) => this.ipc('orders:resolve-conflict', cid, s, d),
-    forceSyncRetry: (id: string) => this.ipc('orders:force-sync-retry', id),
-    getRetryInfo: (id: string) => this.ipc('orders:get-retry-info', id),
-    clearAll: () => this.ipc('orders:clear-all'),
-  };
-
-  payments = {
-    updatePaymentStatus: (id: string, s: string, m?: string) => this.ipc('payment:update-payment-status', id, s, m),
-    printReceipt: (data: any, type?: string) => this.ipc('payment:print-receipt', data, type),
-    printKitchenTicket: (data: any) => this.ipc('kitchen:print-ticket', data),
-    recordPayment: (p: RecordPaymentParams) => this.ipc('payment:record', p),
-    voidPayment: (id: string, reason: string, by?: string) => this.ipc('payment:void', id, reason, by),
-    getOrderPayments: (orderId: string) => this.ipc('payment:get-order-payments', orderId),
-    getReceiptPreview: (orderId: string) => this.ipc('payment:get-receipt-preview', orderId),
-  };
-
-  sync = {
-    getStatus: () => this.ipc('sync:get-status'),
-    force: () => this.ipc('sync:force'),
-    getNetworkStatus: () => this.ipc('sync:get-network-status'),
-    getInterTerminalStatus: () => this.ipc('sync:get-inter-terminal-status'),
-    clearAll: () => this.ipc('sync:clear-all'),
-    clearFailed: () => this.ipc('sync:clear-failed'),
-    clearOldOrders: () => this.ipc('sync:clear-old-orders'),
-    clearAllOrders: () => this.ipc('sync:clear-all-orders'),
-    cleanupDeletedOrders: () => this.ipc('sync:cleanup-deleted-orders'),
-    getFinancialStats: () => this.ipc('sync:get-financial-stats'),
-    getFailedFinancialItems: (limit?: number) => this.ipc('sync:get-failed-financial-items', limit),
-    retryFinancialItem: (id: string) => this.ipc('sync:retry-financial-item', id),
-    retryAllFailedFinancial: () => this.ipc('sync:retry-all-failed-financial'),
-    getUnsyncedFinancialSummary: () => this.ipc('sync:get-unsynced-financial-summary'),
-    validateFinancialIntegrity: () => this.ipc('sync:validate-financial-integrity'),
-    requeueOrphanedFinancial: () => this.ipc('sync:requeue-orphaned-financial'),
-    testParentConnection: () => this.ipc('sync:test-parent-connection'),
-    rediscoverParent: () => this.ipc('sync:rediscover-parent'),
-    fetchTables: () => this.ipc('sync:fetch-tables'),
-    fetchReservations: () => this.ipc('sync:fetch-reservations'),
-    fetchSuppliers: () => this.ipc('sync:fetch-suppliers'),
-    fetchAnalytics: () => this.ipc('sync:fetch-analytics'),
-    fetchOrders: () => this.ipc('sync:fetch-orders'),
-    fetchRooms: (opts?: any) => this.ipc('sync:fetch-rooms', opts),
-    updateRoomStatus: (roomId: string, status: string) => this.ipc('sync:update-room-status', roomId, status),
-    fetchDriveThru: (opts?: any) => this.ipc('sync:fetch-drive-thru', opts),
-    updateDriveThruOrderStatus: (id: string, status: string) => this.ipc('sync:update-drive-thru-order-status', id, status),
-  };
-
-  customers = {
-    invalidateCache: (phone: string) => this.ipc('customer:invalidate-cache', phone),
-    getCacheStats: () => this.ipc('customer:get-cache-stats'),
-    clearCache: () => this.ipc('customer:clear-cache'),
-    lookupByPhone: (phone: string) => this.ipc('customer:lookup-by-phone', phone),
-    lookupById: (id: string) => this.ipc('customer:lookup-by-id', id),
-    search: (q: string) => this.ipc('customer:search', q),
-    create: (d: Partial<Customer>) => this.ipc('customer:create', d),
-    update: (id: string, u: Partial<Customer>, v: number) => this.ipc('customer:update', id, u, v),
-    updateBanStatus: (id: string, b: boolean) => this.ipc('customer:update-ban-status', id, b),
-    addAddress: (id: string, a: Partial<CustomerAddress>) => this.ipc('customer:add-address', id, a),
-    updateAddress: (id: string, u: Partial<CustomerAddress>, v: number) => this.ipc('customer:update-address', id, u, v),
-    resolveConflict: (cid: string, s: string, d?: any) => this.ipc('customer:resolve-conflict', cid, s, d),
-    getConflicts: (f?: any) => this.ipc('customer:get-conflicts', f),
-  };
-
-  settings = {
-    get: (k?: string) => k ? this.ipc('settings:get', k) : this.ipc('get-settings'),
-    getLocal: (k?: string) => k ? this.ipc('settings:get-local', k) : this.ipc('settings:get-local'),
-    updateLocal: (k: string, v: any) => this.ipc('settings:update-local', k, v),
-    set: (k: string, v: any) => this.ipc('settings:set', k, v),
-    getDiscountMax: () => this.ipc('settings:get-discount-max'),
-    setDiscountMax: (p: number) => this.ipc('settings:set-discount-max', p),
-    getTaxRate: () => this.ipc('settings:get-tax-rate'),
-    setTaxRate: (p: number) => this.ipc('settings:set-tax-rate', p),
-    getLanguage: () => this.ipc('settings:get-language'),
-    setLanguage: (l: string) => this.ipc('settings:set-language', l),
-    getAdminUrl: () => this.ipc('settings:get-admin-url'),
-    clearConnection: () => this.ipc('settings:clear-connection'),
-    updateTerminalCredentials: (p: UpdateTerminalCredentialsPayload) => this.ipc('settings:update-terminal-credentials', p),
-    isConfigured: () => this.ipc('settings:is-configured'),
-    factoryReset: () => this.ipc('settings:factory-reset'),
-  };
-
-  terminalConfig = {
-    getSettings: () => this.ipc('terminal-config:get-settings'),
-    getSetting: (s: string, k: string) => this.ipc('terminal-config:get-setting', s, k),
-    getBranchId: () => this.ipc('terminal-config:get-branch-id'),
-    getTerminalId: () => this.ipc('terminal-config:get-terminal-id'),
-    refresh: () => this.ipc('terminal-config:refresh'),
-    getOrganizationId: () => this.ipc('terminal-config:get-organization-id'),
-    getBusinessType: () => this.ipc('terminal-config:get-business-type'),
-    getFullConfig: () => this.ipc('terminal-config:get-full-config'),
-  };
-
-  shifts = {
-    open: (p: OpenShiftParams) => this.ipc('shift:open', p),
-    close: (p: CloseShiftParams) => this.ipc('shift:close', p),
-    getActive: (staffId: string) => this.ipc('shift:get-active', staffId),
-    getActiveByTerminal: (b: string, t: string) => this.ipc('shift:get-active-by-terminal', b, t),
-    getActiveByTerminalLoose: (t: string) => this.ipc('shift:get-active-by-terminal-loose', t),
-    getActiveCashierByTerminal: (b: string, t: string) => this.ipc('shift:get-active-cashier-by-terminal', b, t),
-    listStaffForCheckin: (branchId?: string) => this.ipc('shift:list-staff-for-checkin', branchId),
-    getStaffRoles: (staffIds?: string[]) => this.ipc('shift:get-staff-roles', staffIds),
-    getSummary: (id: string, opts?: { skipBackfill?: boolean }) => this.ipc('shift:get-summary', id, opts),
-    recordExpense: (p: RecordExpenseParams) => this.ipc('shift:record-expense', p),
-    getExpenses: (id: string) => this.ipc('shift:get-expenses', id),
-    recordStaffPayment: (p: RecordStaffPaymentParams) => this.ipc('shift:record-staff-payment', p),
-    getStaffPayments: (id: string) => this.ipc('shift:get-staff-payments', id),
-    getStaffPaymentsByStaff: (params: any) => this.ipc('shift:get-staff-payments-by-staff', params),
-    getStaffPaymentTotalForDate: (staffId: string, date: string) => this.ipc('shift:get-staff-payment-total-for-date', staffId, date),
-    getScheduledShifts: (params: any) => this.ipc('shift:get-scheduled-shifts', params),
-    getTodayScheduledShifts: (branchId: string) => this.ipc('shift:get-today-scheduled-shifts', branchId),
-    backfillDriverEarnings: (p: { shiftId?: string; date?: string }) => this.ipc('shift:backfill-driver-earnings', p),
-  };
-
-  drivers = {
-    recordEarning: (p: any) => this.ipc('driver:record-earning', p),
-    getEarnings: (id: string) => this.ipc('driver:get-earnings', id),
-    getShiftSummary: (id: string) => this.ipc('driver:get-shift-summary', id),
-    getActive: (branchId: string) => this.ipc('driver:get-active', branchId),
-  };
-
-  deliveryZones = {
-    trackValidation: (d: any) => this.ipc('delivery-zone:track-validation', d),
-    getAnalytics: (f?: any) => this.ipc('delivery-zone:get-analytics', f),
-    requestOverride: (d: any) => this.ipc('delivery-zone:request-override', d),
-  };
-
-  reports = {
-    getTodayStatistics: (p: { branchId: string }) => this.ipc('report:get-today-statistics', p),
-    getSalesTrend: (p: { branchId: string; days: number }) => this.ipc('report:get-sales-trend', p),
-    getTopItems: (p: { branchId: string; date?: string; limit?: number }) => this.ipc('report:get-top-items', p),
-    getWeeklyTopItems: (p: { branchId: string; limit?: number }) => this.ipc('report:get-weekly-top-items', p),
-    generateZReport: (p: { branchId: string; date?: string }) => this.ipc('report:generate-z-report', p),
-    getDailyStaffPerformance: (p: { branchId: string; date?: string }) => this.ipc('report:get-daily-staff-performance', p),
-    submitZReport: (p: { branchId: string; date?: string }) => this.ipc('report:submit-z-report', p),
-  };
-
-  menu = {
-    sync: () => this.ipc('menu:sync'),
-    getCategories: () => this.ipc('menu:get-categories'),
-    getSubcategories: () => this.ipc('menu:get-subcategories'),
-    getIngredients: () => this.ipc('menu:get-ingredients'),
-    getSubcategoryIngredients: (id: string) => this.ipc('menu:get-subcategory-ingredients', id),
-    getCombos: () => this.ipc('menu:get-combos'),
-    updateCategory: (id: string, u: any) => this.ipc('menu:update-category', id, u),
-    updateSubcategory: (id: string, u: any) => this.ipc('menu:update-subcategory', id, u),
-    updateIngredient: (id: string, u: any) => this.ipc('menu:update-ingredient', id, u),
-    updateCombo: (id: string, u: any) => this.ipc('menu:update-combo', id, u),
-    triggerCheckForUpdates: () => this.ipc('menu:trigger-check-for-updates'),
-  };
-
-  printer = {
-    listSystemPrinters: () => this.ipc('printer:list-system-printers'),
-    scanNetwork: () => this.ipc('printer:scan-network'),
-    scanBluetooth: () => this.ipc('printer:scan-bluetooth'),
-    discover: (types?: string[]) => this.ipc('printer:discover', types),
-    add: (c: Partial<PrinterConfig>) => this.ipc('printer:add', c),
-    update: (id: string, u: Partial<PrinterConfig>) => this.ipc('printer:update', id, u),
-    remove: (id: string) => this.ipc('printer:remove', id),
-    getAll: () => this.ipc('printer:get-all'),
-    get: (id: string) => this.ipc('printer:get', id),
-    getStatus: (id: string) => this.ipc('printer:get-status', id),
-    getAllStatuses: () => this.ipc('printer:get-all-statuses'),
-    submitJob: (j: any) => this.ipc('printer:submit-job', j),
-    cancelJob: (id: string) => this.ipc('printer:cancel-job', id),
-    retryJob: (id: string) => this.ipc('printer:retry-job', id),
-    test: (id: string) => this.ipc('printer:test', id),
-    testGreekDirect: (mode: string, name?: string) => this.ipc('printer:test-greek-direct', mode, name),
-    diagnostics: (id: string) => this.ipc('printer:diagnostics', id),
-    bluetoothStatus: () => this.ipc('printer:bluetooth-status'),
-    openCashDrawer: (id?: string, drawer?: 1 | 2) => this.ipc('printer:open-cash-drawer', id, drawer),
-    createProfile: (p: any) => this.ipc('printer:create-profile', p),
-    updateProfile: (p: any) => this.ipc('printer:update-profile', p),
-    deleteProfile: (id: string) => this.ipc('printer:delete-profile', id),
-    listProfiles: () => this.ipc('printer:list-profiles'),
-    getProfile: (id: string) => this.ipc('printer:get-profile', id),
-    setDefaultProfile: (id: string) => this.ipc('printer:set-default-profile', id),
-    getDefaultProfile: () => this.ipc('printer:get-default-profile'),
-    reprintJob: (id: string) => this.ipc('print:reprint-job', id),
-  };
-
-  ecr = {
-    discoverDevices: (types?: string[], timeout?: number) => this.ipc('ecr:discover-devices', types, timeout),
-    getDevices: () => this.ipc('ecr:get-devices'),
-    getDevice: (id: string) => this.ipc('ecr:get-device', id),
-    addDevice: (c: any) => this.ipc('ecr:add-device', c),
-    updateDevice: (id: string, u: any) => this.ipc('ecr:update-device', id, u),
-    removeDevice: (id: string) => this.ipc('ecr:remove-device', id),
-    getDefaultTerminal: () => this.ipc('ecr:get-default-terminal'),
-    connectDevice: (id: string) => this.ipc('ecr:connect-device', id),
-    disconnectDevice: (id: string) => this.ipc('ecr:disconnect-device', id),
-    getDeviceStatus: (id: string) => this.ipc('ecr:get-device-status', id),
-    getAllStatuses: () => this.ipc('ecr:get-all-statuses'),
-    processPayment: (amt: number, o?: EcrPaymentOptions) => this.ipc('ecr:process-payment', amt, o),
-    processRefund: (amt: number, o?: EcrRefundOptions) => this.ipc('ecr:process-refund', amt, o),
-    voidTransaction: (tid: string, did?: string) => this.ipc('ecr:void-transaction', tid, did),
-    cancelTransaction: (did: string) => this.ipc('ecr:cancel-transaction', did),
-    settlement: (did?: string) => this.ipc('ecr:settlement', did),
-    getRecentTransactions: (limit?: number) => this.ipc('ecr:get-recent-transactions', limit),
-    queryTransactions: (f: any) => this.ipc('ecr:query-transactions', f),
-    getTransactionStats: (f?: any) => this.ipc('ecr:get-transaction-stats', f),
-    getTransactionForOrder: (oid: string) => this.ipc('ecr:get-transaction-for-order', oid),
-  };
-
-  modules = {
-    fetchFromAdmin: () => this.ipc('modules:fetch-from-admin'),
-    getCached: () => this.ipc('modules:get-cached'),
-    saveCache: (m: any[]) => this.ipc('modules:save-cache', m),
-  };
-
-  updates = {
-    check: () => this.ipc('update:check'),
-    download: () => this.ipc('update:download'),
-    cancelDownload: () => this.ipc('update:cancel-download'),
-    install: () => this.ipc('update:install'),
-    getState: () => this.ipc('update:get-state'),
-    setChannel: (ch: 'stable' | 'beta') => this.ipc('update:set-channel', ch),
-  };
-
-  window = {
-    minimize: () => this.ipc('window-minimize'),
-    maximize: () => this.ipc('window-maximize'),
-    close: () => this.ipc('window-close'),
-    toggleFullscreen: () => this.ipc('window-toggle-fullscreen'),
-    getState: () => this.ipc('window-get-state'),
-    reload: () => this.ipc('window-reload'),
-    forceReload: () => this.ipc('window-force-reload'),
-    toggleDevtools: () => this.ipc('window-toggle-devtools'),
-    zoomIn: () => this.ipc('window-zoom-in'),
-    zoomOut: () => this.ipc('window-zoom-out'),
-    zoomReset: () => this.ipc('window-zoom-reset'),
-  };
-
-  adminApi = {
-    fetchFromAdmin: (path: string, opts?: any) => this.ipc('api:fetch-from-admin', path, opts),
-  };
-
-  database = {
-    healthCheck: () => this.ipc('database:health-check'),
-    getStats: () => this.ipc('database:get-stats'),
-    reset: () => this.ipc('database:reset'),
-    clearOperationalData: () => this.ipc('database:clear-operational-data'),
-  };
-
-  clipboard = {
-    readText: () => this.ipc('clipboard:read-text'),
-    writeText: (text: string) => this.ipc('clipboard:write-text', text),
-  };
-
-  notifications = {
-    show: (data: any) => this.ipc('show-notification', data),
-  };
-
-  screenCapture = {
-    getSources: (opts: { types: string[] }) => this.ipc('screen-capture:get-sources', opts),
-  };
-
-  geo = {
-    ip: () => this.ipc('geo:ip'),
-  };
-
-  labels = {
-    print: (req: any, pid?: string) => this.ipc('label:print', req, pid),
-    printBatch: (items: any[], lt?: string, pid?: string) => this.ipc('label:print-batch', items, lt, pid),
-  };
-
-  refunds = {
-    refundPayment: (params: { paymentId: string; amount: number; reason: string; staffId?: string; orderId?: string }) =>
-      this.ipc('refund:payment', params),
-    listOrderAdjustments: (orderId: string) => this.ipc('refund:list-order-adjustments', orderId),
-    getPaymentBalance: (paymentId: string) => this.ipc('refund:get-payment-balance', paymentId),
-  };
-
-  diagnostics = {
-    getAbout: () => this.ipc('diagnostics:get-about'),
-    getSystemHealth: () => this.ipc('diagnostics:get-system-health'),
-    export: () => this.ipc('diagnostics:export'),
+    export: (options?: DiagnosticsExportOptions) =>
+      this.inv('diagnostics:export', ...buildDiagnosticsExportArgs(options)),
+    openExportDir: (path: string) => this.inv('diagnostics:open-export-dir', { path }),
+    checkDeliveredOrders: () => this.inv('diagnostic:check-delivered-orders'),
+    fixMissingDriverIds: (driverId: string) => this.inv('diagnostic:fix-missing-driver-ids', driverId),
   };
 }
 
@@ -1735,7 +1635,7 @@ let _bridge: PlatformBridge | null = null;
 
 /**
  * Get the platform bridge singleton.
- * Automatically selects TauriBridge or ElectronBridge based on the runtime.
+ * Automatically selects the native Tauri bridge for desktop runtime.
  */
 export function getBridge(): PlatformBridge {
   if (_bridge) return _bridge;
@@ -1745,9 +1645,6 @@ export function getBridge(): PlatformBridge {
   switch (platform) {
     case 'tauri':
       _bridge = new TauriBridge();
-      break;
-    case 'electron':
-      _bridge = new ElectronBridge();
       break;
     case 'browser':
       // In browser mode, create a proxy stub that logs warnings

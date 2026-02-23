@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.2.2"
+version = "1.2.3"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -18,11 +18,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [
   "tray-icon",
 ] }
-tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 
 # Serialization
@@ -62,9 +57,13 @@ tracing-appender = "0.2"
 # Diagnostics export (zip bundle)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Serial port (scales, serial barcode scanners, customer displays)
+serialport = "4"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
+webbrowser = "1.0"
 
 [profile.dev]
 incremental = true
@@ -74,3 +73,4 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+

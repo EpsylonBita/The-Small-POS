@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface FinancialSyncItem {
     id: string;
@@ -12,6 +13,42 @@ interface FinancialSyncItem {
     created_at: string;
 }
 
+const asString = (value: unknown): string =>
+    typeof value === 'string' ? value : '';
+
+const asNumber = (value: unknown, fallback = 0): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+
+const normalizeFinancialSyncItem = (raw: any): FinancialSyncItem | null => {
+    const id = asString(raw?.id);
+    if (!id) return null;
+
+    const payloadRaw = raw?.data ?? raw?.payload;
+    const payload =
+        typeof payloadRaw === 'string'
+            ? payloadRaw
+            : JSON.stringify(payloadRaw ?? {});
+
+    return {
+        id,
+        table_name: asString(raw?.table_name) || asString(raw?.entityType) || 'unknown',
+        record_id: asString(raw?.record_id) || asString(raw?.entityId),
+        operation: asString(raw?.operation) || 'insert',
+        data: payload,
+        attempts: asNumber(raw?.attempts ?? raw?.retryCount, 0),
+        error_message: asString(raw?.error_message) || asString(raw?.lastError) || 'Unknown sync error',
+        created_at: asString(raw?.created_at) || asString(raw?.createdAt) || new Date().toISOString(),
+    };
+};
+
+const formatPayload = (payload: string): string => {
+    try {
+        return JSON.stringify(JSON.parse(payload), null, 2);
+    } catch {
+        return payload;
+    }
+};
+
 interface FinancialSyncPanelProps {
     isOpen: boolean;
     onClose: () => void;
@@ -23,6 +60,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     onClose,
     onRefresh
 }) => {
+    const bridge = getBridge();
     const { t } = useTranslation();
     const [items, setItems] = useState<FinancialSyncItem[]>([]);
     const [loading, setLoading] = useState(false);
@@ -31,13 +69,11 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     const loadItems = async () => {
         setLoading(true);
         try {
-            if (window.electronAPI && typeof (window.electronAPI as any).getFailedFinancialSyncItems === 'function') {
-                const failedItems = await (window.electronAPI as any).getFailedFinancialSyncItems(50);
-                console.log('Loaded failed financial items:', failedItems);
-                setItems(Array.isArray(failedItems) ? failedItems : []);
-            } else {
-                console.warn('getFailedFinancialSyncItems is not available');
-            }
+            const failedItems = await bridge.sync.getFailedFinancialItems(50);
+            const normalized = (Array.isArray(failedItems) ? failedItems : [])
+                .map(normalizeFinancialSyncItem)
+                .filter((item): item is FinancialSyncItem => item !== null);
+            setItems(normalized);
         } catch (err) {
             console.error('Failed to load financial sync items', err);
         } finally {
@@ -47,20 +83,36 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
 
     useEffect(() => {
         if (isOpen) {
-            loadItems();
+            void loadItems();
         }
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen) return;
+
+        const handleSyncComplete = () => {
+            void loadItems();
+        };
+
+        const handleRetryScheduled = () => {
+            void loadItems();
+        };
+
+        onEvent('sync:complete', handleSyncComplete);
+        onEvent('sync-retry-scheduled', handleRetryScheduled);
+
+        return () => {
+            offEvent('sync:complete', handleSyncComplete);
+            offEvent('sync-retry-scheduled', handleRetryScheduled);
+        };
     }, [isOpen]);
 
     const handleRetryItem = async (id: string) => {
         setProcessing(id);
         try {
-            if (window.electronAPI && typeof (window.electronAPI as any).retryFinancialSyncItem === 'function') {
-                await (window.electronAPI as any).retryFinancialSyncItem(id);
-                await loadItems();
-                onRefresh();
-            } else {
-                console.warn('retryFinancialSyncItem is not available');
-            }
+            await bridge.sync.retryFinancialItem(id);
+            await loadItems();
+            onRefresh();
         } catch (err) {
             console.error('Failed to retry item', err);
         } finally {
@@ -71,13 +123,9 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
     const handleRetryAll = async () => {
         setProcessing('all');
         try {
-            if (window.electronAPI && typeof (window.electronAPI as any).retryAllFailedFinancialSyncs === 'function') {
-                await (window.electronAPI as any).retryAllFailedFinancialSyncs();
-                await loadItems();
-                onRefresh();
-            } else {
-                console.warn('retryAllFailedFinancialSyncs is not available');
-            }
+            await bridge.sync.retryAllFailedFinancial();
+            await loadItems();
+            onRefresh();
         } catch (err) {
             console.error('Failed to retry all', err);
         } finally {
@@ -185,7 +233,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                                                         {t('sync.financial.viewPayload')}
                                                     </summary>
                                                     <pre className="mt-2 p-3 bg-slate-100 dark:bg-slate-800/50 rounded-xl overflow-x-auto text-slate-700 dark:text-slate-300 font-mono text-[10px] border border-slate-300/50 dark:border-slate-600/50">
-                                                        {JSON.stringify(JSON.parse(item.data), null, 2)}
+                                                        {formatPayload(item.data)}
                                                     </pre>
                                                 </details>
                                             </div>

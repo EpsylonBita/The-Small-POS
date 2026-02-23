@@ -12,6 +12,7 @@ import {
   formatUpsellCurrency,
   calculateAnnualSavings,
 } from '@shared/services/upsellUrlService'
+import { openExternalUrl } from '../../utils/electron-api'
 
 interface ModuleUpsellCardProps {
   /** Module ID to display */
@@ -135,11 +136,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
       }
 
       // Open Stripe Checkout in external browser
-      if (typeof window !== 'undefined' && window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(data.checkout_url)
-      } else {
-        window.open(data.checkout_url, '_blank')
-      }
+      await openExternalUrl(data.checkout_url)
     } catch (err) {
       console.error('Failed to create checkout:', err)
       // Fallback to admin dashboard redirect
@@ -149,11 +146,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         context: 'locked_module',
       })
 
-      if (typeof window !== 'undefined' && window.electronAPI?.openExternal) {
-        window.electronAPI.openExternal(purchaseUrl)
-      } else {
-        window.open(purchaseUrl, '_blank')
-      }
+      await openExternalUrl(purchaseUrl)
     } finally {
       setIsCheckoutLoading(false)
     }
@@ -215,6 +208,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
           onClose={handleClose}
           title={moduleInfo.display_name}
           size="md"
+          className="!max-w-lg"
         >
           <ModuleUpsellContent
             moduleInfo={moduleInfo}
@@ -251,6 +245,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
       onClose={handleClose}
       title={moduleInfo.display_name}
       size="md"
+      className="!max-w-lg"
     >
       <ModuleUpsellContent
         moduleInfo={moduleInfo}

@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import toast from 'react-hot-toast';
+import { offEvent, onEvent } from '../../lib';
 import {
   productCatalogService,
   Product,
@@ -16,6 +17,8 @@ import {
   ProductFilters,
   ProductStats,
 } from '../services/ProductCatalogService';
+
+const EVENT_REFRESH_THROTTLE_MS = 5000;
 
 interface UseProductCatalogProps {
   branchId: string;
@@ -68,12 +71,15 @@ export function useProductCatalog({
   }, [branchId, organizationId]);
 
   // Fetch products and categories
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (options: { silent?: boolean } = {}) => {
+    const { silent = false } = options;
     // Only organizationId is required (products can be org-wide without branch)
     if (!organizationId) return;
 
-    setIsLoading(true);
-    setError(null);
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
 
     try {
       const [productsData, categoriesData] = await Promise.all([
@@ -84,10 +90,14 @@ export function useProductCatalog({
       setCategories(categoriesData);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch products';
-      setError(message);
+      if (!silent) {
+        setError(message);
+      }
       console.error('Error fetching products:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) {
+        setIsLoading(false);
+      }
     }
   }, [organizationId, filters]);
 
@@ -96,26 +106,59 @@ export function useProductCatalog({
     fetchData();
   }, [fetchData]);
 
-  // Real-time subscription
+  // Refresh from native sync/order events with throttling.
   useEffect(() => {
     if (!enableRealtime || !branchId) return;
 
-    productCatalogService.subscribeToUpdates((updatedProduct) => {
-      setProducts((prev) => {
-        const index = prev.findIndex((p) => p.id === updatedProduct.id);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = updatedProduct;
-          return updated;
-        }
-        return prev;
-      });
-    });
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = 0;
+
+    const scheduleRefresh = () => {
+      if (disposed) return;
+
+      const now = Date.now();
+      const elapsed = now - lastRefreshAt;
+      if (elapsed >= EVENT_REFRESH_THROTTLE_MS) {
+        lastRefreshAt = now;
+        void fetchData({ silent: true });
+        return;
+      }
+
+      if (pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        if (disposed) return;
+        lastRefreshAt = Date.now();
+        void fetchData({ silent: true });
+      }, EVENT_REFRESH_THROTTLE_MS - elapsed);
+    };
+
+    const handleSyncStatus = (status?: { inProgress?: boolean }) => {
+      if (status?.inProgress) return;
+      scheduleRefresh();
+    };
+    const handleSyncComplete = () => scheduleRefresh();
+    const handleOrderMutation = () => scheduleRefresh();
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+    onEvent('order-created', handleOrderMutation);
+    onEvent('order-status-updated', handleOrderMutation);
+    onEvent('order-deleted', handleOrderMutation);
 
     return () => {
-      productCatalogService.unsubscribeFromUpdates();
+      disposed = true;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+      }
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+      offEvent('order-created', handleOrderMutation);
+      offEvent('order-status-updated', handleOrderMutation);
+      offEvent('order-deleted', handleOrderMutation);
     };
-  }, [branchId, enableRealtime]);
+  }, [branchId, enableRealtime, fetchData]);
 
   // Calculate stats
   const stats = useMemo(() => {

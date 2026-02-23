@@ -16,6 +16,7 @@ import { withTimeout, ErrorHandler, POSError } from '../../shared/utils/error-ha
 import { TIMING } from '../../shared/constants';
 import { useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useFeatures } from '../hooks/useFeatures';
+import { getBridge } from '../../lib';
 
 interface Customer {
   id: string;
@@ -42,6 +43,7 @@ interface CustomerInfo {
 }
 
 const NewOrderPage: React.FC<NewOrderPageProps> = () => {
+  const bridge = getBridge();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -435,10 +437,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   // Handle conflict resolution
   const handleResolveConflict = async (conflictId: string, strategy: string) => {
     try {
-      // Call IPC to resolve conflict
-      if (window.electronAPI) {
-        await window.electronAPI.ipcRenderer.invoke('orders:resolve-conflict', conflictId, strategy);
-      }
+      await bridge.orders.resolveConflict(conflictId, strategy);
     } catch (error) {
       console.error('Failed to resolve conflict:', error);
       throw error;

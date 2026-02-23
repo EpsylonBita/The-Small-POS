@@ -2,7 +2,7 @@
  * ReservationsService - POS Reservations Service
  * 
  * Provides reservation management functionality for the POS system.
- * Uses direct Supabase connection for real-time data.
+ * Uses sync/API fetch paths and event-driven refresh orchestration.
  * 
  * Requirements:
  * - 4.3: Store reservation with 'pending' status
@@ -12,24 +12,15 @@
  * **Validates: Requirements 4.6**
  */
 
-import { supabase, subscribeToTable, unsubscribeFromChannel } from '../../shared/supabase';
+import { supabase } from '../../shared/supabase';
+import { getBridge, isBrowser } from '../../lib';
 
 type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
 
 function getIpcInvoke(): IpcInvoke | null {
-  if (typeof window === 'undefined') return null;
-
-  const w = window as any;
-  if (typeof w?.electronAPI?.invoke === 'function') {
-    return w.electronAPI.invoke.bind(w.electronAPI);
-  }
-  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
-    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
-  }
-  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
-    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
-  }
-  return null;
+  if (isBrowser()) return null;
+  const bridge = getBridge();
+  return bridge.invoke.bind(bridge);
 }
 
 function formatError(error: unknown): string {
@@ -160,7 +151,6 @@ function transformFromAPI(data: any): Reservation {
 class ReservationsService {
   private branchId: string = '';
   private organizationId: string = '';
-  private realtimeChannel: any = null;
 
   /**
    * Set the current branch and organization context
@@ -304,6 +294,21 @@ class ReservationsService {
    */
   async fetchReservationById(reservationId: string): Promise<Reservation | null> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`);
+        if (!result?.success || result?.data?.success === false) {
+          console.error(
+            '[ReservationsService] API error fetching reservation by id:',
+            result?.error || result?.data?.error || 'Unknown error'
+          );
+          return null;
+        }
+
+        const reservation = result?.data?.reservation;
+        return reservation ? transformFromAPI(reservation) : null;
+      }
+
       const { data, error } = await supabase
         .from('reservations')
         .select('*')
@@ -334,6 +339,45 @@ class ReservationsService {
    */
   async createReservation(data: CreateReservationDto): Promise<Reservation> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        if (!this.branchId) {
+          throw new Error('Branch context is required for reservation creation');
+        }
+
+        const result = await invoke('api:fetch-from-admin', '/api/pos/reservations', {
+          method: 'POST',
+          body: {
+            customerName: data.customerName,
+            customerPhone: data.customerPhone,
+            customerEmail: data.customerEmail || undefined,
+            partySize: data.partySize,
+            reservationDate: data.reservationDate,
+            reservationTime: data.reservationTime,
+            durationMinutes: data.durationMinutes || 90,
+            tableId: data.tableId || undefined,
+            roomId: data.roomId || undefined,
+            roomNumber: data.roomNumber || undefined,
+            checkInDate: data.checkInDate || undefined,
+            checkOutDate: data.checkOutDate || undefined,
+            customerId: data.customerId || undefined,
+            specialRequests: data.specialRequests || undefined,
+            notes: data.notes || undefined,
+          },
+        });
+
+        if (!result?.success || result?.data?.success === false) {
+          throw new Error(result?.error || result?.data?.error || result?.data?.message || 'Failed to create reservation');
+        }
+
+        const reservation = result?.data?.reservation;
+        if (!reservation) {
+          throw new Error('Reservation creation returned no reservation payload');
+        }
+
+        return transformFromAPI(reservation);
+      }
+
       // Combine date and time into datetime
       const reservationDatetime = `${data.reservationDate}T${data.reservationTime}`;
       
@@ -386,6 +430,30 @@ class ReservationsService {
     metadata?: { cancellationReason?: string }
   ): Promise<Reservation> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const body: Record<string, unknown> = { status };
+        if (metadata?.cancellationReason) {
+          body.cancellation_reason = metadata.cancellationReason;
+        }
+
+        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`, {
+          method: 'PATCH',
+          body,
+        });
+
+        if (!result?.success || result?.data?.success === false) {
+          throw new Error(result?.error || result?.data?.error || 'Failed to update reservation status');
+        }
+
+        const reservation = result?.data?.reservation;
+        if (!reservation) {
+          throw new Error('Reservation status update returned no reservation payload');
+        }
+
+        return transformFromAPI(reservation);
+      }
+
       const updateData: any = {
         status,
         updated_at: new Date().toISOString(),
@@ -427,6 +495,25 @@ class ReservationsService {
    */
   async assignTable(reservationId: string, tableId: string): Promise<Reservation> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke) {
+        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`, {
+          method: 'PATCH',
+          body: { table_id: tableId },
+        });
+
+        if (!result?.success || result?.data?.success === false) {
+          throw new Error(result?.error || result?.data?.error || result?.data?.message || 'Failed to assign table');
+        }
+
+        const reservation = result?.data?.reservation;
+        if (!reservation) {
+          throw new Error('Reservation table assignment returned no reservation payload');
+        }
+
+        return transformFromAPI(reservation);
+      }
+
       const { data: reservation, error } = await supabase
         .from('reservations')
         .update({
@@ -479,35 +566,6 @@ class ReservationsService {
     });
 
     return stats;
-  }
-
-  /**
-   * Subscribe to real-time reservation updates
-   */
-  subscribeToUpdates(callback: (reservation: Reservation) => void): void {
-    if (this.realtimeChannel) {
-      this.unsubscribeFromUpdates();
-    }
-
-    this.realtimeChannel = subscribeToTable(
-      'reservations',
-      (payload: any) => {
-        if (payload.new) {
-          callback(transformFromAPI(payload.new));
-        }
-      },
-      `branch_id=eq.${this.branchId}`
-    );
-  }
-
-  /**
-   * Unsubscribe from real-time updates
-   */
-  unsubscribeFromUpdates(): void {
-    if (this.realtimeChannel) {
-      unsubscribeFromChannel(this.realtimeChannel);
-      this.realtimeChannel = null;
-    }
   }
 
   /**
@@ -622,6 +680,28 @@ class ReservationsService {
    */
   async getReservationsForTable(tableId: string): Promise<Reservation[]> {
     try {
+      const invoke = getIpcInvoke();
+      if (invoke && this.branchId) {
+        const result = await invoke('sync:fetch-reservations', { table_id: tableId });
+        if (!result?.success) {
+          console.error(
+            '[ReservationsService] IPC error fetching table reservations:',
+            result?.error || 'Unknown error'
+          );
+          return [];
+        }
+
+        const reservations = Array.isArray(result?.reservations) ? result.reservations : [];
+        return reservations
+          .filter((reservation: any) => ['pending', 'confirmed'].includes(reservation?.status))
+          .map(transformFromAPI)
+          .sort(
+            (a: Reservation, b: Reservation) =>
+              new Date(a.reservationDatetime || '').getTime() -
+              new Date(b.reservationDatetime || '').getTime()
+          );
+      }
+
       const { data, error } = await supabase
         .from('reservations')
         .select('*')
@@ -648,7 +728,32 @@ class ReservationsService {
   async getTodayReservationForTable(tableId: string): Promise<Reservation | null> {
     try {
       const today = new Date().toISOString().split('T')[0];
-      
+
+      const invoke = getIpcInvoke();
+      if (invoke && this.branchId) {
+        const result = await invoke('sync:fetch-reservations', {
+          date: today,
+          table_id: tableId,
+        });
+        if (!result?.success) {
+          console.error(
+            '[ReservationsService] IPC error fetching today reservation for table:',
+            result?.error || 'Unknown error'
+          );
+          return null;
+        }
+
+        const reservations = Array.isArray(result?.reservations) ? result.reservations : [];
+        const filtered = reservations
+          .filter((reservation: any) => ['pending', 'confirmed'].includes(reservation?.status))
+          .sort((a: any, b: any) =>
+            new Date(a?.reservation_datetime || '').getTime() -
+            new Date(b?.reservation_datetime || '').getTime()
+          );
+
+        return filtered.length > 0 ? transformFromAPI(filtered[0]) : null;
+      }
+
       const { data, error } = await supabase
         .from('reservations')
         .select('*')
@@ -682,23 +787,46 @@ class ReservationsService {
     durationMinutes: number = 90
   ): Promise<Reservation[]> {
     try {
-      // Get all reservations for this table on the same date
-      const { data, error } = await supabase
-        .from('reservations')
-        .select('*')
-        .eq('table_id', tableId)
-        .eq('branch_id', this.branchId)
-        .eq('reservation_date', reservationDate)
-        .in('status', ['pending', 'confirmed']);
+      let data: any[] = [];
 
-      if (error) {
-        console.error('Error checking reservation conflicts:', error);
-        return [];
+      const invoke = getIpcInvoke();
+      if (invoke && this.branchId) {
+        const result = await invoke('sync:fetch-reservations', {
+          date: reservationDate,
+          table_id: tableId,
+        });
+        if (!result?.success) {
+          console.error(
+            '[ReservationsService] IPC error checking reservation conflicts:',
+            result?.error || 'Unknown error'
+          );
+          return [];
+        }
+
+        data = (Array.isArray(result?.reservations) ? result.reservations : []).filter(
+          (reservation: any) =>
+            ['pending', 'confirmed'].includes(reservation?.status) &&
+            reservation?.reservation_date === reservationDate
+        );
+      } else {
+        // Get all reservations for this table on the same date
+        const response = await supabase
+          .from('reservations')
+          .select('*')
+          .eq('table_id', tableId)
+          .eq('branch_id', this.branchId)
+          .eq('reservation_date', reservationDate)
+          .in('status', ['pending', 'confirmed']);
+
+        if (response.error) {
+          console.error('Error checking reservation conflicts:', response.error);
+          return [];
+        }
+
+        data = response.data || [];
       }
 
-      if (!data || data.length === 0) {
-        return [];
-      }
+      if (data.length === 0) return [];
 
       // Check for time overlaps
       const newStartTime = new Date(`${reservationDate}T${reservationTime}`);

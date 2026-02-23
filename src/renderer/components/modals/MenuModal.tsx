@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MenuCategoryTabs } from '../menu/MenuCategoryTabs';
 import { MenuItemGrid } from '../menu/MenuItemGrid';
@@ -17,9 +17,11 @@ import { menuService } from '../../services/MenuService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
 import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
-import { Pencil } from 'lucide-react';
+import { Pencil, Search, X, User, UserPlus } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
 import { posApiPost } from '../../utils/api-helpers';
+import { getBridge } from '../../../lib';
+import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 
 interface MenuModalProps {
   isOpen: boolean;
@@ -78,6 +80,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const { maxDiscountPercentage } = useDiscountSettings();
   const { validateAddress: validateDeliveryAddress } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
+  const bridge = getBridge();
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
@@ -87,6 +90,36 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
+  const [menuSearchQuery, setMenuSearchQuery] = useState('');
+  const menuSearchRef = useRef<HTMLInputElement>(null);
+
+  // Capture keyboard input and redirect to search bar when typing printable characters
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (e.key.length !== 1) return; // only printable characters
+      const active = document.activeElement;
+      if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA') return;
+      // Don't capture if ingredient modal is open (it has its own search)
+      if (active?.closest('[role="dialog"]') && !active?.closest('.liquid-glass-modal-content')) return;
+      menuSearchRef.current?.focus();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  // Customer popover state (for pickup orders)
+  const [showCustomerPopover, setShowCustomerPopover] = useState(false);
+  const [pickupCustomerName, setPickupCustomerName] = useState(selectedCustomer?.name || '');
+  const [pickupCustomerPhone, setPickupCustomerPhone] = useState(selectedCustomer?.phone || selectedCustomer?.phone_number || '');
+  const [pickupCustomerNotes, setPickupCustomerNotes] = useState(selectedCustomer?.notes || '');
+
+  const hasCustomerInfo = !!(
+    (selectedCustomer?.name && selectedCustomer.name.trim()) ||
+    (selectedCustomer?.phone && selectedCustomer.phone.trim()) ||
+    (selectedCustomer?.phone_number && selectedCustomer.phone_number.trim())
+  );
 
   // Combos state
   const [combos, setCombos] = useState<MenuCombo[]>([]);
@@ -122,7 +155,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       console.log('[MenuModal] fetchOrderItems - orderId:', orderId, 'supabaseId:', supabaseId);
       
       // First try to get order from local DB using local ID
-      const localOrder = await window.electronAPI?.invoke('order:get-by-id', { orderId });
+      const localOrderResponse: any = await bridge.orders.getById(orderId);
+      const localOrder = localOrderResponse?.data ?? localOrderResponse;
       console.log('[MenuModal] Local order result:', localOrder?.id, 'items:', localOrder?.items?.length);
       if (localOrder?.items && Array.isArray(localOrder.items) && localOrder.items.length > 0) {
         console.log('[MenuModal] Loaded items from local DB:', localOrder.items.length);
@@ -132,7 +166,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Fallback: fetch from Supabase using supabaseId if available, otherwise use orderId
       const supabaseOrderId = supabaseId || orderId;
       console.log('[MenuModal] Fetching from Supabase with ID:', supabaseOrderId);
-      const supabaseResult = await window.electronAPI?.invoke('order:fetch-items-from-supabase', { orderId: supabaseOrderId });
+      const supabaseResult: any = await bridge.orders.fetchItemsFromSupabase(supabaseOrderId);
       console.log('[MenuModal] Supabase result:', supabaseResult);
       
       // Handle both direct array response and {success, data} response format
@@ -149,7 +183,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       console.error('[MenuModal] Failed to fetch items:', error);
       return [];
     }
-  }, []);
+  }, [bridge.orders]);
 
   // Reset refs and cart when modal closes
   useEffect(() => {
@@ -215,7 +249,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         return;
       }
 
-      const branchId = staff?.branchId || localStorage.getItem('branch_id');
+      const refreshed = await refreshTerminalCredentialCache();
+      const branchId = staff?.branchId || refreshed.branchId || getCachedTerminalCredentials().branchId;
       if (!branchId) {
         return;
       }
@@ -708,6 +743,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Quick add handler for non-customizable items (skips modal, adds directly to cart)
   const handleQuickAdd = async (item: any, quantity: number) => {
     await handleAddToCart(item, quantity, [], '');
+    setMenuSearchQuery('');
+    setTimeout(() => menuSearchRef.current?.focus(), 50);
   };
 
   const handleCheckout = async () => {
@@ -842,10 +879,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // Generate modal title based on mode
   const getModalTitle = () => {
+    const typeLabel = orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup');
     if (editMode && editOrderNumber) {
-      return `${t('modals.menu.editOrder') || 'Edit Order'} #${editOrderNumber} - ${orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup')}`;
+      return `${t('modals.menu.editOrder') || 'Edit Order'} #${editOrderNumber} - ${typeLabel}`;
     }
-    return t('modals.menu.title') + ' - ' + (orderType === 'delivery' ? t('modals.menu.delivery') : t('modals.menu.pickup')) + ' ' + t('modals.menu.order');
+    return `${typeLabel} ${t('modals.menu.order')}`;
   };
 
   return (
@@ -853,60 +891,114 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       <LiquidGlassModal
         isOpen={isOpen}
         onClose={onClose}
-        title={getModalTitle()}
+        header={
+          <div className="flex flex-col gap-1 px-6 py-3 border-b border-white/10 flex-shrink-0">
+            {/* Main row: Title + Customer + Close */}
+            <div className="flex items-center justify-between w-full">
+              <h2 className="liquid-glass-modal-title text-xl">
+                {getModalTitle()}
+                {editMode && (
+                  <span className="ml-3 text-xs font-medium text-amber-400 bg-amber-500/20 px-2 py-0.5 rounded-full align-middle">
+                    <Pencil className="w-3 h-3 inline mr-1" />
+                    {t('modals.menu.editModeMessage') || 'Editing'}
+                  </span>
+                )}
+              </h2>
+
+              <div className="flex items-center gap-3">
+                {/* Customer info chip or Add Customer button */}
+                <div>
+                  {orderType === 'delivery' && selectedCustomer ? (
+                    <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                      <User className="w-3.5 h-3.5" />
+                      {selectedCustomer.name}{selectedCustomer.phone_number || selectedCustomer.phone ? ` \u00B7 ${selectedCustomer.phone_number || selectedCustomer.phone}` : ''}
+                    </span>
+                  ) : hasCustomerInfo ? (
+                    <button
+                      onClick={() => setShowCustomerPopover(true)}
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm bg-green-500/20 text-green-300 border border-green-500/30 hover:bg-green-500/30 transition-colors"
+                    >
+                      <User className="w-3.5 h-3.5" />
+                      {pickupCustomerName || pickupCustomerPhone}
+                      {pickupCustomerName && pickupCustomerPhone ? ` \u00B7 ${pickupCustomerPhone}` : ''}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => setShowCustomerPopover(true)}
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm liquid-glass-modal-button hover:bg-white/10 transition-colors"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      {t('modals.menu.addCustomer', { defaultValue: 'Add Customer' })}
+                    </button>
+                  )}
+                </div>
+
+                {/* Close button */}
+                <button
+                  onClick={onClose}
+                  className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                  aria-label={t('common.actions.close')}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Delivery address subtitle */}
+            {orderType === 'delivery' && selectedAddress && (
+              <div className="flex items-center gap-3 text-xs liquid-glass-modal-text-muted">
+                <span>{selectedAddress.street_address || selectedAddress.street}, {selectedAddress.postal_code || selectedAddress.city}</span>
+                {effectiveDeliveryZoneInfo?.zone && (
+                  <>
+                    <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
+                      {effectiveDeliveryZoneInfo.zone.name}
+                    </span>
+                    <span>{t('modals.menu.fee')}: {formatCurrency(effectiveDeliveryZoneInfo.zone.deliveryFee)}</span>
+                    {effectiveDeliveryZoneInfo.zone.estimatedTime && (
+                      <span>{effectiveDeliveryZoneInfo.zone.estimatedTime.min}-{effectiveDeliveryZoneInfo.zone.estimatedTime.max} min</span>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        }
         size="full"
         closeOnBackdrop={false}
         closeOnEscape={true}
       >
-        {/* Edit Mode Banner */}
-        {editMode && (
-          <div className="bg-amber-500/20 border border-amber-500/30 rounded-lg p-3 mb-4 flex items-center gap-2">
-            <Pencil className="w-4 h-4 text-amber-500" />
-            <span className="text-sm text-amber-700 dark:text-amber-300">
-              {t('modals.menu.editModeMessage') || 'You are editing an existing order. Add, remove, or modify items as needed.'}
-            </span>
-          </div>
-        )}
-
-        {/* Customer/Address Info Section */}
-        {(selectedCustomer || selectedAddress) && (
-          <div className="liquid-glass-modal-card p-4 mb-4">
-            {selectedCustomer && (
-              <p className="liquid-glass-modal-text text-sm">
-                {t('modals.menu.customerLabel', { name: selectedCustomer.name, phone: selectedCustomer.phone_number })}
-              </p>
-            )}
-            {selectedAddress && orderType === 'delivery' && (
-              <>
-                <p className="liquid-glass-modal-text-muted text-xs mt-1">
-                  {t('modals.menu.deliveryTo', { address: `${selectedAddress.street_address || selectedAddress.street}, ${selectedAddress.postal_code || selectedAddress.city}` })}
-                </p>
-                {effectiveDeliveryZoneInfo?.zone && (
-                  <div className="flex items-center gap-3 mt-2 text-xs liquid-glass-modal-text">
-                    <span className="inline-flex items-center px-2 py-1 rounded-md bg-blue-500/20 text-blue-400 font-medium">
-                      {t('modals.menu.zone')}: {effectiveDeliveryZoneInfo.zone.name}
-                    </span>
-                    <span className="inline-flex items-center">
-                      {t('modals.menu.fee')}: {formatCurrency(effectiveDeliveryZoneInfo.zone.deliveryFee)}
-                    </span>
-                    {effectiveDeliveryZoneInfo.zone.estimatedTime && (
-                      <span className="inline-flex items-center">
-                        {t('modals.menu.eta')}: {effectiveDeliveryZoneInfo.zone.estimatedTime.min}-{effectiveDeliveryZoneInfo.zone.estimatedTime.max} min
-                      </span>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
 
         <div className="flex flex-col sm:flex-row flex-1 overflow-hidden min-h-0">
           {/* Left Panel - Menu */}
           <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+            {/* Search bar */}
+            <div className="px-3 pt-3 pb-1">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  ref={menuSearchRef}
+                  type="text"
+                  autoFocus
+                  value={menuSearchQuery}
+                  onChange={(e) => setMenuSearchQuery(e.target.value)}
+                  placeholder={t('menu.search.placeholder', 'Search menu items...')}
+                  className="w-full pl-9 pr-8 py-2 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+                {menuSearchQuery && (
+                  <button
+                    onClick={() => setMenuSearchQuery('')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
             <MenuCategoryTabs
               selectedCategory={selectedCategory}
-              onCategoryChange={setSelectedCategory}
+              onCategoryChange={(cat) => { setSelectedCategory(cat); setMenuSearchQuery(''); }}
               selectedSubcategory={selectedSubcategory}
               onSubcategoryChange={setSelectedSubcategory}
               hideAllItemsButton={true}
@@ -916,11 +1008,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               selectedCategory={selectedCategory}
               selectedSubcategory={selectedSubcategory}
               orderType={orderType}
-              onItemSelect={setSelectedMenuItem}
+              onItemSelect={(item) => { setSelectedMenuItem(item); setMenuSearchQuery(''); setTimeout(() => menuSearchRef.current?.focus(), 50); }}
               onQuickAdd={handleQuickAdd}
               comboMode={selectedCategory === 'combos'}
               combos={combos}
               onComboSelect={handleComboSelect}
+              searchQuery={menuSearchQuery}
             />
           </div>
 
@@ -993,6 +1086,72 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           onPaymentComplete={handlePaymentComplete}
           isProcessing={isProcessingOrder}
         />
+      )}
+
+      {/* Customer Info Modal — compact centered overlay */}
+      {showCustomerPopover && (
+        <div className="fixed inset-0 z-[1200] flex items-center justify-center" onClick={() => setShowCustomerPopover(false)}>
+          {/* Heavy blur backdrop */}
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-md" />
+
+          {/* Compact glass card */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative w-[340px] rounded-2xl overflow-hidden liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-[340px] !max-h-fit !animate-none"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="liquid-glass-modal-header !py-4 !px-5">
+              <h3 className="liquid-glass-modal-title !text-lg">
+                {t('modals.menu.customerInfo', { defaultValue: 'Customer Info (Optional)' })}
+              </h3>
+              <button onClick={() => setShowCustomerPopover(false)} className="liquid-glass-modal-close !w-8 !h-8 !text-base">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-5 space-y-3">
+              <input
+                type="text"
+                value={pickupCustomerName}
+                onChange={(e) => setPickupCustomerName(e.target.value)}
+                placeholder={t('modals.menu.customerName', { defaultValue: 'Name' })}
+                className="liquid-glass-modal-input w-full"
+                autoFocus
+              />
+              <input
+                type="tel"
+                value={pickupCustomerPhone}
+                onChange={(e) => setPickupCustomerPhone(e.target.value)}
+                placeholder={t('modals.menu.customerPhone', { defaultValue: 'Phone' })}
+                className="liquid-glass-modal-input w-full"
+              />
+              <input
+                type="text"
+                value={pickupCustomerNotes}
+                onChange={(e) => setPickupCustomerNotes(e.target.value)}
+                placeholder={t('modals.menu.customerNotes', { defaultValue: 'Notes' })}
+                className="liquid-glass-modal-input w-full"
+              />
+              <button
+                onClick={() => {
+                  if (selectedCustomer) {
+                    selectedCustomer.name = pickupCustomerName;
+                    selectedCustomer.phone = pickupCustomerPhone;
+                    selectedCustomer.phone_number = pickupCustomerPhone;
+                    selectedCustomer.notes = pickupCustomerNotes;
+                  }
+                  setShowCustomerPopover(false);
+                }}
+                className="liquid-glass-modal-button liquid-glass-modal-primary w-full"
+              >
+                {t('common.actions.save', { defaultValue: 'Save' })}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Processing Overlay */}

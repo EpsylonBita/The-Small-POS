@@ -1,7 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus } from 'lucide-react';
-import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { formatCurrency } from '../../utils/format';
 
@@ -99,7 +98,6 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       return true;
     });
   }, [cartItems]);
-  const { resolvedTheme } = useTheme();
   const { language } = useI18n();
 
   const [couponInput, setCouponInput] = React.useState('');
@@ -205,16 +203,12 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   return (
     <div
-      className={`flex flex-col h-full w-full border-l ${
-        resolvedTheme === 'dark' ? 'bg-gray-900 border-gray-700' : 'bg-gray-50 border-gray-200'
-      }`}
+      className="flex flex-col h-full w-full border-l border-black/10 dark:border-white/10 bg-white/5 dark:bg-black/10"
     >
       {/* Header - flex-shrink-0 keeps it fixed size */}
-      <div className={`flex-shrink-0 border-b ${resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'}`}>
+      <div className="flex-shrink-0 border-b border-black/10 dark:border-white/10">
         <div className="flex items-center justify-between p-4">
-          <h3 className={`text-lg font-semibold ${
-            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-          }`}>
+          <h3 className="text-lg font-semibold liquid-glass-modal-title !text-base">
             {t('menu.cart.header', { count: uniqueCartItems.length })}
           </h3>
           {onAddManualItem && !editMode && (
@@ -222,12 +216,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               onClick={() => setShowManualInput((prev) => !prev)}
               className={`p-1.5 rounded-lg transition-colors ${
                 showManualInput
-                  ? resolvedTheme === 'dark'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-blue-500 text-white'
-                  : resolvedTheme === 'dark'
-                    ? 'hover:bg-gray-700 text-gray-400'
-                    : 'hover:bg-gray-200 text-gray-500'
+                  ? 'bg-blue-500 text-white'
+                  : 'liquid-glass-modal-text-muted hover:bg-black/5 dark:hover:bg-white/10'
               }`}
               title={t('menu.cart.addManualItem', 'Manual Item')}
             >
@@ -244,11 +234,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 value={manualName}
                 onChange={(e) => setManualName(e.target.value)}
                 placeholder={t('menu.cart.manualNamePlaceholder', 'Item name (optional)')}
-                className={`flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
-                    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
             <div className="flex gap-2">
@@ -270,11 +256,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 min="0.01"
                 step="0.01"
                 placeholder={t('menu.cart.manualPricePlaceholder', 'Price')}
-                className={`flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
-                    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 autoFocus
               />
               <button
@@ -290,10 +272,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 disabled={!manualPrice || parseFloat(manualPrice) <= 0}
                 className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
                   !manualPrice || parseFloat(manualPrice) <= 0
-                    ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
-                    : resolvedTheme === 'dark'
-                      ? 'bg-blue-600 text-white hover:bg-blue-700'
-                      : 'bg-blue-500 text-white hover:bg-blue-600'
+                    ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                    : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}
               >
                 {t('common.add', 'Add')}
@@ -304,15 +284,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {/* Scrollable Cart Items - flex-1 + min-h-0 allows proper scrolling */}
-      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 touch-scroll scrollbar-hide">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 touch-scroll pos-scrollbar-glass">
         {uniqueCartItems.length === 0 ? (
           <div className="text-center py-6 sm:py-8">
-            <ShoppingCart className={`w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 ${
-              resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
-            }`} />
-            <p className={`text-sm sm:text-base antialiased ${
-              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-            }`}>
+            <ShoppingCart className="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 text-black/20 dark:text-white/20" />
+            <p className="text-sm sm:text-base antialiased liquid-glass-modal-text-muted">
               {t('menu.cart.empty')}
             </p>
           </div>
@@ -321,46 +297,34 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {uniqueCartItems.map((item) => (
               <div
                 key={item.id}
-                className={`p-3 rounded-lg border transition-all duration-200 ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-800 border-gray-700 hover:border-blue-500 hover:bg-gray-750'
-                    : 'bg-white border-gray-200 hover:border-blue-400 hover:bg-gray-50'
-                } ${onEditItem ? 'cursor-pointer' : ''}`}
+                className={`p-3 rounded-xl border transition-all duration-200 bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 hover:border-blue-400/50 dark:hover:border-blue-400/40 hover:bg-black/[0.05] dark:hover:bg-white/[0.09] ${onEditItem ? 'cursor-pointer' : ''}`}
                 onClick={() => onEditItem?.(item)}
               >
                 <div className="flex justify-between items-start mb-2">
                   <div className="flex-1">
                     {/* Category label */}
                     {item.categoryName && (
-                      <div className={`text-[10px] uppercase tracking-wider font-medium mb-0.5 antialiased ${
-                        resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                      }`}>
+                      <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 antialiased liquid-glass-modal-text-muted">
                         {item.categoryName}
                       </div>
                     )}
                     {/* Item name (subcategory) */}
-                    <h4 className={`font-semibold antialiased ${
-                      resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                    }`}>
+                    <h4 className="font-semibold antialiased liquid-glass-modal-text">
                       {item.name}
                     </h4>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`font-semibold antialiased ${
-                      resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-                    }`}>
+                    <span className="font-semibold antialiased text-emerald-600 dark:text-emerald-400">
                       {formatCurrency(item.totalPrice || 0)}
                     </span>
                     {/* Delete button - positioned away from main click area */}
                     {onRemoveItem && (
                       <button
                         onClick={(e) => {
-                          e.stopPropagation(); // Prevent card click
+                          e.stopPropagation();
                           onRemoveItem(item.id);
                         }}
-                        className={`p-1.5 rounded-full hover:bg-red-500/20 transition-colors ml-2 ${
-                          resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-600'
-                        }`}
+                        className="p-1.5 rounded-full hover:bg-red-500/20 transition-colors ml-2 text-red-600 dark:text-red-400"
                         title={t('common.actions.delete')}
                       >
                         <Trash2 className="w-4 h-4" />
@@ -370,10 +334,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 </div>
                 {/* Quantity controls */}
                 <div
-                  className={`flex items-center justify-between mt-2 antialiased ${
-                    resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-                  }`}
-                  onClick={(e) => e.stopPropagation()} // Prevent card click when using quantity controls
+                  className="flex items-center justify-between mt-2 antialiased liquid-glass-modal-text-muted"
+                  onClick={(e) => e.stopPropagation()}
                 >
                   <div className="flex items-center gap-2">
                     <button
@@ -388,15 +350,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           onUpdateCart(updatedItems);
                         }
                       }}
-                      className={`w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors ${
-                        resolvedTheme === 'dark'
-                          ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                          : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
-                      }`}
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text"
                     >
                       −
                     </button>
-                    <span className="min-w-[24px] text-center font-semibold antialiased">{item.quantity}</span>
+                    <span className="min-w-[24px] text-center font-semibold antialiased liquid-glass-modal-text">{item.quantity}</span>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -405,11 +363,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         );
                         onUpdateCart(updatedItems);
                       }}
-                      className={`w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors ${
-                        resolvedTheme === 'dark'
-                          ? 'bg-gray-700 hover:bg-gray-600 text-white'
-                          : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
-                      }`}
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text"
                     >
                       +
                     </button>
@@ -419,9 +373,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   </span>
                 </div>
                 {item.customizations && item.customizations.length > 0 && (
-                  <div className={`mt-2 pt-2 border-t ${
-                    resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-                  }`}>
+                  <div className="mt-2 pt-2 border-t border-black/8 dark:border-white/10">
                     {/* Separate "with" and "without" ingredients */}
                     {(() => {
                       const withIngredients = item.customizations.filter(c => !c.isWithout);
@@ -432,9 +384,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           {/* Added ingredients */}
                           {withIngredients.length > 0 && (
                             <>
-                              <div className={`text-xs font-semibold mb-1 antialiased ${
-                                resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                              }`}>
+                              <div className="text-xs font-semibold mb-1 antialiased liquid-glass-modal-text-muted">
                                 {t('menu.cart.ingredients')}:
                               </div>
                               <div className="flex flex-wrap gap-1">
@@ -446,17 +396,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                                   return (
                                     <span
                                       key={`${item.id}-customization-${c.ingredient.id}-${idx}`}
-                                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
-                                        resolvedTheme === 'dark'
-                                          ? 'bg-blue-600 text-blue-100'
-                                          : 'bg-blue-100 text-blue-700'
-                                      }`}
+                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-blue-500/15 text-blue-700 dark:bg-blue-500/25 dark:text-blue-200"
                                     >
                                       + {ingredientName}
                                       {quantityText && (
-                                        <span className={`ml-1 font-bold ${
-                                          resolvedTheme === 'dark' ? 'text-blue-50' : 'text-blue-800'
-                                        }`}>
+                                        <span className="ml-1 font-bold text-blue-800 dark:text-blue-100">
                                           {quantityText}
                                         </span>
                                       )}
@@ -473,9 +417,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           {/* Without ingredients */}
                           {withoutIngredients.length > 0 && (
                             <>
-                              <div className={`text-xs font-semibold mb-1 antialiased ${withIngredients.length > 0 ? 'mt-2' : ''} ${
-                                resolvedTheme === 'dark' ? 'text-red-400' : 'text-red-500'
-                              }`}>
+                              <div className={`text-xs font-semibold mb-1 antialiased text-red-500 dark:text-red-400 ${withIngredients.length > 0 ? 'mt-2' : ''}`}>
                                 <span className="inline-flex items-center gap-1">
                                   <Ban className="w-3 h-3" aria-hidden="true" />
                                   {t('menu.cart.without', { defaultValue: 'Without' })}:
@@ -488,11 +430,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                                   return (
                                     <span
                                       key={`${item.id}-without-${c.ingredient.id}-${idx}`}
-                                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased ${
-                                        resolvedTheme === 'dark'
-                                          ? 'bg-red-600/80 text-red-100 line-through'
-                                          : 'bg-red-100 text-red-700 line-through'
-                                      }`}
+                                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium antialiased bg-red-500/15 text-red-700 dark:bg-red-500/25 dark:text-red-200 line-through"
                                     >
                                       {ingredientName}
                                     </span>
@@ -508,17 +446,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 )}
                 {/* Special Notes */}
                 {item.notes && item.notes.trim() && (
-                  <div className={`mt-2 pt-2 border-t ${
-                    resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-                  }`}>
-                    <div className={`text-xs font-semibold mb-1 antialiased ${
-                      resolvedTheme === 'dark' ? 'text-amber-400' : 'text-amber-600'
-                    }`}>
+                  <div className="mt-2 pt-2 border-t border-black/8 dark:border-white/10">
+                    <div className="text-xs font-semibold mb-1 antialiased text-amber-600 dark:text-amber-400">
                       📝 {t('menu.cart.specialNotes') || t('menu.itemModal.specialInstructions')}:
                     </div>
-                    <p className={`text-xs italic antialiased ${
-                      resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-600'
-                    }`}>
+                    <p className="text-xs italic antialiased liquid-glass-modal-text-muted">
                       {item.notes}
                     </p>
                   </div>
@@ -530,32 +462,20 @@ export const MenuCart: React.FC<MenuCartProps> = ({
       </div>
 
       {/* Cart Footer - flex-shrink-0 keeps it fixed at bottom */}
-      <div
-        className={`flex-shrink-0 p-4 border-t space-y-3 ${
-          resolvedTheme === 'dark' ? 'border-gray-700 bg-gray-900' : 'border-gray-200 bg-gray-50'
-        }`}
-      >
+      <div className="flex-shrink-0 p-4 border-t border-black/10 dark:border-white/10 bg-white/5 dark:bg-black/10 space-y-3">
         {/* Coupon Input */}
         {onApplyCoupon && !editMode && (
           <div className="space-y-2">
             {appliedCoupon ? (
               /* Applied coupon badge */
-              <div className={`flex items-center justify-between rounded-lg px-3 py-2 ${
-                resolvedTheme === 'dark'
-                  ? 'bg-emerald-500/20 border border-emerald-500/30'
-                  : 'bg-emerald-50 border border-emerald-200'
-              }`}>
+              <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/20 dark:border-emerald-500/30">
                 <div className="flex items-center gap-2">
-                  <Ticket className={`w-4 h-4 ${resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'}`} />
+                  <Ticket className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                   <div>
-                    <span className={`text-sm font-semibold antialiased ${
-                      resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-700'
-                    }`}>
+                    <span className="text-sm font-semibold antialiased text-emerald-700 dark:text-emerald-400">
                       {appliedCoupon.code}
                     </span>
-                    <span className={`text-xs ml-2 antialiased ${
-                      resolvedTheme === 'dark' ? 'text-emerald-300/70' : 'text-emerald-600/70'
-                    }`}>
+                    <span className="text-xs ml-2 antialiased text-emerald-600/70 dark:text-emerald-300/70">
                       {appliedCoupon.discount_type === 'percentage'
                         ? `${appliedCoupon.discount_value}%`
                         : formatCurrency(appliedCoupon.discount_value)
@@ -566,9 +486,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 {onRemoveCoupon && (
                   <button
                     onClick={onRemoveCoupon}
-                    className={`p-1 rounded-full transition-colors ${
-                      resolvedTheme === 'dark' ? 'hover:bg-emerald-500/30 text-emerald-400' : 'hover:bg-emerald-100 text-emerald-600'
-                    }`}
+                    className="p-1 rounded-full transition-colors text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -579,9 +497,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               <div className="space-y-1">
                 <div className="flex gap-2">
                   <div className="relative flex-1">
-                    <Ticket className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 ${
-                      resolvedTheme === 'dark' ? 'text-gray-500' : 'text-gray-400'
-                    }`} />
+                    <Ticket className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-black/30 dark:text-white/30" />
                     <input
                       type="text"
                       value={couponInput}
@@ -592,11 +508,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         }
                       }}
                       placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
-                      className={`w-full pl-9 pr-3 py-1.5 text-sm border rounded-lg antialiased ${
-                        resolvedTheme === 'dark'
-                          ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-500'
-                          : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
-                      } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                      className="w-full pl-9 pr-3 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
                   <button
@@ -608,10 +520,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     disabled={!couponInput.trim() || isValidatingCoupon}
                     className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
                       !couponInput.trim() || isValidatingCoupon
-                        ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
-                        : resolvedTheme === 'dark'
-                          ? 'bg-blue-600 text-white hover:bg-blue-700'
-                          : 'bg-blue-500 text-white hover:bg-blue-600'
+                        ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                        : 'bg-blue-500 text-white hover:bg-blue-600'
                     }`}
                   >
                     {isValidatingCoupon ? (
@@ -633,26 +543,18 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {onDiscountChange && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <label className={`text-sm font-semibold antialiased ${
-                resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-              }`}>
+              <label className="text-sm font-semibold antialiased liquid-glass-modal-text-muted">
                 {t('menu.cart.discountLabel')}
               </label>
               <button
                 type="button"
                 onClick={openDiscountModal}
-                className={`min-w-[88px] px-3 py-1.5 text-sm font-semibold border rounded-lg antialiased transition-colors ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-800 border-gray-600 text-white hover:bg-gray-700'
-                    : 'bg-white border-gray-300 text-gray-900 hover:bg-gray-50'
-                } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                className="min-w-[88px] px-3 py-1.5 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 {discountPercentage > 0 ? `${discountPercentage}%` : '0%'}
               </button>
             </div>
-            <p className={`text-xs text-right font-medium antialiased ${
-              resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-            }`}>
+            <p className="text-xs text-right font-medium antialiased liquid-glass-modal-text-muted">
               {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
             </p>
             {discountPercentage > maxDiscountPercentage && (
@@ -665,10 +567,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         {/* Subtotal */}
         <div className="flex justify-between items-center text-sm font-medium antialiased">
-          <span className={resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-600'}>
+          <span className="liquid-glass-modal-text-muted">
             {t('menu.cart.subtotal')}
           </span>
-          <span className={resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'}>
+          <span className="liquid-glass-modal-text">
             {formatCurrency(subtotal)}
           </span>
         </div>
@@ -676,14 +578,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {/* Discount Display */}
         {discountAmount > 0 && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className={`${
-              resolvedTheme === 'dark' ? 'text-green-400' : 'text-green-600'
-            }`}>
+            <span className="text-green-600 dark:text-green-400">
               {t('menu.cart.discount', { percent: discountPercentage })}:
             </span>
-            <span className={`${
-              resolvedTheme === 'dark' ? 'text-green-400' : 'text-green-600'
-            }`}>
+            <span className="text-green-600 dark:text-green-400">
               -{formatCurrency(discountAmount)}
             </span>
           </div>
@@ -692,55 +590,35 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {/* Coupon Discount Display */}
         {couponDiscount > 0 && appliedCoupon && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
-            <span className={`flex items-center gap-1 ${
-              resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-            }`}>
+            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
               <Ticket className="w-3.5 h-3.5" />
               {t('menu.cart.couponDiscount', 'Coupon')} ({appliedCoupon.code}):
             </span>
-            <span className={`${
-              resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-            }`}>
+            <span className="text-emerald-600 dark:text-emerald-400">
               -{formatCurrency(couponDiscount)}
             </span>
           </div>
         )}
 
         {/* Total */}
-        <div className={`flex justify-between items-center pt-2 border-t antialiased ${
-          resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-        }`}>
-          <span className={`text-lg font-semibold ${
-            resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-          }`}>
+        <div className="flex justify-between items-center pt-2 border-t border-black/10 dark:border-white/10 antialiased">
+          <span className="text-lg font-semibold liquid-glass-modal-text">
             {t('menu.cart.total')}
           </span>
-          <span className={`text-xl font-bold ${
-            resolvedTheme === 'dark' ? 'text-emerald-400' : 'text-emerald-600'
-          }`}>
+          <span className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
             {formatCurrency(totalAfterDiscount)}
           </span>
         </div>
 
         {/* Minimum Order Warning for Delivery */}
         {isBelowMinimum && !editMode && (
-          <div className={`flex items-center gap-2 p-3 rounded-lg mb-3 ${
-            resolvedTheme === 'dark'
-              ? 'bg-orange-500/20 border border-orange-500/30'
-              : 'bg-orange-50 border border-orange-200'
-          }`}>
-            <AlertTriangle className={`w-5 h-5 flex-shrink-0 ${
-              resolvedTheme === 'dark' ? 'text-orange-400' : 'text-orange-500'
-            }`} />
+          <div className="flex items-center gap-2 p-3 rounded-lg mb-3 bg-orange-500/10 dark:bg-orange-500/20 border border-orange-500/20 dark:border-orange-500/30">
+            <AlertTriangle className="w-5 h-5 flex-shrink-0 text-orange-500 dark:text-orange-400" />
             <div className="flex-1">
-              <p className={`text-sm font-medium antialiased ${
-                resolvedTheme === 'dark' ? 'text-orange-400' : 'text-orange-600'
-              }`}>
+              <p className="text-sm font-medium antialiased text-orange-600 dark:text-orange-400">
                 {t('menu.cart.minimumNotMet', 'Minimum order not met')}
               </p>
-              <p className={`text-xs antialiased ${
-                resolvedTheme === 'dark' ? 'text-orange-300/80' : 'text-orange-500/80'
-              }`}>
+              <p className="text-xs antialiased text-orange-500/80 dark:text-orange-300/80">
                 {t('menu.cart.addMoreToOrder', 'Add {{amount}} more to complete order', { amount: formatCurrency(shortfall) })}
               </p>
             </div>
@@ -752,7 +630,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)}
           className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
             uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)
-              ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+              ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
               : editMode
                 ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'
                 : 'bg-blue-600 text-white hover:bg-blue-700 hover:scale-[1.02]'
@@ -780,36 +658,22 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             type="button"
             aria-label={t('common.close', 'Close')}
             onClick={() => setIsDiscountModalOpen(false)}
-            className="absolute inset-0 bg-black/70"
+            className="absolute inset-0 bg-black/50 backdrop-blur-md"
           />
-          <div className={`relative w-full max-w-xl rounded-2xl border shadow-2xl ${
-            resolvedTheme === 'dark'
-              ? 'bg-gray-900 border-gray-700'
-              : 'bg-white border-gray-200'
-          }`}>
-            <div className={`flex items-center justify-between px-6 py-4 border-b ${
-              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-            }`}>
+          <div className="relative w-full max-w-xl liquid-glass-modal-shell !fixed !top-1/2 !left-1/2 !-translate-x-1/2 !-translate-y-1/2 !max-w-xl !max-h-fit !animate-none">
+            <div className="liquid-glass-modal-header">
               <div>
-                <h4 className={`text-xl font-bold antialiased ${
-                  resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
-                }`}>
+                <h4 className="liquid-glass-modal-title !text-xl">
                   {t('menu.cart.discountPickerTitle', 'Apply Discount')}
                 </h4>
-                <p className={`text-sm antialiased ${
-                  resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
-                }`}>
+                <p className="text-sm antialiased liquid-glass-modal-text-muted">
                   {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setIsDiscountModalOpen(false)}
-                className={`w-10 h-10 rounded-lg border flex items-center justify-center ${
-                  resolvedTheme === 'dark'
-                    ? 'border-gray-600 text-gray-300 hover:bg-gray-800'
-                    : 'border-gray-300 text-gray-600 hover:bg-gray-100'
-                }`}
+                className="liquid-glass-modal-close"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -817,9 +681,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
             <div className="px-6 py-5 space-y-5">
               <div>
-                <p className={`text-sm font-semibold mb-3 antialiased ${
-                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                }`}>
+                <p className="text-sm font-semibold mb-3 antialiased liquid-glass-modal-text">
                   {t('menu.cart.quickDiscounts', 'Quick discounts')}
                 </p>
                 <div className="grid grid-cols-5 gap-2">
@@ -843,12 +705,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           disabled
                             ? 'opacity-45 cursor-not-allowed'
                             : selected
-                              ? resolvedTheme === 'dark'
-                                ? 'bg-blue-600 border-blue-500 text-white'
-                                : 'bg-blue-500 border-blue-400 text-white'
-                              : resolvedTheme === 'dark'
-                                ? 'bg-gray-800 border-gray-700 text-gray-200 hover:bg-gray-700'
-                                : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              ? 'bg-blue-500 border-blue-400 text-white'
+                              : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
                         }`}
                       >
                         {value}%
@@ -859,9 +717,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </div>
 
               <div>
-                <label className={`text-sm font-semibold mb-2 block antialiased ${
-                  resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                }`}>
+                <label className="text-sm font-semibold mb-2 block antialiased liquid-glass-modal-text">
                   {t('menu.cart.manualDiscount', 'Manual discount')}
                 </label>
                 <div className="flex items-center gap-2">
@@ -880,15 +736,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       }
                     }}
                     placeholder={t('menu.cart.discountLabel')}
-                    className={`w-full px-4 py-3 rounded-lg text-base border ${
-                      resolvedTheme === 'dark'
-                        ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500'
-                        : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
-                    } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+                    className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
-                  <span className={`text-base font-semibold ${
-                    resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
-                  }`}>%</span>
+                  <span className="text-base font-semibold liquid-glass-modal-text">%</span>
                 </div>
                 {isDraftOverMax && (
                   <p className="text-xs text-red-500 mt-2 font-medium antialiased">
@@ -898,17 +748,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               </div>
             </div>
 
-            <div className={`flex items-center justify-between gap-3 px-6 py-4 border-t ${
-              resolvedTheme === 'dark' ? 'border-gray-700' : 'border-gray-200'
-            }`}>
+            <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-black/10 dark:border-white/10">
               <button
                 type="button"
                 onClick={clearDiscount}
-                className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                  resolvedTheme === 'dark'
-                    ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
               >
                 {t('menu.cart.removeDiscount', 'Remove discount')}
               </button>
@@ -916,11 +760,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsDiscountModalOpen(false)}
-                  className={`px-4 py-2 rounded-lg text-sm font-semibold ${
-                    resolvedTheme === 'dark'
-                      ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
+                  className="liquid-glass-modal-button px-4 py-2 text-sm font-semibold"
                 >
                   {t('common.cancel', 'Cancel')}
                 </button>
@@ -930,7 +770,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   disabled={isDraftOverMax}
                   className={`px-5 py-2 rounded-lg text-sm font-semibold ${
                     isDraftOverMax
-                      ? 'bg-gray-400 text-gray-500 cursor-not-allowed'
+                      ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                       : 'bg-blue-600 text-white hover:bg-blue-700'
                   }`}
                 >

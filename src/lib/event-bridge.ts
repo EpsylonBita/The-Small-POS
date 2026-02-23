@@ -1,41 +1,17 @@
 /**
- * Tauri Event Bridge
+ * Native event bridge for POS Tauri.
  *
- * Subscribes to Tauri backend events and re-emits them on the compat
- * event bus so that existing `ipcRenderer.on(channel, callback)` calls
- * work transparently.
- *
- * Electron pushes events from main -> renderer via `ipcRenderer.on`.
- * Tauri pushes events via `@tauri-apps/api/event::listen()`.
- * This bridge translates between the two models.
- *
- * The EVENT_MAP is derived from the ALLOWED_CHANNELS array in the Electron
- * preload script (pos-system/src/preload/index.ts).
- *
- * Usage:
- *   import { startEventBridge, stopEventBridge } from './lib/event-bridge';
- *   // Call after installElectronCompat()
- *   startEventBridge();
+ * `onEvent/offEvent` remain stable for renderer consumers while event delivery
+ * is now wired directly to Tauri listeners.
  */
 
-import { eventBus } from './electron-compat';
 import { isTauri } from './platform-detect';
 
 type UnlistenFn = () => void;
-
-/** All Tauri event subscriptions so we can clean up. */
-const unlisteners: UnlistenFn[] = [];
+type EventCallback = (data: any) => void;
 
 /**
- * Maps Tauri event names (snake_case) to Electron IPC channel names.
- *
- * Tauri events use snake_case by convention.
- * Electron channels use kebab-case or colon-separated names.
- *
- * The bridge listens for the Tauri event (left) and emits on the
- * Electron channel (right) via the eventBus.
- *
- * Complete list derived from the Electron preload ALLOWED_CHANNELS array.
+ * Maps Tauri event names (snake_case) to renderer channel names.
  */
 const EVENT_MAP: Record<string, string> = {
   // --- App lifecycle / control ---
@@ -99,13 +75,20 @@ const EVENT_MAP: Record<string, string> = {
   // --- Session management ---
   'session_timeout': 'session-timeout',
 
+  // --- Window state ---
+  'window_state_changed': 'window-state-changed',
+
   // --- Menu management ---
   'menu_sync': 'menu:sync',
   'menu_check_for_updates': 'menu:check-for-updates',
+  'menu_version_checked': 'menu:version-checked',
 
   // --- Screen capture ---
   'screen_capture_start': 'screen-capture:start',
   'screen_capture_stop': 'screen-capture:stop',
+  'screen_capture_signal_batch': 'screen-capture:signal-batch',
+  'screen_capture_signal_poll_error': 'screen-capture:signal-poll-error',
+  'screen_capture_signal_poll_stopped': 'screen-capture:signal-poll-stopped',
 
   // --- Module sync events ---
   'modules_sync_complete': 'modules:sync-complete',
@@ -115,10 +98,10 @@ const EVENT_MAP: Record<string, string> = {
   // --- Printer status events ---
   'printer_status_changed': 'printer:status-changed',
 
-  // --- Terminal config events (heartbeat updates) ---
+  // --- Terminal config events ---
   'terminal_config_updated': 'terminal-config-updated',
 
-  // --- ECR (Payment Terminal) events ---
+  // --- ECR events ---
   'ecr_event_device_connected': 'ecr:event:device-connected',
   'ecr_event_device_disconnected': 'ecr:event:device-disconnected',
   'ecr_event_device_status_changed': 'ecr:event:device-status-changed',
@@ -129,61 +112,116 @@ const EVENT_MAP: Record<string, string> = {
   'ecr_event_error': 'ecr:event:error',
 };
 
+const CHANNEL_TO_TAURI_EVENT = Object.entries(EVENT_MAP).reduce<Record<string, string>>(
+  (acc, [tauriEvent, channel]) => {
+    if (!acc[channel]) {
+      acc[channel] = tauriEvent;
+    }
+    return acc;
+  },
+  {}
+);
+
+const listenersByChannel = new Map<string, Set<EventCallback>>();
+const unlistenByChannel = new Map<string, UnlistenFn>();
+const pendingAttachByChannel = new Map<string, Promise<void>>();
+
+function dispatch(channel: string, payload: any): void {
+  const listeners = listenersByChannel.get(channel);
+  if (!listeners || listeners.size === 0) return;
+
+  for (const callback of listeners) {
+    try {
+      callback(payload);
+    } catch (error) {
+      console.error(`[EventBridge] listener failed for channel "${channel}"`, error);
+    }
+  }
+}
+
+async function attachChannelListener(channel: string): Promise<void> {
+  if (!isTauri()) return;
+  if (unlistenByChannel.has(channel) || pendingAttachByChannel.has(channel)) return;
+
+  const tauriEvent = CHANNEL_TO_TAURI_EVENT[channel];
+  if (!tauriEvent) return;
+
+  const attachPromise = (async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const unlisten = await listen<any>(tauriEvent, (event) => {
+      dispatch(channel, event.payload);
+    });
+
+    const listeners = listenersByChannel.get(channel);
+    if (!listeners || listeners.size === 0) {
+      unlisten();
+      return;
+    }
+
+    unlistenByChannel.set(channel, unlisten);
+  })()
+    .catch((error) => {
+      console.error(`[EventBridge] failed to attach "${channel}"`, error);
+    })
+    .finally(() => {
+      pendingAttachByChannel.delete(channel);
+    });
+
+  pendingAttachByChannel.set(channel, attachPromise);
+  await attachPromise;
+}
+
+function detachChannelListener(channel: string): void {
+  const unlisten = unlistenByChannel.get(channel);
+  if (!unlisten) return;
+  unlisten();
+  unlistenByChannel.delete(channel);
+}
+
 /**
- * Start listening to Tauri events and forwarding them to the compat event bus.
+ * Deprecated compatibility shim.
  *
- * No-op if not running in Tauri.
+ * Legacy startup code used this to start a bus forwarding layer. In the
+ * native-only runtime, `onEvent` subscribes lazily per channel.
  */
 export async function startEventBridge(): Promise<void> {
   if (!isTauri()) return;
-
-  // Clean up any existing listeners first (idempotent — prevents HMR accumulation)
-  stopEventBridge();
-
-  const { listen } = await import('@tauri-apps/api/event');
-
-  for (const [tauriEvent, electronChannel] of Object.entries(EVENT_MAP)) {
-    const unlisten = await listen<any>(tauriEvent, (event) => {
-      eventBus.emit(electronChannel, event.payload);
-    });
-    unlisteners.push(unlisten);
-  }
-
-  console.log(
-    `[EventBridge] Listening to ${Object.keys(EVENT_MAP).length} Tauri events`
-  );
 }
 
 /**
- * Stop all Tauri event subscriptions.
+ * Removes all active Tauri listener bindings.
+ * Renderer channel subscriptions remain registered.
  */
 export function stopEventBridge(): void {
-  for (const unlisten of unlisteners) {
+  for (const unlisten of unlistenByChannel.values()) {
     unlisten();
   }
-  unlisteners.length = 0;
-  console.log('[EventBridge] All listeners removed');
+  unlistenByChannel.clear();
+  pendingAttachByChannel.clear();
 }
 
-/**
- * Convenience: subscribe to an event channel using the Electron channel name.
- * Works on both Tauri (via eventBus) and Electron (via eventBus).
- */
-export function onEvent(channel: string, callback: (data: any) => void): void {
-  eventBus.on(channel, callback);
+export function onEvent(channel: string, callback: EventCallback): void {
+  let listeners = listenersByChannel.get(channel);
+  if (!listeners) {
+    listeners = new Set<EventCallback>();
+    listenersByChannel.set(channel, listeners);
+  }
+
+  listeners.add(callback);
+  void attachChannelListener(channel);
 }
 
-/**
- * Convenience: unsubscribe from an event channel.
- */
-export function offEvent(channel: string, callback: (data: any) => void): void {
-  eventBus.removeListener(channel, callback);
+export function offEvent(channel: string, callback: EventCallback): void {
+  const listeners = listenersByChannel.get(channel);
+  if (!listeners) return;
+
+  listeners.delete(callback);
+  if (listeners.size > 0) return;
+
+  listenersByChannel.delete(channel);
+  detachChannelListener(channel);
 }
 
-/**
- * Emit an event on the compat bus (useful for testing or for Rust -> JS
- * communication that bypasses the standard Tauri event system).
- */
-export function emitCompatEvent(electronChannel: string, data: any): void {
-  eventBus.emit(electronChannel, data);
+export function emitCompatEvent(channel: string, data: any): void {
+  dispatch(channel, data);
 }

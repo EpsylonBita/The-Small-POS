@@ -377,6 +377,7 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
             .or_else(|| item.get("itemName"))
             .and_then(Value::as_str)
             .unwrap_or("Item");
+        let safe_name = escape_html(name);
         let qty = item.get("quantity").and_then(Value::as_i64).unwrap_or(1);
         let price = item
             .get("totalPrice")
@@ -385,7 +386,7 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         items_html.push_str(&format!(
-            "<div style=\"display:flex;justify-content:space-between;\"><span>{qty}x {name}</span><span>{price:.2}</span></div>\n",
+            "<div style=\"display:flex;justify-content:space-between;\"><span>{qty}x {safe_name}</span><span>{price:.2}</span></div>\n",
         ));
     }
     if items_html.is_empty() {
@@ -403,6 +404,10 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
     let order_type = order["orderType"].as_str().unwrap_or("dine-in");
     let date = order["createdAt"].as_str().unwrap_or("N/A");
     let terminal_id = order["terminalId"].as_str().unwrap_or("");
+    let safe_order_number = escape_html(order_number);
+    let safe_order_type = escape_html(order_type);
+    let safe_date = escape_html(date);
+    let safe_terminal_id = escape_html(terminal_id);
 
     // Build totals rows
     let mut totals_html = String::new();
@@ -476,22 +481,26 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
             "<div style=\"display:flex;justify-content:space-between;color:#c00;\"><span>{label}</span><span>-{adj_amount:.2}</span></div>\n"
         ));
         if !adj_reason.is_empty() {
+            let safe_reason = escape_html(adj_reason);
             adjustment_html.push_str(&format!(
-                "<div style=\"color:#888;font-size:9px;\">Reason: {adj_reason}</div>\n"
+                "<div style=\"color:#888;font-size:9px;\">Reason: {safe_reason}</div>\n"
             ));
         }
     }
 
     // Build header lines
+    let safe_store_name = escape_html(&store_name);
+    let safe_store_address = escape_html(&store_address);
+    let safe_store_phone = escape_html(&store_phone);
     let address_line = if store_address.is_empty() {
         String::new()
     } else {
-        format!("{store_address}<br/>")
+        format!("{safe_store_address}<br/>")
     };
     let phone_line = if store_phone.is_empty() {
         String::new()
     } else {
-        format!("Tel: {store_phone}<br/>")
+        format!("Tel: {safe_store_phone}<br/>")
     };
 
     // Build adjustment section (only if there are adjustments)
@@ -507,13 +516,13 @@ pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String
     let html = format!(
         r#"<div style="font-family:monospace;font-size:10px;line-height:1.4;width:100%;">
 <div style="text-align:center;margin-bottom:8px;">
-<strong style="font-size:14px;">{store_name}</strong><br/>
+<strong style="font-size:14px;">{safe_store_name}</strong><br/>
 {address_line}{phone_line}</div>
 <hr style="border:none;border-top:1px dashed #000;"/>
 <div style="margin:4px 0;">
-<strong>Order #{order_number}</strong><br/>
-Type: {order_type}<br/>
-Date: {date}
+<strong>Order #{safe_order_number}</strong><br/>
+Type: {safe_order_type}<br/>
+Date: {safe_date}
 </div>
 <hr style="border:none;border-top:1px dashed #000;"/>
 {items_html}
@@ -527,7 +536,7 @@ Date: {date}
 <hr style="border:none;border-top:1px dashed #000;"/>
 <div style="text-align:center;margin-top:8px;font-size:9px;">
 Thank you for your order!<br/>
-{terminal_id}
+{safe_terminal_id}
 </div>
 </div>"#,
     );
@@ -548,6 +557,21 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 
 fn num_field(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64)
+}
+
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 // ===========================================================================
@@ -826,5 +850,25 @@ mod tests {
         assert!(html.contains("Cash"));
         assert!(html.contains("20.00")); // received
         assert!(html.contains("5.50")); // change
+    }
+
+    #[test]
+    fn test_receipt_preview_escapes_html_content() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, order_number, customer_name, items, total_amount, subtotal, tax_amount, status, order_type, sync_status, created_at, updated_at)
+             VALUES ('ord-4', '<script>alert(1)</script>', '<img src=x onerror=alert(2)>', '[{\"name\":\"<b>Burger</b>\",\"quantity\":1,\"totalPrice\":8.50}]', 8.50, 8.50, 0.0, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = get_receipt_preview(&db, "ord-4").expect("get_receipt_preview");
+        let html = result["html"].as_str().unwrap();
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;b&gt;Burger&lt;/b&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("<b>Burger</b>"));
     }
 }

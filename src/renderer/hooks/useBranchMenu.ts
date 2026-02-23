@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { BranchMenuFilterService } from '../../services/BranchMenuFilterService'
 import { useRealTimeMenuSync } from './useRealTimeMenuSync'
+import { offEvent, onEvent } from '../../lib'
 
 interface MenuCategory {
   id: string
@@ -78,7 +79,8 @@ export function useBranchMenu(
   const [error, setError] = useState<string | null>(null)
 
   const serviceRef = useRef<BranchMenuFilterService | null>(null)
-  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastAutoRefreshAtRef = useRef<number>(0)
 
   // Use real-time menu sync to get updates
   const menuSync = useRealTimeMenuSync({ branchId })
@@ -111,47 +113,89 @@ export function useBranchMenu(
     }
   }, [])
 
+  const refreshFromCache = useCallback(
+    async (force = false) => {
+      if (!serviceRef.current) return
+      if (!force && autoRefresh && refreshInterval > 0) {
+        const now = Date.now()
+        if (now - lastAutoRefreshAtRef.current < refreshInterval) {
+          return
+        }
+        lastAutoRefreshAtRef.current = now
+      }
+
+      await serviceRef.current.refreshCache()
+      setCategories(serviceRef.current.getCategories())
+      setSubcategories(serviceRef.current.getSubcategories())
+      setIngredients(serviceRef.current.getIngredients())
+    },
+    [autoRefresh, refreshInterval]
+  )
+
+  const scheduleRefresh = useCallback(
+    (delayMs = 250, force = false) => {
+      if (pendingRefreshRef.current) return
+      pendingRefreshRef.current = setTimeout(() => {
+        pendingRefreshRef.current = null
+        void refreshFromCache(force).catch((err) => {
+          console.error('Error refreshing branch menu cache:', err)
+        })
+      }, delayMs)
+    },
+    [refreshFromCache]
+  )
+
   // Initial load
   useEffect(() => {
     loadData()
   }, [loadData])
 
-  // Set up auto-refresh
+  // Auto-refresh without timers: use sync events with refresh-interval throttling.
   useEffect(() => {
     if (!autoRefresh || refreshInterval <= 0) return
 
-    refreshTimerRef.current = setInterval(() => {
-      if (serviceRef.current) {
-        serviceRef.current.refreshCache().then(() => {
-          setCategories(serviceRef.current!.getCategories())
-          setSubcategories(serviceRef.current!.getSubcategories())
-          setIngredients(serviceRef.current!.getIngredients())
-        })
-      }
-    }, refreshInterval)
+    const handleSyncStatus = () => {
+      scheduleRefresh(300, false)
+    }
+    const handleSyncComplete = () => {
+      scheduleRefresh(200, false)
+    }
+
+    onEvent('sync:status', handleSyncStatus)
+    onEvent('sync:complete', handleSyncComplete)
 
     return () => {
-      if (refreshTimerRef.current) {
-        clearInterval(refreshTimerRef.current)
-      }
+      offEvent('sync:status', handleSyncStatus)
+      offEvent('sync:complete', handleSyncComplete)
     }
-  }, [autoRefresh, refreshInterval])
+  }, [autoRefresh, refreshInterval, scheduleRefresh])
+
+  // React to explicit menu sync events from the backend.
+  useEffect(() => {
+    const handleMenuSync = () => {
+      scheduleRefresh(250, true)
+    }
+    onEvent('menu:sync', handleMenuSync)
+    return () => {
+      offEvent('menu:sync', handleMenuSync)
+    }
+  }, [scheduleRefresh])
 
   // Listen for real-time menu updates
   useEffect(() => {
     if (menuSync.lastUpdate && serviceRef.current) {
-      // Debounce refresh to avoid too many updates
-      const timeoutId = setTimeout(() => {
-        serviceRef.current?.refreshCache().then(() => {
-          setCategories(serviceRef.current!.getCategories())
-          setSubcategories(serviceRef.current!.getSubcategories())
-          setIngredients(serviceRef.current!.getIngredients())
-        })
-      }, 500)
-
-      return () => clearTimeout(timeoutId)
+      // Debounce refresh to avoid too many updates.
+      scheduleRefresh(500, true)
     }
-  }, [menuSync.lastUpdate])
+  }, [menuSync.lastUpdate, scheduleRefresh])
+
+  useEffect(() => {
+    return () => {
+      if (pendingRefreshRef.current) {
+        clearTimeout(pendingRefreshRef.current)
+      }
+    }
+  }, [])
 
   // Memoized helper functions
   const isItemAvailable = useCallback(

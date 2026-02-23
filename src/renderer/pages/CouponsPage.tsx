@@ -25,6 +25,7 @@ import {
   posApiPost,
 } from '../utils/api-helpers';
 import { formatCurrency, formatDate } from '../utils/format';
+import { getBridge, isBrowser } from '../../lib';
 
 interface Coupon {
   id: string;
@@ -68,18 +69,9 @@ const EMPTY_FORM: CouponFormState = {
 };
 
 function getIpcInvoke(): IpcInvoke | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as any;
-  if (typeof w?.electronAPI?.invoke === 'function') {
-    return w.electronAPI.invoke.bind(w.electronAPI);
-  }
-  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
-    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
-  }
-  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
-    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
-  }
-  return null;
+  if (isBrowser()) return null;
+  const bridge = getBridge();
+  return bridge.invoke.bind(bridge);
 }
 
 function asNumber(value: unknown, fallback = 0): number {

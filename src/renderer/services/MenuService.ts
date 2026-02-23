@@ -3,6 +3,7 @@ import { getApiUrl } from '../../config/environment';
 import { ErrorFactory, ErrorHandler, withTimeout, withRetry, POSError } from '../../shared/utils/error-handler';
 import { TIMING, RETRY } from '../../shared/constants';
 import { isOwnEvent, addSessionId } from '../utils/session-utils';
+import { getBridge, isBrowser } from '../../lib';
 
 // Enhanced interfaces matching database schema
 /**
@@ -198,19 +199,9 @@ export interface MenuSyncResult {
 }
 
 function getIpcInvoke(): IpcInvoke | null {
-  if (typeof window === 'undefined') return null;
-
-  const w = window as any;
-  if (typeof w?.electronAPI?.invoke === 'function') {
-    return w.electronAPI.invoke.bind(w.electronAPI);
-  }
-  if (typeof w?.electronAPI?.ipcRenderer?.invoke === 'function') {
-    return w.electronAPI.ipcRenderer.invoke.bind(w.electronAPI.ipcRenderer);
-  }
-  if (typeof w?.electron?.ipcRenderer?.invoke === 'function') {
-    return w.electron.ipcRenderer.invoke.bind(w.electron.ipcRenderer);
-  }
-  return null;
+  if (isBrowser()) return null;
+  const bridge = getBridge();
+  return bridge.invoke.bind(bridge);
 }
 
 function formatError(error: unknown): string {
@@ -259,6 +250,22 @@ class MenuService {
       console.warn(`[MenuService] IPC fetch failed for ${channel}:`, formatError(error));
       return null;
     }
+  }
+
+  private canUseSupabaseFallback(context: string): boolean {
+    if (!isBrowser()) {
+      console.warn(
+        `[MenuService] ${context}: IPC unavailable in desktop runtime, skipping renderer Supabase fallback`
+      );
+      return false;
+    }
+
+    if (!isSupabaseConfigured()) {
+      console.warn(`[MenuService] ${context}: Supabase is not configured for browser fallback`);
+      return false;
+    }
+
+    return true;
   }
 
   async syncMenu(): Promise<MenuSyncResult> {
@@ -368,6 +375,11 @@ class MenuService {
         return normalized;
       }
 
+      if (!this.canUseSupabaseFallback('getMenuCategories')) {
+        this.loadingStates.set(cacheKey, 'loaded');
+        return [];
+      }
+
       // Wrap Supabase query with timeout and retry
       const { data, error } = await withRetry(async () => {
         return await withTimeout(
@@ -443,7 +455,7 @@ class MenuService {
         return Array.from(categoryMap.values()).sort((a, b) => a.name.localeCompare(b.name));
       }
 
-      if (!isSupabaseConfigured()) {
+      if (!this.canUseSupabaseFallback('getIngredientCategories')) {
         return [];
       }
 
@@ -508,8 +520,7 @@ class MenuService {
         return normalized;
       }
 
-      if (!isSupabaseConfigured()) {
-        console.warn('[MenuService] Supabase not configured and IPC ingredients unavailable');
+      if (!this.canUseSupabaseFallback('getIngredients')) {
         this.loadingStates.set(cacheKey, 'loaded');
         return [];
       }
@@ -717,6 +728,14 @@ class MenuService {
       }
     }
 
+    // Try category_flavor_type (the field name the admin API menu-sync returns)
+    if (!flavorType) {
+      const catFlavorType = (raw as any).category_flavor_type;
+      if (catFlavorType === 'sweet' || catFlavorType === 'savory') {
+        flavorType = catFlavorType as 'savory' | 'sweet';
+      }
+    }
+
     if (!flavorType) {
       const directFlavorType = (raw as any).flavor_type;
       if (directFlavorType === 'sweet' || directFlavorType === 'savory') {
@@ -780,6 +799,11 @@ class MenuService {
         return normalized;
       }
 
+      if (!this.canUseSupabaseFallback('getMenuItems')) {
+        this.loadingStates.set(cacheKey, 'loaded');
+        return [];
+      }
+
       // Wrap Supabase query with timeout and retry
       const { data, error } = await withRetry(async () => {
         return await withTimeout(
@@ -837,6 +861,16 @@ class MenuService {
 
   async getMenuItemById(itemId: string): Promise<MenuItem | null> {
     try {
+      const cachedItems = await this.getMenuItems();
+      const cachedMatch = cachedItems.find((item) => item.id === itemId);
+      if (cachedMatch) {
+        return cachedMatch;
+      }
+
+      if (!this.canUseSupabaseFallback('getMenuItemById')) {
+        return null;
+      }
+
       const { data, error } = await withTimeout(
         (async () => {
           return await supabase
@@ -960,7 +994,7 @@ class MenuService {
         }));
       }
 
-      if (!isSupabaseConfigured()) {
+      if (!this.canUseSupabaseFallback('getMenuItemIngredients')) {
         return [];
       }
 
@@ -1024,6 +1058,18 @@ class MenuService {
   // Method to check ingredient availability and update stock
   async checkIngredientAvailability(ingredientId: string): Promise<boolean> {
     try {
+      const ingredients = await this.getIngredients();
+      const ingredient = ingredients.find((entry) => entry.id === ingredientId);
+      if (ingredient) {
+        const stockQuantity = Number(ingredient.stock_quantity ?? 0);
+        const minStockLevel = Number(ingredient.min_stock_level ?? 0);
+        return (ingredient.is_available ?? true) && stockQuantity > minStockLevel;
+      }
+
+      if (!this.canUseSupabaseFallback('checkIngredientAvailability')) {
+        return false;
+      }
+
       const { data, error } = await supabase
         .from('ingredients')
         .select('is_available, stock_quantity, min_stock_level, current_stock, minimum_stock')
@@ -1155,6 +1201,11 @@ class MenuService {
         this.setCache(cacheKey, availableCombos);
         this.loadingStates.set(cacheKey, 'loaded');
         return availableCombos;
+      }
+
+      if (!this.canUseSupabaseFallback('getMenuCombos')) {
+        this.loadingStates.set(cacheKey, 'loaded');
+        return [];
       }
 
       const { data, error } = await withRetry(async () => {

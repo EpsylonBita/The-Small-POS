@@ -1,27 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { useTheme } from '../contexts/theme-context';
 import { Info, Copy, Check, ExternalLink } from 'lucide-react';
-
-interface AboutInfo {
-  version: string;
-  buildTimestamp: string;
-  gitSha: string;
-  platform: string;
-  arch: string;
-  rustVersion: string;
-}
+import { getBridge, type DiagnosticsAboutInfo } from '../../lib';
 
 const AboutPage: React.FC = () => {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
-  const [about, setAbout] = useState<AboutInfo | null>(null);
+  const [about, setAbout] = useState<DiagnosticsAboutInfo | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    const api = (window as any).electronAPI;
-    api?.invoke?.('diagnostics:get-about')
-      .then((data: AboutInfo) => setAbout(data))
-      .catch((err: any) => console.error('Failed to load about info:', err));
+    const bridge = getBridge();
+    bridge.diagnostics
+      .getAbout()
+      .then((data) => setAbout(data))
+      .catch((err: unknown) => console.error('Failed to load about info:', err));
   }, []);
 
   const handleCopy = async () => {
