@@ -111,7 +111,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         body: JSON.stringify({
           event_type: 'click',
           module_id: moduleId,
-          source: 'pos_electron',
+          source: 'pos_tauri',
           context: 'locked_module',
           timestamp: new Date().toISOString(),
         }),
@@ -124,7 +124,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
         body: JSON.stringify({
           module_id: moduleId,
           billing_cycle: 'monthly',
-          source: 'pos_electron',
+          source: 'pos_tauri',
           context: 'locked_module',
         }),
       })
@@ -142,7 +142,7 @@ export const ModuleUpsellCard: React.FC<ModuleUpsellCardProps> = ({
       // Fallback to admin dashboard redirect
       const adminUrl = getAdminBaseUrl()
       const purchaseUrl = generateModulePurchaseUrl(adminUrl, moduleId, {
-        source: 'pos_electron',
+        source: 'pos_tauri',
         context: 'locked_module',
       })
 
@@ -388,3 +388,4 @@ const ModuleUpsellContent: React.FC<ModuleUpsellContentProps> = ({
 }
 
 export default ModuleUpsellCard
+

@@ -132,7 +132,7 @@ export type UpsellEventType =
  */
 export type UpsellSource =
   | 'admin_dashboard'
-  | 'pos_electron'
+  | 'pos_tauri'
   | 'pos_mobile';
 
 /**
@@ -293,3 +293,4 @@ export interface FeatureComparisonData {
     savings_percentage: number;
   };
 }
+

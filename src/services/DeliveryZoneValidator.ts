@@ -279,7 +279,7 @@ export class DeliveryZoneValidator {
         result: validationResult,
         orderAmount,
         deliveryFee: result.zone?.deliveryFee,
-        source: 'pos-system',
+        source: 'pos-tauri',
         terminalId: this.config.terminalId,
         staffId: this.config.staffId,
         overrideApplied: false,
@@ -311,7 +311,7 @@ export class DeliveryZoneValidator {
         coordinates: typeof address === 'object' ? address : undefined,
         result: 'error',
         orderAmount,
-        source: 'pos-system',
+        source: 'pos-tauri',
         terminalId: this.config.terminalId,
         staffId: this.config.staffId,
         overrideApplied: false,
@@ -421,3 +421,4 @@ export class DeliveryZoneValidator {
     this.validationService.updateAuth(authToken, apiKey);
   }
 }
+

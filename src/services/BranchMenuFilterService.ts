@@ -214,7 +214,7 @@ export class BranchMenuFilterService {
       .from('menu_synchronization')
       .select('*')
       .eq('branch_id', this.branchId)
-      .eq('app_name', 'pos-system')
+      .in('app_name', ['pos-tauri', 'pos-system'])
 
     if (error) throw error
 
@@ -398,3 +398,4 @@ export class BranchMenuFilterService {
     }
   }
 }
+

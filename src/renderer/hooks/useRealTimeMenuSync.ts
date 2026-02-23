@@ -24,6 +24,14 @@ interface UseRealTimeMenuSyncOptions {
   onMenuUpdate?: (payload: MenuUpdatePayload) => void
 }
 
+function isPosAppName(value: unknown): boolean {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'pos-tauri' || normalized === 'pos-system'
+}
+
 /**
  * Real-time menu synchronization hook for POS system
  * Listens for menu changes from admin dashboard and updates local data
@@ -59,7 +67,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
     if (!row) return
 
     // Guard: Only process POS overrides
-    if (row.app_name !== 'pos-system') return
+    if (!isPosAppName(row.app_name)) return
 
     // Use correct column names: subcategory_id, ingredient_id, product_id
     const resourceId = String(row.subcategory_id || row.ingredient_id || row.product_id || '')
@@ -104,7 +112,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
       const ov = overridesRef.current.get(prefixedKey) || overridesRef.current.get(String(mergedNew.id))
 
       // Verify override belongs to the active branch AND is for POS system
-      if (ov && ov.branch_id === branchId && ov.app_name === 'pos-system') {
+      if (ov && ov.branch_id === branchId && isPosAppName(ov.app_name)) {
         mergedNew = { ...mergedNew }
         if (typeof ov.price_override === 'number') mergedNew.price = ov.price_override
         if (typeof ov.availability_override === 'boolean') mergedNew.is_available = ov.availability_override
@@ -184,7 +192,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
             .from('menu_synchronization')
             .select('*')
             .eq('branch_id', branchId)
-            .eq('app_name', 'pos-system')
+            .in('app_name', ['pos-tauri', 'pos-system'])
 
           const { data, error } = await query
           if (!error && Array.isArray(data)) {
@@ -231,7 +239,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
         overrideUnsubRef.current = subscriptionManager.subscribe('menu_synchronization', {
           table: 'menu_synchronization',
           event: '*',
-          filter: `branch_id=eq.${branchId}&app_name=eq.pos-system`,
+          filter: `branch_id=eq.${branchId}&app_name=eq.pos-tauri`,
           callback: (pl) => handleMenuSyncOverride(pl)
         })
 
@@ -245,7 +253,7 @@ export function useRealTimeMenuSync(options?: UseRealTimeMenuSyncOptions) {
               .eq('branch_id', branchId)
 
             // Optionally filter by app_name
-            query = query.eq('app_name', 'pos-system')
+            query = query.eq('app_name', 'pos-tauri')
 
             const { data, error } = await query
             if (!error && Array.isArray(data)) {
@@ -506,3 +514,4 @@ export function useMenuDataSync() {
     setMenuData
   }
 }
+

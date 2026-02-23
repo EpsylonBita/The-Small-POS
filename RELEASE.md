@@ -114,10 +114,10 @@ node scripts/generate-updater-manifest.mjs \
 
 ## Icon Identity Policy
 
-Desktop icon identity must remain aligned with legacy assets:
+Desktop icon identity must remain aligned with canonical branding assets:
 
-- `pos-system/public/icon.ico` == `pos-tauri/src-tauri/icons/icon.ico`
-- `pos-system/public/icon.png` == Tauri PNG variants
+- `branding/pos-desktop/icon.ico` == `pos-tauri/src-tauri/icons/icon.ico`
+- `branding/pos-desktop/icon.png` == Tauri PNG variants
 
 CI checks enforce this policy.
 
@@ -127,4 +127,5 @@ CI checks enforce this policy.
 - `ARCHITECTURE.md`
 - `SUPPORT.md`
 - `docs/security-native-migration/EXECUTION_BACKLOG.md`
+
 

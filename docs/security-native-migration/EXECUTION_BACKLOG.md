@@ -69,3 +69,15 @@
 - [x] Make staging soak evidence collection repeatable (`scripts/tauri-smoke.mjs` now supports `--report <path>` JSON export and `--auto <pass|fail|skip>` dry-run mode; runbook added at `docs/security-native-migration/STAGING_SOAK_RUNBOOK.md`)
 - [x] Add deterministic soak gate evaluator (`scripts/evaluate-soak-report.mjs` + `npm run soak:report`) so rollout approval requires zero skipped/failed critical gates.
 - [ ] Manual staging pilot soak (24h with forced offline/online toggles) still pending: execute `node scripts/tauri-smoke.mjs --report docs/security-native-migration/reports/staging-soak-report.json` on a staging terminal and attach logs/admin evidence per `docs/security-native-migration/STAGING_SOAK_RUNBOOK.md`.
+
+## Electron Decommission + Identifier Migration (Monorepo)
+- [x] Decouple active CI/release tooling from legacy Electron app paths (`.github/workflows/pos-tauri-auto-release.yml`, `.github/workflows/security-scans.yml`, `.github/workflows/test.yml`, `scripts/make-ico.js`, `.gitignore`, and root `package.json` scripts)
+- [x] Promote canonical desktop branding assets to `branding/pos-desktop/` and remove Electron icon dependency chain
+- [x] Delete legacy Electron desktop app directory from the monorepo
+- [x] Complete canonical identifier migration to `pos-tauri` on write paths with one-release read compatibility for legacy aliases
+- [x] Add centralized platform/source normalization helper (`admin-dashboard/src/lib/platform-identifiers.ts`) and apply to admin/POS sync flows
+- [x] Migrate analytics source canonical value to `pos_tauri` with one-release inbound legacy compatibility
+- [x] Add compatibility-window DB migrations (`20260223000000_rename_pos_system_to_pos_tauri.sql`, `20260223000001_remove_pos_system_compatibility.sql`)
+- [x] Purge legacy docs/spec archives and stale platform guides (`docs/archive/`, legacy desktop platform guide subtree)
+- [x] Add regression guardrails (`scripts/check-no-pos-system-path-refs.mjs`, `scripts/check-platform-identifier-policy.mjs`) and wire them into CI + npm scripts
+- [ ] Remove one-release compatibility aliases in release N+1 and apply follow-up migration `20260223000001_remove_pos_system_compatibility.sql`

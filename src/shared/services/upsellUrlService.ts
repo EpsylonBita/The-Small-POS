@@ -30,9 +30,9 @@ import type {
  * const url = generateModulePurchaseUrl(
  *   'https://admin.thesmall.app',
  *   'inventory',
- *   { billingCycle: 'annual', source: 'pos_electron' }
+ *   { billingCycle: 'annual', source: 'pos_tauri' }
  * );
- * // Returns: https://admin.thesmall.app/profile?tab=modules&purchase=inventory&billing=annual&source=pos_electron
+ * // Returns: https://admin.thesmall.app/profile?tab=modules&purchase=inventory&billing=annual&source=pos_tauri
  * ```
  */
 export function generateModulePurchaseUrl(
@@ -298,3 +298,5 @@ export function getAdminBaseUrl(): string {
   // Default to production URL
   return 'https://admin.thesmall.app';
 }
+
+

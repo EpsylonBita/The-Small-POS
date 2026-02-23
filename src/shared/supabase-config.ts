@@ -110,7 +110,7 @@ function hydrateContextFromLocalStorage(): void {
 
 function buildGlobalHeaders(): Record<string, string> {
   return {
-    'x-application-name': 'pos-system',
+    'x-application-name': 'pos-tauri',
     'x-terminal-id': storedContext.terminalId || '',
     'x-organization-id': storedContext.organizationId || '',
     'x-branch-id': storedContext.branchId || '',
@@ -302,3 +302,4 @@ export const SUPABASE_TABLES = {
 } as const;
 
 export default getSupabaseClient; 
+

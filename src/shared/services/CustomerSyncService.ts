@@ -33,14 +33,14 @@ type SupabaseConflict = any
  */
 export class CustomerSyncService {
   private supabase: SupabaseClient<any>
-  private source: 'admin-dashboard' | 'pos-system' | 'customer-web' | 'customer-mobile'
+  private source: 'admin-dashboard' | 'pos-tauri' | 'customer-web' | 'customer-mobile'
   private terminalId?: string
   private organizationId?: string
   private onConflictCallback?: (conflict: CustomerConflict) => void
 
   constructor(
     supabaseClient: SupabaseClient<any>,
-    source: 'admin-dashboard' | 'pos-system' | 'customer-web' | 'customer-mobile',
+    source: 'admin-dashboard' | 'pos-tauri' | 'customer-web' | 'customer-mobile',
     options?: {
       terminalId?: string
       organizationId?: string
@@ -911,3 +911,4 @@ export class CustomerSyncService {
     }
   }
 }
+

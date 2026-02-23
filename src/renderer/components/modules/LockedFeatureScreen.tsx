@@ -85,7 +85,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
       body: JSON.stringify({
         event_type: 'view',
         module_id: moduleId,
-        source: 'pos_electron',
+        source: 'pos_tauri',
         context: 'feature_gate',
         timestamp: new Date().toISOString(),
         metadata: { screen: 'locked_feature' },
@@ -120,7 +120,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         body: JSON.stringify({
           event_type: 'click',
           module_id: moduleId,
-          source: 'pos_electron',
+          source: 'pos_tauri',
           context: 'feature_gate',
           timestamp: new Date().toISOString(),
           metadata: { action: 'upgrade' },
@@ -134,7 +134,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
         body: JSON.stringify({
           module_id: moduleId,
           billing_cycle: 'monthly',
-          source: 'pos_electron',
+          source: 'pos_tauri',
           context: 'feature_gate',
         }),
       })
@@ -151,7 +151,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
       // Fallback to admin dashboard
       const adminUrl = getAdminBaseUrl()
       const purchaseUrl = generateModulePurchaseUrl(adminUrl, moduleId, {
-        source: 'pos_electron',
+        source: 'pos_tauri',
         context: 'feature_gate',
       })
 
@@ -172,7 +172,7 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
       body: JSON.stringify({
         event_type: 'dismiss',
         module_id: moduleId,
-        source: 'pos_electron',
+        source: 'pos_tauri',
         context: 'feature_gate',
         timestamp: new Date().toISOString(),
         metadata: { action: 'back' },
@@ -387,3 +387,4 @@ export const LockedFeatureScreen: React.FC<LockedFeatureScreenProps> = ({
 }
 
 export default LockedFeatureScreen
+

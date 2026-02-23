@@ -34,19 +34,25 @@ interface KitchenOrder {
   table_number?: string;
   priority: 'normal' | 'rush' | 'vip';
   notes?: string;
+  station_id?: string;
 }
 
 interface KitchenOrderItem {
   id: string;
   name: string;
   quantity: number;
-  station: 'grill' | 'cold' | 'hot' | 'dessert' | 'drinks';
+  station: string;
   status: 'pending' | 'preparing' | 'ready';
   modifiers?: string[];
   notes?: string;
 }
 
-type StationType = 'all' | 'grill' | 'cold' | 'hot' | 'dessert' | 'drinks';
+interface KdsStation {
+  id: string;
+  name: string;
+  station_type: string;
+}
+
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 
 const KitchenDisplayPage: React.FC = () => {
@@ -56,7 +62,8 @@ const KitchenDisplayPage: React.FC = () => {
   const { staff } = useShift();
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
-  const [stationFilter, setStationFilter] = useState<StationType>('all');
+  const [stations, setStations] = useState<KdsStation[]>([]);
+  const [stationFilter, setStationFilter] = useState<string>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -117,6 +124,15 @@ const KitchenDisplayPage: React.FC = () => {
 
       // Note: fetchFromApi wraps responses in { success, data, status }
       if (result?.success && result?.data?.success && result?.data?.tickets) {
+        // Extract dynamic stations from API config
+        if (result.data.config?.stations) {
+          setStations(result.data.config.stations.map((s: Record<string, unknown>) => ({
+            id: s['id'] as string,
+            name: s['name'] as string,
+            station_type: s['station_type'] as string,
+          })));
+        }
+
         const kitchenOrders: KitchenOrder[] = result.data.tickets
           .map((ticket: Record<string, unknown>) => {
             const status = mapApiStatusToUi(ticket['status'] as string);
@@ -131,11 +147,12 @@ const KitchenDisplayPage: React.FC = () => {
               notes: ticket['notes'] as string | undefined,
               table_number: ticket['table_number'] as string | undefined,
               priority: (ticket['priority'] as 'normal' | 'rush' | 'vip') || 'normal',
+              station_id: ticket['station_id'] as string | undefined,
               items: ((ticket['items'] as Record<string, unknown>[]) || []).map((item: Record<string, unknown>) => ({
                 id: item['id'] as string,
                 name: item['name'] as string || 'Unknown',
                 quantity: item['quantity'] as number || 1,
-                station: (item['station'] as 'grill' | 'cold' | 'hot' | 'dessert' | 'drinks') || 'hot',
+                station: (item['station'] as string) || 'hot',
                 status: (item['status'] as 'pending' | 'preparing' | 'ready') || 'pending',
                 notes: item['notes'] as string | undefined,
                 modifiers: item['modifiers'] as string[] | undefined
@@ -143,10 +160,13 @@ const KitchenDisplayPage: React.FC = () => {
             };
           })
           .filter((order: KitchenOrder | null): order is KitchenOrder => order !== null);
-        // Filter by station client-side if needed
+        // Filter by station client-side if needed (match by station_id on ticket or item station field)
         const filteredOrders = stationFilter === 'all'
           ? kitchenOrders
-          : kitchenOrders.filter(order => order.items.some(item => item.station === stationFilter));
+          : kitchenOrders.filter(order =>
+              order.station_id === stationFilter ||
+              order.items.some(item => item.station === stationFilter)
+            );
         setOrders(filteredOrders);
       } else {
         throw new Error(result?.data?.error || result?.error || 'Failed to fetch kitchen orders');
@@ -413,13 +433,13 @@ const KitchenDisplayPage: React.FC = () => {
 
       {/* Station Filter */}
       <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-        {(['all', 'grill', 'hot', 'cold', 'dessert', 'drinks'] as StationType[]).map((station) => (
+        {[{ id: 'all', name: t('kitchen.allStations', 'All'), station_type: 'all' } as KdsStation, ...stations].map((station) => (
           <button
-            key={station}
-            onClick={() => setStationFilter(station)}
-            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all ${stationFilter === station ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'} shadow-lg`}
+            key={station.id}
+            onClick={() => setStationFilter(station.id === 'all' ? 'all' : station.id)}
+            className={`px-4 py-2 rounded-lg font-medium whitespace-nowrap transition-all ${stationFilter === (station.id === 'all' ? 'all' : station.id) ? 'bg-cyan-500 text-white' : isDark ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-600'} shadow-lg`}
           >
-            {station === 'all' ? t('kitchen.allStations', 'All') : t(`kitchen.${station}`, station.charAt(0).toUpperCase() + station.slice(1))}
+            {station.id === 'all' ? t('kitchen.allStations', 'All') : station.name}
           </button>
         ))}
       </div>

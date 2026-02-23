@@ -137,7 +137,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
     // Default: Open admin dashboard
     const adminUrl = getAdminBaseUrl()
     const upgradeUrl = generateTrialUpgradeUrl(adminUrl, {
-      source: 'pos_electron',
+      source: 'pos_tauri',
       context: 'trial_countdown',
     })
 
@@ -150,7 +150,7 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
       body: JSON.stringify({
         event_type: 'trial_action',
         module_id: 'trial',
-        source: 'pos_electron',
+        source: 'pos_tauri',
         context: 'trial_countdown',
         timestamp: new Date().toISOString(),
         metadata: { action: 'contact_admin' },
@@ -259,3 +259,4 @@ export const TrialModulePrompt: React.FC<TrialModulePromptProps> = ({
 }
 
 export default TrialModulePrompt
+
