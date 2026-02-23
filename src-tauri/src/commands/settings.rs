@@ -232,8 +232,7 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
     let _ = storage::set_credential("admin_dashboard_url", normalized_admin_url.trim());
 
     let path = format!("/api/pos/settings/{terminal_id}");
-    let resp =
-        api::fetch_from_admin(&normalized_admin_url, &api_key, &path, "GET", None).await?;
+    let resp = api::fetch_from_admin(&normalized_admin_url, &api_key, &path, "GET", None).await?;
 
     if let Some(bid) = crate::extract_branch_id_from_terminal_settings_response(&resp) {
         let _ = storage::set_credential("branch_id", &bid);
@@ -249,7 +248,8 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         }
         tracing::info!("Stored organization_id from admin settings");
     }
-    if let Some(ghost_enabled) = crate::extract_ghost_mode_feature_from_terminal_settings_response(&resp)
+    if let Some(ghost_enabled) =
+        crate::extract_ghost_mode_feature_from_terminal_settings_response(&resp)
     {
         let value = if ghost_enabled { "true" } else { "false" };
         let _ = storage::set_credential("ghost_mode_feature_enabled", value);

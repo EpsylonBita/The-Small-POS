@@ -7,6 +7,8 @@
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use tracing::{error, trace, warn};
 
 use crate::api;
@@ -76,6 +78,37 @@ fn section_count(data: &Value, key: &str) -> usize {
         .and_then(Value::as_array)
         .map(|arr| arr.len())
         .unwrap_or(0)
+}
+
+fn section_or_empty(data: &Value, key: &str) -> Value {
+    data.get(key)
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+/// Compute a stable local version from the actual menu sections we cache.
+/// This avoids treating response timestamps as menu-version changes.
+fn compute_menu_payload_version(data: &Value) -> String {
+    let snapshot = serde_json::json!({
+        "categories": section_or_empty(data, "categories"),
+        "subcategories": section_or_empty(data, "subcategories"),
+        "ingredients": section_or_empty(data, "ingredients"),
+        "combos": section_or_empty(data, "combos"),
+    });
+
+    let serialized = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    format!("digest:{:016x}", hasher.finish())
+}
+
+fn explicit_menu_version(data: &Value, resp: &Value) -> Option<String> {
+    data.get("version")
+        .or_else(|| resp.get("version"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn mask_terminal_id(terminal_id: &str) -> String {
@@ -217,17 +250,15 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
         "combos": combo_count
     });
 
-    let version = data
-        .get("version")
-        .or_else(|| resp.get("version"))
-        .or_else(|| resp.get("timestamp"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let version =
+        explicit_menu_version(data, &resp).unwrap_or_else(|| compute_menu_payload_version(data));
     let timestamp = resp
         .get("timestamp")
         .and_then(Value::as_str)
-        .unwrap_or(version)
-        .to_string();
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
 
     // Check if version matches current cache to skip unnecessary writes
     {
@@ -241,10 +272,10 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
             .ok()
             .flatten();
 
-        if cached_version.as_deref() == Some(version) {
+        if cached_version.as_deref() == Some(version.as_str()) {
             trace!(
                 terminal_id = %masked_terminal_id,
-                version = version,
+                version = %version,
                 categories = category_count,
                 subcategories = subcategory_count,
                 ingredients = ingredient_count,
@@ -285,7 +316,7 @@ pub async fn sync_menu(db: &DbState) -> Result<Value, String> {
 
     trace!(
         terminal_id = %masked_terminal_id,
-        version = version,
+        version = %version,
         categories = category_count,
         subcategories = subcategory_count,
         ingredients = ingredient_count,

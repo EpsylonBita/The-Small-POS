@@ -2152,7 +2152,14 @@ async fn reconcile_remote_orders(
                                      sync_status = 'synced',
                                      last_synced_at = datetime('now'),
                                      updated_at = ?4
-                                 WHERE id = ?5",
+                                 WHERE id = ?5
+                                   AND (
+                                     COALESCE(supabase_id, '') != COALESCE(?1, '')
+                                     OR COALESCE(status, '') != COALESCE(?2, '')
+                                     OR COALESCE(payment_status, '') != COALESCE(?3, '')
+                                     OR COALESCE(sync_status, '') != 'synced'
+                                     OR COALESCE(updated_at, '') != COALESCE(?4, '')
+                                   )",
                                 params![remote_id, status, payment_status, updated_at, local_id],
                             )
                             .unwrap_or(0);

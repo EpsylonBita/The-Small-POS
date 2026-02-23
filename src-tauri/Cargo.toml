@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.2.3"
+version = "1.3.1"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
