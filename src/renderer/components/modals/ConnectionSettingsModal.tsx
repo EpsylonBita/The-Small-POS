@@ -46,6 +46,21 @@ const normalizeAdminDashboardUrl = (rawUrl: string): string => {
   }
 }
 
+const parseBooleanSetting = (value: unknown): boolean => {
+  if (value === true || value === 1) return true
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return false
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+      const unwrapped = trimmed.slice(1, -1).trim().toLowerCase()
+      return unwrapped === 'true' || unwrapped === '1' || unwrapped === 'yes' || unwrapped === 'on'
+    }
+    const normalized = trimmed.toLowerCase()
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on'
+  }
+  return false
+}
+
 const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
@@ -75,6 +90,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showSecuritySettings, setShowSecuritySettings] = useState(false)
   const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
   const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
+  const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false)
+  const [ghostModeEnabled, setGhostModeEnabled] = useState(false)
 
   const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
   // Peripheral settings state
@@ -124,13 +141,62 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     // Load session timeout settings from main process
     const loadSecuritySettings = async () => {
       try {
+        let remoteGhostFeatureEnabled: boolean | null = null
+        try {
+          try {
+            await bridge.invoke('admin-sync-terminal-config')
+          } catch (nativeSyncError) {
+            console.warn('[ConnectionSettings] Native admin terminal sync failed (non-fatal):', nativeSyncError)
+          }
+
+          const resolvedCreds = await refreshTerminalCredentialCache()
+          const resolvedTerminalId = (resolvedCreds.terminalId || '').trim()
+          const resolvedApiKey = (resolvedCreds.apiKey || '').trim()
+          const storedAdminUrl = normalizeAdminDashboardUrl(
+            (
+              (await bridge.settings.getAdminUrl()) ||
+              localStorage.getItem('admin_dashboard_url') ||
+              ''
+            ).toString()
+          )
+
+          if (resolvedTerminalId && resolvedApiKey && storedAdminUrl) {
+            await bridge.settings.updateTerminalCredentials({
+              terminalId: resolvedTerminalId,
+              apiKey: resolvedApiKey,
+              adminUrl: storedAdminUrl,
+            })
+            const settingsResult = await posApiGet(`/pos/settings/${encodeURIComponent(resolvedTerminalId)}`)
+            const payload: any = settingsResult?.data
+            const rawRemoteGhostFeature =
+              payload?.ghost_mode_feature_enabled ??
+              payload?.settings?.terminal?.ghost_mode_feature_enabled ??
+              payload?.terminal?.ghost_mode_feature_enabled ??
+              payload?.enabled_features?.ghost_mode
+            if (rawRemoteGhostFeature !== undefined && rawRemoteGhostFeature !== null) {
+              remoteGhostFeatureEnabled = parseBooleanSetting(rawRemoteGhostFeature)
+              await bridge.settings.updateLocal({
+                settingType: 'terminal',
+                settings: { ghost_mode_feature_enabled: remoteGhostFeatureEnabled },
+              })
+            }
+          } else {
+            await bridge.terminalConfig.refresh()
+          }
+        } catch (refreshError) {
+          console.warn('[ConnectionSettings] Failed to refresh terminal settings before loading security settings:', refreshError)
+        }
+
+        const ghostFeature = remoteGhostFeatureEnabled !== null
+          ? remoteGhostFeatureEnabled
+          : await bridge.settings.get('terminal', 'ghost_mode_feature_enabled')
+        const ghostEnabled = await bridge.settings.get('system', 'ghost_mode_enabled')
         const enabled = await bridge.settings.get('system', 'session_timeout_enabled')
         const minutes = await bridge.settings.get('system', 'session_timeout_minutes')
-        const enabledNormalized =
-          enabled === true ||
-          enabled === 1 ||
-          (typeof enabled === 'string' && ['true', '1', 'yes', 'on'].includes(enabled.toLowerCase()))
+        const enabledNormalized = parseBooleanSetting(enabled)
         const minutesParsed = Number(minutes)
+        setGhostModeFeatureEnabled(parseBooleanSetting(ghostFeature))
+        setGhostModeEnabled(parseBooleanSetting(ghostEnabled))
         setSessionTimeoutEnabled(enabledNormalized)
         setSessionTimeoutMinutes(String(Number.isFinite(minutesParsed) && minutesParsed > 0 ? minutesParsed : 15))
       } catch (e) {
@@ -276,6 +342,24 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     } catch (e) {
       console.error('Failed to toggle session timeout:', e)
       toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to update session timeout'))
+    }
+  }
+
+  const handleToggleGhostMode = async (enabled: boolean) => {
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'system',
+        settings: { ghost_mode_enabled: enabled }
+      })
+      setGhostModeEnabled(enabled)
+      toast.success(
+        enabled
+          ? t('modals.connectionSettings.ghostModeEnabled', 'Ghost mode enabled')
+          : t('modals.connectionSettings.ghostModeDisabled', 'Ghost mode disabled')
+      )
+    } catch (e) {
+      console.error('Failed to toggle ghost mode:', e)
+      toast.error(t('modals.connectionSettings.ghostModeError', 'Failed to update ghost mode'))
     }
   }
 
@@ -723,6 +807,44 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-amber-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-amber-500"></div>
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-3 border-t liquid-glass-modal-border">
+                <div className="flex items-center gap-3 flex-1 min-w-0">
+                  <div className="text-left min-w-0">
+                    <span className={`font-medium block liquid-glass-modal-text`}>
+                      {t('modals.connectionSettings.ghostMode', 'Ghost Mode')}
+                    </span>
+                    <span className={`text-xs liquid-glass-modal-text-muted`}>
+                      {ghostModeFeatureEnabled
+                        ? t(
+                            'modals.connectionSettings.ghostModeHelp',
+                            'Manual-item orders are hidden from POS and bypass payment terminals.'
+                          )
+                        : t(
+                            'modals.connectionSettings.ghostModeDisabledByAdmin',
+                            'Enable Ghost Mode for this terminal in Admin Dashboard first.'
+                          ) + (terminalId?.trim() ? ` (${terminalId.trim()})` : '')}
+                    </span>
+                  </div>
+                </div>
+                <label
+                  className={`relative inline-flex items-center ${
+                    ghostModeFeatureEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={ghostModeEnabled}
+                    onChange={(e) => {
+                      if (!ghostModeFeatureEnabled) return
+                      void handleToggleGhostMode(e.target.checked)
+                    }}
+                    disabled={!ghostModeFeatureEnabled}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
                 </label>
               </div>
 

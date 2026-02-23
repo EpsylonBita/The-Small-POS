@@ -6,8 +6,8 @@ use tracing::{info, warn};
 
 use crate::shifts as shift_service;
 use crate::{
-    db, escpos, fetch_supabase_rows, hydrate_terminal_credentials_from_local_settings,
-    printers, read_local_setting, storage, value_f64, value_str,
+    db, fetch_supabase_rows, hydrate_terminal_credentials_from_local_settings, print,
+    read_local_setting, storage, value_f64, value_str,
 };
 
 #[derive(Debug, Deserialize)]
@@ -236,18 +236,14 @@ fn parse_shift_print_checkout_payload(
     let mut parsed: ShiftPrintCheckoutPayload = serde_json::from_value(payload)
         .map_err(|e| format!("Invalid shift checkout print payload: {e}"))?;
     parsed.shift_id = parsed.shift_id.trim().to_string();
-    parsed.role_type = parsed
-        .role_type
-        .and_then(|value| match value.trim() {
-            "" => None,
-            v => Some(v.to_string()),
-        });
-    parsed.terminal_name = parsed
-        .terminal_name
-        .and_then(|value| match value.trim() {
-            "" => None,
-            v => Some(v.to_string()),
-        });
+    parsed.role_type = parsed.role_type.and_then(|value| match value.trim() {
+        "" => None,
+        v => Some(v.to_string()),
+    });
+    parsed.terminal_name = parsed.terminal_name.and_then(|value| match value.trim() {
+        "" => None,
+        v => Some(v.to_string()),
+    });
 
     if parsed.shift_id.is_empty() {
         return Err("Missing shiftId".into());
@@ -464,12 +460,35 @@ pub async fn shift_close(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing shift close payload")?;
-    let result = shift_service::close_shift(&db, &payload)?;
+    let mut result = shift_service::close_shift(&db, &payload)?;
+
+    let shift_id = value_str(&result, &["id", "shiftId", "shift_id"]).or_else(|| {
+        result
+            .get("shift")
+            .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
+    });
+    if let Some(shift_id) = shift_id {
+        match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None) {
+            Ok(job) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("autoPrintJob".to_string(), job);
+                }
+            }
+            Err(error) => {
+                warn!(
+                    shift_id = %shift_id,
+                    error = %error,
+                    "Failed to enqueue automatic shift checkout print job"
+                );
+            }
+        }
+    }
+
     let _ = app.emit(
         "shift_updated",
         serde_json::json!({
             "action": "close",
-            "shift": result
+            "shift": result.clone()
         }),
     );
     Ok(result)
@@ -543,212 +562,34 @@ pub async fn shift_print_checkout(
         }
     };
 
-    let profile = match printers::resolve_printer_profile(&db, None) {
-        Ok(Some(profile)) => profile,
-        Ok(None) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": "No printer profile configured",
-                "shiftId": payload.shift_id,
-                "roleType": payload.role_type,
-                "terminalName": payload.terminal_name,
-            }));
-        }
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to resolve printer profile: {error}"),
-                "shiftId": payload.shift_id,
-                "roleType": payload.role_type,
-                "terminalName": payload.terminal_name,
-            }));
-        }
-    };
-
-    let printer_name =
-        value_str(&profile, &["printerName", "printer_name", "name"]).unwrap_or_default();
-    if printer_name.trim().is_empty() {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": "Printer profile has no printerName configured",
-            "shiftId": payload.shift_id,
-            "roleType": payload.role_type,
-            "terminalName": payload.terminal_name,
-        }));
-    }
-
-    let paper_mm = profile
-        .get("paperWidthMm")
-        .or_else(|| profile.get("paper_width_mm"))
-        .and_then(|value| value.as_i64())
-        .unwrap_or(80) as i32;
-    let paper = escpos::PaperWidth::from_mm(paper_mm);
-
-    let shift = summary.get("shift").cloned().unwrap_or(serde_json::json!({}));
-    let cash_drawer = summary
-        .get("cashDrawer")
+    let shift = summary
+        .get("shift")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-
     let role_type = payload.role_type.unwrap_or_else(|| {
         value_str(&shift, &["role_type", "roleType"]).unwrap_or_else(|| "staff".to_string())
     });
     let terminal_name = payload.terminal_name.or_else(|| {
         value_str(&shift, &["terminal_id", "terminalId"]).filter(|value| !value.is_empty())
     });
-    let staff_name = value_str(&shift, &["staff_name", "staffName"])
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| value_str(&shift, &["staff_id", "staffId"]))
-        .unwrap_or_else(|| "Unknown".to_string());
-    let check_in = value_str(&shift, &["check_in_time", "checkInTime"]).unwrap_or_default();
-    let check_out = value_str(&shift, &["check_out_time", "checkOutTime"]).unwrap_or_default();
 
-    let orders_count = summary
-        .get("ordersCount")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0);
-    let sales_amount = summary
-        .get("salesAmount")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-    let total_expenses = summary
-        .get("totalExpenses")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-    let cash_refunds = summary
-        .get("cashRefunds")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-
-    let opening = cash_drawer
-        .get("opening_amount")
-        .or_else(|| cash_drawer.get("openingAmount"))
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-    let expected = cash_drawer
-        .get("expected_amount")
-        .or_else(|| cash_drawer.get("expectedAmount"))
-        .and_then(|value| value.as_f64());
-    let closing = cash_drawer
-        .get("closing_amount")
-        .or_else(|| cash_drawer.get("closingAmount"))
-        .and_then(|value| value.as_f64());
-    let variance = cash_drawer
-        .get("variance_amount")
-        .or_else(|| cash_drawer.get("varianceAmount"))
-        .and_then(|value| value.as_f64());
-
-    let driver_deliveries = summary
-        .get("driverDeliveries")
-        .and_then(|value| value.as_array())
-        .map(|items| items.len())
-        .unwrap_or(0);
-    let payment_amount = shift
-        .get("payment_amount")
-        .or_else(|| shift.get("paymentAmount"))
-        .and_then(|value| value.as_f64())
-        .unwrap_or(0.0);
-
-    let shift_id_short = payload
-        .shift_id
-        .get(..8)
-        .unwrap_or(payload.shift_id.as_str())
-        .to_string();
-
-    let mut receipt = escpos::EscPosBuilder::new().with_paper(paper);
-    receipt
-        .init()
-        .center()
-        .bold(true)
-        .text("SHIFT CHECKOUT\n")
-        .bold(false)
-        .separator()
-        .left()
-        .line_pair("Shift", &shift_id_short)
-        .line_pair("Role", &role_type)
-        .line_pair("Staff", &staff_name);
-    if let Some(name) = terminal_name.as_ref() {
-        receipt.line_pair("Terminal", name);
-    }
-    if !check_in.is_empty() {
-        receipt.line_pair("Check-in", &check_in);
-    }
-    if !check_out.is_empty() {
-        receipt.line_pair("Check-out", &check_out);
-    }
-    receipt
-        .separator()
-        .line_pair("Orders", &orders_count.to_string())
-        .line_pair("Sales", &format!("{sales_amount:.2}"))
-        .line_pair("Expenses", &format!("{total_expenses:.2}"))
-        .line_pair("Refunds", &format!("{cash_refunds:.2}"));
-    if driver_deliveries > 0 {
-        receipt.line_pair("Deliveries", &driver_deliveries.to_string());
-    }
-    if payment_amount > 0.0 {
-        receipt.line_pair("Payment", &format!("{payment_amount:.2}"));
-    }
-    receipt
-        .separator()
-        .line_pair("Opening", &format!("{opening:.2}"))
-        .line_pair(
-            "Expected",
-            &expected
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| "N/A".to_string()),
-        )
-        .line_pair(
-            "Closing",
-            &closing
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| "N/A".to_string()),
-        )
-        .line_pair(
-            "Variance",
-            &variance
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| "N/A".to_string()),
-        )
-        .separator()
-        .center()
-        .text("End of Checkout\n")
-        .feed(4)
-        .cut();
-
-    let bytes = receipt.build();
-    match printers::print_raw_to_windows(&printer_name, &bytes, "POS Shift Checkout") {
-        Ok(()) => {
-            info!(
-                shift_id = %payload.shift_id,
-                role_type = %role_type,
-                printer_name = %printer_name,
-                "Printed shift checkout receipt"
-            );
-            Ok(serde_json::json!({
-                "success": true,
-                "shiftId": payload.shift_id,
-                "roleType": role_type,
-                "terminalName": terminal_name,
-                "printerName": printer_name,
-            }))
-        }
-        Err(error) => {
-            warn!(
-                shift_id = %payload.shift_id,
-                role_type = %role_type,
-                printer_name = %printer_name,
-                error = %error,
-                "Failed to print shift checkout receipt"
-            );
-            Ok(serde_json::json!({
-                "success": false,
-                "error": error,
-                "shiftId": payload.shift_id,
-                "roleType": role_type,
-                "terminalName": terminal_name,
-                "printerName": printer_name,
-            }))
-        }
+    match print::enqueue_print_job(&db, "shift_checkout", &payload.shift_id, None) {
+        Ok(job) => Ok(serde_json::json!({
+            "success": true,
+            "queued": true,
+            "shiftId": payload.shift_id,
+            "roleType": role_type,
+            "terminalName": terminal_name,
+            "job": job,
+            "jobId": job.get("jobId").cloned().unwrap_or(serde_json::Value::Null),
+        })),
+        Err(error) => Ok(serde_json::json!({
+            "success": false,
+            "error": error,
+            "shiftId": payload.shift_id,
+            "roleType": role_type,
+            "terminalName": terminal_name,
+        })),
     }
 }
 

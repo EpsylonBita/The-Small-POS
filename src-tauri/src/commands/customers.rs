@@ -392,6 +392,7 @@ pub async fn customer_lookup_by_phone(
             "SELECT customer_name, customer_phone, customer_email
              FROM orders
              WHERE customer_phone IS NOT NULL
+               AND COALESCE(is_ghost, 0) = 0
                AND replace(replace(replace(replace(customer_phone, '-', ''), ' ', ''), '(', ''), ')', '') LIKE ?1
              ORDER BY updated_at DESC
              LIMIT 1",

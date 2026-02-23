@@ -3,7 +3,7 @@ use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
-    db, fetch_supabase_rows, normalize_status_for_storage, payload_arg0_as_string,
+    db, fetch_supabase_rows, normalize_status_for_storage, payload_arg0_as_string, print,
     read_local_json_array, resolve_order_id, storage, sync, value_f64, value_i64, value_str,
     write_local_json,
 };
@@ -536,6 +536,45 @@ pub async fn order_save_from_remote(
             "externalPlatformOrderId",
         ],
     );
+    let is_ghost = order_data
+        .get("is_ghost")
+        .or_else(|| order_data.get("isGhost"))
+        .and_then(|value| {
+            if let Some(flag) = value.as_bool() {
+                return Some(flag);
+            }
+            if let Some(flag) = value.as_i64() {
+                return Some(flag == 1);
+            }
+            value.as_str().and_then(|flag| {
+                let normalized = flag.trim().to_ascii_lowercase();
+                if matches!(normalized.as_str(), "true" | "1" | "yes" | "on") {
+                    Some(true)
+                } else if matches!(normalized.as_str(), "false" | "0" | "no" | "off") {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(false);
+    let ghost_source = value_str(&order_data, &["ghost_source", "ghostSource"]);
+    let ghost_metadata = order_data
+        .get("ghost_metadata")
+        .or_else(|| order_data.get("ghostMetadata"))
+        .and_then(|value| {
+            if value.is_null() {
+                return None;
+            }
+            if let Some(raw) = value.as_str() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(trimmed.to_string());
+            }
+            Some(value.to_string())
+        });
     let created_at = value_str(&order_data, &["created_at", "createdAt"]).unwrap_or(now.clone());
     let updated_at = value_str(&order_data, &["updated_at", "updatedAt"]).unwrap_or(now.clone());
 
@@ -550,7 +589,8 @@ pub async fn order_save_from_remote(
                 estimated_time, supabase_id, sync_status, payment_status, payment_method,
                 payment_transaction_id, staff_shift_id, staff_id, discount_percentage,
                 discount_amount, tip_amount, version, terminal_id, branch_id,
-                plugin, external_plugin_order_id, tax_rate, delivery_fee
+                plugin, external_plugin_order_id, tax_rate, delivery_fee,
+                is_ghost, ghost_source, ghost_metadata
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10,
@@ -559,7 +599,8 @@ pub async fn order_save_from_remote(
                 ?19, ?20, 'synced', ?21, ?22,
                 ?23, ?24, ?25, ?26,
                 ?27, ?28, 1, ?29, ?30,
-                ?31, ?32, ?33, ?34
+                ?31, ?32, ?33, ?34,
+                ?35, ?36, ?37
             )",
             rusqlite::params![
                 local_id,
@@ -596,6 +637,9 @@ pub async fn order_save_from_remote(
                 external_plugin_order_id,
                 tax_rate,
                 delivery_fee,
+                if is_ghost { 1_i64 } else { 0_i64 },
+                ghost_source,
+                ghost_metadata,
             ],
         )
         .map_err(|e| format!("save remote order: {e}"))?;
@@ -603,6 +647,16 @@ pub async fn order_save_from_remote(
 
     if let Ok(order_json) = sync::get_order_by_id(&db, &local_id) {
         let _ = app.emit("order_created", order_json);
+    }
+
+    if !is_ghost {
+        if let Err(error) = print::enqueue_print_job(&db, "order_receipt", &local_id, None) {
+            tracing::warn!(
+                order_id = %local_id,
+                error = %error,
+                "Failed to enqueue remote order receipt auto-print job"
+            );
+        }
     }
 
     Ok(serde_json::json!({
@@ -916,6 +970,14 @@ pub async fn order_assign_driver(
     )
     .map_err(|e| format!("assign driver: {e}"))?;
     drop(conn);
+
+    if let Err(error) = print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None) {
+        tracing::warn!(
+            order_id = %order_id,
+            error = %error,
+            "Failed to enqueue assignment kitchen ticket print job"
+        );
+    }
 
     let payload = serde_json::json!({
         "orderId": order_id_raw,

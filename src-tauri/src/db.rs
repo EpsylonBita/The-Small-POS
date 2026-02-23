@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 17;
+const CURRENT_SCHEMA_VERSION: i32 = 19;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -152,6 +152,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 17 {
         migrate_v17(conn)?;
+    }
+    if current < 18 {
+        migrate_v18(conn)?;
+    }
+    if current < 19 {
+        migrate_v19(conn)?;
     }
 
     Ok(())
@@ -1217,6 +1223,86 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v18: extend print_jobs entity type for shift checkout auto-print.
+fn migrate_v18(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS print_jobs_v18 (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL
+                CHECK (entity_type IN ('order_receipt', 'kitchen_ticket', 'z_report', 'shift_checkout')),
+            entity_id TEXT NOT NULL,
+            printer_profile_id TEXT,
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'printing', 'printed', 'failed')),
+            output_path TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            next_retry_at TEXT,
+            last_error TEXT,
+            warning_code TEXT,
+            warning_message TEXT,
+            last_attempt_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO print_jobs_v18
+            SELECT * FROM print_jobs;
+        DROP TABLE print_jobs;
+        ALTER TABLE print_jobs_v18 RENAME TO print_jobs;
+
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_status
+            ON print_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_created_at
+            ON print_jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_entity
+            ON print_jobs(entity_type, entity_id);
+
+        INSERT INTO schema_version (version) VALUES (18);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v18 failed: {e}");
+        format!("migration v18: {e}")
+    })?;
+
+    info!("Applied migration v18 (print_jobs entity_type includes shift_checkout)");
+    Ok(())
+}
+
+/// Migration v19: add ghost-order tracking fields on local orders.
+fn migrate_v19(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "is_ghost")? {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN is_ghost INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| format!("migration v19 add is_ghost: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "ghost_source")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN ghost_source TEXT", [])
+            .map_err(|e| format!("migration v19 add ghost_source: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "ghost_metadata")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN ghost_metadata TEXT", [])
+            .map_err(|e| format!("migration v19 add ghost_metadata: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_is_ghost ON orders(is_ghost);
+        INSERT INTO schema_version (version) VALUES (19);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v19 failed: {e}");
+        format!("migration v19: {e}")
+    })?;
+
+    info!("Applied migration v19 (ghost order tracking fields)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -1819,6 +1905,16 @@ mod tests {
         conn.execute("DELETE FROM print_jobs WHERE id = 'pj-zr-test'", [])
             .expect("cleanup");
 
+        // v18: print_jobs should accept shift_checkout entity_type
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES ('pj-sc-test', 'shift_checkout', 'shift-1', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("print_jobs should accept shift_checkout entity_type");
+        conn.execute("DELETE FROM print_jobs WHERE id = 'pj-sc-test'", [])
+            .expect("cleanup");
+
         // v14 tables
         assert!(
             tables.contains(&"driver_earnings".to_string()),
@@ -2072,6 +2168,13 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM print_jobs", [], |row| row.get(0))
             .expect("count print_jobs");
         assert_eq!(count, 1);
+
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES ('pj-shift', 'shift_checkout', 'shift-1', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert shift checkout print job");
 
         // Verify CHECK constraint rejects invalid status
         let bad = conn.execute(

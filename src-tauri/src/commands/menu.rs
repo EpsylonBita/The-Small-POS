@@ -64,17 +64,15 @@ static MENU_OFFLINE_INFO_STATE: OnceLock<Mutex<Option<Instant>>> = OnceLock::new
 
 fn should_emit_menu_payload_warn() -> bool {
     let now = Instant::now();
-    let guard = MENU_PAYLOAD_WARN_STATE.get_or_init(|| Mutex::new(None)).lock();
+    let guard = MENU_PAYLOAD_WARN_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock();
     let Ok(mut last_warned_at) = guard else {
         return true;
     };
 
     match *last_warned_at {
-        Some(previous)
-            if previous.elapsed().as_secs() < MENU_MONITOR_WARN_THROTTLE_SECS =>
-        {
-            false
-        }
+        Some(previous) if previous.elapsed().as_secs() < MENU_MONITOR_WARN_THROTTLE_SECS => false,
         _ => {
             *last_warned_at = Some(now);
             true
@@ -84,15 +82,15 @@ fn should_emit_menu_payload_warn() -> bool {
 
 fn should_emit_menu_offline_info() -> bool {
     let now = Instant::now();
-    let guard = MENU_OFFLINE_INFO_STATE.get_or_init(|| Mutex::new(None)).lock();
+    let guard = MENU_OFFLINE_INFO_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock();
     let Ok(mut last_info_at) = guard else {
         return true;
     };
 
     match *last_info_at {
-        Some(previous)
-            if previous.elapsed().as_secs() < MENU_MONITOR_OFFLINE_LOG_THROTTLE_SECS =>
-        {
+        Some(previous) if previous.elapsed().as_secs() < MENU_MONITOR_OFFLINE_LOG_THROTTLE_SECS => {
             false
         }
         _ => {

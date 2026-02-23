@@ -87,6 +87,12 @@ interface Props {
 
 const PRINTER_TYPES: PrinterType[] = ['network', 'bluetooth', 'usb', 'wifi', 'system']
 
+const isTauriDesktopRuntime = (): boolean => {
+  if (typeof window === 'undefined') return false
+  const runtime = window as any
+  return Boolean(runtime.__TAURI_INTERNALS__ || runtime.__TAURI__)
+}
+
 const normalizePrinterType = (value: unknown): PrinterType => {
   const raw = typeof value === 'string' ? value.trim().toLowerCase() : ''
   if ((PRINTER_TYPES as string[]).includes(raw)) return raw as PrinterType
@@ -359,8 +365,9 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
       let webFallbackPrinters: DiscoveredPrinter[] = []
 
-      // 2) Web Bluetooth fallback only when native found nothing
-      if (nativePrinters.length === 0) {
+      // 2) Web Bluetooth fallback only for browser runtime.
+      // On Tauri desktop we must avoid opening the browser pairing chooser.
+      if (nativePrinters.length === 0 && !isTauriDesktopRuntime()) {
         const bluetoothStatus = await getBluetoothStatus()
         if (!bluetoothStatus.available) {
           console.warn('[PrinterSettings] Web Bluetooth unavailable for fallback:', bluetoothStatus.error)
@@ -464,7 +471,10 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       usbProductId,
       usbSystemName: '',
       usbPath: connectionDetails.path || '',
-      systemPrinterName: '',
+      systemPrinterName:
+        discovered.type === 'system'
+          ? (discovered.name || discovered.address || '')
+          : '',
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       greekRenderMode: 'text',
@@ -513,6 +523,23 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   // Save printer (add or update)
   const handleSave = async () => {
+    if (!formData.name.trim()) {
+      toast.error(t('settings.printer.nameRequired', 'Printer name is required'))
+      return
+    }
+    if (formData.type === 'system' && !formData.systemPrinterName.trim()) {
+      toast.error(t('settings.printer.systemNameRequired', 'System printer name is required'))
+      return
+    }
+    if ((formData.type === 'network' || formData.type === 'wifi') && !formData.ip.trim()) {
+      toast.error(t('settings.printer.networkIpRequired', 'Network printer IP is required'))
+      return
+    }
+    if (formData.type === 'bluetooth' && !formData.bluetoothAddress.trim()) {
+      toast.error(t('settings.printer.bluetoothAddressRequired', 'Bluetooth address is required'))
+      return
+    }
+
     setLoading(true)
     try {
       const config = {

@@ -19,6 +19,7 @@ const KEY_ORG_ID: &str = "organization_id";
 const KEY_BUSINESS_TYPE: &str = "business_type";
 const KEY_SUPABASE_URL: &str = "supabase_url";
 const KEY_SUPABASE_ANON_KEY: &str = "supabase_anon_key";
+const KEY_GHOST_MODE_FEATURE_ENABLED: &str = "ghost_mode_feature_enabled";
 
 /// All credential keys managed by this module.
 const ALL_KEYS: &[&str] = &[
@@ -30,6 +31,7 @@ const ALL_KEYS: &[&str] = &[
     KEY_BUSINESS_TYPE,
     KEY_SUPABASE_URL,
     KEY_SUPABASE_ANON_KEY,
+    KEY_GHOST_MODE_FEATURE_ENABLED,
 ];
 
 // ---------------------------------------------------------------------------
@@ -101,6 +103,7 @@ pub fn get_full_config() -> Value {
         "business_type":   get_credential(KEY_BUSINESS_TYPE).unwrap_or_else(|| "food".to_string()),
         "supabase_url":    get_credential(KEY_SUPABASE_URL),
         "supabase_anon_key": get_credential(KEY_SUPABASE_ANON_KEY),
+        "ghost_mode_feature_enabled": get_credential(KEY_GHOST_MODE_FEATURE_ENABLED),
     })
 }
 
@@ -191,6 +194,33 @@ pub fn update_terminal_credentials(payload: &Value) -> Result<Value, String> {
         .and_then(Value::as_str)
     {
         set_credential(KEY_SUPABASE_ANON_KEY, skey)?;
+    }
+    if let Some(ghost_enabled) = payload
+        .get("ghostModeFeatureEnabled")
+        .or_else(|| payload.get("ghost_mode_feature_enabled"))
+    {
+        let normalized = if let Some(flag) = ghost_enabled.as_bool() {
+            Some(flag)
+        } else if let Some(flag) = ghost_enabled.as_i64() {
+            Some(flag == 1)
+        } else if let Some(flag) = ghost_enabled.as_str() {
+            let lower = flag.trim().to_ascii_lowercase();
+            if lower == "true" || lower == "1" || lower == "yes" || lower == "on" {
+                Some(true)
+            } else if lower == "false" || lower == "0" || lower == "no" || lower == "off" {
+                Some(false)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(flag) = normalized {
+            set_credential(
+                KEY_GHOST_MODE_FEATURE_ENABLED,
+                if flag { "true" } else { "false" },
+            )?;
+        }
     }
 
     info!(terminal_id = %terminal_id, "terminal credentials updated");

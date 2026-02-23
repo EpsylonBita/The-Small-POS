@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! The Small POS - Tauri v2 Backend
 //!
 //! This module registers all IPC command handlers that the React frontend
@@ -128,6 +130,7 @@ pub(crate) use data_helpers::{
 };
 pub(crate) use terminal_helpers::{
     credential_key_for_terminal_setting, extract_branch_id_from_terminal_settings_response,
+    extract_ghost_mode_feature_from_terminal_settings_response,
     extract_org_id_from_terminal_settings_response, handle_invalid_terminal_credentials,
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,
     is_terminal_auth_failure, mask_terminal_id, read_local_setting, scrub_sensitive_local_settings,
@@ -551,6 +554,21 @@ pub fn run() {
                             if let Some(oid) = extract_org_id_from_terminal_settings_response(&resp)
                             {
                                 let _ = storage::set_credential("organization_id", &oid);
+                            }
+                            if let Some(ghost_enabled) =
+                                extract_ghost_mode_feature_from_terminal_settings_response(&resp)
+                            {
+                                let value = if ghost_enabled { "true" } else { "false" };
+                                let _ =
+                                    storage::set_credential("ghost_mode_feature_enabled", value);
+                                if let Ok(conn) = startup_db.conn.lock() {
+                                    let _ = db::set_setting(
+                                        &conn,
+                                        "terminal",
+                                        "ghost_mode_feature_enabled",
+                                        value,
+                                    );
+                                }
                             }
                             if let Some(supa) = resp.get("supabase") {
                                 if let Some(url) = supa.get("url").and_then(|v| v.as_str()) {

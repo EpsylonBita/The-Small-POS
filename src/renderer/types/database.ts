@@ -209,10 +209,17 @@ export type Database = {
           customer_id: string | null
           customer_name: string | null
           customer_phone: string | null
+          coupon_code: string | null
+          coupon_discount_amount: number | null
+          coupon_id: string | null
           delivery_address: string | null
           discount_amount: number | null
+          discount_percentage: number | null
           id: string
+          is_ghost: boolean | null
           local_id: number | null
+          manual_discount_mode: string | null
+          manual_discount_value: number | null
           notes: string | null
           order_type: string
           payment_method: string | null
@@ -222,6 +229,8 @@ export type Database = {
           table_number: number | null
           tax_amount: number | null
           total_amount: number
+          ghost_source: string | null
+          ghost_metadata: Json | null
           updated_at: string | null
         }
         Insert: {
@@ -230,10 +239,17 @@ export type Database = {
           customer_id?: string | null
           customer_name?: string | null
           customer_phone?: string | null
+          coupon_code?: string | null
+          coupon_discount_amount?: number | null
+          coupon_id?: string | null
           delivery_address?: string | null
           discount_amount?: number | null
+          discount_percentage?: number | null
           id?: string
+          is_ghost?: boolean | null
           local_id?: number | null
+          manual_discount_mode?: string | null
+          manual_discount_value?: number | null
           notes?: string | null
           order_type?: string
           payment_method?: string | null
@@ -243,6 +259,8 @@ export type Database = {
           table_number?: number | null
           tax_amount?: number | null
           total_amount: number
+          ghost_source?: string | null
+          ghost_metadata?: Json | null
           updated_at?: string | null
         }
         Update: {
@@ -251,10 +269,17 @@ export type Database = {
           customer_id?: string | null
           customer_name?: string | null
           customer_phone?: string | null
+          coupon_code?: string | null
+          coupon_discount_amount?: number | null
+          coupon_id?: string | null
           delivery_address?: string | null
           discount_amount?: number | null
+          discount_percentage?: number | null
           id?: string
+          is_ghost?: boolean | null
           local_id?: number | null
+          manual_discount_mode?: string | null
+          manual_discount_value?: number | null
           notes?: string | null
           order_type?: string
           payment_method?: string | null
@@ -264,6 +289,8 @@ export type Database = {
           table_number?: number | null
           tax_amount?: number | null
           total_amount?: number
+          ghost_source?: string | null
+          ghost_metadata?: Json | null
           updated_at?: string | null
         }
         Relationships: [
@@ -292,6 +319,8 @@ export type Database = {
           unit_price: number
           total_price: number | null
           customizations: Json | null
+          original_unit_price: number | null
+          is_price_overridden: boolean
           notes: string | null
           created_at: string | null
         }
@@ -303,6 +332,8 @@ export type Database = {
           unit_price: number
           total_price?: number | null
           customizations?: Json | null
+          original_unit_price?: number | null
+          is_price_overridden?: boolean
           notes?: string | null
           created_at?: string | null
         }
@@ -314,6 +345,8 @@ export type Database = {
           unit_price?: number
           total_price?: number | null
           customizations?: Json | null
+          original_unit_price?: number | null
+          is_price_overridden?: boolean
           notes?: string | null
           created_at?: string | null
         }

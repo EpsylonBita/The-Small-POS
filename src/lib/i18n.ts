@@ -30,7 +30,7 @@ const getInitialLanguage = (): string => {
   return 'en';
 };
 
-// Only initialize if not already initialized
+// Initialize i18next on first load
 if (!i18n.isInitialized) {
   i18n
     .use(initReactI18next)
@@ -48,6 +48,11 @@ if (!i18n.isInitialized) {
       initImmediate: false,
     });
 }
+
+// Always refresh resource bundles so new/changed translations are picked up
+// (handles Vite HMR where the module re-evaluates but isInitialized is already true)
+i18n.addResourceBundle('en', 'translation', enTranslations, true, true);
+i18n.addResourceBundle('el', 'translation', elTranslations, true, true);
 
 /**
  * Update i18n language from database

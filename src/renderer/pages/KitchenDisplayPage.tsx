@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -23,6 +23,7 @@ import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { subscriptionManager, type SubscriptionStatus } from '../services/SubscriptionManager';
 
 interface KitchenOrder {
   id: string;
@@ -54,6 +55,8 @@ interface KdsStation {
 }
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
+const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
+const KDS_FALLBACK_POLL_INTERVAL_MS = 4000;
 
 const KitchenDisplayPage: React.FC = () => {
   const bridge = getBridge();
@@ -68,6 +71,9 @@ const KitchenDisplayPage: React.FC = () => {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
+  const [isFallbackPollingActive, setIsFallbackPollingActive] = useState(false);
+  const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isDark = resolvedTheme === 'dark';
 
@@ -110,9 +116,11 @@ const KitchenDisplayPage: React.FC = () => {
     return colors[type] || 'bg-gray-500/20 text-gray-500';
   };
 
-  const fetchOrders = useCallback(async () => {
+  const fetchOrders = useCallback(async (showLoading = true) => {
     if (!staff?.organizationId || !staff?.branchId) return;
-    setLoading(true);
+    if (showLoading) {
+      setLoading(true);
+    }
     setError(null);
     try {
       // Only fetch pending and preparing tickets - completed tickets clear from KDS
@@ -176,13 +184,86 @@ const KitchenDisplayPage: React.FC = () => {
       setError(err instanceof Error ? err.message : t('kitchen.loadError', 'Unable to load orders'));
       setOrders([]);
     } finally {
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   }, [bridge, staff?.organizationId, staff?.branchId, stationFilter, t]);
 
   useEffect(() => {
-    fetchOrders();
+    void fetchOrders(true);
   }, [fetchOrders]);
+
+  useEffect(() => {
+    if (!autoRefresh || !staff?.branchId) {
+      setIsRealtimeConnected(false);
+      setIsFallbackPollingActive(false);
+      return;
+    }
+
+    let disposed = false;
+
+    const scheduleRealtimeRefresh = (delayMs = 180) => {
+      if (disposed || realtimeRefreshTimerRef.current) {
+        return;
+      }
+      realtimeRefreshTimerRef.current = setTimeout(() => {
+        realtimeRefreshTimerRef.current = null;
+        void fetchOrders(false);
+      }, delayMs);
+    };
+
+    const unsubscribeRealtime = subscriptionManager.subscribe(KDS_REALTIME_SUBSCRIPTION_KEY, {
+      table: 'kds_tickets',
+      event: '*',
+      filter: `branch_id=eq.${staff.branchId}`,
+      callback: (payload) => {
+        const record = payload?.new || payload?.old;
+        if (staff?.organizationId && record?.organization_id && record.organization_id !== staff.organizationId) {
+          return;
+        }
+        scheduleRealtimeRefresh(120);
+      },
+      onStatusChange: (status: SubscriptionStatus) => {
+        if (status.status === 'active') {
+          setIsRealtimeConnected(true);
+          setIsFallbackPollingActive(false);
+          return;
+        }
+
+        if (status.status === 'error' || status.status === 'closed') {
+          setIsRealtimeConnected(false);
+          setIsFallbackPollingActive(autoRefresh);
+          return;
+        }
+
+        setIsRealtimeConnected(false);
+      },
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribeRealtime();
+      if (realtimeRefreshTimerRef.current) {
+        clearTimeout(realtimeRefreshTimerRef.current);
+        realtimeRefreshTimerRef.current = null;
+      }
+      setIsRealtimeConnected(false);
+      setIsFallbackPollingActive(false);
+    };
+  }, [autoRefresh, fetchOrders, staff?.branchId, staff?.organizationId]);
+
+  useEffect(() => {
+    if (!autoRefresh || !isFallbackPollingActive) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      void fetchOrders(false);
+    }, KDS_FALLBACK_POLL_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [autoRefresh, fetchOrders, isFallbackPollingActive]);
 
   // Auto-refresh from Rust-driven events when enabled.
   useEffect(() => {
@@ -195,7 +276,7 @@ const KitchenDisplayPage: React.FC = () => {
       if (disposed || pendingTimer) return;
       pendingTimer = setTimeout(() => {
         pendingTimer = null;
-        void fetchOrders();
+        void fetchOrders(false);
       }, delayMs);
     };
 
@@ -372,6 +453,9 @@ const KitchenDisplayPage: React.FC = () => {
             <h1 className="text-2xl font-bold">{t('kitchen.title', 'Kitchen Display')}</h1>
             <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
               {t('kitchen.subtitle', 'Real-time order preparation')}
+              {autoRefresh
+                ? ` • ${isRealtimeConnected ? t('common.live', 'Live') : t('kitchen.pollingFallback', 'Polling fallback')}`
+                : ''}
             </p>
           </div>
         </div>
@@ -385,7 +469,12 @@ const KitchenDisplayPage: React.FC = () => {
           <button onClick={() => setAutoRefresh(!autoRefresh)} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg ${autoRefresh ? 'text-green-500' : ''}`}>
             {autoRefresh ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
           </button>
-          <button onClick={fetchOrders} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <button
+            onClick={() => {
+              void fetchOrders(true);
+            }}
+            className={`p-3 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}
+          >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
@@ -464,7 +553,9 @@ const KitchenDisplayPage: React.FC = () => {
           <h3 className="text-xl font-semibold mb-2 text-red-500">{t('kitchen.loadError', 'Unable to Load Orders')}</h3>
           <p className={`mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{error}</p>
           <button
-            onClick={fetchOrders}
+            onClick={() => {
+              void fetchOrders(true);
+            }}
             className="px-6 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white font-medium transition-colors"
           >
             <RefreshCw className="w-4 h-4 inline mr-2" />
@@ -491,4 +582,3 @@ const KitchenDisplayPage: React.FC = () => {
 };
 
 export default KitchenDisplayPage;
-

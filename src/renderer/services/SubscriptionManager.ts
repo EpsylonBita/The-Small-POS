@@ -10,13 +10,15 @@ interface SubscriptionConfig {
   event: string;
   callback: (payload: any) => void;
   filter?: string;
+  onStatusChange?: (status: SubscriptionStatus) => void;
 }
 
-interface SubscriptionStatus {
+export interface SubscriptionStatus {
   key: string;
   table: string;
-  status: 'active' | 'error';
+  status: 'connecting' | 'active' | 'error' | 'closed';
   callbackCount: number;
+  channelStatus?: string;
   error?: string;
 }
 
@@ -24,6 +26,7 @@ class SubscriptionManager {
   private static instance: SubscriptionManager;
   private subscriptions = new Map<string, any>();
   private callbacks = new Map<string, Set<(payload: any) => void>>();
+  private statusCallbacks = new Map<string, Set<(status: SubscriptionStatus) => void>>();
   private subscriptionStatus = new Map<string, SubscriptionStatus>();
 
   private constructor() {}
@@ -52,10 +55,13 @@ class SubscriptionManager {
         this.callbacks.set(subscriptionKey, new Set());
       }
       this.callbacks.get(subscriptionKey)!.add(config.callback);
+      this.addStatusCallback(subscriptionKey, config.onStatusChange);
+      this.emitStatusToCallbacks(subscriptionKey);
 
       // Return unsubscribe function
       return () => {
         this.removeCallback(subscriptionKey, config.callback);
+        this.removeStatusCallback(subscriptionKey, config.onStatusChange);
       };
     }
 
@@ -91,7 +97,9 @@ class SubscriptionManager {
             }
           }
         )
-        .subscribe();
+        .subscribe((status, err) => {
+          this.handleChannelStatus(subscriptionKey, config.table, status, err);
+        });
 
       this.subscriptions.set(subscriptionKey, channel);
 
@@ -100,20 +108,23 @@ class SubscriptionManager {
         this.callbacks.set(subscriptionKey, new Set());
       }
       this.callbacks.get(subscriptionKey)!.add(config.callback);
+      this.addStatusCallback(subscriptionKey, config.onStatusChange);
 
       // Track subscription status
       this.subscriptionStatus.set(subscriptionKey, {
         key: subscriptionKey,
         table: config.table,
-        status: 'active',
+        status: 'connecting',
         callbackCount: 1
       });
+      this.emitStatusToCallbacks(subscriptionKey);
 
       console.log(`✅ Created new subscription: ${subscriptionKey}`);
 
       // Return unsubscribe function
       return () => {
         this.removeCallback(subscriptionKey, config.callback);
+        this.removeStatusCallback(subscriptionKey, config.onStatusChange);
       };
 
     } catch (error) {
@@ -127,6 +138,7 @@ class SubscriptionManager {
         callbackCount: 0,
         error: error instanceof Error ? error.message : String(error)
       });
+      this.emitStatusToCallbacks(subscriptionKey);
 
       // Return no-op unsubscribe instead of throwing
       return () => {
@@ -149,11 +161,99 @@ class SubscriptionManager {
         status.callbackCount = callbacks.size;
       }
 
-      // If no more callbacks, unsubscribe completely
+      this.maybeUnsubscribe(subscriptionKey);
+    }
+  }
+
+  private addStatusCallback(
+    subscriptionKey: string,
+    callback?: (status: SubscriptionStatus) => void
+  ): void {
+    if (!callback) {
+      return;
+    }
+    if (!this.statusCallbacks.has(subscriptionKey)) {
+      this.statusCallbacks.set(subscriptionKey, new Set());
+    }
+    this.statusCallbacks.get(subscriptionKey)!.add(callback);
+  }
+
+  private removeStatusCallback(
+    subscriptionKey: string,
+    callback?: (status: SubscriptionStatus) => void
+  ): void {
+    if (!callback) {
+      return;
+    }
+    const callbacks = this.statusCallbacks.get(subscriptionKey);
+    if (callbacks) {
+      callbacks.delete(callback);
       if (callbacks.size === 0) {
-        this.unsubscribe(subscriptionKey);
+        this.statusCallbacks.delete(subscriptionKey);
       }
     }
+    this.maybeUnsubscribe(subscriptionKey);
+  }
+
+  private maybeUnsubscribe(subscriptionKey: string): void {
+    const callbackCount = this.callbacks.get(subscriptionKey)?.size ?? 0;
+    const statusCallbackCount = this.statusCallbacks.get(subscriptionKey)?.size ?? 0;
+    if (callbackCount === 0 && statusCallbackCount === 0) {
+      this.unsubscribe(subscriptionKey);
+    }
+  }
+
+  private handleChannelStatus(
+    subscriptionKey: string,
+    table: string,
+    status: string,
+    err?: Error
+  ): void {
+    const current = this.subscriptionStatus.get(subscriptionKey) || {
+      key: subscriptionKey,
+      table,
+      status: 'connecting' as const,
+      callbackCount: this.callbacks.get(subscriptionKey)?.size ?? 0,
+    };
+
+    const next: SubscriptionStatus = {
+      ...current,
+      callbackCount: this.callbacks.get(subscriptionKey)?.size ?? 0,
+      channelStatus: status,
+      error: err?.message || current.error,
+    };
+
+    if (status === 'SUBSCRIBED') {
+      next.status = 'active';
+      next.error = undefined;
+    } else if (status === 'CLOSED') {
+      next.status = 'closed';
+      next.error = err?.message || 'Channel closed';
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      next.status = 'error';
+      next.error = err?.message || status;
+    } else {
+      next.status = 'connecting';
+    }
+
+    this.subscriptionStatus.set(subscriptionKey, next);
+    this.emitStatusToCallbacks(subscriptionKey);
+  }
+
+  private emitStatusToCallbacks(subscriptionKey: string): void {
+    const status = this.subscriptionStatus.get(subscriptionKey);
+    const callbacks = this.statusCallbacks.get(subscriptionKey);
+    if (!status || !callbacks || callbacks.size === 0) {
+      return;
+    }
+
+    callbacks.forEach(callback => {
+      try {
+        callback({ ...status });
+      } catch (error) {
+        console.error(`Error in status callback for ${subscriptionKey}:`, error);
+      }
+    });
   }
 
   /**
@@ -166,6 +266,7 @@ class SubscriptionManager {
         supabase.removeChannel(channel);
         this.subscriptions.delete(subscriptionKey);
         this.callbacks.delete(subscriptionKey);
+        this.statusCallbacks.delete(subscriptionKey);
         this.subscriptionStatus.delete(subscriptionKey);
         console.log(`📡 Unsubscribed from: ${subscriptionKey}`);
       } catch (error) {
@@ -190,6 +291,7 @@ class SubscriptionManager {
 
     this.subscriptions.clear();
     this.callbacks.clear();
+    this.statusCallbacks.clear();
     this.subscriptionStatus.clear();
     console.log('✅ All subscriptions cleaned up');
   }

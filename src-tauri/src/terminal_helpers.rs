@@ -15,6 +15,37 @@ fn nested_value_str(v: &serde_json::Value, pointers: &[&str]) -> Option<String> 
     None
 }
 
+fn nested_value_bool(v: &serde_json::Value, pointers: &[&str]) -> Option<bool> {
+    for pointer in pointers {
+        if let Some(value) = v.pointer(pointer) {
+            if let Some(flag) = value.as_bool() {
+                return Some(flag);
+            }
+            if let Some(flag) = value.as_i64() {
+                return Some(flag == 1);
+            }
+            if let Some(flag) = value.as_str() {
+                let normalized = flag.trim().to_ascii_lowercase();
+                if normalized == "true"
+                    || normalized == "1"
+                    || normalized == "yes"
+                    || normalized == "on"
+                {
+                    return Some(true);
+                }
+                if normalized == "false"
+                    || normalized == "0"
+                    || normalized == "no"
+                    || normalized == "off"
+                {
+                    return Some(false);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_org_id_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -46,6 +77,46 @@ pub(crate) fn extract_branch_id_from_terminal_settings_response(
     })
 }
 
+pub(crate) fn extract_ghost_mode_feature_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<bool> {
+    if let Some(value) = resp.get("ghost_mode_feature_enabled") {
+        if let Some(flag) = value.as_bool() {
+            return Some(flag);
+        }
+        if let Some(flag) = value.as_i64() {
+            return Some(flag == 1);
+        }
+        if let Some(flag) = value.as_str() {
+            let normalized = flag.trim().to_ascii_lowercase();
+            if normalized == "true"
+                || normalized == "1"
+                || normalized == "yes"
+                || normalized == "on"
+            {
+                return Some(true);
+            }
+            if normalized == "false"
+                || normalized == "0"
+                || normalized == "no"
+                || normalized == "off"
+            {
+                return Some(false);
+            }
+        }
+    }
+
+    nested_value_bool(
+        resp,
+        &[
+            "/settings/terminal/ghost_mode_feature_enabled",
+            "/terminal/ghost_mode_feature_enabled",
+            "/terminal/enabled_features/ghost_mode",
+            "/enabled_features/ghost_mode",
+        ],
+    )
+}
+
 pub(crate) fn credential_key_for_terminal_setting(setting_key: &str) -> Option<&'static str> {
     match setting_key {
         "terminal_id" => Some("terminal_id"),
@@ -56,6 +127,7 @@ pub(crate) fn credential_key_for_terminal_setting(setting_key: &str) -> Option<&
         "business_type" => Some("business_type"),
         "supabase_url" => Some("supabase_url"),
         "supabase_anon_key" => Some("supabase_anon_key"),
+        "ghost_mode_feature_enabled" => Some("ghost_mode_feature_enabled"),
         _ => None,
     }
 }
@@ -133,6 +205,7 @@ pub(crate) fn hydrate_terminal_credentials_from_local_settings(db: &db::DbState)
         ("business_type", "business_type"),
         ("supabase_url", "supabase_url"),
         ("supabase_anon_key", "supabase_anon_key"),
+        ("ghost_mode_feature_enabled", "ghost_mode_feature_enabled"),
     ];
 
     for (credential_key, setting_key) in mappings {

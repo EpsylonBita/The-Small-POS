@@ -40,6 +40,7 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../services/terminal-credentials';
+import { couponRedemptionService } from '../services/CouponRedemptionService';
 import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface OrderDashboardProps {
@@ -283,6 +284,23 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     shiftRefreshArmedRef.current = true;
     void silentRefresh();
   }, [isShiftActive, showMenuModal, showEditMenuModal, silentRefresh]);
+
+  useEffect(() => {
+    const processCouponQueue = () => {
+      couponRedemptionService.processQueue().catch((error) => {
+        console.warn('[OrderDashboard] Coupon redemption retry failed:', error);
+      });
+    };
+
+    processCouponQueue();
+    const intervalId = window.setInterval(processCouponQueue, 30000);
+    window.addEventListener('online', processCouponQueue);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', processCouponQueue);
+    };
+  }, []);
 
   // Auto-open approval panel for external pending orders (queue)
   const playExternalOrderAlert = useCallback(() => {
@@ -1290,8 +1308,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // Fallback: multiply price by quantity
         return sum + ((item.price || 0) * (item.quantity || 1));
       }, 0) || orderData.total || 0;
-      const discountAmount = orderData.discountAmount || 0;
+      const manualDiscountAmount = Number(orderData.discountAmount || 0);
+      const couponDiscountAmount = Math.max(0, Number(orderData.coupon_discount_amount || 0));
+      const totalDiscountAmount = Math.max(
+        0,
+        Number(orderData.total_discount_amount ?? (manualDiscountAmount + couponDiscountAmount))
+      );
       const discountPercentage = orderData.discountPercentage || 0;
+      const manualDiscountMode: 'percentage' | 'fixed' | null =
+        orderData.manualDiscountMode || (discountPercentage > 0 ? 'percentage' : null);
+      const manualDiscountValue =
+        orderData.manualDiscountValue ??
+        (manualDiscountMode === 'percentage' ? discountPercentage : manualDiscountAmount);
+      const couponId = typeof orderData.coupon_id === 'string' ? orderData.coupon_id : null;
+      const couponCode = typeof orderData.coupon_code === 'string' ? orderData.coupon_code : null;
+      const isGhostOrder =
+        orderData.is_ghost === true ||
+        orderData.isGhost === true ||
+        orderData.ghost === true;
+      const ghostSource = isGhostOrder
+        ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_item')
+        : null;
+      const ghostMetadata = isGhostOrder
+        ? (orderData.ghost_metadata ?? {
+          trigger: 'manual_item',
+          bypass_reason: 'ghost_mode_enabled',
+        })
+        : null;
 
       // Get delivery fee from delivery zone info if available, otherwise use 0
       let deliveryFee = 0;
@@ -1301,7 +1344,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         }
       }
 
-      const total = subtotal - discountAmount + deliveryFee;
+      const total = subtotal - totalDiscountAmount + deliveryFee;
 
       // Create order object
       const orderToCreate = {
@@ -1324,6 +1367,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           price: item.unitPrice || item.price || 0,
           unit_price: item.unitPrice || item.price || 0,
           unitPrice: item.unitPrice || item.price || 0,
+          original_unit_price:
+            item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.price || 0,
+          originalUnitPrice:
+            item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.price || 0,
+          is_price_overridden:
+            item.isPriceOverridden === true ||
+            item.is_price_overridden === true ||
+            Math.abs(
+              (item.unitPrice || item.price || 0) -
+                (item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.price || 0)
+            ) > 0.0001,
+          isPriceOverridden:
+            item.isPriceOverridden === true ||
+            item.is_price_overridden === true ||
+            Math.abs(
+              (item.unitPrice || item.price || 0) -
+                (item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.price || 0)
+            ) > 0.0001,
           totalPrice: item.totalPrice || ((item.unitPrice || item.price || 0) * (item.quantity || 1)),
           total_price: item.totalPrice || ((item.unitPrice || item.price || 0) * (item.quantity || 1)),
           customizations: item.customizations || null,
@@ -1331,9 +1392,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         })) || [],
         total_amount: total,
         subtotal: subtotal,
-        discount_amount: discountAmount,
+        discount_amount: totalDiscountAmount,
         discount_percentage: discountPercentage,
+        manual_discount_mode: manualDiscountMode,
+        manual_discount_value: manualDiscountValue,
+        coupon_id: couponId,
+        // Leave coupon_code null at create-time; redemption flow finalizes the code after usage increment.
+        coupon_code: null,
+        coupon_discount_amount: couponDiscountAmount,
         delivery_fee: deliveryFee,
+        is_ghost: isGhostOrder,
+        ghost_source: ghostSource,
+        ghost_metadata: ghostMetadata,
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
         payment_method: orderData.paymentData?.method || 'cash',
@@ -1356,17 +1426,30 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // Refresh orders in background - don't block UI
         silentRefresh().catch(err => console.debug('[OrderDashboard] Background refresh error:', err));
 
-        // Auto-print receipt/ticket for new orders (fire-and-forget - don't block UI)
-        if (result.orderId) {
-          console.log('[OrderDashboard] Starting auto-print for order:', result.orderId);
-          bridge.payments.printReceipt(result.orderId)
-            .then((printResult: any) => console.log('[OrderDashboard] Receipt print result:', printResult))
-            .catch((printError: any) => console.error('[OrderDashboard] Auto-print error:', printError));
+        if (!isGhostOrder && couponId && result.orderId) {
+          couponRedemptionService
+            .redeemOrQueue({
+              couponId,
+              couponCode,
+              orderId: result.orderId,
+              discountAmount: couponDiscountAmount,
+            })
+            .catch((error) => {
+              console.warn('[OrderDashboard] Failed to enqueue coupon redemption retry:', error);
+            });
+        }
 
-          // Cash register / fiscal print (fire-and-forget, non-blocking)
-          bridge.ecr.fiscalPrint(result.orderId)
-            .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
-            .catch((e: any) => console.warn('[OrderDashboard] Cash register print error (non-blocking):', e));
+        if (result.orderId) {
+          if (isGhostOrder) {
+            bridge.payments.printReceipt(result.orderId)
+              .then((printResult: any) => console.log('[OrderDashboard] Ghost receipt print result:', printResult))
+              .catch((printError: any) => console.error('[OrderDashboard] Ghost receipt print error:', printError));
+          } else {
+            // Cash register / fiscal print (fire-and-forget, non-blocking)
+            bridge.ecr.fiscalPrint(result.orderId)
+              .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
+              .catch((e: any) => console.warn('[OrderDashboard] Cash register print error (non-blocking):', e));
+          }
         } else {
           console.warn('[OrderDashboard] No orderId in result, skipping auto-print');
         }

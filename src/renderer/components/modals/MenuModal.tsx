@@ -41,6 +41,15 @@ interface MenuModalProps {
     paymentData?: any;
     discountPercentage?: number;
     discountAmount?: number;
+    manualDiscountMode?: 'percentage' | 'fixed';
+    manualDiscountValue?: number;
+    coupon_id?: string | null;
+    coupon_code?: string | null;
+    coupon_discount_amount?: number;
+    total_discount_amount?: number;
+    is_ghost?: boolean;
+    ghost_source?: string | null;
+    ghost_metadata?: Record<string, unknown> | null;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   }) => void;
   // Edit mode props
@@ -86,7 +95,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
   const [cartItems, setCartItems] = useState<any[]>([]);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [discountPercentage, setDiscountPercentage] = useState<number>(0);
+  const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
+  const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
+  const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false);
+  const [ghostModeEnabled, setGhostModeEnabled] = useState(false);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
@@ -142,6 +154,23 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Track if we've loaded items for this edit session to prevent infinite loops
   const hasLoadedItemsRef = React.useRef(false);
   const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
+  const hasManualCartItems = cartItems.some((item) => item?.is_manual === true);
+  const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeEnabled && hasManualCartItems;
+
+  const parseBooleanSetting = (value: unknown): boolean => {
+    if (value === true || value === 1) return true;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return false;
+      if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+        const unwrapped = trimmed.slice(1, -1).trim().toLowerCase();
+        return unwrapped === 'true' || unwrapped === '1' || unwrapped === 'yes' || unwrapped === 'on';
+      }
+      const normalized = trimmed.toLowerCase();
+      return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+    }
+    return false;
+  };
 
   // Effective delivery zone info - use prop if available, otherwise use locally fetched
   const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
@@ -199,8 +228,33 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setAppliedCoupon(null);
       setCouponError(null);
       setSelectedCombo(null);
+      setManualDiscountMode('percentage');
+      setManualDiscountValue(0);
+      setGhostModeEnabled(false);
+      setGhostModeFeatureEnabled(false);
     }
   }, [isOpen, cartItems.length]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const loadGhostSettings = async () => {
+      try {
+        const [featureFlag, enabled] = await Promise.all([
+          bridge.settings.get('terminal', 'ghost_mode_feature_enabled'),
+          bridge.settings.get('system', 'ghost_mode_enabled'),
+        ]);
+        setGhostModeFeatureEnabled(parseBooleanSetting(featureFlag));
+        setGhostModeEnabled(parseBooleanSetting(enabled));
+      } catch (error) {
+        console.warn('[MenuModal] Failed to load ghost mode settings:', error);
+        setGhostModeFeatureEnabled(false);
+        setGhostModeEnabled(false);
+      }
+    };
+    void loadGhostSettings();
+  }, [bridge.settings, isOpen]);
 
   // Fetch delivery zone info when modal opens for delivery orders (if not provided via props)
   useEffect(() => {
@@ -358,6 +412,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
             basePrice: item.unit_price || item.price || 0,
             unitPrice: item.unit_price || item.price || 0,
+            originalUnitPrice: item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0,
+            isPriceOverridden:
+              item.is_price_overridden === true ||
+              item.isPriceOverridden === true ||
+              ((item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0) !==
+                (item.unit_price || item.price || 0)),
           }));
           setCartItems(transformedItems);
         }
@@ -380,6 +440,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                   totalPrice: item.total_price || item.totalPrice || ((item.unit_price || item.price || 0) * (item.quantity || 1)),
                   basePrice: item.unit_price || item.price || 0,
                   unitPrice: item.unit_price || item.price || 0,
+                  originalUnitPrice: item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0,
+                  isPriceOverridden:
+                    item.is_price_overridden === true ||
+                    item.isPriceOverridden === true ||
+                    ((item.original_unit_price || item.originalUnitPrice || item.unit_price || item.price || 0) !==
+                      (item.unit_price || item.price || 0)),
                 };
               });
               setCartItems(transformedItems);
@@ -519,6 +585,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       totalPrice: comboPrice,
       basePrice: comboPrice,
       unitPrice: comboPrice,
+      originalUnitPrice: comboPrice,
+      isPriceOverridden: false,
       is_combo: true,
       combo_id: combo.id,
       combo_type: combo.combo_type,
@@ -552,6 +620,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       totalPrice: comboPrice,
       basePrice: comboPrice,
       unitPrice: comboPrice,
+      originalUnitPrice: comboPrice,
+      isPriceOverridden: false,
       is_combo: true,
       combo_id: combo.id,
       combo_type: combo.combo_type,
@@ -581,7 +651,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         error?: string;
       }>('pos/coupons/validate', { code, order_total: cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) });
 
-      if (result.success && result.data?.valid && result.data?.coupon) {
+      if (!result.success) {
+        setCouponError(result.error || t('menu.cart.couponError', 'Failed to validate coupon'));
+        return;
+      }
+
+      if (result.data?.valid && result.data?.coupon) {
         setAppliedCoupon(result.data.coupon);
         setCouponError(null);
         toast.success(t('menu.cart.couponApplied', 'Coupon applied!'));
@@ -614,17 +689,34 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       totalPrice: price,
       basePrice: price,
       unitPrice: price,
+      originalUnitPrice: price,
+      isPriceOverridden: false,
       is_manual: true,
     };
     setCartItems((prev) => [...prev, cartItem]);
     toast.success(t('menu.cart.manualItemAdded', 'Manual item added'));
   };
 
+  const calculateManualDiscount = useCallback((subtotal: number) => {
+    if (manualDiscountMode === 'percentage') {
+      const percentage = Math.max(0, Math.min(manualDiscountValue, 100));
+      return {
+        discountAmount: subtotal * (percentage / 100),
+        discountPercentage: percentage,
+      };
+    }
+    return {
+      discountAmount: Math.min(Math.max(manualDiscountValue, 0), subtotal),
+      discountPercentage: 0,
+    };
+  }, [manualDiscountMode, manualDiscountValue]);
+
   // Calculate coupon discount
   const calculateCouponDiscount = (): number => {
     if (!appliedCoupon) return 0;
     const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-    const afterManualDiscount = subtotal * (1 - discountPercentage / 100);
+    const { discountAmount } = calculateManualDiscount(subtotal);
+    const afterManualDiscount = subtotal - discountAmount;
     if (appliedCoupon.discount_type === 'percentage') {
       return afterManualDiscount * (appliedCoupon.discount_value / 100);
     }
@@ -727,6 +819,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       totalPrice: totalPriceWithQuantity, // TOTAL price = (base + customizations) * quantity
       basePrice: basePrice, // Store base price separately (without customizations)
       unitPrice: pricePerItem, // Store unit price (base + customizations, without quantity)
+      originalUnitPrice: pricePerItem,
+      isPriceOverridden: false,
       flavorType: item.flavor_type || null, // Store flavor type (savory/sweet) for display
       categoryName: categoryName, // Store main category name (e.g., "Crepes", "Waffles")
     };
@@ -766,6 +860,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             quantity: item.quantity,
             unit_price: item.unitPrice || item.price,
             total_price: item.totalPrice,
+            original_unit_price: item.originalUnitPrice ?? item.unitPrice ?? item.price,
+            is_price_overridden:
+              item.isPriceOverridden === true ||
+              Math.abs(
+                (item.unitPrice || item.price || 0) -
+                  (item.originalUnitPrice ?? item.unitPrice ?? item.price ?? 0)
+              ) > 0.0001,
             notes: item.notes,
             customizations: item.customizations,
             categoryName: item.categoryName // Include category name for display in orders
@@ -785,6 +886,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       } finally {
         setIsSavingEdit(false);
       }
+      return;
+    }
+
+    if (shouldApplyGhostMode) {
+      const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+      await handlePaymentComplete({
+        method: 'other',
+        status: 'paid',
+        amount: subtotal,
+        isGhostBypass: true,
+      });
       return;
     }
 
@@ -815,11 +927,42 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     toast.success(t('modals.menu.itemRemoved'));
   };
 
+  const handleLinePriceChange = (itemId: string | number, newUnitPrice: number) => {
+    const normalizedPrice = Math.max(0, Number.isFinite(newUnitPrice) ? newUnitPrice : 0);
+    setCartItems(prev =>
+      prev.map(item => {
+        if (item.id !== itemId) return item;
+        const originalUnitPrice = item.originalUnitPrice ?? item.unitPrice ?? item.price ?? 0;
+        const isPriceOverridden = Math.abs(normalizedPrice - originalUnitPrice) > 0.0001;
+        return {
+          ...item,
+          unitPrice: normalizedPrice,
+          price: normalizedPrice,
+          totalPrice: normalizedPrice * item.quantity,
+          originalUnitPrice,
+          isPriceOverridden,
+        };
+      })
+    );
+  };
+
   const handlePaymentComplete = async (paymentData: any) => {
     const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-    const discountAmount = subtotal * (discountPercentage / 100);
+    const {
+      discountAmount: manualDiscountAmount,
+      discountPercentage: normalizedDiscountPercentage,
+    } = calculateManualDiscount(subtotal);
     const couponDiscountAmount = calculateCouponDiscount();
-    const totalAfterDiscount = subtotal - discountAmount - couponDiscountAmount;
+    const totalDiscountAmount = manualDiscountAmount + couponDiscountAmount;
+    const totalAfterDiscount = subtotal - totalDiscountAmount;
+    const isGhostOrder = shouldApplyGhostMode;
+    const ghostMetadata = isGhostOrder
+      ? {
+        trigger: 'manual_item',
+        manual_item_count: cartItems.filter(item => item?.is_manual === true).length,
+        bypass_reason: 'ghost_mode_enabled',
+      }
+      : null;
 
     // Debug: Log cart items with notes, categoryName, and customizations before passing to onOrderComplete
     console.log('[MenuModal.handlePaymentComplete] cartItems details:', cartItems.map(item => ({
@@ -852,8 +995,14 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           orderType,
           notes: '', // Could be enhanced to collect order notes
           paymentData,
-          discountPercentage,
-          discountAmount,
+          discountPercentage: normalizedDiscountPercentage,
+          discountAmount: manualDiscountAmount,
+          manualDiscountMode,
+          manualDiscountValue,
+          total_discount_amount: totalDiscountAmount,
+          is_ghost: isGhostOrder,
+          ghost_source: isGhostOrder ? 'manual_item' : null,
+          ghost_metadata: ghostMetadata,
           deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
           ...(appliedCoupon ? {
             coupon_id: appliedCoupon.id,
@@ -867,7 +1016,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setCartItems([]);
       setSelectedCategory("all");
       setSelectedSubcategory("");
-      setDiscountPercentage(0);
+      setManualDiscountMode('percentage');
+      setManualDiscountValue(0);
       setShowPaymentModal(false);
       onClose();
     } catch (error) {
@@ -1025,9 +1175,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onUpdateCart={setCartItems}
               onEditItem={handleEditCartItem}
               onRemoveItem={handleRemoveCartItem}
-              discountPercentage={discountPercentage}
+              discountPercentage={manualDiscountMode === 'percentage' ? manualDiscountValue : 0}
+              manualDiscountMode={manualDiscountMode}
+              manualDiscountValue={manualDiscountValue}
               maxDiscountPercentage={maxDiscountPercentage}
-              onDiscountChange={editMode ? undefined : setDiscountPercentage}
+              onManualDiscountChange={
+                editMode
+                  ? undefined
+                  : (mode, value) => {
+                      setManualDiscountMode(mode);
+                      setManualDiscountValue(value);
+                    }
+              }
               editMode={editMode}
               isSaving={isSavingEdit}
               orderType={orderType}
@@ -1039,6 +1198,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               isValidatingCoupon={isValidatingCoupon}
               couponError={couponError}
               onAddManualItem={editMode ? undefined : handleAddManualItem}
+              onLinePriceChange={handleLinePriceChange}
             />
           </div>
         </div>
@@ -1076,16 +1236,25 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       {/* Payment Modal */}
       {isOpen && (
+        (() => {
+          const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+          const { discountAmount: manualDiscountAmount } = calculateManualDiscount(subtotal);
+          const couponDiscountAmount = calculateCouponDiscount();
+          const discountAmount = manualDiscountAmount + couponDiscountAmount;
+          const orderTotal = subtotal - discountAmount;
+          return (
         <PaymentModal
           isOpen={showPaymentModal}
           onClose={() => setShowPaymentModal(false)}
-          orderTotal={cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) * (1 - discountPercentage / 100)}
-          discountAmount={cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) * (discountPercentage / 100)}
+          orderTotal={orderTotal}
+          discountAmount={discountAmount}
           orderType={orderType}
           minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount || 0}
           onPaymentComplete={handlePaymentComplete}
           isProcessing={isProcessingOrder}
         />
+          );
+        })()
       )}
 
       {/* Customer Info Modal — compact centered overlay */}

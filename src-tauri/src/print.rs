@@ -3,8 +3,8 @@
 //! Provides an offline-safe print job queue backed by the `print_jobs` SQLite
 //! table.  UI "Print" actions enqueue a job; a background worker generates
 //! receipt output files and dispatches them to the configured Windows printer
-//! via the `printers` module.  If no printer profile is configured, the worker
-//! still generates the receipt file (file-only mode).
+//! via the `printers` module. Missing/unavailable hardware profile resolution
+//! is treated as a retryable failure.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,9 +45,10 @@ pub fn enqueue_print_job(
     if entity_type != "order_receipt"
         && entity_type != "kitchen_ticket"
         && entity_type != "z_report"
+        && entity_type != "shift_checkout"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, or z_report"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, or z_report"
         ));
     }
 
@@ -291,32 +292,320 @@ pub fn generate_receipt_file(
     Ok(path_str)
 }
 
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn generate_kitchen_ticket_file(
+    db: &DbState,
+    order_id: &str,
+    data_dir: &Path,
+) -> Result<String, String> {
+    let (
+        order_number,
+        order_type,
+        table_number,
+        delivery_address,
+        delivery_notes,
+        special_instructions,
+        created_at,
+        items_json,
+    ) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT
+                COALESCE(order_number, ''),
+                COALESCE(order_type, ''),
+                COALESCE(table_number, ''),
+                COALESCE(delivery_address, ''),
+                COALESCE(delivery_notes, ''),
+                COALESCE(special_instructions, ''),
+                COALESCE(created_at, ''),
+                COALESCE(items, '[]')
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Order not found: {order_id}"))?
+    };
+
+    let parsed_items: Vec<Value> = serde_json::from_str::<Value>(&items_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut items_html = String::new();
+    for item in parsed_items {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Item")
+            .trim();
+        let qty = item.get("quantity").and_then(Value::as_f64).unwrap_or(1.0);
+        let notes = item
+            .get("notes")
+            .or_else(|| item.get("special_instructions"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        items_html.push_str(&format!(
+            "<li><strong>{:.0}x {}</strong>{}</li>",
+            qty,
+            escape_html(name),
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("<br/><small>Note: {}</small>", escape_html(notes))
+            }
+        ));
+    }
+    if items_html.is_empty() {
+        items_html.push_str("<li>No items</li>");
+    }
+
+    let ticket_html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Kitchen Ticket - {order_id}</title>
+<style>
+  body {{ margin: 0; padding: 10px; background: #fff; font-family: monospace; font-size: 13px; }}
+  h1 {{ margin: 0 0 6px 0; font-size: 18px; }}
+  hr {{ border: none; border-top: 1px dashed #000; margin: 8px 0; }}
+  ul {{ margin: 0; padding-left: 18px; }}
+  li {{ margin: 4px 0; }}
+  .meta {{ line-height: 1.35; white-space: pre-wrap; }}
+</style>
+</head>
+<body>
+<h1>KITCHEN TICKET</h1>
+<div class="meta">
+Order: {order_number}
+Type: {order_type}
+Table: {table_number}
+Created: {created_at}
+Address: {delivery_address}
+Delivery Notes: {delivery_notes}
+Order Notes: {special_instructions}
+</div>
+<hr/>
+<ul>{items_html}</ul>
+<hr/>
+<div>-- End Ticket --</div>
+</body>
+</html>"#,
+        order_id = escape_html(order_id),
+        order_number = escape_html(&order_number),
+        order_type = escape_html(&order_type),
+        table_number = escape_html(&table_number),
+        created_at = escape_html(&created_at),
+        delivery_address = escape_html(&delivery_address),
+        delivery_notes = escape_html(&delivery_notes),
+        special_instructions = escape_html(&special_instructions),
+        items_html = items_html,
+    );
+
+    let receipts_dir = data_dir.join(RECEIPTS_DIR);
+    fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("kitchen_ticket_{order_id}_{timestamp}.html");
+    let file_path = receipts_dir.join(&filename);
+    fs::write(&file_path, ticket_html).map_err(|e| format!("write kitchen ticket file: {e}"))?;
+    let path_str = file_path.to_string_lossy().to_string();
+    info!(order_id = %order_id, path = %path_str, "Kitchen ticket file generated");
+    Ok(path_str)
+}
+
+fn generate_shift_checkout_file(
+    db: &DbState,
+    shift_id: &str,
+    data_dir: &Path,
+) -> Result<String, String> {
+    let summary = crate::shifts::get_shift_summary(db, shift_id)?;
+    let shift = summary
+        .get("shift")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let cash_drawer = summary
+        .get("cashDrawer")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let role_type = shift
+        .get("role_type")
+        .or_else(|| shift.get("roleType"))
+        .and_then(Value::as_str)
+        .unwrap_or("staff");
+    let staff_name = shift
+        .get("staff_name")
+        .or_else(|| shift.get("staffName"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Unknown");
+    let terminal_name = shift
+        .get("terminal_id")
+        .or_else(|| shift.get("terminalId"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let check_in = shift
+        .get("check_in_time")
+        .or_else(|| shift.get("checkInTime"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let check_out = shift
+        .get("check_out_time")
+        .or_else(|| shift.get("checkOutTime"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let orders_count = summary
+        .get("ordersCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let sales_amount = summary
+        .get("salesAmount")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let total_expenses = summary
+        .get("totalExpenses")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let cash_refunds = summary
+        .get("cashRefunds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+
+    let opening = cash_drawer
+        .get("opening_amount")
+        .or_else(|| cash_drawer.get("openingAmount"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let expected = cash_drawer
+        .get("expected_amount")
+        .or_else(|| cash_drawer.get("expectedAmount"))
+        .and_then(Value::as_f64);
+    let closing = cash_drawer
+        .get("closing_amount")
+        .or_else(|| cash_drawer.get("closingAmount"))
+        .and_then(Value::as_f64);
+    let variance = cash_drawer
+        .get("variance_amount")
+        .or_else(|| cash_drawer.get("varianceAmount"))
+        .and_then(Value::as_f64);
+
+    let receipt_html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Shift Checkout - {shift_id}</title>
+<style>
+  body {{ margin: 0; padding: 16px; background: #fff; font-family: monospace; }}
+  h1 {{ margin: 0 0 10px 0; font-size: 18px; }}
+  .line {{ display: flex; justify-content: space-between; }}
+  hr {{ border: none; border-top: 1px dashed #000; margin: 8px 0; }}
+</style>
+</head>
+<body>
+<h1>SHIFT CHECKOUT</h1>
+<div class="line"><span>Shift</span><span>{shift_id_short}</span></div>
+<div class="line"><span>Role</span><span>{role_type}</span></div>
+<div class="line"><span>Staff</span><span>{staff_name}</span></div>
+<div class="line"><span>Terminal</span><span>{terminal_name}</span></div>
+<div class="line"><span>Check-in</span><span>{check_in}</span></div>
+<div class="line"><span>Check-out</span><span>{check_out}</span></div>
+<hr/>
+<div class="line"><span>Orders</span><span>{orders_count}</span></div>
+<div class="line"><span>Sales</span><span>{sales_amount:.2}</span></div>
+<div class="line"><span>Expenses</span><span>{total_expenses:.2}</span></div>
+<div class="line"><span>Refunds</span><span>{cash_refunds:.2}</span></div>
+<hr/>
+<div class="line"><span>Opening</span><span>{opening:.2}</span></div>
+<div class="line"><span>Expected</span><span>{expected}</span></div>
+<div class="line"><span>Closing</span><span>{closing}</span></div>
+<div class="line"><span>Variance</span><span>{variance}</span></div>
+<hr/>
+<div>End of Checkout</div>
+</body>
+</html>"#,
+        shift_id = escape_html(shift_id),
+        shift_id_short = escape_html(shift_id.get(..8).unwrap_or(shift_id)),
+        role_type = escape_html(role_type),
+        staff_name = escape_html(staff_name),
+        terminal_name = escape_html(terminal_name),
+        check_in = escape_html(check_in),
+        check_out = escape_html(check_out),
+        orders_count = orders_count,
+        sales_amount = sales_amount,
+        total_expenses = total_expenses,
+        cash_refunds = cash_refunds,
+        opening = opening,
+        expected = expected
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        closing = closing
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        variance = variance
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+    );
+
+    let receipts_dir = data_dir.join(RECEIPTS_DIR);
+    fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("shift_checkout_{shift_id}_{timestamp}.html");
+    let file_path = receipts_dir.join(filename);
+    fs::write(&file_path, receipt_html).map_err(|e| format!("write shift checkout file: {e}"))?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Hardware dispatch
 // ---------------------------------------------------------------------------
 
 /// Attempt to send a receipt file to a hardware printer.
 ///
-/// If no printer profile is resolved (none configured and none on the job),
-/// this is a no-op success — the job is considered "printed" (file-only mode).
-///
 /// Returns the resolved profile (if any) so the caller can pass it to the
 /// drawer kick logic.
 fn dispatch_to_printer(
     db: &DbState,
+    entity_type: &str,
     job_profile_id: Option<&str>,
     html_path: &str,
 ) -> Result<Option<Value>, String> {
     use crate::escpos;
 
-    let profile = printers::resolve_printer_profile(db, job_profile_id)?;
+    let role = match entity_type {
+        "kitchen_ticket" => "kitchen",
+        "order_receipt" | "shift_checkout" | "z_report" => "receipt",
+        _ => "receipt",
+    };
+    let profile = printers::resolve_printer_profile_for_role(db, job_profile_id, Some(role))?;
 
     let profile = match profile {
         Some(p) => p,
         None => {
-            // No printer configured — file-only mode, that's fine
-            info!("No printer profile configured — file-only mode");
-            return Ok(None);
+            return Err(format!(
+                "No hardware printer profile resolved for entity type {entity_type}"
+            ));
         }
     };
 
@@ -324,6 +613,9 @@ fn dispatch_to_printer(
     let printer_name = profile["printerName"]
         .as_str()
         .ok_or("Printer profile missing printerName")?;
+    if printer_name.trim().is_empty() {
+        return Err("Resolved printer profile has empty printerName".into());
+    }
     let paper_mm = profile
         .get("paperWidthMm")
         .and_then(|v| v.as_i64())
@@ -361,7 +653,13 @@ fn dispatch_to_printer(
             }
 
             let data = builder.build();
-            printers::print_raw_to_windows(printer_name, &data, "POS Receipt")?;
+            let doc_name = match entity_type {
+                "kitchen_ticket" => "POS Kitchen Ticket",
+                "shift_checkout" => "POS Shift Checkout",
+                "z_report" => "POS Z Report",
+                _ => "POS Receipt",
+            };
+            let _dispatch = printers::print_raw_to_windows(printer_name, &data, doc_name)?;
             Ok(Some(profile))
         }
         other => Err(format!("Unsupported driver_type: {other}")),
@@ -470,7 +768,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
         .prepare(
             "SELECT id, entity_type, entity_id, printer_profile_id FROM print_jobs
              WHERE status = 'pending'
-               AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+               AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday(?1))
              ORDER BY created_at ASC
              LIMIT 10",
         )
@@ -499,10 +797,11 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
             );
         }
 
-        // Generate the receipt file first (always needed, whether or not a
-        // hardware printer is configured)
+        // Generate the receipt/ticket file first, then attempt hardware dispatch.
         let file_result = match entity_type.as_str() {
-            "order_receipt" | "kitchen_ticket" => generate_receipt_file(db, &entity_id, data_dir),
+            "order_receipt" => generate_receipt_file(db, &entity_id, data_dir),
+            "kitchen_ticket" => generate_kitchen_ticket_file(db, &entity_id, data_dir),
+            "shift_checkout" => generate_shift_checkout_file(db, &entity_id, data_dir),
             "z_report" => crate::zreport::generate_z_report_file(db, &entity_id, data_dir),
             _ => {
                 mark_print_job_failed(db, &job_id, &format!("Unknown entity_type: {entity_type}"))?;
@@ -513,7 +812,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
         match file_result {
             Ok(path) => {
                 // Try to dispatch to hardware printer
-                match dispatch_to_printer(db, profile_id.as_deref(), &path) {
+                match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &path) {
                     Ok(resolved_profile) => {
                         mark_print_job_printed(db, &job_id, &path)?;
 
@@ -750,14 +1049,16 @@ mod tests {
         let count = process_pending_jobs(&db, &dir).unwrap();
         assert_eq!(count, 1);
 
-        // Verify job is now printed
-        let jobs = list_print_jobs(&db, Some("printed")).unwrap();
+        // No hardware profile configured -> retryable failure (not printed/file-only success).
+        let jobs = list_print_jobs(&db, None).unwrap();
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert!(arr[0]["outputPath"]
+        assert_eq!(arr[0]["status"], "pending");
+        assert_eq!(arr[0]["retryCount"], 1);
+        assert!(arr[0]["lastError"]
             .as_str()
-            .unwrap()
-            .contains("receipt_ord-proc_"));
+            .unwrap_or_default()
+            .contains("No hardware printer profile resolved"));
 
         // Process again — should be no-op
         let count2 = process_pending_jobs(&db, &dir).unwrap();
@@ -834,5 +1135,16 @@ mod tests {
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr[0]["retryCount"], 1);
         assert!(arr[0]["lastError"].as_str().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn test_enqueue_shift_checkout_job() {
+        let db = test_db();
+        let result = enqueue_print_job(&db, "shift_checkout", "shift-42", None).unwrap();
+        assert_eq!(result["success"], true);
+        let jobs = list_print_jobs(&db, None).unwrap();
+        let arr = jobs.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["entityType"], "shift_checkout");
     }
 }

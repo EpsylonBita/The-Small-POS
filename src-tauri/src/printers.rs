@@ -18,6 +18,13 @@ use uuid::Uuid;
 
 use crate::db::{self, DbState};
 
+#[derive(Debug, Clone)]
+pub struct RawPrintResult {
+    pub bytes_requested: usize,
+    pub bytes_written: usize,
+    pub doc_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // System printer list cache (avoids calling EnumPrintersW on every poll)
 // ---------------------------------------------------------------------------
@@ -54,7 +61,10 @@ fn printer_inventory_hash(names: &[String]) -> u64 {
 fn log_printer_inventory_if_changed(names: &[String]) {
     let current_hash = printer_inventory_hash(names);
     if let Ok(mut previous_hash) = printer_enum_log_state().lock() {
-        if previous_hash.map(|value| value != current_hash).unwrap_or(true) {
+        if previous_hash
+            .map(|value| value != current_hash)
+            .unwrap_or(true)
+        {
             *previous_hash = Some(current_hash);
             info!(count = names.len(), "Windows printer inventory changed");
         }
@@ -217,7 +227,11 @@ pub fn list_system_printers() -> Vec<String> {
 /// without any rendering.  This is the correct method for thermal receipt
 /// printers which expect ESC/POS binary.
 #[cfg(target_os = "windows")]
-pub fn print_raw_to_windows(printer_name: &str, data: &[u8], doc_name: &str) -> Result<(), String> {
+pub fn print_raw_to_windows(
+    printer_name: &str,
+    data: &[u8],
+    doc_name: &str,
+) -> Result<RawPrintResult, String> {
     use std::ffi::CString;
     use std::ptr;
 
@@ -306,13 +320,24 @@ pub fn print_raw_to_windows(printer_name: &str, data: &[u8], doc_name: &str) -> 
         ));
     }
 
+    if written as usize != data.len() {
+        return Err(format!(
+            "Partial spool write for \"{printer_name}\": wrote {written}/{} bytes",
+            data.len()
+        ));
+    }
+
     info!(
         printer = %printer_name,
         bytes = data.len(),
         doc = %doc_name,
         "Sent raw data to Windows print spooler"
     );
-    Ok(())
+    Ok(RawPrintResult {
+        bytes_requested: data.len(),
+        bytes_written: written as usize,
+        doc_name: doc_name.to_string(),
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -320,8 +345,47 @@ pub fn print_raw_to_windows(
     _printer_name: &str,
     _data: &[u8],
     _doc_name: &str,
-) -> Result<(), String> {
+) -> Result<RawPrintResult, String> {
     Err("Windows raw printing not available on this platform".into())
+}
+
+#[cfg(target_os = "windows")]
+pub fn probe_printer_spool(printer_name: &str) -> Result<(), String> {
+    use std::ptr;
+
+    #[allow(clippy::upper_case_acronyms)]
+    type HANDLE = *mut std::ffi::c_void;
+
+    #[link(name = "winspool")]
+    extern "system" {
+        fn OpenPrinterW(
+            pPrinterName: *const u16,
+            phPrinter: *mut HANDLE,
+            pDefault: *const u8,
+        ) -> i32;
+        fn ClosePrinter(hPrinter: HANDLE) -> i32;
+    }
+
+    let wide_name: Vec<u16> = printer_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut h_printer: HANDLE = ptr::null_mut();
+    let ok = unsafe { OpenPrinterW(wide_name.as_ptr(), &mut h_printer, ptr::null()) };
+    if ok == 0 || h_printer.is_null() {
+        return Err(format!(
+            "Printer spool is not reachable for \"{printer_name}\""
+        ));
+    }
+    unsafe {
+        ClosePrinter(h_printer);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn probe_printer_spool(_printer_name: &str) -> Result<(), String> {
+    Err("Printer spool probe is only available on Windows".into())
 }
 
 #[allow(dead_code)]
@@ -348,17 +412,82 @@ pub fn print_html_to_windows(_printer_name: &str, _html_path: &str) -> Result<()
 // Printer profile CRUD
 // ---------------------------------------------------------------------------
 
+fn non_empty_str(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string)
+}
+
+fn set_default_profile_locked(conn: &rusqlite::Connection, profile_id: &str) -> Result<(), String> {
+    conn.execute("UPDATE printer_profiles SET is_default = 0", [])
+        .map_err(|e| format!("clear existing default printer flags: {e}"))?;
+    conn.execute(
+        "UPDATE printer_profiles
+         SET is_default = 1, updated_at = ?1
+         WHERE id = ?2",
+        params![Utc::now().to_rfc3339(), profile_id],
+    )
+    .map_err(|e| format!("set printer default flag: {e}"))?;
+    db::set_setting(conn, "printer", "default_printer_profile_id", profile_id)?;
+    Ok(())
+}
+
+fn clear_default_profile_locked(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute("UPDATE printer_profiles SET is_default = 0", [])
+        .map_err(|e| format!("clear default profile flags: {e}"))?;
+    conn.execute(
+        "DELETE FROM local_settings
+         WHERE setting_category = 'printer'
+           AND setting_key = 'default_printer_profile_id'",
+        [],
+    )
+    .map_err(|e| format!("clear default printer setting: {e}"))?;
+    Ok(())
+}
+
+fn get_default_profile_id_from_setting(conn: &rusqlite::Connection) -> Option<String> {
+    db::get_setting(conn, "printer", "default_printer_profile_id").and_then(|id| {
+        let trimmed = id.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn get_default_profile_id_from_column(conn: &rusqlite::Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT id FROM printer_profiles
+         WHERE is_default = 1
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|id| {
+        let trimmed = id.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
 /// Create a new printer profile. Returns `{ success, profileId }`.
 pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, String> {
-    let name = profile
-        .get("name")
-        .and_then(|v| v.as_str())
+    let name = non_empty_str(profile.get("name").and_then(|v| v.as_str()))
         .ok_or("Missing profile name")?;
-    let printer_name = profile
-        .get("printerName")
-        .or_else(|| profile.get("printer_name"))
-        .and_then(|v| v.as_str())
-        .ok_or("Missing printer_name")?;
+    let printer_name = non_empty_str(
+        profile
+            .get("printerName")
+            .or_else(|| profile.get("printer_name"))
+            .and_then(|v| v.as_str()),
+    )
+    .ok_or("Missing printer_name")?;
     let driver_type = profile
         .get("driverType")
         .or_else(|| profile.get("driver_type"))
@@ -477,9 +606,9 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
                  ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22)",
         params![
             id,
-            name,
+            &name,
             driver_type,
-            printer_name,
+            &printer_name,
             paper_width_mm,
             copies_default,
             cut_paper as i32,
@@ -501,6 +630,10 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         ],
     )
     .map_err(|e| format!("create printer profile: {e}"))?;
+
+    if is_default {
+        set_default_profile_locked(&conn, &id)?;
+    }
 
     info!(id = %id, name = %name, printer = %printer_name, "Printer profile created");
 
@@ -524,16 +657,25 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
     // Build dynamic SET clause from provided fields
     let mut sets = Vec::new();
     let mut vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut requested_default: Option<bool> = None;
 
-    if let Some(v) = profile.get("name").and_then(|v| v.as_str()) {
+    if let Some(raw) = profile.get("name").and_then(|v| v.as_str()) {
+        let v = raw.trim();
+        if v.is_empty() {
+            return Err("Printer profile name cannot be empty".into());
+        }
         sets.push("name = ?");
         vals.push(Box::new(v.to_string()));
     }
-    if let Some(v) = profile
+    if let Some(raw) = profile
         .get("printerName")
         .or_else(|| profile.get("printer_name"))
         .and_then(|v| v.as_str())
     {
+        let v = raw.trim();
+        if v.is_empty() {
+            return Err("printer_name cannot be empty".into());
+        }
         sets.push("printer_name = ?");
         vals.push(Box::new(v.to_string()));
     }
@@ -627,8 +769,7 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .or_else(|| profile.get("is_default"))
         .and_then(|v| v.as_bool())
     {
-        sets.push("is_default = ?");
-        vals.push(Box::new(v as i32));
+        requested_default = Some(v);
     }
     if let Some(v) = profile.get("enabled").and_then(|v| v.as_bool()) {
         sets.push("enabled = ?");
@@ -675,26 +816,73 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         vals.push(Box::new(v.to_string()));
     }
 
-    if sets.is_empty() {
+    if sets.is_empty() && requested_default.is_none() {
         return Err("No fields to update".into());
     }
 
-    sets.push("updated_at = ?");
-    vals.push(Box::new(now));
-    vals.push(Box::new(id.to_string()));
+    if !sets.is_empty() {
+        sets.push("updated_at = ?");
+        vals.push(Box::new(now.clone()));
+        vals.push(Box::new(id.to_string()));
 
-    let sql = format!(
-        "UPDATE printer_profiles SET {} WHERE id = ?",
-        sets.join(", ")
-    );
+        let sql = format!(
+            "UPDATE printer_profiles SET {} WHERE id = ?",
+            sets.join(", ")
+        );
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = vals.iter().map(|v| v.as_ref()).collect();
-    let affected = conn
-        .execute(&sql, params_refs.as_slice())
-        .map_err(|e| format!("update printer profile: {e}"))?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            vals.iter().map(|v| v.as_ref()).collect();
+        let affected = conn
+            .execute(&sql, params_refs.as_slice())
+            .map_err(|e| format!("update printer profile: {e}"))?;
 
-    if affected == 0 {
-        return Err(format!("Printer profile {id} not found"));
+        if affected == 0 {
+            return Err(format!("Printer profile {id} not found"));
+        }
+    } else {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM printer_profiles WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("lookup printer profile: {e}"))?;
+        if !exists {
+            return Err(format!("Printer profile {id} not found"));
+        }
+    }
+
+    match requested_default {
+        Some(true) => {
+            set_default_profile_locked(&conn, id)?;
+        }
+        Some(false) => {
+            conn.execute(
+                "UPDATE printer_profiles SET is_default = 0, updated_at = ?1 WHERE id = ?2",
+                params![Utc::now().to_rfc3339(), id],
+            )
+            .map_err(|e| format!("clear printer default flag: {e}"))?;
+
+            if get_default_profile_id_from_setting(&conn).as_deref() == Some(id) {
+                if let Some(other_default) = get_default_profile_id_from_column(&conn) {
+                    db::set_setting(
+                        &conn,
+                        "printer",
+                        "default_printer_profile_id",
+                        &other_default,
+                    )?;
+                } else {
+                    conn.execute(
+                        "DELETE FROM local_settings
+                         WHERE setting_category = 'printer'
+                           AND setting_key = 'default_printer_profile_id'",
+                        [],
+                    )
+                    .map_err(|e| format!("clear default printer setting: {e}"))?;
+                }
+            }
+        }
+        None => {}
     }
 
     info!(id = %id, "Printer profile updated");
@@ -802,6 +990,11 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
 pub fn delete_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    let was_default_setting = get_default_profile_id_from_setting(&conn)
+        .as_deref()
+        .map(|id| id == profile_id)
+        .unwrap_or(false);
+
     let affected = conn
         .execute(
             "DELETE FROM printer_profiles WHERE id = ?1",
@@ -813,13 +1006,24 @@ pub fn delete_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, S
         return Err(format!("Printer profile {profile_id} not found"));
     }
 
-    // Clear default if this was the default profile
-    let current_default = db::get_setting(&conn, "printer", "default_printer_profile_id");
-    if current_default.as_deref() == Some(profile_id) {
-        let _ = conn.execute(
-            "DELETE FROM local_settings WHERE setting_category = 'printer' AND setting_key = 'default_printer_profile_id'",
-            [],
-        );
+    // Keep local setting and is_default source-of-truth in sync after delete.
+    if was_default_setting {
+        if let Some(other_default) = get_default_profile_id_from_column(&conn) {
+            db::set_setting(
+                &conn,
+                "printer",
+                "default_printer_profile_id",
+                &other_default,
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM local_settings
+                 WHERE setting_category = 'printer'
+                   AND setting_key = 'default_printer_profile_id'",
+                [],
+            )
+            .map_err(|e| format!("clear default printer setting after delete: {e}"))?;
+        }
     }
 
     info!(id = %profile_id, "Printer profile deleted");
@@ -832,7 +1036,7 @@ pub fn set_default_printer_profile(db: &DbState, profile_id: &str) -> Result<Val
     let _ = get_printer_profile(db, profile_id)?;
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "printer", "default_printer_profile_id", profile_id)?;
+    set_default_profile_locked(&conn, profile_id)?;
 
     info!(profile_id = %profile_id, "Default printer profile set");
     Ok(serde_json::json!({ "success": true }))
@@ -840,24 +1044,41 @@ pub fn set_default_printer_profile(db: &DbState, profile_id: &str) -> Result<Val
 
 /// Get the default printer profile (full profile object or null).
 pub fn get_default_printer_profile(db: &DbState) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let profile_id = db::get_setting(&conn, "printer", "default_printer_profile_id");
-    drop(conn);
-
-    match profile_id {
-        Some(id) => match get_printer_profile(db, &id) {
-            Ok(profile) => Ok(profile),
-            Err(_) => {
-                warn!(id = %id, "Default printer profile not found, clearing setting");
-                let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                let _ = conn.execute(
-                    "DELETE FROM local_settings WHERE setting_category = 'printer' AND setting_key = 'default_printer_profile_id'",
-                    [],
-                );
-                Ok(Value::Null)
+    let selected_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        if let Some(id) = get_default_profile_id_from_setting(&conn) {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM printer_profiles WHERE id = ?1)",
+                    params![id.clone()],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if exists {
+                let _ = set_default_profile_locked(&conn, &id);
+                Some(id)
+            } else {
+                warn!(id = %id, "Default printer profile setting points to missing profile");
+                None
             }
-        },
-        None => Ok(Value::Null),
+        } else {
+            None
+        }
+        .or_else(|| {
+            let column_default = get_default_profile_id_from_column(&conn);
+            if let Some(ref id) = column_default {
+                let _ = db::set_setting(&conn, "printer", "default_printer_profile_id", id);
+            }
+            column_default
+        })
+    };
+
+    if let Some(id) = selected_id {
+        get_printer_profile(db, &id)
+    } else {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let _ = clear_default_profile_locked(&conn);
+        Ok(Value::Null)
     }
 }
 
@@ -867,6 +1088,68 @@ pub fn get_default_printer_profile(db: &DbState) -> Result<Value, String> {
 pub fn resolve_printer_profile(
     db: &DbState,
     job_profile_id: Option<&str>,
+) -> Result<Option<Value>, String> {
+    resolve_printer_profile_for_role(db, job_profile_id, None)
+}
+
+fn resolve_profile_for_role(db: &DbState, role: &str) -> Result<Option<Value>, String> {
+    let role = role.trim();
+    if role.is_empty() {
+        return Ok(None);
+    }
+
+    let selected_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id
+             FROM printer_profiles
+             WHERE role = ?1 AND enabled = 1
+             ORDER BY is_default DESC, updated_at DESC, created_at ASC
+             LIMIT 1",
+            params![role],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+
+    match selected_id {
+        Some(id) => get_printer_profile(db, &id).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn resolve_any_enabled_profile(db: &DbState) -> Result<Option<Value>, String> {
+    let selected_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id
+             FROM printer_profiles
+             WHERE enabled = 1
+             ORDER BY is_default DESC, updated_at DESC, created_at ASC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+
+    match selected_id {
+        Some(id) => get_printer_profile(db, &id).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Resolve a profile for a specific role with fallback to default.
+///
+/// Priority:
+/// 1) explicit job profile id,
+/// 2) enabled role profile,
+/// 3) enabled default profile,
+/// 4) first enabled profile.
+pub fn resolve_printer_profile_for_role(
+    db: &DbState,
+    job_profile_id: Option<&str>,
+    role: Option<&str>,
 ) -> Result<Option<Value>, String> {
     // Try job-specific profile first
     if let Some(id) = job_profile_id {
@@ -878,13 +1161,24 @@ pub fn resolve_printer_profile(
         }
     }
 
-    // Fall back to default
-    let default_profile = get_default_printer_profile(db)?;
-    if default_profile.is_null() {
-        Ok(None)
-    } else {
-        Ok(Some(default_profile))
+    if let Some(role_name) = role {
+        if let Some(profile) = resolve_profile_for_role(db, role_name)? {
+            return Ok(Some(profile));
+        }
     }
+
+    let default_profile = get_default_printer_profile(db)?;
+    if !default_profile.is_null() {
+        let enabled = default_profile
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if enabled {
+            return Ok(Some(default_profile));
+        }
+    }
+
+    resolve_any_enabled_profile(db)
 }
 
 /// Reprint a failed print job by resetting its status and retry counters.
@@ -1216,5 +1510,136 @@ mod tests {
             }),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_flag_and_local_setting_are_synchronized() {
+        let db = test_db();
+
+        let p1 = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "P1",
+                "printerName": "P1",
+                "isDefault": true,
+            }),
+        )
+        .unwrap();
+        let p1_id = p1["profileId"].as_str().unwrap().to_string();
+
+        let p2 = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "P2",
+                "printerName": "P2",
+                "isDefault": true,
+            }),
+        )
+        .unwrap();
+        let p2_id = p2["profileId"].as_str().unwrap().to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let default_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM printer_profiles WHERE is_default = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_count, 1);
+
+        let default_id: String = conn
+            .query_row(
+                "SELECT id FROM printer_profiles WHERE is_default = 1 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(default_id, p2_id);
+
+        let setting_default = db::get_setting(&conn, "printer", "default_printer_profile_id");
+        assert_eq!(setting_default.as_deref(), Some(p2_id.as_str()));
+        assert_ne!(p1_id, p2_id);
+    }
+
+    #[test]
+    fn test_resolve_printer_profile_for_role_prefers_role_then_falls_back() {
+        let db = test_db();
+
+        let receipt = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Receipt",
+                "printerName": "ReceiptPrinter",
+                "role": "receipt",
+                "isDefault": true,
+                "enabled": true,
+            }),
+        )
+        .unwrap();
+        let receipt_id = receipt["profileId"].as_str().unwrap();
+
+        let kitchen = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Kitchen",
+                "printerName": "KitchenPrinter",
+                "role": "kitchen",
+                "enabled": true,
+            }),
+        )
+        .unwrap();
+        let kitchen_id = kitchen["profileId"].as_str().unwrap();
+
+        let resolved_kitchen = resolve_printer_profile_for_role(&db, None, Some("kitchen"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_kitchen["id"], kitchen_id);
+
+        update_printer_profile(
+            &db,
+            &serde_json::json!({
+                "id": kitchen_id,
+                "enabled": false,
+            }),
+        )
+        .unwrap();
+
+        let fallback = resolve_printer_profile_for_role(&db, None, Some("kitchen"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback["id"], receipt_id);
+    }
+
+    #[test]
+    fn test_empty_printer_name_rejected() {
+        let db = test_db();
+        let create_err = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Bad",
+                "printerName": "   ",
+            }),
+        );
+        assert!(create_err.is_err());
+
+        let created = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Good",
+                "printerName": "Printer",
+            }),
+        )
+        .unwrap();
+        let id = created["profileId"].as_str().unwrap();
+
+        let update_err = update_printer_profile(
+            &db,
+            &serde_json::json!({
+                "id": id,
+                "printerName": "",
+            }),
+        );
+        assert!(update_err.is_err());
     }
 }

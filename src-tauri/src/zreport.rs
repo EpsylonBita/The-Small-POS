@@ -130,6 +130,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                     COALESCE(SUM(tip_amount), 0) as tips
              FROM orders
              WHERE staff_shift_id = ?1
+               AND COALESCE(is_ghost, 0) = 0
                AND status NOT IN ('cancelled', 'canceled')",
             params![shift_id],
             |row| {
@@ -148,10 +149,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // Payments: breakdown by method
     let mut pay_stmt = conn
         .prepare(
-            "SELECT method, COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total
-             FROM order_payments
-             WHERE staff_shift_id = ?1 AND status = 'completed'
-             GROUP BY method",
+            "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.staff_shift_id = ?1
+               AND op.status = 'completed'
+               AND COALESCE(o.is_ghost, 0) = 0
+             GROUP BY op.method",
         )
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
@@ -196,7 +200,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
              FROM payment_adjustments pa
              JOIN order_payments op ON pa.payment_id = op.id
+             JOIN orders o ON o.id = op.order_id
              WHERE op.staff_shift_id = ?1
+               AND COALESCE(o.is_ghost, 0) = 0
              GROUP BY pa.adjustment_type",
         )
         .map_err(|e| format!("prepare adjustment query: {e}"))?;
@@ -669,6 +675,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     COALESCE(SUM(tip_amount), 0) as tips
              FROM orders
              WHERE created_at > ?1
+               AND COALESCE(is_ghost, 0) = 0
                AND status NOT IN ('cancelled', 'canceled')",
             params![period_start],
             |row| {
@@ -687,10 +694,13 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     // --- Payments: breakdown by method across all shifts ---
     let mut pay_stmt = conn
         .prepare(
-            "SELECT method, COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total
-             FROM order_payments
-             WHERE created_at > ?1 AND status = 'completed'
-             GROUP BY method",
+            "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.created_at > ?1
+               AND op.status = 'completed'
+               AND COALESCE(o.is_ghost, 0) = 0
+             GROUP BY op.method",
         )
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
@@ -734,7 +744,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .prepare(
             "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
              FROM payment_adjustments pa
+             JOIN orders o ON o.id = pa.order_id
              WHERE pa.created_at > ?1
+               AND COALESCE(o.is_ghost, 0) = 0
              GROUP BY pa.adjustment_type",
         )
         .map_err(|e| format!("prepare adjustment query: {e}"))?;
@@ -856,6 +868,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     "SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
                      FROM orders
                      WHERE staff_shift_id = ?1
+                       AND COALESCE(is_ghost, 0) = 0
                        AND status NOT IN ('cancelled', 'canceled')",
                     params![s.id],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?)),
@@ -1100,6 +1113,7 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
             .query_row(
                 "SELECT COUNT(*) FROM orders
                  WHERE created_at > ?1
+                   AND COALESCE(is_ghost, 0) = 0
                    AND status NOT IN ('cancelled', 'canceled')
                    AND payment_status NOT IN ('paid', 'completed')",
                 params![period_start],

@@ -148,6 +148,17 @@ const isPendingExternalOrder = (order: Order | any): boolean => {
   );
 };
 
+const isGhostOrder = (order: Order | any): boolean => {
+  const value = (order as any)?.is_ghost ?? (order as any)?.isGhost;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+  }
+  return false;
+};
+
 const getOrderUniqueKey = (order: Order | any): string => {
   const plugin = getOrderPlugin(order);
   const externalId = getExternalPluginOrderId(order);
@@ -239,6 +250,9 @@ const splitOrdersForQueue = (orders: Order[]): { visible: Order[]; pendingExtern
   const pendingExternal: Order[] = [];
 
   uniqueOrders.forEach((order) => {
+    if (isGhostOrder(order)) {
+      return;
+    }
     visible.push(order);
     if (isPendingExternalOrder(order)) {
       pendingExternal.push(order);

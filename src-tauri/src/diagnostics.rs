@@ -69,7 +69,7 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
         schema_version,
         sync_backlog,
         last_sync_times,
-        printer_status,
+        mut printer_status,
         last_zreport,
         pending_orders,
         db_size,
@@ -105,6 +105,21 @@ pub fn get_system_health(db: &DbState) -> Result<Value, String> {
             db_size,
         )
     }; // lock released here
+
+    // Use the same resolver path as print dispatch for default profile reporting.
+    let resolved_default_profile =
+        crate::printers::resolve_printer_profile_for_role(db, None, Some("receipt"))
+            .ok()
+            .flatten();
+    if let Some(profile) = resolved_default_profile {
+        let display_name = profile
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| profile.get("printerName").and_then(Value::as_str))
+            .map(|value| value.to_string());
+        printer_status["defaultProfile"] = json!(display_name);
+    }
 
     // Validate pending orders against menu cache (acquires its own lock)
     let invalid_orders = crate::sync::validate_pending_orders(db)
@@ -214,14 +229,6 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
         })
         .unwrap_or(0);
 
-    let default_profile: Option<String> = conn
-        .query_row(
-            "SELECT name FROM printer_profiles WHERE is_default = 1 LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
     // Last 5 print jobs
     let mut recent_jobs = Vec::new();
     if let Ok(mut stmt) = conn.prepare(
@@ -247,7 +254,7 @@ fn get_printer_status(conn: &rusqlite::Connection) -> Value {
     json!({
         "configured": profile_count > 0,
         "profileCount": profile_count,
-        "defaultProfile": default_profile,
+        "defaultProfile": serde_json::Value::Null,
         "recentJobs": recent_jobs,
     })
 }
@@ -632,7 +639,7 @@ mod tests {
     #[test]
     fn test_redact_sensitive_fields_recurses_through_objects() {
         let value = json!({
-            "token": "secret-token",
+            "token": "tk-val",
             "nested": {
                 "api_key": "key-value",
                 "status": "ok"

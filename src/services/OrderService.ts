@@ -415,7 +415,17 @@ export class OrderService {
         subtotal: (orderData as any).subtotal ?? (orderData as any).total ?? null,
         discountAmount: (orderData as any).discountAmount ?? (orderData as any).discount_amount ?? 0,
         discountPercentage: (orderData as any).discountPercentage ?? (orderData as any).discount_percentage ?? 0,
+        manualDiscountMode: (orderData as any).manualDiscountMode ?? (orderData as any).manual_discount_mode ?? null,
+        manualDiscountValue: (orderData as any).manualDiscountValue ?? (orderData as any).manual_discount_value ?? null,
+        coupon_id: (orderData as any).coupon_id ?? (orderData as any).couponId ?? null,
+        coupon_code: (orderData as any).coupon_code ?? (orderData as any).couponCode ?? null,
+        coupon_discount_amount:
+          (orderData as any).coupon_discount_amount ?? (orderData as any).couponDiscountAmount ?? 0,
         deliveryFee: (orderData as any).deliveryFee ?? (orderData as any).delivery_fee ?? 0,
+        is_ghost: (orderData as any).is_ghost ?? (orderData as any).isGhost ?? false,
+        ghost_source: (orderData as any).ghost_source ?? (orderData as any).ghostSource ?? null,
+        ghost_metadata:
+          (orderData as any).ghost_metadata ?? (orderData as any).ghostMetadata ?? null,
         status: orderData.status,
         orderType: (orderData.orderType ?? orderData.order_type) as any,
         tableNumber: orderData.tableNumber ?? orderData.table_number,
@@ -509,6 +519,31 @@ export class OrderService {
         }
       } catch { }
 
+      const normalizedManualDiscountMode =
+        orderDataAny.manual_discount_mode ?? orderDataAny.manualDiscountMode ?? null;
+      const normalizedManualDiscountValue =
+        orderDataAny.manual_discount_value ?? orderDataAny.manualDiscountValue ?? null;
+      const normalizedDiscountPercentage =
+        orderDataAny.discount_percentage ??
+        orderDataAny.discountPercentage ??
+        (normalizedManualDiscountMode === 'percentage' ? (normalizedManualDiscountValue ?? 0) : 0);
+      const normalizedDiscountAmount =
+        orderDataAny.discount_amount ?? orderDataAny.discountAmount ?? 0;
+      const normalizedCouponId = orderDataAny.coupon_id ?? orderDataAny.couponId ?? null;
+      const normalizedCouponCode = orderDataAny.coupon_code ?? orderDataAny.couponCode ?? null;
+      const normalizedCouponDiscountAmount = Math.max(
+        0,
+        Number(orderDataAny.coupon_discount_amount ?? orderDataAny.couponDiscountAmount ?? 0)
+      );
+      const normalizedIsGhost =
+        orderDataAny.is_ghost === true ||
+        orderDataAny.isGhost === true ||
+        orderDataAny.ghost === true;
+      const normalizedGhostSource =
+        orderDataAny.ghost_source ?? orderDataAny.ghostSource ?? null;
+      const normalizedGhostMetadata =
+        orderDataAny.ghost_metadata ?? orderDataAny.ghostMetadata ?? null;
+
       const apiPayload: any = {
         // Required fields
         branch_id: branchId || orderDataAny.branch_id,
@@ -516,8 +551,25 @@ export class OrderService {
         items: (orderData.items || []).map((item: any) => ({
           menu_item_id: item.menu_item_id || item.menuItemId || item.id,
           quantity: item.quantity || 1,
-          // Use totalPrice first (includes customizations), then unit_price, then price as fallback
-          unit_price: item.totalPrice || item.unit_price || item.price || 0,
+          unit_price: item.unitPrice || item.unit_price || item.price || 0,
+          total_price:
+            item.totalPrice ||
+            item.total_price ||
+            ((item.unitPrice || item.unit_price || item.price || 0) * (item.quantity || 1)),
+          original_unit_price:
+            item.originalUnitPrice ||
+            item.original_unit_price ||
+            item.unitPrice ||
+            item.unit_price ||
+            item.price ||
+            0,
+          is_price_overridden:
+            item.isPriceOverridden === true ||
+            item.is_price_overridden === true ||
+            Math.abs(
+              (item.unitPrice || item.unit_price || item.price || 0) -
+              (item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.unit_price || item.price || 0)
+            ) > 0.0001,
           customizations: Array.isArray(item.customizations)
             ? item.customizations.reduce((acc: any, c: any, idx: number) => {
               // Generate a unique key for each customization
@@ -548,8 +600,17 @@ export class OrderService {
         customer_phone: orderData.customer_phone || orderDataAny.customerPhone || null,
         subtotal: orderDataAny.subtotal ?? 0,
         tax_amount: orderDataAny.tax ?? orderData.taxAmount ?? 0,
-        discount_amount: orderDataAny.discount_amount ?? 0,
+        discount_amount: normalizedDiscountAmount,
+        discount_percentage: normalizedDiscountPercentage,
+        manual_discount_mode: normalizedManualDiscountMode,
+        manual_discount_value: normalizedManualDiscountValue,
+        coupon_id: normalizedCouponId,
+        coupon_code: normalizedCouponCode,
+        coupon_discount_amount: normalizedCouponDiscountAmount,
         delivery_fee: orderDataAny.delivery_fee ?? orderData.deliveryFee ?? 0,
+        is_ghost: normalizedIsGhost,
+        ghost_source: normalizedGhostSource,
+        ghost_metadata: normalizedGhostMetadata,
         delivery_address: orderData.delivery_address || orderDataAny.deliveryAddress || null,
         notes: orderData.notes || orderData.special_instructions || null,
         staff_shift_id: activeCashierShiftId || null

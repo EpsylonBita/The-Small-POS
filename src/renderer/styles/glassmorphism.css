@@ -460,6 +460,11 @@
   flex-direction: column;
 }
 
+/* Hide scrollbar while keeping scroll functional */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Dark theme - Liquid Glass */
 .dark .liquid-glass-modal-shell {
   /* True Liquid Glass Effect - Dark Theme */

@@ -27,7 +27,6 @@ import KitchenDisplayPage from '../pages/KitchenDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
 import AboutPage from '../pages/AboutPage';
-import SystemHealthPage from '../pages/SystemHealthPage';
 import { getBridge } from '../../lib';
 
 import { ExpenseModal } from './modals/ExpenseModal';
@@ -283,7 +282,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
 
     // System / Diagnostics
     about: () => <AboutPage />,
-    system_health: () => <SystemHealthPage />,
   };
 
   // Render current view based on navigation selection

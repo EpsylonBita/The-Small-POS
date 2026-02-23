@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::api;
 use crate::db::DbState;
+use crate::print;
 use crate::storage;
 
 // ---------------------------------------------------------------------------
@@ -379,6 +380,54 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| num_field(payload, "delivery_fee"))
         .unwrap_or(0.0);
     let plugin = str_field(payload, "plugin");
+    let is_ghost = payload
+        .get("is_ghost")
+        .or_else(|| payload.get("isGhost"))
+        .and_then(|value| {
+            if let Some(flag) = value.as_bool() {
+                return Some(flag);
+            }
+            if let Some(flag) = value.as_i64() {
+                return Some(flag == 1);
+            }
+            value.as_str().and_then(|flag| {
+                let normalized = flag.trim().to_ascii_lowercase();
+                if normalized == "true"
+                    || normalized == "1"
+                    || normalized == "yes"
+                    || normalized == "on"
+                {
+                    Some(true)
+                } else if normalized == "false"
+                    || normalized == "0"
+                    || normalized == "no"
+                    || normalized == "off"
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(false);
+    let ghost_source =
+        str_field(payload, "ghost_source").or_else(|| str_field(payload, "ghostSource"));
+    let ghost_metadata = payload
+        .get("ghost_metadata")
+        .or_else(|| payload.get("ghostMetadata"))
+        .and_then(|value| {
+            if value.is_null() {
+                return None;
+            }
+            if let Some(raw) = value.as_str() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(trimmed.to_string());
+            }
+            Some(value.to_string())
+        });
 
     conn.execute(
         "INSERT INTO orders (
@@ -389,7 +438,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             estimated_time, sync_status, payment_status, payment_method,
             staff_shift_id, staff_id, discount_percentage, discount_amount,
             tip_amount, version, terminal_id, branch_id, plugin, tax_rate, delivery_fee,
-            client_request_id
+            client_request_id, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8, ?9, ?10,
@@ -397,7 +446,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             ?15, ?16, ?17, ?18,
             ?19, 'pending', ?20, ?21,
             ?22, ?23, ?24, ?25,
-            ?26, 1, ?27, ?28, ?29, ?30, ?31, ?32
+            ?26, 1, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35
         )",
         params![
             &order_id,
@@ -432,6 +481,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &tax_rate,
             &delivery_fee,
             &client_request_id,
+            &(if is_ghost { 1_i64 } else { 0_i64 }),
+            &ghost_source,
+            &ghost_metadata,
         ],
     )
     .map_err(|e| format!("insert order: {e}"))?;
@@ -460,6 +512,16 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         params![&order_id, sync_payload, idempotency_key],
     )
     .map_err(|e| format!("enqueue sync: {e}"))?;
+
+    drop(conn);
+
+    if let Err(error) = print::enqueue_print_job(db, "order_receipt", &order_id, None) {
+        warn!(
+            order_id = %order_id,
+            error = %error,
+            "Failed to enqueue order receipt print job after local create"
+        );
+    }
 
     info!(order_id = %order_id, "Order created and queued for sync");
 
@@ -504,8 +566,9 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     discount_percentage, discount_amount, tip_amount,
                     version, updated_by, last_synced_at, remote_version,
                     terminal_id, branch_id, plugin, external_plugin_order_id,
-                    tax_rate, delivery_fee
+                    tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
              FROM orders
+             WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -515,6 +578,12 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
             // Parse items JSON
             let items_str: String = row.get(5)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or(Value::Array(vec![]));
+            let ghost_metadata_str: Option<String> = row.get(42)?;
+            let ghost_metadata = ghost_metadata_str
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .unwrap_or(Value::Null);
+            let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
@@ -557,6 +626,12 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "externalPluginOrderId": row.get::<_, Option<String>>(37)?,
                 "taxRate": row.get::<_, Option<f64>>(38)?,
                 "deliveryFee": row.get::<_, Option<f64>>(39)?,
+                "is_ghost": is_ghost,
+                "isGhost": is_ghost,
+                "ghost_source": row.get::<_, Option<String>>(41)?,
+                "ghostSource": row.get::<_, Option<String>>(41)?,
+                "ghost_metadata": ghost_metadata,
+                "ghostMetadata": ghost_metadata,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -586,12 +661,19 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 discount_percentage, discount_amount, tip_amount,
                 version, updated_by, last_synced_at, remote_version,
                 terminal_id, branch_id, plugin, external_plugin_order_id,
-                tax_rate, delivery_fee
+                tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
          FROM orders WHERE id = ?1",
         params![id],
         |row| {
             let items_str: String = row.get(5)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or(Value::Array(vec![]));
+            let ghost_metadata_str: Option<String> = row.get(42)?;
+            let ghost_metadata = ghost_metadata_str
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .unwrap_or(Value::Null);
+            let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
+            let ghost_source: Option<String> = row.get(41)?;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
@@ -634,6 +716,12 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "externalPluginOrderId": row.get::<_, Option<String>>(37)?,
                 "taxRate": row.get::<_, Option<f64>>(38)?,
                 "deliveryFee": row.get::<_, Option<f64>>(39)?,
+                "is_ghost": is_ghost,
+                "isGhost": is_ghost,
+                "ghost_source": ghost_source,
+                "ghostSource": ghost_source,
+                "ghost_metadata": ghost_metadata,
+                "ghostMetadata": ghost_metadata,
             }))
         },
     );
@@ -1689,6 +1777,183 @@ fn resolve_local_order_id(conn: &rusqlite::Connection, remote_order: &Value) -> 
     None
 }
 
+fn materialize_remote_order(
+    conn: &rusqlite::Connection,
+    remote_order: &Value,
+) -> Result<Option<String>, String> {
+    let remote_id = match remote_order.get("id").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => return Ok(None),
+    };
+
+    let existing_local_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM orders WHERE supabase_id = ?1 LIMIT 1",
+            params![remote_id.clone()],
+            |row| row.get(0),
+        )
+        .ok();
+    if existing_local_id.is_some() {
+        return Ok(existing_local_id);
+    }
+
+    let client_order_id = remote_order
+        .get("client_order_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let local_id = client_order_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let items_json = match remote_order.get("items") {
+        Some(Value::String(raw)) => raw.clone(),
+        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string()),
+        None => "[]".to_string(),
+    };
+
+    let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
+    let customer_name = str_any(remote_order, &["customer_name", "customerName"]);
+    let customer_phone = str_any(remote_order, &["customer_phone", "customerPhone"]);
+    let customer_email = str_any(remote_order, &["customer_email", "customerEmail"]);
+    let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]).unwrap_or(0.0);
+    let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]).unwrap_or(0.0);
+    let subtotal = num_any(remote_order, &["subtotal"]).unwrap_or(total_amount);
+    let status = normalize_order_status_for_sync(
+        remote_order
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending"),
+    );
+    let order_type =
+        str_any(remote_order, &["order_type", "orderType"]).unwrap_or_else(|| "pickup".to_string());
+    let table_number = str_any(remote_order, &["table_number", "tableNumber"]);
+    let delivery_address = str_any(remote_order, &["delivery_address", "deliveryAddress"]);
+    let delivery_notes = str_any(remote_order, &["delivery_notes", "deliveryNotes"]);
+    let name_on_ringer = str_any(remote_order, &["name_on_ringer", "nameOnRinger"]);
+    let special_instructions = str_any(
+        remote_order,
+        &["special_instructions", "specialInstructions", "notes"],
+    );
+    let created_at = str_any(remote_order, &["created_at", "createdAt"])
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let updated_at =
+        str_any(remote_order, &["updated_at", "updatedAt"]).unwrap_or_else(|| created_at.clone());
+    let estimated_time = i64_any(remote_order, &["estimated_time", "estimatedTime"]);
+    let payment_status = normalize_payment_status_for_sync(
+        remote_order.get("payment_status").and_then(Value::as_str),
+    );
+    let payment_method = str_any(remote_order, &["payment_method", "paymentMethod"]);
+    let payment_tx = str_any(
+        remote_order,
+        &["payment_transaction_id", "paymentTransactionId"],
+    );
+    let staff_shift_id = str_any(remote_order, &["staff_shift_id", "staffShiftId"]);
+    let staff_id = str_any(remote_order, &["staff_id", "staffId"]);
+    let discount_percentage =
+        num_any(remote_order, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
+    let discount_amount =
+        num_any(remote_order, &["discount_amount", "discountAmount"]).unwrap_or(0.0);
+    let tip_amount = num_any(remote_order, &["tip_amount", "tipAmount"]).unwrap_or(0.0);
+    let version = remote_order
+        .get("version")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
+    let terminal_id = str_any(remote_order, &["terminal_id", "terminalId"]);
+    let branch_id = str_any(remote_order, &["branch_id", "branchId"]);
+    let plugin = str_any(remote_order, &["plugin", "platform"]);
+    let external_plugin_order_id = str_any(
+        remote_order,
+        &["external_plugin_order_id", "externalPluginOrderId"],
+    );
+    let tax_rate = num_any(remote_order, &["tax_rate", "taxRate"]);
+    let delivery_fee = num_any(remote_order, &["delivery_fee", "deliveryFee"]).unwrap_or(0.0);
+    let is_ghost = bool_any(remote_order, &["is_ghost", "isGhost"]).unwrap_or(false);
+    let ghost_source = str_any(remote_order, &["ghost_source", "ghostSource"]);
+    let ghost_metadata = remote_order
+        .get("ghost_metadata")
+        .or_else(|| remote_order.get("ghostMetadata"))
+        .and_then(|value| {
+            if value.is_null() {
+                return None;
+            }
+            if let Some(raw) = value.as_str() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(trimmed.to_string());
+            }
+            Some(value.to_string())
+        });
+
+    conn.execute(
+        "INSERT INTO orders (
+            id, order_number, customer_name, customer_phone, customer_email,
+            items, total_amount, tax_amount, subtotal, status,
+            order_type, table_number, delivery_address, delivery_notes,
+            name_on_ringer, special_instructions, created_at, updated_at,
+            estimated_time, supabase_id, sync_status, payment_status, payment_method,
+            payment_transaction_id, staff_shift_id, staff_id, discount_percentage,
+            discount_amount, tip_amount, version, terminal_id, branch_id,
+            plugin, external_plugin_order_id, tax_rate, delivery_fee,
+            is_ghost, ghost_source, ghost_metadata
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5,
+            ?6, ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18,
+            ?19, ?20, 'synced', ?21, ?22,
+            ?23, ?24, ?25, ?26,
+            ?27, ?28, ?29, ?30, ?31,
+            ?32, ?33, ?34, ?35,
+            ?36, ?37, ?38
+        )",
+        params![
+            local_id,
+            order_number,
+            customer_name,
+            customer_phone,
+            customer_email,
+            items_json,
+            total_amount,
+            tax_amount,
+            subtotal,
+            status,
+            order_type,
+            table_number,
+            delivery_address,
+            delivery_notes,
+            name_on_ringer,
+            special_instructions,
+            created_at,
+            updated_at,
+            estimated_time,
+            remote_id,
+            payment_status,
+            payment_method,
+            payment_tx,
+            staff_shift_id,
+            staff_id,
+            discount_percentage,
+            discount_amount,
+            tip_amount,
+            version,
+            terminal_id,
+            branch_id,
+            plugin,
+            external_plugin_order_id,
+            tax_rate,
+            delivery_fee,
+            if is_ghost { 1_i64 } else { 0_i64 },
+            ghost_source,
+            ghost_metadata,
+        ],
+    )
+    .map_err(|e| format!("materialize remote order: {e}"))?;
+
+    Ok(Some(local_id))
+}
+
 async fn reconcile_remote_orders(
     db: &DbState,
     admin_url: &str,
@@ -1782,6 +2047,7 @@ async fn reconcile_remote_orders(
         }
 
         let mut newest_updated_at: Option<String> = None;
+        let mut newly_materialized_order_ids: Vec<String> = Vec::new();
 
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -1792,7 +2058,27 @@ async fn reconcile_remote_orders(
                 };
                 let local_id = match resolve_local_order_id(&conn, &remote_order) {
                     Some(v) => v,
-                    None => continue,
+                    None => match materialize_remote_order(&conn, &remote_order) {
+                        Ok(Some(inserted_id)) => {
+                            info!(
+                                local_id = %inserted_id,
+                                remote_id = %remote_id,
+                                "Materialized missing remote order into local cache"
+                            );
+                            newly_materialized_order_ids.push(inserted_id.clone());
+                            reconciled += 1;
+                            inserted_id
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            warn!(
+                                remote_id = %remote_id,
+                                error = %error,
+                                "Failed to materialize remote order"
+                            );
+                            continue;
+                        }
+                    },
                 };
 
                 let updated_at = remote_order
@@ -1884,6 +2170,26 @@ async fn reconcile_remote_orders(
 
                 // Always promote payments regardless of reconciliation outcome
                 promote_payments_for_order(&conn, &local_id);
+            }
+        }
+
+        for local_id in newly_materialized_order_ids {
+            if let Ok(order_json) = get_order_by_id(db, &local_id) {
+                let _ = app.emit("order_created", order_json.clone());
+                let _ = app.emit("order_realtime_update", order_json);
+            } else {
+                let _ = app.emit(
+                    "order_created",
+                    serde_json::json!({ "orderId": local_id.clone() }),
+                );
+            }
+
+            if let Err(error) = print::enqueue_print_job(db, "order_receipt", &local_id, None) {
+                warn!(
+                    order_id = %local_id,
+                    error = %error,
+                    "Failed to enqueue print job for newly materialized remote order"
+                );
             }
         }
 
@@ -2256,6 +2562,32 @@ fn i64_any(v: &Value, keys: &[&str]) -> Option<i64> {
     None
 }
 
+fn bool_any(v: &Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        let value = match v.get(*key) {
+            Some(value) => value,
+            None => continue,
+        };
+
+        if let Some(flag) = value.as_bool() {
+            return Some(flag);
+        }
+        if let Some(flag) = value.as_i64() {
+            return Some(flag == 1);
+        }
+        if let Some(flag) = value.as_str() {
+            let normalized = flag.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "true" | "1" | "yes" | "on") {
+                return Some(true);
+            }
+            if matches!(normalized.as_str(), "false" | "0" | "no" | "off") {
+                return Some(false);
+            }
+        }
+    }
+    None
+}
+
 fn normalize_order_status_for_sync(raw_status: &str) -> String {
     match raw_status.trim().to_lowercase().as_str() {
         "approved" => "confirmed".to_string(),
@@ -2511,6 +2843,52 @@ fn build_normalized_order_operation(
         .or_else(|| num_any(&payload_data, &["discountAmount", "discount_amount"]))
         .unwrap_or(0.0)
         .max(0.0);
+    let discount_percentage = num_any(source, &["discountPercentage", "discount_percentage"])
+        .or_else(|| {
+            num_any(
+                &payload_data,
+                &["discountPercentage", "discount_percentage"],
+            )
+        })
+        .unwrap_or(0.0)
+        .max(0.0);
+    let manual_discount_mode = str_any(source, &["manualDiscountMode", "manual_discount_mode"])
+        .or_else(|| {
+            str_any(
+                &payload_data,
+                &["manualDiscountMode", "manual_discount_mode"],
+            )
+        })
+        .and_then(|mode| {
+            if mode == "percentage" || mode == "fixed" {
+                Some(mode)
+            } else {
+                None
+            }
+        });
+    let manual_discount_value = num_any(source, &["manualDiscountValue", "manual_discount_value"])
+        .or_else(|| {
+            num_any(
+                &payload_data,
+                &["manualDiscountValue", "manual_discount_value"],
+            )
+        })
+        .map(|value| value.max(0.0));
+    let coupon_id = str_any(source, &["couponId", "coupon_id"])
+        .or_else(|| str_any(&payload_data, &["couponId", "coupon_id"]))
+        .filter(|id| Uuid::parse_str(id).is_ok());
+    let coupon_code = str_any(source, &["couponCode", "coupon_code"])
+        .or_else(|| str_any(&payload_data, &["couponCode", "coupon_code"]));
+    let coupon_discount_amount =
+        num_any(source, &["couponDiscountAmount", "coupon_discount_amount"])
+            .or_else(|| {
+                num_any(
+                    &payload_data,
+                    &["couponDiscountAmount", "coupon_discount_amount"],
+                )
+            })
+            .unwrap_or(0.0)
+            .max(0.0);
     let delivery_fee = num_any(source, &["deliveryFee", "delivery_fee"])
         .or_else(|| num_any(&payload_data, &["deliveryFee", "delivery_fee"]))
         .unwrap_or(0.0)
@@ -2594,6 +2972,30 @@ fn build_normalized_order_operation(
             &["specialInstructions", "special_instructions", "notes"],
         )
     });
+    let is_ghost = bool_any(source, &["is_ghost", "isGhost"])
+        .or_else(|| bool_any(&payload_data, &["is_ghost", "isGhost"]))
+        .unwrap_or(false);
+    let ghost_source = str_any(source, &["ghost_source", "ghostSource"])
+        .or_else(|| str_any(&payload_data, &["ghost_source", "ghostSource"]));
+    let ghost_metadata = source
+        .get("ghost_metadata")
+        .or_else(|| source.get("ghostMetadata"))
+        .or_else(|| payload_data.get("ghost_metadata"))
+        .or_else(|| payload_data.get("ghostMetadata"))
+        .and_then(|value| {
+            if value.is_null() {
+                return None;
+            }
+            if value.is_object() {
+                return Some(value.clone());
+            }
+            if let Some(raw) = value.as_str() {
+                return serde_json::from_str::<Value>(raw)
+                    .ok()
+                    .filter(|parsed| parsed.is_object());
+            }
+            None
+        });
 
     let data = serde_json::json!({
         "order_number": str_any(source, &["orderNumber", "order_number"]).or_else(|| str_any(&payload_data, &["orderNumber", "order_number"])),
@@ -2609,7 +3011,13 @@ fn build_normalized_order_operation(
         "total_amount": total_amount,
         "subtotal": subtotal,
         "tax_amount": tax_amount,
+        "discount_percentage": discount_percentage,
         "discount_amount": discount_amount,
+        "manual_discount_mode": manual_discount_mode,
+        "manual_discount_value": manual_discount_value,
+        "coupon_id": coupon_id,
+        "coupon_code": coupon_code,
+        "coupon_discount_amount": coupon_discount_amount,
         "delivery_fee": delivery_fee,
         "notes": notes,
         "special_instructions": special_instructions,
@@ -2624,6 +3032,9 @@ fn build_normalized_order_operation(
         "driver_id": driver_id,
         "created_at": str_any(source, &["createdAt", "created_at"]).or_else(|| str_any(&payload_data, &["createdAt", "created_at"])),
         "updated_at": str_any(source, &["updatedAt", "updated_at"]).or_else(|| str_any(&payload_data, &["updatedAt", "updated_at"])),
+        "is_ghost": is_ghost,
+        "ghost_source": ghost_source,
+        "ghost_metadata": ghost_metadata,
     });
 
     Ok(serde_json::json!({
@@ -3841,6 +4252,66 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_create_order_enqueues_order_receipt_print_job() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "pickup"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id");
+
+        let conn = db.conn.lock().unwrap();
+        let queued_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_type = 'order_receipt'
+                   AND entity_id = ?1
+                   AND status = 'pending'",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued_count, 1);
+    }
+
+    #[test]
+    fn test_materialize_remote_order_inserts_missing_local_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-order-1",
+            "order_number": "ORD-REMOTE-1",
+            "items": [{ "name": "Toast", "quantity": 2, "price": 3.0 }],
+            "total_amount": 6.0,
+            "status": "pending",
+            "payment_status": "pending",
+            "updated_at": "2026-02-23T12:00:00Z"
+        });
+
+        let local_id = materialize_remote_order(&conn, &remote_order)
+            .expect("materialize remote order")
+            .expect("local id");
+
+        let supabase_id: String = conn
+            .query_row(
+                "SELECT supabase_id FROM orders WHERE id = ?1",
+                params![local_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(supabase_id, "remote-order-1");
     }
 
     #[test]

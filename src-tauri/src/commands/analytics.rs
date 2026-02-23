@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, escpos, printers, value_str, zreport};
+use crate::{db, escpos, print, printers, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,7 +171,10 @@ fn resolve_report_date(optional_date: Option<String>) -> String {
 }
 
 fn is_cancelled_status(status: &str) -> bool {
-    matches!(status.to_ascii_lowercase().as_str(), "cancelled" | "canceled")
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "cancelled" | "canceled"
+    )
 }
 
 #[allow(clippy::type_complexity)]
@@ -185,6 +188,7 @@ fn load_report_rows_for_day(
             "SELECT status, created_at, payment_method, order_type, COALESCE(total_amount, 0), items
              FROM orders
              WHERE (?1 = '' OR branch_id = ?1)
+               AND COALESCE(is_ghost, 0) = 0
                AND substr(created_at, 1, 10) = ?2",
         )
         .map_err(|e| e.to_string())?;
@@ -1037,7 +1041,8 @@ pub async fn report_print_z_report(
         }
     };
 
-    let printer_name = value_str(&profile, &["printerName", "printer_name", "name"]).unwrap_or_default();
+    let printer_name =
+        value_str(&profile, &["printerName", "printer_name", "name"]).unwrap_or_default();
     if printer_name.trim().is_empty() {
         return Ok(serde_json::json!({
             "success": false,
@@ -1056,8 +1061,23 @@ pub async fn report_print_z_report(
         .or_else(|| string_from_pointers(&snapshot, &["/date", "/reportDate", "/report_date"]))
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
     let terminal_name = value_str(&payload, &["terminalName", "terminal_name"])
-        .or_else(|| value_str(&snapshot, &["terminalName", "terminal_name", "terminalId", "terminal_id"]))
-        .or_else(|| string_from_pointers(&snapshot, &["/terminalName", "/terminal_name", "/terminalId", "/terminal_id"]));
+        .or_else(|| {
+            value_str(
+                &snapshot,
+                &["terminalName", "terminal_name", "terminalId", "terminal_id"],
+            )
+        })
+        .or_else(|| {
+            string_from_pointers(
+                &snapshot,
+                &[
+                    "/terminalName",
+                    "/terminal_name",
+                    "/terminalId",
+                    "/terminal_id",
+                ],
+            )
+        });
 
     let shifts_total = number_from_pointers(
         &snapshot,
@@ -1067,13 +1087,23 @@ pub async fn report_print_z_report(
     .round() as i64;
     let shifts_cashier = number_from_pointers(
         &snapshot,
-        &["/shifts/cashier", "/shifts/cashiers", "/cashierShifts", "/cashier_shifts"],
+        &[
+            "/shifts/cashier",
+            "/shifts/cashiers",
+            "/cashierShifts",
+            "/cashier_shifts",
+        ],
     )
     .unwrap_or(0.0)
     .round() as i64;
     let shifts_driver = number_from_pointers(
         &snapshot,
-        &["/shifts/driver", "/shifts/drivers", "/driverShifts", "/driver_shifts"],
+        &[
+            "/shifts/driver",
+            "/shifts/drivers",
+            "/driverShifts",
+            "/driver_shifts",
+        ],
     )
     .unwrap_or(0.0)
     .round() as i64;
@@ -1218,7 +1248,7 @@ pub async fn report_print_z_report(
 
     let bytes = receipt.build();
     match printers::print_raw_to_windows(&printer_name, &bytes, "POS Z Report") {
-        Ok(()) => {
+        Ok(dispatch) => {
             info!(
                 printer_name = %printer_name,
                 report_date = %report_date,
@@ -1228,6 +1258,8 @@ pub async fn report_print_z_report(
                 "success": true,
                 "printerName": printer_name,
                 "reportDate": report_date,
+                "bytesRequested": dispatch.bytes_requested,
+                "bytesWritten": dispatch.bytes_written,
             }))
         }
         Err(error) => {
@@ -1284,7 +1316,39 @@ pub async fn report_submit_z_report(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let result = zreport::submit_z_report(&db, &payload)?;
+    let mut result = zreport::submit_z_report(&db, &payload)?;
+
+    let z_report_id = extract_z_report_id_from_payload(&result)
+        .or_else(|| {
+            result
+                .get("data")
+                .and_then(extract_z_report_id_from_payload)
+        })
+        .or_else(|| {
+            result
+                .get("data")
+                .and_then(|value| value.get("data"))
+                .and_then(extract_z_report_id_from_payload)
+        })
+        .or_else(|| extract_z_report_id_from_payload(&payload));
+
+    if let Some(z_report_id) = z_report_id {
+        match print::enqueue_print_job(&db, "z_report", &z_report_id, None) {
+            Ok(job) => {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("autoPrintJob".to_string(), job);
+                }
+            }
+            Err(error) => {
+                warn!(
+                    z_report_id = %z_report_id,
+                    error = %error,
+                    "Failed to enqueue automatic z-report print job"
+                );
+            }
+        }
+    }
+
     let _ = app.emit("sync_complete", serde_json::json!({ "entity": "z_report" }));
     Ok(result)
 }

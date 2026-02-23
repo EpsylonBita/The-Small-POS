@@ -298,7 +298,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "SELECT COALESCE(SUM(op.amount), 0)
                  FROM order_payments op
                  JOIN orders o ON o.id = op.order_id
-                 WHERE o.staff_shift_id = ?1 AND op.method = 'cash' AND op.status = 'completed'",
+                 WHERE o.staff_shift_id = ?1
+                   AND op.method = 'cash'
+                   AND op.status = 'completed'
+                   AND COALESCE(o.is_ghost, 0) = 0",
                 params![shift_id],
                 |row| row.get(0),
             )
@@ -308,7 +311,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "SELECT COALESCE(SUM(op.amount), 0)
                  FROM order_payments op
                  JOIN orders o ON o.id = op.order_id
-                 WHERE o.staff_shift_id = ?1 AND op.method = 'card' AND op.status = 'completed'",
+                 WHERE o.staff_shift_id = ?1
+                   AND op.method = 'card'
+                   AND op.status = 'completed'
+                   AND COALESCE(o.is_ghost, 0) = 0",
                 params![shift_id],
                 |row| row.get(0),
             )
@@ -318,7 +324,9 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "SELECT COALESCE(SUM(pa.amount), 0)
                  FROM payment_adjustments pa
                  JOIN orders o ON o.id = pa.order_id
-                 WHERE o.staff_shift_id = ?1 AND pa.adjustment_type = 'refund'",
+                 WHERE o.staff_shift_id = ?1
+                   AND pa.adjustment_type = 'refund'
+                   AND COALESCE(o.is_ghost, 0) = 0",
                 params![shift_id],
                 |row| row.get(0),
             )
@@ -511,6 +519,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id AND op.status = 'completed'
                  WHERE o.staff_shift_id = ?1
+                   AND COALESCE(o.is_ghost, 0) = 0
                    AND o.status NOT IN ('cancelled', 'canceled')",
                 params![shift_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -739,7 +748,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             "SELECT COALESCE(order_type, 'dine-in'), COALESCE(payment_method, 'cash'),
                     COUNT(*), COALESCE(SUM(total_amount), 0)
              FROM orders
-             WHERE staff_shift_id = ?1 AND status NOT IN ('cancelled', 'canceled')
+             WHERE staff_shift_id = ?1
+               AND COALESCE(is_ghost, 0) = 0
+               AND status NOT IN ('cancelled', 'canceled')
              GROUP BY order_type, payment_method",
         )
         .map_err(|e| format!("prepare breakdown: {e}"))?;
@@ -795,7 +806,9 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         .prepare(
             "SELECT COALESCE(payment_method, 'cash'), COUNT(*), COALESCE(SUM(total_amount), 0)
              FROM orders
-             WHERE staff_shift_id = ?1 AND status IN ('cancelled', 'canceled', 'refunded')
+             WHERE staff_shift_id = ?1
+               AND COALESCE(is_ghost, 0) = 0
+               AND status IN ('cancelled', 'canceled', 'refunded')
              GROUP BY payment_method",
         )
         .map_err(|e| format!("prepare canceled: {e}"))?;
@@ -826,7 +839,10 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let cash_refunds: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(total_amount), 0) FROM orders
-             WHERE staff_shift_id = ?1 AND status = 'refunded' AND payment_method = 'cash'",
+             WHERE staff_shift_id = ?1
+               AND COALESCE(is_ghost, 0) = 0
+               AND status = 'refunded'
+               AND payment_method = 'cash'",
             params![shift_id],
             |row| row.get(0),
         )
@@ -968,6 +984,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                  FROM driver_earnings de
                  LEFT JOIN orders o ON de.order_id = o.id
                  WHERE de.staff_shift_id = ?1
+                   AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
                  ORDER BY de.created_at DESC",
             )
             .map_err(|e| format!("prepare driver earnings: {e}"))?;

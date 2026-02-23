@@ -230,8 +230,13 @@ pub async fn diagnostic_check_delivered_orders(
             ))
         })
         .map_err(|e| e.to_string())?;
-    let delivered: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> =
-        delivered_rows.filter_map(|r| r.ok()).collect();
+    let delivered: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = delivered_rows.filter_map(|r| r.ok()).collect();
 
     let mut with_driver = 0usize;
     let mut orders_without_driver = Vec::new();
@@ -338,7 +343,8 @@ pub async fn diagnostic_fix_missing_driver_ids(
             ))
         })
         .map_err(|e| e.to_string())?;
-    let orders: Vec<(String, String, f64, f64, String)> = orders_rows.filter_map(|r| r.ok()).collect();
+    let orders: Vec<(String, String, f64, f64, String)> =
+        orders_rows.filter_map(|r| r.ok()).collect();
 
     if orders.is_empty() {
         return Ok(serde_json::json!({

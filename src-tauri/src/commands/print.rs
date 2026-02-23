@@ -129,6 +129,17 @@ fn parse_printer_discover_types(arg0: Option<serde_json::Value>) -> Vec<String> 
         .collect()
 }
 
+fn should_discover_system_like(requested: &[String]) -> bool {
+    requested.is_empty()
+        || requested
+            .iter()
+            .any(|t| matches!(t.as_str(), "system" | "network" | "wifi" | "usb"))
+}
+
+fn should_discover_bluetooth(requested: &[String]) -> bool {
+    requested.iter().any(|t| t == "bluetooth")
+}
+
 fn parse_printer_update_payload(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
@@ -479,15 +490,27 @@ fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> 
         }
 
         // Extract printerName from connectionDetails based on type
-        let printer_name = conn
-            .get("systemName")
-            .and_then(|v| v.as_str())
-            .or_else(|| conn.get("hostname").and_then(|v| v.as_str()))
-            .or_else(|| conn.get("ip").and_then(|v| v.as_str()))
-            .or_else(|| conn.get("address").and_then(|v| v.as_str()))
-            .or_else(|| conn.get("deviceName").and_then(|v| v.as_str()))
-            .or_else(|| obj.and_then(|o| o.get("name")).and_then(|v| v.as_str()))
-            .unwrap_or("Printer");
+        let conn_string = |key: &str| -> Option<String> {
+            conn.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        };
+
+        let printer_name = conn_string("systemName")
+            .or_else(|| conn_string("hostname"))
+            .or_else(|| conn_string("ip"))
+            .or_else(|| conn_string("address"))
+            .or_else(|| conn_string("deviceName"))
+            .or_else(|| {
+                obj.and_then(|o| o.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| "Printer".to_string());
         out.insert("printerName".to_string(), serde_json::json!(printer_name));
     } else if !out.contains_key("printerName") {
         // Fallback: use name as printerName
@@ -616,11 +639,29 @@ fn is_internal_bluetooth_name(name: &str) -> bool {
         "protocol",
         "transport",
         "radio",
+        "personal area network",
         "wireless bluetooth",
         "host controller",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn is_internal_bluetooth_instance(instance_id: &str) -> bool {
+    let upper = instance_id.trim().to_uppercase();
+    if upper.is_empty() {
+        return false;
+    }
+
+    [
+        "BTH\\MS_BTHBRB",
+        "BTH\\MS_BTHLE",
+        "BTH\\MS_RFCOMM",
+        "BTH\\MS_BTHPAN",
+        "SWD\\RADIO\\",
+    ]
+    .iter()
+    .any(|needle| upper.starts_with(needle))
 }
 
 fn is_printer_like_bluetooth_name(name: &str) -> bool {
@@ -709,6 +750,259 @@ fn parse_powershell_device_rows(parsed: serde_json::Value) -> Vec<serde_json::Va
     } else {
         vec![]
     }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() => Some(ip),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn lan_subnet_hosts(primary_ip: std::net::Ipv4Addr) -> Vec<std::net::Ipv4Addr> {
+    let [a, b, c, host] = primary_ip.octets();
+    (1u8..=254u8)
+        .filter(|candidate| *candidate != host)
+        .map(|candidate| std::net::Ipv4Addr::new(a, b, c, candidate))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_lan_printer_host(ip: std::net::Ipv4Addr) -> Option<u16> {
+    const PRINTER_PORTS: [u16; 3] = [9100, 515, 631];
+    for port in PRINTER_PORTS {
+        let addr = std::net::SocketAddr::from((std::net::IpAddr::V4(ip), port));
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(180),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
+        {
+            return Some(port);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+async fn discover_lan_printers_native(
+    configured: &ConfiguredPrinterLookup,
+) -> Vec<serde_json::Value> {
+    let primary_ip = match detect_primary_ipv4() {
+        Some(ip) => ip,
+        None => {
+            warn!("LAN printer discovery skipped: unable to detect primary IPv4 address");
+            return vec![];
+        }
+    };
+    let hosts = lan_subnet_hosts(primary_ip);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(48));
+    let mut set = tokio::task::JoinSet::new();
+
+    for ip in hosts {
+        let semaphore = semaphore.clone();
+        set.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok()?;
+            let port = probe_lan_printer_host(ip).await?;
+            Some((ip, port))
+        });
+    }
+
+    let mut discovered = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some((ip, port))) = joined {
+            let address = ip.to_string();
+            let name = format!("LAN Printer ({address})");
+            let is_configured = is_configured_discovery_entry(configured, &name, &address);
+            discovered.push(serde_json::json!({
+                "name": name,
+                "type": "network",
+                "address": address,
+                "port": port,
+                "model": serde_json::Value::Null,
+                "manufacturer": serde_json::Value::Null,
+                "isConfigured": is_configured,
+                "source": "lan-port-scan"
+            }));
+        }
+    }
+
+    let deduped = dedupe_discovered_printers(discovered);
+    info!(
+        primary_ip = %primary_ip,
+        discovered = deduped.len(),
+        "LAN printer discovery completed"
+    );
+    deduped
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn discover_lan_printers_native(
+    _configured: &ConfiguredPrinterLookup,
+) -> Vec<serde_json::Value> {
+    vec![]
+}
+
+#[cfg(target_os = "windows")]
+fn run_hidden_powershell(script: &str) -> Result<std::process::Output, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to execute PowerShell command: {e}"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_hidden_powershell_json_rows(script: &str, context: &str) -> Vec<serde_json::Value> {
+    let output = match run_hidden_powershell(script) {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(error = %error, context = %context, "PowerShell discovery command failed to start");
+            return vec![];
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            stderr = %stderr,
+            context = %context,
+            "PowerShell discovery command returned a non-success status"
+        );
+        return vec![];
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() || stdout == "null" {
+        return vec![];
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(parsed) => parse_powershell_device_rows(parsed),
+        Err(error) => {
+            warn!(
+                error = %error,
+                output = %stdout,
+                context = %context,
+                "PowerShell discovery output was not valid JSON"
+            );
+            vec![]
+        }
+    }
+}
+
+fn resolve_bluetooth_address(device: &serde_json::Value, instance_id: &str, name: &str) -> String {
+    let explicit = value_str(
+        device,
+        &[
+            "Address",
+            "address",
+            "MacAddress",
+            "macAddress",
+            "BluetoothAddress",
+            "bluetoothAddress",
+        ],
+    );
+    if let Some(raw) = explicit {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Some(mac) = extract_mac_from_instance_id(trimmed) {
+                return mac;
+            }
+            if trimmed.len() == 12 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                return format_mac_address(trimmed);
+            }
+            return trimmed.to_string();
+        }
+    }
+
+    extract_mac_from_instance_id(instance_id)
+        .unwrap_or_else(|| stable_bt_fallback_address(instance_id, name))
+}
+
+#[cfg(target_os = "windows")]
+fn discover_bluetooth_pnp_rows() -> Vec<serde_json::Value> {
+    // Use a broad present-device query so printer modules that are not yet in fully "OK" state
+    // are still visible in the discovery modal.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$devices = Get-PnpDevice -PresentOnly | Where-Object {
+  (
+    ($_.Class -like '*Bluetooth*') -or
+    ($_.InstanceId -like 'BTH*') -or
+    ($_.InstanceId -like 'SWD\RADIO\*')
+  ) -and
+  ($_.FriendlyName -notlike '*Adapter*') -and
+  ($_.FriendlyName -notlike '*Enumerator*') -and
+  ($_.FriendlyName -notlike '*Protocol*') -and
+  ($_.FriendlyName -notlike '*Transport*')
+}
+$devices |
+  Select-Object `
+    @{Name='FriendlyName';Expression={ if ($_.FriendlyName) { $_.FriendlyName } elseif ($_.Name) { $_.Name } else { 'Bluetooth Device' } }}, `
+    InstanceId, Class, Status, @{Name='Source';Expression={'windows-pnp'}} |
+  ConvertTo-Json -Depth 6 -Compress
+"#;
+
+    run_hidden_powershell_json_rows(script, "bluetooth-pnp")
+}
+
+#[cfg(target_os = "windows")]
+fn discover_bluetooth_ble_rows() -> Vec<serde_json::Value> {
+    // Passive BLE advertisement scan without opening a browser pairing chooser.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$watcher = [Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher, Windows, ContentType=WindowsRuntime]::new()
+$watcher.ScanningMode = [Windows.Devices.Bluetooth.Advertisement.BluetoothLEScanningMode, Windows, ContentType=WindowsRuntime]::Active
+$devices = [hashtable]::Synchronized(@{})
+$handler = [Windows.Foundation.TypedEventHandler[Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher, Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs]] {
+  param($sender, $args)
+  $hex = ('{0:X12}' -f $args.BluetoothAddress)
+  if ([string]::IsNullOrWhiteSpace($hex)) { return }
+  $address = ($hex -replace '(..)(?=.)', '$1:')
+  $name = $args.Advertisement.LocalName
+  if ([string]::IsNullOrWhiteSpace($name)) {
+    $name = \"Unknown or unsupported device ($address)\"
+  }
+
+  if (-not $devices.ContainsKey($address)) {
+    $devices[$address] = [pscustomobject]@{
+      FriendlyName = $name
+      InstanceId = \"BLE::$address\"
+      Address = $address
+      Class = 'BluetoothLE'
+      Status = 'Discovered'
+      Source = 'windows-ble'
+    }
+  } elseif ($devices[$address].FriendlyName -like 'Unknown or unsupported device*' -and -not [string]::IsNullOrWhiteSpace($args.Advertisement.LocalName)) {
+    $devices[$address].FriendlyName = $args.Advertisement.LocalName
+  }
+}
+
+$token = $watcher.add_Received($handler)
+try {
+  $watcher.Start()
+  Start-Sleep -Milliseconds 4500
+} finally {
+  try { $watcher.Stop() } catch {}
+  $watcher.remove_Received($token)
+}
+
+$devices.Values | ConvertTo-Json -Depth 6 -Compress
+"#;
+
+    run_hidden_powershell_json_rows(script, "bluetooth-ble")
 }
 
 fn collect_printer_status_map(
@@ -802,69 +1096,37 @@ pub fn start_printer_status_monitor(
 fn discover_bluetooth_printers_native(
     configured: &ConfiguredPrinterLookup,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use std::process::Command;
+    let mut candidates = discover_bluetooth_pnp_rows();
+    let ble = discover_bluetooth_ble_rows();
 
-    let script = r#"
-$ErrorActionPreference = 'Stop'
-$devices = Get-PnpDevice -Class Bluetooth | Where-Object {
-  $_.Status -eq 'OK' -and
-  $_.FriendlyName -and
-  $_.FriendlyName -notlike '*Adapter*' -and
-  $_.FriendlyName -notlike '*Enumerator*' -and
-  $_.FriendlyName -notlike '*Protocol*' -and
-  $_.FriendlyName -notlike '*Transport*'
-}
-$devices | Select-Object FriendlyName, InstanceId, Class, Status | ConvertTo-Json -Depth 6 -Compress
-"#;
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .map_err(|e| format!("Failed to execute Bluetooth discovery command: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        warn!(
-            stderr = %stderr,
-            "Bluetooth discovery PowerShell command returned a non-success status"
-        );
-        return Ok(vec![]);
+    if !ble.is_empty() {
+        candidates.extend(ble);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() || stdout == "null" {
-        info!("Bluetooth discovery returned no paired devices");
+    if candidates.is_empty() {
+        info!("Bluetooth discovery returned no candidate devices");
         return Ok(vec![]);
     }
-
-    let parsed: serde_json::Value = match serde_json::from_str(&stdout) {
-        Ok(v) => v,
-        Err(error) => {
-            warn!(
-                error = %error,
-                output = %stdout,
-                "Bluetooth discovery output was not valid JSON"
-            );
-            return Ok(vec![]);
-        }
-    };
-
-    let candidates = parse_powershell_device_rows(parsed);
 
     let mut printer_like: Vec<serde_json::Value> = Vec::new();
     let mut others: Vec<serde_json::Value> = Vec::new();
 
     for device in candidates {
+        let instance_id = value_str(&device, &["InstanceId", "instanceId"]).unwrap_or_default();
+        if is_internal_bluetooth_instance(&instance_id) {
+            continue;
+        }
+
         let name = value_str(&device, &["FriendlyName", "friendlyName", "name"])
             .unwrap_or_else(|| "Bluetooth Device".to_string());
         if is_internal_bluetooth_name(&name) {
             continue;
         }
 
-        let instance_id = value_str(&device, &["InstanceId", "instanceId"]).unwrap_or_default();
-        let address = extract_mac_from_instance_id(&instance_id)
-            .unwrap_or_else(|| stable_bt_fallback_address(&instance_id, &name));
+        let address = resolve_bluetooth_address(&device, &instance_id, &name);
         let is_configured = is_configured_discovery_entry(configured, &name, &address);
+        let source =
+            value_str(&device, &["Source", "source"]).unwrap_or_else(|| "windows-pnp".to_string());
 
         let row = serde_json::json!({
             "name": name,
@@ -874,7 +1136,7 @@ $devices | Select-Object FriendlyName, InstanceId, Class, Status | ConvertTo-Jso
             "model": serde_json::Value::Null,
             "manufacturer": serde_json::Value::Null,
             "isConfigured": is_configured,
-            "source": "windows-pnp"
+            "source": source
         });
 
         if is_printer_like_bluetooth_name(
@@ -945,6 +1207,35 @@ mod bluetooth_discovery_tests {
         let rows = parse_powershell_device_rows(parsed);
         assert_eq!(rows.len(), 2);
     }
+
+    #[test]
+    fn resolve_address_prefers_explicit_mac() {
+        let row = serde_json::json!({
+            "Address": "AABBCCDDEEFF",
+            "InstanceId": "BTHENUM\\DEV_112233445566\\x"
+        });
+        let resolved = resolve_bluetooth_address(&row, "BTHENUM\\DEV_112233445566\\x", "Printer");
+        assert_eq!(resolved, "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn resolve_address_falls_back_to_instance_id() {
+        let row = serde_json::json!({
+            "FriendlyName": "Printer"
+        });
+        let resolved = resolve_bluetooth_address(&row, "BTHENUM\\DEV_112233445566\\x", "Printer");
+        assert_eq!(resolved, "11:22:33:44:55:66");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lan_subnet_hosts_excludes_primary_host() {
+        let hosts = lan_subnet_hosts(std::net::Ipv4Addr::new(192, 168, 1, 42));
+        assert_eq!(hosts.len(), 253);
+        assert!(!hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 42)));
+        assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 254)));
+    }
 }
 
 #[tauri::command]
@@ -953,7 +1244,7 @@ pub async fn printer_scan_network(
 ) -> Result<serde_json::Value, String> {
     let configured = configured_printer_lookup(&db);
     let printers = printers::list_system_printers();
-    let discovered: Vec<serde_json::Value> = printers
+    let mut discovered: Vec<serde_json::Value> = printers
         .into_iter()
         .map(|name| {
             let address = name.clone();
@@ -967,9 +1258,11 @@ pub async fn printer_scan_network(
             })
         })
         .collect();
+    discovered.extend(discover_lan_printers_native(&configured).await);
+    let deduped = dedupe_discovered_printers(discovered);
     Ok(serde_json::json!({
         "success": true,
-        "printers": discovered,
+        "printers": deduped,
         "type": "network"
     }))
 }
@@ -1007,12 +1300,8 @@ pub async fn printer_discover(
         requested_types = ?requested,
         "printer_discover requested"
     );
-    let discover_all = requested.is_empty();
-    let wants_system_like = discover_all
-        || requested
-            .iter()
-            .any(|t| matches!(t.as_str(), "system" | "network" | "wifi" | "usb"));
-    let wants_bluetooth = discover_all || requested.iter().any(|t| t == "bluetooth");
+    let wants_system_like = should_discover_system_like(&requested);
+    let wants_bluetooth = should_discover_bluetooth(&requested);
 
     let configured = configured_printer_lookup(&db);
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1030,6 +1319,7 @@ pub async fn printer_discover(
                 "isConfigured": is_configured_discovery_entry(&configured, &printer_name, &address)
             }));
         }
+        out.extend(discover_lan_printers_native(&configured).await);
     }
 
     if wants_bluetooth {
@@ -1193,7 +1483,7 @@ pub async fn printer_submit_job(
 
     let allowed = matches!(
         entity_type.as_str(),
-        "order_receipt" | "kitchen_ticket" | "z_report"
+        "order_receipt" | "kitchen_ticket" | "z_report" | "shift_checkout"
     );
     if allowed {
         return print::enqueue_print_job(
@@ -1259,6 +1549,18 @@ pub async fn printer_test(
         return Err("Printer has no system printer name configured".into());
     }
 
+    let known_printers = printers::list_system_printers();
+    let printer_known = known_printers.iter().any(|name| name == &printer_name);
+    if !printer_known {
+        return Ok(serde_json::json!({
+            "success": false,
+            "printerId": printer_id,
+            "error": format!("Printer \"{}\" is not installed in Windows Printers", printer_name),
+            "printerName": printer_name,
+            "knownPrinters": known_printers,
+        }));
+    }
+
     let start = std::time::Instant::now();
 
     // Determine paper width from profile
@@ -1296,9 +1598,28 @@ pub async fn printer_test(
         .cut();
     let test_data = builder.build();
 
+    let doc_name = "POS Test Print";
     // Send raw ESC/POS bytes to Windows printer
-    match printers::print_raw_to_windows(&printer_name, &test_data, "POS Test Print") {
-        Ok(()) => {
+    match printers::print_raw_to_windows(&printer_name, &test_data, doc_name) {
+        Ok(dispatch) => {
+            if let Err(probe_error) = printers::probe_printer_spool(&printer_name) {
+                warn!(
+                    printer = %printer_name,
+                    error = %probe_error,
+                    "Printer spool probe failed after test print dispatch"
+                );
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "printerId": printer_id,
+                    "printerName": printer_name,
+                    "error": format!("Print data was sent but spool status probe failed: {probe_error}"),
+                    "bytesRequested": dispatch.bytes_requested,
+                    "bytesWritten": dispatch.bytes_written,
+                    "docName": dispatch.doc_name,
+                    "latencyMs": start.elapsed().as_millis() as u64
+                }));
+            }
+
             let latency_ms = start.elapsed().as_millis() as u64;
             info!(
                 printer = %printer_name,
@@ -1309,8 +1630,12 @@ pub async fn printer_test(
             Ok(serde_json::json!({
                 "success": true,
                 "printerId": printer_id,
+                "printerName": printer_name,
                 "latencyMs": latency_ms,
-                "message": "Test print dispatched"
+                "message": "Test print dispatched",
+                "bytesRequested": dispatch.bytes_requested,
+                "bytesWritten": dispatch.bytes_written,
+                "docName": dispatch.doc_name
             }))
         }
         Err(e) => {
@@ -1318,8 +1643,12 @@ pub async fn printer_test(
             Ok(serde_json::json!({
                 "success": false,
                 "printerId": printer_id,
+                "printerName": printer_name,
                 "error": e,
-                "latencyMs": start.elapsed().as_millis() as u64
+                "latencyMs": start.elapsed().as_millis() as u64,
+                "bytesRequested": test_data.len(),
+                "bytesWritten": 0,
+                "docName": doc_name
             }))
         }
     }
@@ -1493,6 +1822,19 @@ mod dto_tests {
     }
 
     #[test]
+    fn printer_discover_defaults_exclude_bluetooth() {
+        let requested = parse_printer_discover_types(None);
+        assert!(should_discover_system_like(&requested));
+        assert!(!should_discover_bluetooth(&requested));
+    }
+
+    #[test]
+    fn printer_discover_includes_bluetooth_only_when_requested() {
+        let requested = parse_printer_discover_types(Some(serde_json::json!(["bluetooth"])));
+        assert!(should_discover_bluetooth(&requested));
+    }
+
+    #[test]
     fn parse_printer_update_payload_supports_legacy_tuple_and_object() {
         let legacy = parse_printer_update_payload(
             Some(serde_json::json!("printer-1")),
@@ -1517,6 +1859,25 @@ mod dto_tests {
         assert_eq!(
             object.updates.get("paperSize").and_then(|v| v.as_str()),
             Some("58mm")
+        );
+    }
+
+    #[test]
+    fn electron_to_profile_input_ignores_empty_system_name() {
+        let mapped = electron_to_profile_input(
+            None,
+            serde_json::json!({
+                "name": "Front Desk",
+                "type": "system",
+                "connectionDetails": {
+                    "systemName": "   ",
+                    "address": ""
+                }
+            }),
+        );
+        assert_eq!(
+            mapped.get("printerName").and_then(|v| v.as_str()),
+            Some("Front Desk")
         );
     }
 

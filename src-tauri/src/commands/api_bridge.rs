@@ -112,6 +112,16 @@ pub async fn admin_sync_terminal_config(
         }
         updated.push("organization_id".into());
     }
+    if let Some(ghost_enabled) =
+        crate::extract_ghost_mode_feature_from_terminal_settings_response(&resp)
+    {
+        let ghost_value = if ghost_enabled { "true" } else { "false" };
+        storage::set_credential("ghost_mode_feature_enabled", ghost_value)?;
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "ghost_mode_feature_enabled", ghost_value);
+        }
+        updated.push("ghost_mode_feature_enabled".into());
+    }
     if let Some(supa) = resp.get("supabase") {
         if let Some(url) = supa.get("url").and_then(|v| v.as_str()) {
             if !url.is_empty() {

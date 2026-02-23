@@ -1,15 +1,23 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine } from 'lucide-react';
 import { useI18n } from '../../contexts/i18n-context';
+import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
+import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
+
+const LINE_PRICE_HOLD_DURATION_MS = 5000;
+const LINE_PRICE_HOLD_TICK_MS = 100;
 
 interface CartItem {
   id: string | number;
   name: string;
   quantity: number;
   price: number;
+  unitPrice?: number;
   totalPrice: number;
+  originalUnitPrice?: number | null;
+  isPriceOverridden?: boolean;
   categoryName?: string; // Main category (e.g., "Crepes", "Waffles")
   flavorType?: 'savory' | 'sweet' | null; // Flavor type for display
   customizations?: Array<{
@@ -45,8 +53,11 @@ interface MenuCartProps {
   onEditItem?: (item: CartItem) => void;
   onRemoveItem?: (itemId: string | number) => void;
   discountPercentage?: number;
+  manualDiscountMode?: 'percentage' | 'fixed';
+  manualDiscountValue?: number;
   maxDiscountPercentage?: number;
   onDiscountChange?: (percentage: number) => void;
+  onManualDiscountChange?: (mode: 'percentage' | 'fixed', value: number) => void;
   editMode?: boolean; // When true, shows "Save Changes" instead of "Complete Order"
   isSaving?: boolean; // When true, shows loading state on save button
   orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
@@ -60,6 +71,7 @@ interface MenuCartProps {
   couponError?: string | null;
   // Manual item props
   onAddManualItem?: (price: number, name?: string) => void;
+  onLinePriceChange?: (itemId: string | number, newUnitPrice: number) => void;
 }
 
 export const MenuCart: React.FC<MenuCartProps> = ({
@@ -69,8 +81,11 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   onEditItem,
   onRemoveItem,
   discountPercentage = 0,
+  manualDiscountMode = 'percentage',
+  manualDiscountValue = 0,
   maxDiscountPercentage = 30,
   onDiscountChange,
+  onManualDiscountChange,
   editMode = false,
   isSaving = false,
   orderType,
@@ -82,6 +97,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   isValidatingCoupon = false,
   couponError,
   onAddManualItem,
+  onLinePriceChange,
 }) => {
   const { t } = useTranslation();
 
@@ -101,30 +117,50 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const { language } = useI18n();
 
   const [couponInput, setCouponInput] = React.useState('');
+  const [isCouponModalOpen, setIsCouponModalOpen] = React.useState(false);
   const [showManualInput, setShowManualInput] = React.useState(false);
   const [manualPrice, setManualPrice] = React.useState('');
   const [manualName, setManualName] = React.useState('');
   const [isDiscountModalOpen, setIsDiscountModalOpen] = React.useState(false);
-  const [discountDraft, setDiscountDraft] = React.useState<number>(discountPercentage || 0);
+  const [discountModeDraft, setDiscountModeDraft] = React.useState<'percentage' | 'fixed'>(
+    onManualDiscountChange ? manualDiscountMode : 'percentage'
+  );
+  const [discountDraft, setDiscountDraft] = React.useState<number>(
+    onManualDiscountChange ? manualDiscountValue : discountPercentage || 0
+  );
   const [discountManualInput, setDiscountManualInput] = React.useState<string>('');
+  const [editingLineItemId, setEditingLineItemId] = React.useState<string | number | null>(null);
+  const [linePriceDraft, setLinePriceDraft] = React.useState<string>('');
+  const [holdingLineItemId, setHoldingLineItemId] = React.useState<string | number | null>(null);
+  const [linePriceHoldProgress, setLinePriceHoldProgress] = React.useState<number>(0);
+  const holdStartAtRef = React.useRef<number | null>(null);
+  const holdItemSnapshotRef = React.useRef<string | null>(null);
+  const holdPointerIdRef = React.useRef<number | null>(null);
+  const holdTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const holdProgressIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const couponInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const discountPresetValues = React.useMemo(() => (
     Array.from({ length: 10 }, (_, index) => (index + 1) * 10)
   ), []);
 
   React.useEffect(() => {
-    setDiscountDraft(discountPercentage || 0);
-    setDiscountManualInput(discountPercentage ? String(discountPercentage) : '');
-  }, [discountPercentage]);
+    const mode = onManualDiscountChange ? manualDiscountMode : 'percentage';
+    const value = onManualDiscountChange ? manualDiscountValue : discountPercentage || 0;
+    setDiscountModeDraft(mode);
+    setDiscountDraft(value || 0);
+    setDiscountManualInput(value ? String(value) : '');
+  }, [manualDiscountMode, manualDiscountValue, discountPercentage, onManualDiscountChange]);
 
   React.useEffect(() => {
-    if (!isDiscountModalOpen) {
+    if (!isDiscountModalOpen && !isCouponModalOpen) {
       return;
     }
 
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setIsDiscountModalOpen(false);
+        setIsCouponModalOpen(false);
       }
     };
 
@@ -132,41 +168,317 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     return () => {
       window.removeEventListener('keydown', onEscape);
     };
-  }, [isDiscountModalOpen]);
+  }, [isDiscountModalOpen, isCouponModalOpen]);
 
-  const parseDiscountInput = (value: string): number => {
+  React.useEffect(() => {
+    if (!isCouponModalOpen) {
+      return;
+    }
+    if (appliedCoupon) {
+      setIsCouponModalOpen(false);
+      setCouponInput('');
+    }
+  }, [isCouponModalOpen, appliedCoupon]);
+
+  React.useEffect(() => {
+    if (!isCouponModalOpen) {
+      return;
+    }
+
+    const focusTimer = window.setTimeout(() => {
+      couponInputRef.current?.focus();
+    }, 20);
+
+    return () => {
+      window.clearTimeout(focusTimer);
+    };
+  }, [isCouponModalOpen]);
+
+  useOnBarcodeScan((barcode) => {
+    if (!isCouponModalOpen || !onApplyCoupon) {
+      return;
+    }
+    const scannedCode = (barcode || '').trim().toUpperCase();
+    if (!scannedCode) {
+      return;
+    }
+    setCouponInput(scannedCode);
+    onApplyCoupon(scannedCode);
+  }, [isCouponModalOpen, onApplyCoupon]);
+
+  const handleLoyaltyCardScanned = React.useCallback((card: { uid: string }) => {
+    if (!isCouponModalOpen || !onApplyCoupon) {
+      return;
+    }
+    const scannedCode = (card?.uid || '').trim().toUpperCase();
+    if (!scannedCode) {
+      return;
+    }
+    setCouponInput(scannedCode);
+    onApplyCoupon(scannedCode);
+  }, [isCouponModalOpen, onApplyCoupon]);
+
+  const { start: startLoyaltyReader } = useLoyaltyReader(isCouponModalOpen, handleLoyaltyCardScanned);
+
+  const clearHoldTimers = React.useCallback(() => {
+    if (holdTimeoutRef.current) {
+      clearTimeout(holdTimeoutRef.current);
+      holdTimeoutRef.current = null;
+    }
+    if (holdProgressIntervalRef.current) {
+      clearInterval(holdProgressIntervalRef.current);
+      holdProgressIntervalRef.current = null;
+    }
+  }, []);
+
+  const cancelLinePriceHold = React.useCallback(() => {
+    clearHoldTimers();
+    holdStartAtRef.current = null;
+    holdItemSnapshotRef.current = null;
+    holdPointerIdRef.current = null;
+    setHoldingLineItemId(null);
+    setLinePriceHoldProgress(0);
+  }, [clearHoldTimers]);
+
+  const closeLinePriceModal = React.useCallback(() => {
+    setEditingLineItemId(null);
+    setLinePriceDraft('');
+  }, []);
+
+  const openLinePriceModal = React.useCallback((itemId: string | number, unitPrice: number) => {
+    setEditingLineItemId(itemId);
+    setLinePriceDraft(unitPrice.toFixed(2));
+  }, []);
+
+  const applyLinePriceDraft = React.useCallback(() => {
+    if (editingLineItemId === null) {
+      return;
+    }
+
+    const next = Number.parseFloat(linePriceDraft.replace(',', '.').trim());
+    if (!Number.isFinite(next) || next < 0) {
+      return;
+    }
+
+    const targetItem = cartItems.find((ci) => ci.id === editingLineItemId);
+    if (!targetItem) {
+      closeLinePriceModal();
+      return;
+    }
+
+    const baselinePrice =
+      targetItem.unitPrice ||
+      targetItem.price ||
+      ((targetItem.totalPrice || 0) / Math.max(targetItem.quantity || 1, 1));
+
+    if (onLinePriceChange) {
+      onLinePriceChange(editingLineItemId, next);
+    } else {
+      const updatedItems = cartItems.map(ci =>
+        ci.id === editingLineItemId
+          ? {
+              ...ci,
+              unitPrice: next,
+              totalPrice: next * ci.quantity,
+              originalUnitPrice: ci.originalUnitPrice ?? baselinePrice,
+              isPriceOverridden:
+                Math.abs(next - (ci.originalUnitPrice ?? baselinePrice)) > 0.0001,
+            }
+          : ci
+      );
+      onUpdateCart(updatedItems);
+    }
+
+    closeLinePriceModal();
+  }, [editingLineItemId, linePriceDraft, cartItems, onLinePriceChange, onUpdateCart, closeLinePriceModal]);
+
+  const startLinePriceHold = React.useCallback(
+    (
+      event: React.PointerEvent<HTMLButtonElement>,
+      itemId: string | number,
+      unitPrice: number,
+      holdSnapshot: string
+    ) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) {
+        return;
+      }
+
+      event.stopPropagation();
+      cancelLinePriceHold();
+      holdPointerIdRef.current = event.pointerId;
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {}
+      setHoldingLineItemId(itemId);
+      holdStartAtRef.current = Date.now();
+      holdItemSnapshotRef.current = holdSnapshot;
+      setLinePriceHoldProgress(0);
+
+      holdProgressIntervalRef.current = setInterval(() => {
+        if (holdStartAtRef.current === null) {
+          return;
+        }
+        const elapsed = Date.now() - holdStartAtRef.current;
+        const progress = Math.min(99, (elapsed / LINE_PRICE_HOLD_DURATION_MS) * 100);
+        setLinePriceHoldProgress(progress);
+      }, LINE_PRICE_HOLD_TICK_MS);
+
+      holdTimeoutRef.current = setTimeout(() => {
+        setLinePriceHoldProgress(100);
+        openLinePriceModal(itemId, unitPrice);
+        cancelLinePriceHold();
+      }, LINE_PRICE_HOLD_DURATION_MS);
+    },
+    [cancelLinePriceHold, openLinePriceModal]
+  );
+
+  const handleLinePricePointerEnd = React.useCallback(
+    (event: React.PointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      if (holdPointerIdRef.current !== null && event.pointerId !== holdPointerIdRef.current) {
+        return;
+      }
+      cancelLinePriceHold();
+    },
+    [cancelLinePriceHold]
+  );
+
+  React.useEffect(() => {
+    if (editingLineItemId === null) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeLinePriceModal();
+      }
+    };
+
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [editingLineItemId, closeLinePriceModal]);
+
+  React.useEffect(() => {
+    if (holdingLineItemId === null) {
+      return;
+    }
+
+    const cancelFromWindow = () => cancelLinePriceHold();
+    window.addEventListener('blur', cancelFromWindow);
+    window.addEventListener('scroll', cancelFromWindow, true);
+
+    return () => {
+      window.removeEventListener('blur', cancelFromWindow);
+      window.removeEventListener('scroll', cancelFromWindow, true);
+    };
+  }, [holdingLineItemId, cancelLinePriceHold]);
+
+  React.useEffect(() => {
+    if (holdingLineItemId !== null && !cartItems.some((item) => item.id === holdingLineItemId)) {
+      cancelLinePriceHold();
+    }
+  }, [holdingLineItemId, cartItems, cancelLinePriceHold]);
+
+  React.useEffect(() => {
+    if (holdingLineItemId === null || holdItemSnapshotRef.current === null) {
+      return;
+    }
+
+    const heldItem = cartItems.find((item) => item.id === holdingLineItemId);
+    if (!heldItem) {
+      cancelLinePriceHold();
+      return;
+    }
+
+    const heldItemUnitPrice =
+      heldItem.unitPrice ||
+      heldItem.price ||
+      ((heldItem.totalPrice || 0) / Math.max(heldItem.quantity || 1, 1));
+    const currentSnapshot = `${heldItem.quantity}:${heldItemUnitPrice}:${heldItem.totalPrice || 0}`;
+
+    if (currentSnapshot !== holdItemSnapshotRef.current) {
+      cancelLinePriceHold();
+    }
+  }, [cartItems, holdingLineItemId, cancelLinePriceHold]);
+
+  React.useEffect(() => {
+    if (editingLineItemId !== null && !cartItems.some((item) => item.id === editingLineItemId)) {
+      closeLinePriceModal();
+    }
+  }, [editingLineItemId, cartItems, closeLinePriceModal]);
+
+  React.useEffect(() => {
+    return () => {
+      clearHoldTimers();
+    };
+  }, [clearHoldTimers]);
+
+  const parseDiscountInput = (value: string, mode: 'percentage' | 'fixed'): number => {
     const normalized = value.replace(',', '.').trim();
     const parsed = Number.parseFloat(normalized);
     if (!Number.isFinite(parsed)) {
       return 0;
     }
-    return Math.max(0, Math.min(parsed, 100));
+    if (mode === 'percentage') {
+      return Math.max(0, Math.min(parsed, 100));
+    }
+    return Math.max(0, parsed);
   };
 
   const openDiscountModal = () => {
-    const current = discountPercentage || 0;
+    const mode = onManualDiscountChange ? manualDiscountMode : 'percentage';
+    const current = onManualDiscountChange ? manualDiscountValue : discountPercentage || 0;
+    setDiscountModeDraft(mode);
     setDiscountDraft(current);
     setDiscountManualInput(current > 0 ? String(current) : '');
     setIsDiscountModalOpen(true);
   };
 
-  const applyDraftDiscount = () => {
-    if (!onDiscountChange) {
+  const applyCouponFromModal = React.useCallback(() => {
+    if (!onApplyCoupon) {
       return;
     }
-    const nextValue = Math.max(0, Math.min(discountDraft, maxDiscountPercentage));
-    onDiscountChange(nextValue);
+    const normalizedCode = couponInput.trim().toUpperCase();
+    if (!normalizedCode) {
+      return;
+    }
+    setCouponInput(normalizedCode);
+    onApplyCoupon(normalizedCode);
+  }, [couponInput, onApplyCoupon]);
+
+  const applyDraftDiscount = () => {
+    if (!onDiscountChange && !onManualDiscountChange) {
+      return;
+    }
+    if (onManualDiscountChange) {
+      if (discountModeDraft === 'percentage') {
+        const nextValue = Math.max(0, Math.min(discountDraft, maxDiscountPercentage));
+        onManualDiscountChange('percentage', nextValue);
+      } else {
+        const nextValue = Math.max(0, Math.min(discountDraft, getSubtotal()));
+        onManualDiscountChange('fixed', nextValue);
+      }
+    } else {
+      const nextValue = Math.max(0, Math.min(discountDraft, maxDiscountPercentage));
+      onDiscountChange?.(nextValue);
+    }
     setIsDiscountModalOpen(false);
   };
 
   const clearDiscount = () => {
     setDiscountDraft(0);
     setDiscountManualInput('');
-    onDiscountChange?.(0);
+    if (onManualDiscountChange) {
+      onManualDiscountChange(discountModeDraft, 0);
+    } else {
+      onDiscountChange?.(0);
+    }
     setIsDiscountModalOpen(false);
   };
 
-  const isDraftOverMax = discountDraft > maxDiscountPercentage;
+  const isDraftOverMax = discountModeDraft === 'percentage' && discountDraft > maxDiscountPercentage;
 
   // Helper function to get localized ingredient name
   const getIngredientName = (ingredient: {
@@ -193,8 +505,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   };
 
   const subtotal = getSubtotal();
-  const discountAmount = subtotal * (discountPercentage / 100);
+  const effectiveDiscountMode = onManualDiscountChange ? manualDiscountMode : 'percentage';
+  const effectiveDiscountValue = onManualDiscountChange ? manualDiscountValue : discountPercentage;
+  const effectiveDiscountPercentage = effectiveDiscountMode === 'percentage'
+    ? Math.max(0, Math.min(effectiveDiscountValue || 0, 100))
+    : 0;
+  const discountAmount = effectiveDiscountMode === 'percentage'
+    ? subtotal * (effectiveDiscountPercentage / 100)
+    : Math.min(Math.max(effectiveDiscountValue || 0, 0), subtotal);
+  const discountControlEnabled = Boolean(onDiscountChange || onManualDiscountChange);
+  const isAppliedDiscountOverMax =
+    effectiveDiscountMode === 'percentage' && effectiveDiscountPercentage > maxDiscountPercentage;
   const totalAfterDiscount = subtotal - discountAmount - couponDiscount;
+  const editingLineItem = editingLineItemId === null
+    ? null
+    : cartItems.find(item => item.id === editingLineItemId) ?? null;
+  const parsedLinePriceDraft = Number.parseFloat(linePriceDraft.replace(',', '.').trim());
+  const isLinePriceDraftValid = Number.isFinite(parsedLinePriceDraft) && parsedLinePriceDraft >= 0;
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
@@ -294,7 +621,16 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            {uniqueCartItems.map((item) => (
+            {uniqueCartItems.map((item) => {
+              const itemUnitPrice =
+                item.unitPrice ||
+                item.price ||
+                ((item.totalPrice || 0) / Math.max(item.quantity || 1, 1));
+              const isHoldingLinePrice = holdingLineItemId === item.id;
+              const isPriceOverridden =
+                item.isPriceOverridden || ((item.originalUnitPrice ?? itemUnitPrice) !== itemUnitPrice);
+
+              return (
               <div
                 key={item.id}
                 className={`p-3 rounded-xl border transition-all duration-200 bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 hover:border-blue-400/50 dark:hover:border-blue-400/40 hover:bg-black/[0.05] dark:hover:bg-white/[0.09] ${onEditItem ? 'cursor-pointer' : ''}`}
@@ -345,7 +681,15 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           onRemoveItem?.(item.id);
                         } else {
                           const updatedItems = cartItems.map(ci =>
-                            ci.id === item.id ? { ...ci, quantity: ci.quantity - 1, totalPrice: (ci.totalPrice / ci.quantity) * (ci.quantity - 1) } : ci
+                            ci.id === item.id
+                              ? {
+                                  ...ci,
+                                  quantity: ci.quantity - 1,
+                                  totalPrice:
+                                    (ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity)) *
+                                    (ci.quantity - 1),
+                                }
+                              : ci
                           );
                           onUpdateCart(updatedItems);
                         }
@@ -359,7 +703,15 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       onClick={(e) => {
                         e.stopPropagation();
                         const updatedItems = cartItems.map(ci =>
-                          ci.id === item.id ? { ...ci, quantity: ci.quantity + 1, totalPrice: (ci.totalPrice / ci.quantity) * (ci.quantity + 1) } : ci
+                          ci.id === item.id
+                            ? {
+                                ...ci,
+                                quantity: ci.quantity + 1,
+                                totalPrice:
+                                  (ci.unitPrice || ci.price || (ci.totalPrice / ci.quantity)) *
+                                  (ci.quantity + 1),
+                              }
+                            : ci
                         );
                         onUpdateCart(updatedItems);
                       }}
@@ -368,10 +720,43 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                       +
                     </button>
                   </div>
-                  <span className="text-sm font-medium antialiased">
-                    × {formatCurrency(item.price || 0)}
-                  </span>
+                  <button
+                    type="button"
+                    onPointerDown={(event) =>
+                      startLinePriceHold(
+                        event,
+                        item.id,
+                        itemUnitPrice || 0,
+                        `${item.quantity}:${itemUnitPrice || 0}:${item.totalPrice || 0}`
+                      )
+                    }
+                    onPointerUp={handleLinePricePointerEnd}
+                    onPointerCancel={handleLinePricePointerEnd}
+                    onLostPointerCapture={handleLinePricePointerEnd}
+                    onContextMenu={(event) => event.preventDefault()}
+                    onClick={(event) => event.stopPropagation()}
+                    className={`relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
+                      isHoldingLinePrice
+                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-300'
+                        : 'liquid-glass-modal-text hover:bg-black/8 dark:hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="relative z-[1]">× {formatCurrency(itemUnitPrice || 0)}</span>
+                    {isHoldingLinePrice && (
+                      <span
+                        className="absolute left-0 bottom-0 h-[2px] bg-blue-500/70 rounded-full"
+                        style={{ width: `${linePriceHoldProgress}%` }}
+                      />
+                    )}
+                  </button>
                 </div>
+                {isPriceOverridden && (
+                  <div className="mt-2 flex items-center justify-end" onClick={(e) => e.stopPropagation()}>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-300">
+                      {t('menu.cart.priceOverridden', 'Overridden')}
+                    </span>
+                  </div>
+                )}
                 {item.customizations && item.customizations.length > 0 && (
                   <div className="mt-2 pt-2 border-t border-black/8 dark:border-white/10">
                     {/* Separate "with" and "without" ingredients */}
@@ -456,18 +841,61 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   </div>
                 )}
               </div>
-            ))}
+            )})}
           </div>
         )}
       </div>
 
       {/* Cart Footer - flex-shrink-0 keeps it fixed at bottom */}
       <div className="flex-shrink-0 p-4 border-t border-black/10 dark:border-white/10 bg-white/5 dark:bg-black/10 space-y-3">
-        {/* Coupon Input */}
-        {onApplyCoupon && !editMode && (
+        {/* Coupon + Discount Controls */}
+        {!editMode && (onApplyCoupon || discountControlEnabled) && (
           <div className="space-y-2">
-            {appliedCoupon ? (
-              /* Applied coupon badge */
+            <div className={`grid gap-2 ${onApplyCoupon && discountControlEnabled ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              {onApplyCoupon && (
+                <button
+                  type="button"
+                  onClick={() => setIsCouponModalOpen(true)}
+                  className="h-11 px-3 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+                >
+                  <span>{t('menu.cart.couponButton', 'Coupon')}</span>
+                  {isValidatingCoupon ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <span className="text-xs font-semibold opacity-80">
+                      {appliedCoupon ? appliedCoupon.code : t('menu.cart.applyCoupon', 'Apply')}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              {discountControlEnabled && (
+                <button
+                  type="button"
+                  onClick={openDiscountModal}
+                  className="h-11 px-3 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500 flex items-center justify-between"
+                >
+                  <span>{t('menu.cart.discountAmount', 'Discount')}</span>
+                  <span>
+                    {effectiveDiscountMode === 'percentage'
+                      ? `${effectiveDiscountPercentage}%`
+                      : formatCurrency(discountAmount)}
+                  </span>
+                </button>
+              )}
+            </div>
+
+            {couponError && !appliedCoupon && (
+              <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
+            )}
+
+            {isAppliedDiscountOverMax && (
+              <p className="text-xs text-red-500 text-right font-medium antialiased">
+                {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
+              </p>
+            )}
+
+            {onApplyCoupon && appliedCoupon && (
               <div className="flex items-center justify-between rounded-lg px-3 py-2 bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/20 dark:border-emerald-500/30">
                 <div className="flex items-center gap-2">
                   <Ticket className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
@@ -492,75 +920,6 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   </button>
                 )}
               </div>
-            ) : (
-              /* Coupon input field */
-              <div className="space-y-1">
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <Ticket className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-black/30 dark:text-white/30" />
-                    <input
-                      type="text"
-                      value={couponInput}
-                      onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && couponInput.trim()) {
-                          onApplyCoupon(couponInput.trim());
-                        }
-                      }}
-                      placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
-                      className="w-full pl-9 pr-3 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                  <button
-                    onClick={() => {
-                      if (couponInput.trim()) {
-                        onApplyCoupon(couponInput.trim());
-                      }
-                    }}
-                    disabled={!couponInput.trim() || isValidatingCoupon}
-                    className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
-                      !couponInput.trim() || isValidatingCoupon
-                        ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
-                        : 'bg-blue-500 text-white hover:bg-blue-600'
-                    }`}
-                  >
-                    {isValidatingCoupon ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      t('menu.cart.applyCoupon', 'Apply')
-                    )}
-                  </button>
-                </div>
-                {couponError && (
-                  <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Discount Input */}
-        {onDiscountChange && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-semibold antialiased liquid-glass-modal-text-muted">
-                {t('menu.cart.discountLabel')}
-              </label>
-              <button
-                type="button"
-                onClick={openDiscountModal}
-                className="min-w-[88px] px-3 py-1.5 text-sm font-semibold border rounded-lg antialiased transition-colors bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {discountPercentage > 0 ? `${discountPercentage}%` : '0%'}
-              </button>
-            </div>
-            <p className="text-xs text-right font-medium antialiased liquid-glass-modal-text-muted">
-              {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
-            </p>
-            {discountPercentage > maxDiscountPercentage && (
-              <p className="text-xs text-red-500 text-right font-medium antialiased">
-                {t('menu.cart.discountExceeded', { max: maxDiscountPercentage })}
-              </p>
             )}
           </div>
         )}
@@ -579,7 +938,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         {discountAmount > 0 && (
           <div className="flex justify-between items-center text-sm font-medium antialiased">
             <span className="text-green-600 dark:text-green-400">
-              {t('menu.cart.discount', { percent: discountPercentage })}:
+              {effectiveDiscountMode === 'percentage'
+                ? t('menu.cart.discount', { percent: effectiveDiscountPercentage })
+                : t('menu.cart.discountAmount', 'Discount')}:
             </span>
             <span className="text-green-600 dark:text-green-400">
               -{formatCurrency(discountAmount)}
@@ -627,9 +988,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         <button
           onClick={onCheckout}
-          disabled={uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)}
+          disabled={uniqueCartItems.length === 0 || isAppliedDiscountOverMax || isSaving || (isBelowMinimum && !editMode)}
           className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
-            uniqueCartItems.length === 0 || discountPercentage > maxDiscountPercentage || isSaving || (isBelowMinimum && !editMode)
+            uniqueCartItems.length === 0 || isAppliedDiscountOverMax || isSaving || (isBelowMinimum && !editMode)
               ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
               : editMode
                 ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'
@@ -652,7 +1013,167 @@ export const MenuCart: React.FC<MenuCartProps> = ({
         </button>
       </div>
 
-      {onDiscountChange && isDiscountModalOpen && (
+      {editingLineItem && (
+        <div className="fixed inset-0 z-[1190] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label={t('common.close', 'Close')}
+            onClick={closeLinePriceModal}
+            className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+          />
+          <div
+            className="relative w-full max-w-xs rounded-2xl border bg-white/85 dark:bg-black/75 border-black/10 dark:border-white/15 shadow-2xl p-4 space-y-3"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div>
+              <h4 className="text-base font-semibold liquid-glass-modal-text">
+                {t('menu.cart.changePrice', 'Change Price')}
+              </h4>
+              <p className="text-xs mt-1 liquid-glass-modal-text-muted">
+                {editingLineItem.name}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
+                {t('order.unit_price', 'Unit price')}
+              </label>
+              <input
+                type="text"
+                inputMode="decimal"
+                autoFocus
+                value={linePriceDraft}
+                onChange={(event) => setLinePriceDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && isLinePriceDraftValid) {
+                    event.preventDefault();
+                    applyLinePriceDraft();
+                  }
+                }}
+                placeholder="0.00"
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {!isLinePriceDraftValid && linePriceDraft.trim().length > 0 && (
+                <p className="text-xs text-red-500 font-medium antialiased">
+                  {t('menu.cart.invalidPrice', 'Enter a valid non-negative price')}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={closeLinePriceModal}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15"
+              >
+                {t('common.cancel', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={applyLinePriceDraft}
+                disabled={!isLinePriceDraftValid}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
+                  isLinePriceDraftValid
+                    ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    : 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                }`}
+              >
+                {t('common.apply', 'Apply')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isCouponModalOpen && onApplyCoupon && !editMode && (
+        <div className="fixed inset-0 z-[1195] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label={t('common.close', 'Close')}
+            onClick={() => setIsCouponModalOpen(false)}
+            className="absolute inset-0 bg-black/45 backdrop-blur-sm"
+          />
+          <div
+            className="relative w-full max-w-xs rounded-2xl border bg-white/85 dark:bg-black/75 border-black/10 dark:border-white/15 shadow-2xl p-4 space-y-3"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="text-base font-semibold liquid-glass-modal-text">
+                {t('menu.cart.couponButton', 'Coupon')}
+              </h4>
+              <button
+                type="button"
+                onClick={() => setIsCouponModalOpen(false)}
+                className="p-1 rounded-full transition-colors liquid-glass-modal-text-muted hover:bg-black/10 dark:hover:bg-white/15"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold antialiased liquid-glass-modal-text-muted">
+                {t('menu.cart.couponPlaceholder', 'Coupon code')}
+              </label>
+              <input
+                ref={couponInputRef}
+                type="text"
+                value={couponInput}
+                onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && couponInput.trim()) {
+                    e.preventDefault();
+                    applyCouponFromModal();
+                  }
+                }}
+                placeholder={t('menu.cart.couponPlaceholder', 'Coupon code')}
+                className="w-full px-3 py-2 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {couponError && (
+                <p className="text-xs text-red-500 font-medium antialiased">{couponError}</p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  startLoyaltyReader().catch(() => undefined);
+                  couponInputRef.current?.focus();
+                }}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15 inline-flex items-center gap-1.5"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                {t('menu.cart.scanCoupon', 'Scan')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsCouponModalOpen(false)}
+                className="px-3 py-1.5 text-xs font-semibold rounded-md border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15"
+              >
+                {t('common.cancel', 'Cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={applyCouponFromModal}
+                disabled={!couponInput.trim() || isValidatingCoupon}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-md ${
+                  !couponInput.trim() || isValidatingCoupon
+                    ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                {isValidatingCoupon ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  t('menu.cart.applyCoupon', 'Apply')
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {discountControlEnabled && isDiscountModalOpen && (
         <div className="fixed inset-0 z-[1200] flex items-center justify-center p-4">
           <button
             type="button"
@@ -667,7 +1188,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                   {t('menu.cart.discountPickerTitle', 'Apply Discount')}
                 </h4>
                 <p className="text-sm antialiased liquid-glass-modal-text-muted">
-                  {t('menu.cart.discountMax', { max: maxDiscountPercentage })}
+                  {discountModeDraft === 'percentage'
+                    ? t('menu.cart.discountMax', { max: maxDiscountPercentage })
+                    : t('menu.cart.fixedDiscountHint', 'Fixed discount is clamped to subtotal')}
                 </p>
               </div>
               <button
@@ -680,13 +1203,44 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             </div>
 
             <div className="px-6 py-5 space-y-5">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDiscountModeDraft('percentage');
+                    setDiscountDraft(parseDiscountInput(discountManualInput, 'percentage'));
+                  }}
+                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    discountModeDraft === 'percentage'
+                      ? 'bg-blue-500 border-blue-400 text-white'
+                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
+                  }`}
+                >
+                  {t('menu.cart.percentMode', '% Mode')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDiscountModeDraft('fixed');
+                    setDiscountDraft(parseDiscountInput(discountManualInput, 'fixed'));
+                  }}
+                  className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
+                    discountModeDraft === 'fixed'
+                      ? 'bg-blue-500 border-blue-400 text-white'
+                      : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
+                  }`}
+                >
+                  {t('menu.cart.fixedMode', 'Fixed')}
+                </button>
+              </div>
+
               <div>
                 <p className="text-sm font-semibold mb-3 antialiased liquid-glass-modal-text">
                   {t('menu.cart.quickDiscounts', 'Quick discounts')}
                 </p>
                 <div className="grid grid-cols-5 gap-2">
                   {discountPresetValues.map((value) => {
-                    const disabled = value > maxDiscountPercentage;
+                    const disabled = discountModeDraft === 'percentage' && value > maxDiscountPercentage;
                     const selected = Math.abs(discountDraft - value) < 0.001;
 
                     return (
@@ -698,8 +1252,10 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           if (disabled) {
                             return;
                           }
-                          setDiscountDraft(value);
-                          setDiscountManualInput(String(value));
+                          const nextValue =
+                            discountModeDraft === 'fixed' ? Math.min(value, getSubtotal()) : value;
+                          setDiscountDraft(nextValue);
+                          setDiscountManualInput(String(nextValue));
                         }}
                         className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                           disabled
@@ -709,7 +1265,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                               : 'bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text hover:bg-black/10 dark:hover:bg-white/15'
                         }`}
                       >
-                        {value}%
+                        {discountModeDraft === 'percentage' ? `${value}%` : formatCurrency(value)}
                       </button>
                     );
                   })}
@@ -728,17 +1284,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     onChange={(e) => {
                       const rawValue = e.target.value;
                       setDiscountManualInput(rawValue);
-                      setDiscountDraft(parseDiscountInput(rawValue));
+                      setDiscountDraft(parseDiscountInput(rawValue, discountModeDraft));
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !isDraftOverMax) {
                         applyDraftDiscount();
                       }
                     }}
-                    placeholder={t('menu.cart.discountLabel')}
+                    placeholder={
+                      discountModeDraft === 'percentage'
+                        ? t('menu.cart.discountLabel')
+                        : t('menu.cart.discountAmount', 'Discount amount')
+                    }
                     className="w-full px-4 py-3 rounded-lg text-base border bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
-                  <span className="text-base font-semibold liquid-glass-modal-text">%</span>
+                  <span className="text-base font-semibold liquid-glass-modal-text">
+                    {discountModeDraft === 'percentage' ? '%' : '€'}
+                  </span>
                 </div>
                 {isDraftOverMax && (
                   <p className="text-xs text-red-500 mt-2 font-medium antialiased">

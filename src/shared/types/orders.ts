@@ -43,6 +43,10 @@ export interface OrderItem {
   name: string;
   price: number;
   quantity: number;
+  unit_price?: number;
+  total_price?: number;
+  original_unit_price?: number | null;
+  is_price_overridden?: boolean;
   notes?: string;
   special_instructions?: string; // For backward compatibility
   options?: OrderItemOption[];
@@ -128,6 +132,17 @@ export interface Order {
   // Discount information
   discount_percentage?: number; // Discount percentage (0-100)
   discount_amount?: number; // Calculated discount amount in currency
+  manual_discount_mode?: 'percentage' | 'fixed' | null;
+  manual_discount_value?: number | null;
+  coupon_id?: string | null;
+  coupon_code?: string | null;
+  coupon_discount_amount?: number | null;
+  couponId?: string | null;
+  couponCode?: string | null;
+  couponDiscountAmount?: number | null;
+  is_ghost?: boolean;
+  ghost_source?: string | null;
+  ghost_metadata?: Record<string, unknown> | null;
 
   // Driver information (for delivery orders)
   driver_id?: string; // Assigned driver for delivery orders
@@ -212,6 +227,14 @@ export interface OrderRow {
   payment_transaction_id?: string;
   discount_percentage?: number;
   discount_amount?: number;
+  manual_discount_mode?: 'percentage' | 'fixed' | null;
+  manual_discount_value?: number | null;
+  coupon_id?: string | null;
+  coupon_code?: string | null;
+  coupon_discount_amount?: number | null;
+  is_ghost?: boolean;
+  ghost_source?: string | null;
+  ghost_metadata?: string | null;
   driver_id?: string;
   terminal_id?: string | null;
   branch_id?: string | null;
@@ -259,6 +282,16 @@ export interface OrderCreateParams {
   delivery_notes?: string;
   name_on_ringer?: string;
   special_instructions?: string;
+  discount_percentage?: number;
+  discount_amount?: number;
+  manual_discount_mode?: 'percentage' | 'fixed' | null;
+  manual_discount_value?: number | null;
+  coupon_id?: string | null;
+  coupon_code?: string | null;
+  coupon_discount_amount?: number | null;
+  is_ghost?: boolean;
+  ghost_source?: string | null;
+  ghost_metadata?: Record<string, unknown> | null;
   estimated_time?: number;
   payment_method?: PaymentMethod;
   payment_transaction_id?: string;
@@ -281,6 +314,16 @@ export interface OrderUpdateParams {
   delivery_notes?: string;
   name_on_ringer?: string;
   special_instructions?: string;
+  discount_percentage?: number;
+  discount_amount?: number;
+  manual_discount_mode?: 'percentage' | 'fixed' | null;
+  manual_discount_value?: number | null;
+  coupon_id?: string | null;
+  coupon_code?: string | null;
+  coupon_discount_amount?: number | null;
+  is_ghost?: boolean;
+  ghost_source?: string | null;
+  ghost_metadata?: Record<string, unknown> | null;
   estimated_time?: number;
   payment_status?: PaymentStatus;
   payment_method?: PaymentMethod;

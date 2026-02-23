@@ -19,6 +19,25 @@ fn value_to_settings_string(value: &Value) -> String {
     }
 }
 
+fn value_to_bool_string(value: &Value) -> Option<String> {
+    if let Some(flag) = value.as_bool() {
+        return Some(if flag { "true" } else { "false" }.to_string());
+    }
+    if let Some(flag) = value.as_i64() {
+        return Some(if flag == 1 { "true" } else { "false" }.to_string());
+    }
+    if let Some(flag) = value.as_str() {
+        let normalized = flag.trim().to_ascii_lowercase();
+        if normalized == "true" || normalized == "1" || normalized == "yes" || normalized == "on" {
+            return Some("true".to_string());
+        }
+        if normalized == "false" || normalized == "0" || normalized == "no" || normalized == "off" {
+            return Some("false".to_string());
+        }
+    }
+    None
+}
+
 fn parse_settings_set_payload(
     arg0: Option<Value>,
     arg1: Option<Value>,
@@ -187,6 +206,80 @@ fn parse_terminal_config_get_setting_payload(
     }
 
     (category, key)
+}
+
+async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), String> {
+    let raw_api_key =
+        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?;
+    let api_key = api::extract_api_key_from_connection_string(&raw_api_key)
+        .unwrap_or_else(|| raw_api_key.clone());
+    if api_key != raw_api_key {
+        let _ = storage::set_credential("pos_api_key", api_key.trim());
+    }
+
+    let terminal_id = storage::get_credential("terminal_id")
+        .or_else(|| api::extract_terminal_id_from_connection_string(&raw_api_key))
+        .ok_or("Terminal not configured: missing terminal ID")?;
+    let _ = storage::set_credential("terminal_id", terminal_id.trim());
+
+    let admin_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| api::extract_admin_url_from_connection_string(&raw_api_key))
+        .ok_or("Terminal not configured: missing admin URL")?;
+    let normalized_admin_url = api::normalize_admin_url(&admin_url);
+    if normalized_admin_url.is_empty() {
+        return Err("Terminal not configured: invalid admin URL".into());
+    }
+    let _ = storage::set_credential("admin_dashboard_url", normalized_admin_url.trim());
+
+    let path = format!("/api/pos/settings/{terminal_id}");
+    let resp =
+        api::fetch_from_admin(&normalized_admin_url, &api_key, &path, "GET", None).await?;
+
+    if let Some(bid) = crate::extract_branch_id_from_terminal_settings_response(&resp) {
+        let _ = storage::set_credential("branch_id", &bid);
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "branch_id", &bid);
+        }
+        tracing::info!(branch_id = %bid, "Stored branch_id from admin settings");
+    }
+    if let Some(oid) = crate::extract_org_id_from_terminal_settings_response(&resp) {
+        let _ = storage::set_credential("organization_id", &oid);
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "organization_id", &oid);
+        }
+        tracing::info!("Stored organization_id from admin settings");
+    }
+    if let Some(ghost_enabled) = crate::extract_ghost_mode_feature_from_terminal_settings_response(&resp)
+    {
+        let value = if ghost_enabled { "true" } else { "false" };
+        let _ = storage::set_credential("ghost_mode_feature_enabled", value);
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "ghost_mode_feature_enabled", value);
+        }
+        tracing::info!(
+            ghost_mode_feature_enabled = %value,
+            "Stored ghost_mode_feature_enabled from admin settings"
+        );
+    }
+
+    // Supabase runtime config (in case connection code didn't include it)
+    if let Some(supa) = resp.get("supabase") {
+        if let Some(url) = supa.get("url").and_then(|v| v.as_str()) {
+            if !url.is_empty() && storage::get_credential("supabase_url").is_none() {
+                let _ = storage::set_credential("supabase_url", url);
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = db::set_setting(&conn, "terminal", "supabase_url", url);
+                }
+            }
+        }
+        if let Some(key) = supa.get("anon_key").and_then(|v| v.as_str()) {
+            if !key.is_empty() && storage::get_credential("supabase_anon_key").is_none() {
+                let _ = storage::set_credential("supabase_anon_key", key);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -393,55 +486,22 @@ pub async fn settings_update_terminal_credentials(
         {
             db::set_setting(&conn, "terminal", "supabase_url", &v)?;
         }
+        let ghost_mode_feature =
+            storage::get_credential("ghost_mode_feature_enabled").or_else(|| {
+                payload
+                    .get("ghostModeFeatureEnabled")
+                    .or_else(|| payload.get("ghost_mode_feature_enabled"))
+                    .and_then(value_to_bool_string)
+            });
+        if let Some(v) = ghost_mode_feature {
+            db::set_setting(&conn, "terminal", "ghost_mode_feature_enabled", &v)?;
+        }
     }
 
-    // After saving credentials, try to fetch terminal config from admin API
-    // to populate branch_id and organization_id (not in the connection code).
-    if let (Some(admin_url), Some(api_key), Some(terminal_id)) = (
-        storage::get_credential("admin_dashboard_url"),
-        storage::get_credential("pos_api_key"),
-        storage::get_credential("terminal_id"),
-    ) {
-        let path = format!("/api/pos/settings/{terminal_id}");
-        match api::fetch_from_admin(&admin_url, &api_key, &path, "GET", None).await {
-            Ok(resp) => {
-                if let Some(bid) = crate::extract_branch_id_from_terminal_settings_response(&resp) {
-                    let _ = storage::set_credential("branch_id", &bid);
-                    if let Ok(conn) = db.conn.lock() {
-                        let _ = db::set_setting(&conn, "terminal", "branch_id", &bid);
-                    }
-                    tracing::info!(branch_id = %bid, "Stored branch_id from admin settings");
-                }
-                // Also try to get organization_id from terminal lookup
-                if let Some(oid) = crate::extract_org_id_from_terminal_settings_response(&resp) {
-                    let _ = storage::set_credential("organization_id", &oid);
-                    if let Ok(conn) = db.conn.lock() {
-                        let _ = db::set_setting(&conn, "terminal", "organization_id", &oid);
-                    }
-                    tracing::info!("Stored organization_id from admin settings");
-                }
-                // Supabase runtime config (in case connection code didn't include it)
-                if let Some(supa) = resp.get("supabase") {
-                    if let Some(url) = supa.get("url").and_then(|v| v.as_str()) {
-                        if !url.is_empty() && storage::get_credential("supabase_url").is_none() {
-                            let _ = storage::set_credential("supabase_url", url);
-                            if let Ok(conn) = db.conn.lock() {
-                                let _ = db::set_setting(&conn, "terminal", "supabase_url", url);
-                            }
-                        }
-                    }
-                    if let Some(key) = supa.get("anon_key").and_then(|v| v.as_str()) {
-                        if !key.is_empty() && storage::get_credential("supabase_anon_key").is_none()
-                        {
-                            let _ = storage::set_credential("supabase_anon_key", key);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
-            }
-        }
+    // After saving credentials, fetch terminal config from admin API
+    // to populate branch_id, organization_id, and feature flags.
+    if let Err(e) = refresh_terminal_context_from_admin(&db).await {
+        tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
     }
 
     let _ = app.emit(
@@ -500,6 +560,10 @@ pub async fn get_settings(db: tauri::State<'_, db::DbState>) -> Result<Value, St
             t.entry("business_type")
                 .or_insert(serde_json::Value::String(bt));
         }
+        if let Some(ghost_feature) = storage::get_credential("ghost_mode_feature_enabled") {
+            t.entry("ghost_mode_feature_enabled")
+                .or_insert(serde_json::Value::String(ghost_feature));
+        }
     }
 
     // Also add flat keys for legacy lookups (e.g. `terminal.branch_id`)
@@ -523,6 +587,12 @@ pub async fn get_settings(db: tauri::State<'_, db::DbState>) -> Result<Value, St
         map.insert(
             "terminal.admin_dashboard_url".into(),
             serde_json::Value::String(admin),
+        );
+    }
+    if let Some(ghost_feature) = storage::get_credential("ghost_mode_feature_enabled") {
+        map.insert(
+            "terminal.ghost_mode_feature_enabled".into(),
+            serde_json::Value::String(ghost_feature),
         );
     }
 
@@ -836,6 +906,10 @@ pub async fn terminal_config_get_settings() -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let bid = flat.get("branch_id").and_then(|v| v.as_str()).unwrap_or("");
+    let ghost_mode_feature_enabled = flat
+        .get("ghost_mode_feature_enabled")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     Ok(serde_json::json!({
         // Nested form: settings.terminal?.terminal_id
@@ -844,12 +918,14 @@ pub async fn terminal_config_get_settings() -> Result<Value, String> {
             "pos_api_key": api,
             "organization_id": org,
             "branch_id": bid,
+            "ghost_mode_feature_enabled": ghost_mode_feature_enabled,
         },
         // Dot-notation form: settings['terminal.terminal_id']
         "terminal.terminal_id": tid,
         "terminal.pos_api_key": api,
         "terminal.organization_id": org,
         "terminal.branch_id": bid,
+        "terminal.ghost_mode_feature_enabled": ghost_mode_feature_enabled,
     }))
 }
 
@@ -929,6 +1005,14 @@ pub async fn terminal_config_refresh(
             return Err(error);
         }
     };
+
+    if let Err(error) = refresh_terminal_context_from_admin(&db).await {
+        tracing::warn!(
+            error = %error,
+            "terminal_config_refresh: failed to refresh terminal settings (non-fatal)"
+        );
+    }
+
     let _ = app.emit(
         "terminal_config_updated",
         serde_json::json!({ "source": "terminal_config_refresh" }),

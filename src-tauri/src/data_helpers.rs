@@ -71,6 +71,7 @@ pub(crate) fn load_orders_for_period(
             "SELECT id, status, created_at, items, staff_id, payment_method
              FROM orders
              WHERE (?1 = '' OR branch_id = ?1)
+               AND COALESCE(is_ghost, 0) = 0
                AND substr(created_at, 1, 10) >= ?2
                AND substr(created_at, 1, 10) <= ?3",
         )
@@ -160,8 +161,8 @@ pub(crate) fn validate_external_url(
             }
         }
 
-        let exact_allowed = ALLOWED_EXTERNAL_HOSTS.iter().any(|h| host == *h)
-            || custom_hosts.contains(&host);
+        let exact_allowed =
+            ALLOWED_EXTERNAL_HOSTS.iter().any(|h| host == *h) || custom_hosts.contains(&host);
         let suffix_allowed = ALLOWED_EXTERNAL_HOST_SUFFIXES
             .iter()
             .any(|suffix| host.ends_with(suffix))
