@@ -230,13 +230,8 @@ pub async fn diagnostic_check_delivered_orders(
             ))
         })
         .map_err(|e| e.to_string())?;
-    let delivered: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = delivered_rows.filter_map(|r| r.ok()).collect();
+    type Row = (String, Option<String>, Option<String>, Option<String>, Option<String>);
+    let delivered: Vec<Row> = delivered_rows.filter_map(|r| r.ok()).collect();
 
     let mut with_driver = 0usize;
     let mut orders_without_driver = Vec::new();

@@ -30,7 +30,7 @@ export const ContentContainer = memo<ContentContainerProps>(({ children, classNa
           <div className="absolute -inset-4 -z-10 bg-blue-500/15 blur-2xl rounded-3xl"></div>
         )}
         {/* Content */}
-        <div className="relative h-full overflow-y-auto">
+        <div className="relative h-full overflow-y-auto scrollbar-hide">
           {children}
         </div>
       </div>

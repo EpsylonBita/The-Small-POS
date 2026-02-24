@@ -208,6 +208,6 @@ mod tests {
     fn test_reconnect_unknown_device() {
         // Can't test with real AppHandle, but we can verify error for unknown type
         // This would need an AppHandle mock — just verify the match arm
-        assert!(true); // Placeholder — real tests require Tauri test harness
+        // Placeholder — real tests require Tauri test harness
     }
 }

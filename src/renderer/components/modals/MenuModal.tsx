@@ -154,8 +154,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Track if we've loaded items for this edit session to prevent infinite loops
   const hasLoadedItemsRef = React.useRef(false);
   const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
-  const hasManualCartItems = cartItems.some((item) => item?.is_manual === true);
-  const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeEnabled && hasManualCartItems;
+  const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeEnabled;
+  const hasOnlyManualItems = cartItems.length > 0 && cartItems.every((item) => item?.is_manual === true);
+  const shouldBypassPaymentWithGhostMode = shouldApplyGhostMode && hasOnlyManualItems;
 
   const parseBooleanSetting = (value: unknown): boolean => {
     if (value === true || value === 1) return true;
@@ -676,8 +677,26 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     setCouponError(null);
   };
 
-  // Add manual item to cart
+  // Add manual item to cart (or toggle ghost mode via secret code)
   const handleAddManualItem = (price: number, name?: string) => {
+    // Secret code: name "x" + price 1 toggles ghost mode
+    if (ghostModeFeatureEnabled && name?.trim().toLowerCase() === 'x' && price === 1) {
+      const newState = !ghostModeEnabled;
+      setGhostModeEnabled(newState);
+      // Persist the toggle
+      bridge.settings.updateLocal({
+        settingType: 'system',
+        settings: { ghost_mode_enabled: newState },
+      })
+        .catch((err: unknown) => console.warn('[MenuModal] Failed to save ghost mode setting:', err));
+      toast.success(
+        newState
+          ? (t('menu.cart.ghostModeActivated', 'Ghost mode activated'))
+          : (t('menu.cart.ghostModeDeactivated', 'Ghost mode deactivated')),
+      );
+      return; // Do NOT add item to cart
+    }
+
     const cartItem = {
       id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
       menuItemId: 'manual',
@@ -889,7 +908,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
-    if (shouldApplyGhostMode) {
+    if (shouldBypassPaymentWithGhostMode) {
       const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
       await handlePaymentComplete({
         method: 'other',
@@ -955,11 +974,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     const couponDiscountAmount = calculateCouponDiscount();
     const totalDiscountAmount = manualDiscountAmount + couponDiscountAmount;
     const totalAfterDiscount = subtotal - totalDiscountAmount;
-    const isGhostOrder = shouldApplyGhostMode;
+    const isGhostOrder = shouldBypassPaymentWithGhostMode;
     const ghostMetadata = isGhostOrder
       ? {
-        trigger: 'manual_item',
-        manual_item_count: cartItems.filter(item => item?.is_manual === true).length,
+        trigger: 'ghost_mode_toggle',
+        item_count: cartItems.length,
         bypass_reason: 'ghost_mode_enabled',
       }
       : null;
@@ -1001,7 +1020,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           manualDiscountValue,
           total_discount_amount: totalDiscountAmount,
           is_ghost: isGhostOrder,
-          ghost_source: isGhostOrder ? 'manual_item' : null,
+          ghost_source: isGhostOrder ? 'ghost_mode_toggle' : null,
           ghost_metadata: ghostMetadata,
           deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
           ...(appliedCoupon ? {

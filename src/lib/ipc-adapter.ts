@@ -619,6 +619,14 @@ export interface PlatformBridge {
     trackValidation(data: any): Promise<IpcResult>;
     getAnalytics(filters?: any): Promise<any>;
     requestOverride(data: any): Promise<IpcResult>;
+    cacheRefresh(payload?: { branchId?: string; branch_id?: string }): Promise<IpcResult>;
+    validateLocal(payload: any): Promise<any>;
+  };
+
+  // -- Local address cache ----------------------------------------------------
+  address: {
+    searchLocal(payload: { query: string; branchId?: string; branch_id?: string; limit?: number }): Promise<any>;
+    upsertLocalCandidate(payload: Record<string, unknown>): Promise<IpcResult>;
   };
 
   // -- Reports ---------------------------------------------------------------
@@ -1196,6 +1204,11 @@ export const CHANNEL_MAP: Record<string, string> = {
   // Labels
   'label:print': 'labels.print',
   'label:print-batch': 'labels.printBatch',
+  // Offline address + delivery cache
+  'delivery-zone:cache-refresh': 'deliveryZones.cacheRefresh',
+  'delivery-zone:validate-local': 'deliveryZones.validateLocal',
+  'address:search-local': 'address.searchLocal',
+  'address:upsert-local-candidate': 'address.upsertLocalCandidate',
 };
 
 // ============================================================================
@@ -1430,6 +1443,16 @@ export class TauriBridge implements PlatformBridge {
     trackValidation: (d: any) => this.inv('delivery-zone:track-validation', d),
     getAnalytics: (f?: any) => this.inv('delivery-zone:get-analytics', f),
     requestOverride: (d: any) => this.inv('delivery-zone:request-override', d),
+    cacheRefresh: (payload?: { branchId?: string; branch_id?: string }) =>
+      this.inv('delivery-zone:cache-refresh', payload || {}),
+    validateLocal: (payload: any) => this.inv('delivery-zone:validate-local', payload),
+  };
+
+  address = {
+    searchLocal: (payload: { query: string; branchId?: string; branch_id?: string; limit?: number }) =>
+      this.inv('address:search-local', payload),
+    upsertLocalCandidate: (payload: Record<string, unknown>) =>
+      this.inv('address:upsert-local-candidate', payload),
   };
 
   reports = {

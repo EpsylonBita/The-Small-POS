@@ -3235,11 +3235,20 @@ async fn sync_order_batch_via_direct_api(
             "subtotal": num_any(&data, &["subtotal"]),
             "tax_amount": num_any(&data, &["tax_amount"]),
             "discount_amount": num_any(&data, &["discount_amount"]),
+            "discount_percentage": num_any(&data, &["discount_percentage"]),
+            "manual_discount_mode": str_any(&data, &["manual_discount_mode", "manualDiscountMode"]),
+            "manual_discount_value": num_any(&data, &["manual_discount_value", "manualDiscountValue"]),
+            "coupon_id": str_any(&data, &["coupon_id"]),
+            "coupon_code": str_any(&data, &["coupon_code"]),
+            "coupon_discount_amount": num_any(&data, &["coupon_discount_amount"]),
             "delivery_fee": num_any(&data, &["delivery_fee"]),
             "notes": str_any(&data, &["notes"]),
             "customer_name": str_any(&data, &["customer_name"]),
             "customer_phone": str_any(&data, &["customer_phone"]),
             "delivery_address": str_any(&data, &["delivery_address"]),
+            "is_ghost": bool_any(&data, &["is_ghost"]).unwrap_or(false),
+            "ghost_source": str_any(&data, &["ghost_source"]),
+            "ghost_metadata": data.get("ghost_metadata").or_else(|| data.pointer("/data/ghost_metadata")),
         });
 
         match api::fetch_from_admin(admin_url, api_key, "/api/pos/orders", "POST", Some(body)).await

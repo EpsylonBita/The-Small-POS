@@ -40,7 +40,7 @@ export { AddNewAddressModal } from './modals/AddNewAddressModal';
 export { PaymentModal } from './modals/PaymentModal';
 export { default as DriverAssignmentModal } from './modals/DriverAssignmentModal';
 export { default as OrderCancellationModal } from './modals/OrderCancellationModal';
-export { default as EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
+export { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
 export { default as EditAddressModal } from './modals/EditAddressModal';
 export { default as EditOptionsModal } from './modals/EditOptionsModal';
 export { default as EditOrderItemsModal } from './modals/EditOrderItemsModal';

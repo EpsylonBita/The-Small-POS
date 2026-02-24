@@ -4,7 +4,22 @@
  */
 
 import { getApiUrl } from '../../config/environment';
-import { getBridge, isBrowser } from '../../lib';
+import { getBridge } from '../../lib';
+
+function isTauriRuntime(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const runtime = window as unknown as {
+    __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
+    __TAURI_IPC__?: unknown;
+  };
+  return Boolean(runtime.__TAURI_INTERNALS__ || runtime.__TAURI__ || runtime.__TAURI_IPC__);
+}
+
+let hasLoggedTransportPath = false;
 
 function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
   if (!headers) return {};
@@ -55,7 +70,7 @@ export async function getPosAuthHeaders(): Promise<Record<string, string>> {
   };
 
   try {
-    if (isBrowser()) {
+    if (!isTauriRuntime()) {
       return headers;
     }
 
@@ -101,8 +116,14 @@ export async function posApiFetch<T = any>(
       ...callerHeaders,
     };
     const method = (options.method || 'GET').toUpperCase();
+    const useTauriIpc = isTauriRuntime();
 
-    if (!isBrowser()) {
+    if (!hasLoggedTransportPath) {
+      hasLoggedTransportPath = true;
+      console.info(`[posApiFetch] transport=${useTauriIpc ? 'tauri-ipc' : 'browser-fetch'}`);
+    }
+
+    if (useTauriIpc) {
       const bridge = getBridge();
       const ipcResult = await bridge.adminApi.fetchFromAdmin(toAdminApiPath(endpoint), {
         method,

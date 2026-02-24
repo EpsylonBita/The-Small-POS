@@ -9,7 +9,7 @@ import BulkActionsBar from './BulkActionsBar';
 import DriverAssignmentModal from './modals/DriverAssignmentModal';
 import OrderCancellationModal from './modals/OrderCancellationModal';
 import EditOptionsModal from './modals/EditOptionsModal';
-import EditCustomerInfoModal from './modals/EditCustomerInfoModal';
+import { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
 import EditOrderItemsModal from './modals/EditOrderItemsModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { CustomerInfoModal } from './modals/CustomerInfoModal';
@@ -1327,11 +1327,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         orderData.isGhost === true ||
         orderData.ghost === true;
       const ghostSource = isGhostOrder
-        ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_item')
+        ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'ghost_mode_toggle')
         : null;
       const ghostMetadata = isGhostOrder
         ? (orderData.ghost_metadata ?? {
-          trigger: 'manual_item',
+          trigger: 'ghost_mode_toggle',
           bypass_reason: 'ghost_mode_enabled',
         })
         : null;

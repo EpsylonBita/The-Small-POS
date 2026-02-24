@@ -497,6 +497,8 @@
       "manualPricePlaceholder": "Price",
       "manualNamePlaceholder": "Item name (optional)",
       "manualItemAdded": "Manual item added",
+      "ghostModeActivated": "Ghost mode activated",
+      "ghostModeDeactivated": "Ghost mode deactivated",
       "changePrice": "Change Price",
       "priceOverridden": "Overridden",
       "invalidPrice": "Enter a valid non-negative price",

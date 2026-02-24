@@ -881,6 +881,10 @@ pub fn run() {
             commands::analytics::delivery_zone_track_validation,
             commands::analytics::delivery_zone_get_analytics,
             commands::analytics::delivery_zone_request_override,
+            commands::address_offline::delivery_zone_cache_refresh,
+            commands::address_offline::delivery_zone_validate_local,
+            commands::address_offline::address_search_local,
+            commands::address_offline::address_upsert_local_candidate,
             // Reports
             commands::analytics::report_get_today_statistics,
             commands::analytics::report_get_sales_trend,

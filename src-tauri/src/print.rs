@@ -4,7 +4,7 @@
 //! table.  UI "Print" actions enqueue a job; a background worker generates
 //! receipt output files and dispatches them to the configured Windows printer
 //! via the `printers` module. Missing/unavailable hardware profile resolution
-//! is treated as a retryable failure.
+//! is treated as a non-retryable failure.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -238,6 +238,41 @@ pub fn mark_print_job_failed(db: &DbState, job_id: &str, error_msg: &str) -> Res
 
     warn!(job_id = %job_id, error = %error_msg, "Print job failed");
     Ok(())
+}
+
+/// Mark a print job as permanently failed (no retry).
+pub fn mark_print_job_failed_non_retryable(
+    db: &DbState,
+    job_id: &str,
+    error_msg: &str,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "UPDATE print_jobs SET
+            status = 'failed',
+            retry_count = retry_count + 1,
+            last_error = ?1,
+            last_attempt_at = ?2,
+            next_retry_at = NULL,
+            updated_at = ?2
+         WHERE id = ?3",
+        params![error_msg, now, job_id],
+    )
+    .map_err(|e| format!("mark failed non-retryable: {e}"))?;
+
+    warn!(
+        job_id = %job_id,
+        error = %error_msg,
+        "Print job failed (non-retryable)"
+    );
+    Ok(())
+}
+
+fn is_non_retryable_print_error(error_msg: &str) -> bool {
+    let normalized = error_msg.to_ascii_lowercase();
+    normalized.contains("no hardware printer profile resolved")
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +864,11 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                     Err(e) => {
                         // Receipt file exists, but hardware print failed
                         warn!(job_id = %job_id, error = %e, "Hardware print failed, file generated at {path}");
-                        mark_print_job_failed(db, &job_id, &e)?;
+                        if is_non_retryable_print_error(&e) {
+                            mark_print_job_failed_non_retryable(db, &job_id, &e)?;
+                        } else {
+                            mark_print_job_failed(db, &job_id, &e)?;
+                        }
                     }
                 }
             }
@@ -972,6 +1011,14 @@ mod tests {
     }
 
     #[test]
+    fn test_non_retryable_error_classifier() {
+        assert!(is_non_retryable_print_error(
+            "No hardware printer profile resolved for entity type order_receipt"
+        ));
+        assert!(!is_non_retryable_print_error("printer offline"));
+    }
+
+    #[test]
     fn test_idempotency_allows_retry_after_failure() {
         let db = test_db();
 
@@ -1049,16 +1096,17 @@ mod tests {
         let count = process_pending_jobs(&db, &dir).unwrap();
         assert_eq!(count, 1);
 
-        // No hardware profile configured -> retryable failure (not printed/file-only success).
+        // No hardware profile configured -> non-retryable failure.
         let jobs = list_print_jobs(&db, None).unwrap();
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["status"], "pending");
+        assert_eq!(arr[0]["status"], "failed");
         assert_eq!(arr[0]["retryCount"], 1);
         assert!(arr[0]["lastError"]
             .as_str()
             .unwrap_or_default()
             .contains("No hardware printer profile resolved"));
+        assert!(arr[0]["nextRetryAt"].is_null());
 
         // Process again — should be no-op
         let count2 = process_pending_jobs(&db, &dir).unwrap();

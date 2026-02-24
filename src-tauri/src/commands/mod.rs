@@ -1,3 +1,4 @@
+pub mod address_offline;
 pub mod analytics;
 pub mod api_bridge;
 pub mod auth;

@@ -489,6 +489,8 @@
       "manualPricePlaceholder": "Τιμή",
       "manualNamePlaceholder": "Όνομα είδους (προαιρετικό)",
       "manualItemAdded": "Το είδος προστέθηκε",
+      "ghostModeActivated": "Ghost mode ενεργοποιήθηκε",
+      "ghostModeDeactivated": "Ghost mode απενεργοποιήθηκε",
       "changePrice": "Αλλαγή Τιμής",
       "priceOverridden": "Τροποποιημένη",
       "invalidPrice": "Εισάγετε έγκυρη μη αρνητική τιμή",

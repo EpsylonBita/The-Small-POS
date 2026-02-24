@@ -1,14 +1,23 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { MapPin, User, Phone, Mail, FileText, Building, Users, AlertTriangle, CheckCircle, Clock, Hash } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { getApiUrl } from '../../../config/environment';
 import { Customer } from '../../../shared/types/customer';
 import { customerService } from '../../services/CustomerService';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { useTheme } from '../../contexts/theme-context';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
-  getCachedTerminalCredentials,
+  buildAddressFingerprint,
+  ensureAddressOfflineRuntime,
+  extractStreetNumber,
+  resolveAddressSuggestion,
+  searchAddressSuggestions,
+  upsertVerifiedLocalCandidate,
+  validateAddressForDelivery,
+  type DeliveryValidationResult,
+  type ValidationStatus,
+} from '../../services/address-workflow';
+import {
   getResolvedTerminalCredentials,
 } from '../../services/terminal-credentials';
 
@@ -48,9 +57,20 @@ interface AddCustomerModalProps {
 
 interface AddressAutocompleteProps {
   value: string;
-  onChange: (value: string, details?: any) => void;
+  onChange: (value: string, details?: AddressSelectionDetails) => void;
   placeholder?: string;
   className?: string;
+}
+
+interface AddressSelectionDetails {
+  city?: string;
+  postalCode?: string;
+  coordinates?: { lat: number; lng: number };
+  placeId?: string;
+  resolvedStreetNumber?: string;
+  addressFingerprint?: string;
+  validationSource?: 'online' | 'offline_cache';
+  fromSuggestion?: boolean;
 }
 
 const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
@@ -66,6 +86,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const searchRequestRef = useRef(0);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const bridge = getBridge();
@@ -120,7 +141,6 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       console.warn('[AddressAutocomplete] IP geolocation fallback failed; proceeding without location bias');
     };
 
-    // Avoid Chromium provider 403 spam: use IP-based geolocation only
     fetchIpFallback();
 
     return () => { cancelled = true };
@@ -146,62 +166,37 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     }
   }, [bridge.terminalConfig]);
 
-  const searchAddresses = async (input: string) => {
-    if (input.length < 3) {
-      setSuggestions([]);
-      return;
-    }
+  useEffect(() => {
+    void ensureAddressOfflineRuntime(terminalBranchId || undefined);
+  }, [terminalBranchId]);
 
-    setIsLoading(true);
+  const searchAddresses = async (input: string, requestId: number) => {
     try {
-      const url = getApiUrl('google-maps/autocomplete');
-      console.log('[AddressAutocomplete] 🔎 autocomplete →', { input, url, userLocation });
-
-      // Call the Google Places Autocomplete API
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          input: input.trim(),
-          location: userLocation || undefined,
-          radius: userLocation ? 20000 : undefined // 20km bias when location known
-        })
+      const results = await searchAddressSuggestions(input, {
+        branchId: terminalBranchId || undefined,
+        location: userLocation,
+        radius: userLocation ? 20000 : undefined,
+        limit: 5,
       });
-
-      console.log('[AddressAutocomplete] 📡 autocomplete status:', response.status);
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`HTTP ${response.status} ${response.statusText} — ${text}`);
+      if (requestId !== searchRequestRef.current) {
+        return;
       }
-
-      const result = await response.json();
-      console.log('[AddressAutocomplete] ✅ autocomplete result:', { count: Array.isArray(result?.predictions) ? result.predictions.length : 0, sample: result?.predictions?.[0] });
-
-      if (result.predictions && Array.isArray(result.predictions)) {
-        // Convert predictions to the format expected by the UI
-        const formattedSuggestions = result.predictions.map((pred: any) => ({
-          place_id: pred.place_id,
-          name: pred.main_text || pred.description,
-          formatted_address: pred.description,
-          description: pred.description
-        }));
-        setSuggestions(formattedSuggestions.slice(0, 5)); // Limit to 5 suggestions
-      } else {
-        setSuggestions([]);
-      }
+      setSuggestions(results.slice(0, 5));
     } catch (error) {
+      if (requestId !== searchRequestRef.current) {
+        return;
+      }
       console.error('[AddressAutocomplete] ❌ Error searching addresses:', error);
       setSuggestions([]);
     } finally {
-      setIsLoading(false);
+      if (requestId === searchRequestRef.current) {
+        setIsLoading(false);
+      }
     }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
-    console.log('[AddressAutocomplete] ⌨️ input change:', newValue);
     onChange(newValue);
     setShowSuggestions(true);
 
@@ -210,102 +205,60 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       clearTimeout(timeoutRef.current);
     }
 
+    if (newValue.length < 3) {
+      searchRequestRef.current += 1;
+      setIsLoading(false);
+      setSuggestions([]);
+      return;
+    }
+
+    const requestId = ++searchRequestRef.current;
+    setIsLoading(true);
     timeoutRef.current = setTimeout(() => {
-      console.log('[AddressAutocomplete] ⏱️ debounced search for:', newValue);
-      searchAddresses(newValue);
-    }, 300);
+      void searchAddresses(newValue, requestId);
+    }, 200);
   };
 
   const handleSuggestionClick = async (suggestion: any) => {
     try {
-      // Get place details to extract street address, city, postal code, and coordinates
-      const response = await fetch(getApiUrl('google-maps/place-details'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          place_id: suggestion.place_id,
-          // Provide coordinates for OSM reverse fallback when Google key is missing
-          location: suggestion.location || undefined,
-          formatted_address: suggestion.formatted_address || undefined
-        })
+      const resolved = await resolveAddressSuggestion(suggestion, value, {
+        branchId: terminalBranchId || undefined,
+      });
+      void upsertVerifiedLocalCandidate({
+        place_id: resolved.placeId || suggestion.place_id,
+        branch_id: terminalBranchId || undefined,
+        name: resolved.streetAddress,
+        formatted_address: resolved.formattedAddress || suggestion.formatted_address || resolved.streetAddress,
+        city: resolved.city || undefined,
+        postal_code: resolved.postalCode || undefined,
+        location: resolved.coordinates || suggestion.location || undefined,
+        resolved_street_number: resolved.resolvedStreetNumber || undefined,
+        address_fingerprint: resolved.addressFingerprint,
+        source: resolved.validationSource,
+        verified: true,
       });
 
-      let detailsResult: any = null;
-      if (response.ok) {
-        detailsResult = await response.json();
-      } else {
-        console.warn('[AddressAutocomplete] place-details non-OK', response.status);
-      }
-
-      let streetAddress = ''; // Only street name + number
-      let city = '';
-      let postalCode = '';
-      let coordinates: { lat: number; lng: number } | undefined = undefined;
-
-      if (detailsResult && detailsResult.result) {
-        const addressComponents = detailsResult.result.address_components || [];
-
-        // Extract street number and route (street name)
-        const streetNumber = addressComponents.find((component: any) =>
-          component.types.includes('street_number')
-        )?.long_name || '';
-
-        const route = addressComponents.find((component: any) =>
-          component.types.includes('route')
-        )?.long_name || '';
-
-        // Combine street name and number (e.g., "Kresnas 4")
-        if (route && streetNumber) {
-          streetAddress = `${route} ${streetNumber}`;
-        } else if (route) {
-          streetAddress = route;
-        } else {
-          // Fallback to main_text from suggestion
-          streetAddress = suggestion.name || suggestion.formatted_address.split(',')[0];
-        }
-
-        // Extract city (locality or administrative_area_level_3)
-        const cityComponent = addressComponents.find((component: any) =>
-          component.types.includes('locality') ||
-          component.types.includes('administrative_area_level_3')
-        );
-        if (cityComponent) {
-          city = cityComponent.long_name;
-        }
-
-        // Extract postal code
-        const postalCodeComponent = addressComponents.find((component: any) =>
-          component.types.includes('postal_code')
-        );
-        if (postalCodeComponent) {
-          postalCode = postalCodeComponent.long_name;
-        }
-
-        // Extract coordinates
-        const loc = detailsResult.result.geometry?.location;
-        if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
-          coordinates = { lat: loc.lat, lng: loc.lng };
-        }
-      } else {
-        // Fallback: use only the first part of the address (before first comma)
-        streetAddress = suggestion.formatted_address.split(',')[0];
-      }
-
-      // Pass street address, city, postal code, and coordinates
-      onChange(streetAddress, { city, postalCode, coordinates });
+      onChange(resolved.streetAddress, {
+        city: resolved.city || undefined,
+        postalCode: resolved.postalCode || undefined,
+        coordinates: resolved.coordinates,
+        placeId: resolved.placeId || suggestion.place_id,
+        resolvedStreetNumber: resolved.resolvedStreetNumber,
+        addressFingerprint: resolved.addressFingerprint,
+        validationSource: resolved.validationSource,
+        fromSuggestion: true,
+      });
       setSuggestions([]);
       setShowSuggestions(false);
-      // Do NOT auto-submit; let the user click Save
     } catch (error) {
       console.error('Error getting place details:', error);
-      // Fallback: use only the first part of the address
-      const streetAddress = suggestion.formatted_address.split(',')[0];
-      onChange(streetAddress);
+      const streetAddress =
+        suggestion?.name ||
+        String(suggestion?.formatted_address || '').split(',')[0] ||
+        String(suggestion?.formatted_address || '');
+      onChange(streetAddress, { fromSuggestion: false });
       setSuggestions([]);
       setShowSuggestions(false);
-      // Do NOT auto-submit; let the user click Save
     }
   };
 
@@ -314,6 +267,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
+      searchRequestRef.current += 1;
     };
   }, []);
 
@@ -440,8 +394,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
       // Reset delivery validation state when modal opens
       setDeliveryValidationResult(null);
+      setDeliveryValidationStatus('idle');
       setShowDeliveryValidation(false);
       setAddressCoordinates(null);
+      setSelectedAddressDetails(null);
+      setValidationSnapshot(null);
+      setOverrideApplied(false);
+      setOverrideReason('');
       setIsValidatingDelivery(false);
       setErrors({});
 
@@ -536,10 +495,15 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [deliveryValidationResult, setDeliveryValidationResult] = useState<any>(null);
+  const [deliveryValidationResult, setDeliveryValidationResult] = useState<DeliveryValidationResult | null>(null);
+  const [deliveryValidationStatus, setDeliveryValidationStatus] = useState<ValidationStatus | 'idle'>('idle');
   const [showDeliveryValidation, setShowDeliveryValidation] = useState(false);
   const [addressCoordinates, setAddressCoordinates] = useState<{ lat: number; lng: number } | null>(null);
   const [isValidatingDelivery, setIsValidatingDelivery] = useState(false);
+  const [selectedAddressDetails, setSelectedAddressDetails] = useState<AddressSelectionDetails | null>(null);
+  const [validationSnapshot, setValidationSnapshot] = useState<string | null>(null);
+  const [overrideApplied, setOverrideApplied] = useState(false);
+  const [overrideReason, setOverrideReason] = useState('');
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -549,12 +513,154 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     }
   };
 
-  const handleAddressChange = (address: string, details?: any) => {
-    console.log('🔍 handleAddressChange called with:', { address, details });
+  const clearAddressValidation = (addressValue: string) => {
+    setSelectedAddressDetails(null);
+    setAddressCoordinates(null);
+    setDeliveryValidationResult(null);
+    setValidationSnapshot(null);
+    setOverrideApplied(false);
+    setOverrideReason('');
+
+    if (!addressValue.trim()) {
+      setShowDeliveryValidation(false);
+      setDeliveryValidationStatus('idle');
+      return;
+    }
+
+    setShowDeliveryValidation(true);
+    setDeliveryValidationStatus('requires_selection');
+    setDeliveryValidationResult({
+      success: true,
+      isValid: false,
+      deliveryAvailable: false,
+      validation_status: 'requires_selection',
+      requires_override: false,
+      house_number_match: true,
+      message: t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.'),
+    });
+  };
+
+  const validateDeliveryAddress = async (
+    address: string,
+    details?: AddressSelectionDetails | null
+  ): Promise<DeliveryValidationResult | null> => {
+    const trimmedAddress = address.trim();
+    if (!trimmedAddress) {
+      return null;
+    }
+
+    setIsValidatingDelivery(true);
+    try {
+      const coords = details?.coordinates || addressCoordinates || undefined;
+      const fallbackFingerprint = buildAddressFingerprint(trimmedAddress, coords);
+
+      const validation = await validateAddressForDelivery(trimmedAddress, {
+        branchId: terminalBranchId || undefined,
+        orderAmount: 0,
+        placeId: details?.placeId,
+        coordinates: coords,
+        inputStreetNumber: extractStreetNumber(trimmedAddress),
+        resolvedStreetNumber: details?.resolvedStreetNumber,
+        addressFingerprint: details?.addressFingerprint || fallbackFingerprint,
+        validationSource: details?.validationSource,
+      });
+
+      setDeliveryValidationResult(validation);
+      setDeliveryValidationStatus(validation.validation_status);
+      setShowDeliveryValidation(true);
+      setValidationSnapshot(validation.address_fingerprint || fallbackFingerprint);
+      if (validation.coordinates) {
+        setAddressCoordinates(validation.coordinates);
+      } else if (coords) {
+        setAddressCoordinates(coords);
+      }
+
+      if (validation.validation_status === 'in_zone') {
+        setOverrideApplied(false);
+        setOverrideReason('');
+      }
+
+      return validation;
+    } catch (error) {
+      console.error('Delivery validation error:', error);
+      const fallback: DeliveryValidationResult = {
+        success: false,
+        isValid: false,
+        deliveryAvailable: false,
+        validation_status: 'unverified_offline',
+        requires_override: true,
+        house_number_match: true,
+        message: t('modals.addCustomer.validationError'),
+      };
+      setDeliveryValidationResult(fallback);
+      setDeliveryValidationStatus('unverified_offline');
+      setShowDeliveryValidation(true);
+      return fallback;
+    } finally {
+      setIsValidatingDelivery(false);
+    }
+  };
+
+  const ensureAddressValidationForSubmit = async (): Promise<DeliveryValidationResult | null> => {
+    const address = formData.address.trim();
+    if (!address) {
+      return null;
+    }
+
+    const coords = selectedAddressDetails?.coordinates || addressCoordinates || undefined;
+    const currentFingerprint = buildAddressFingerprint(address, coords);
+
+    if (deliveryValidationResult && validationSnapshot === currentFingerprint) {
+      return deliveryValidationResult;
+    }
+
+    return validateDeliveryAddress(address, selectedAddressDetails);
+  };
+
+  const evaluateValidationDecision = (result: DeliveryValidationResult | null): string | null => {
+    if (!result) {
+      return t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.');
+    }
+
+    if (result.validation_status === 'in_zone') {
+      return null;
+    }
+
+    if (result.validation_status === 'requires_selection') {
+      return t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.');
+    }
+
+    if (result.validation_status === 'out_of_zone') {
+      if (!overrideApplied) {
+        return t('modals.addCustomer.outOfZoneOverrideRequired', 'Address is out of zone. Tap accept out-of-zone and provide a reason to continue.');
+      }
+      if (overrideReason.trim().length < 6) {
+        return t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
+      }
+      return null;
+    }
+
+    if (result.validation_status === 'unverified_offline') {
+      if (!overrideApplied) {
+        return t('modals.addCustomer.offlineOverrideRequired', 'Address is unverified offline. Confirm warning and provide a reason to continue.');
+      }
+      if (overrideReason.trim().length < 6) {
+        return t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
+      }
+      return null;
+    }
+
+    return t('modals.addCustomer.validationError');
+  };
+
+  const handleAddressChange = (address: string, details?: AddressSelectionDetails) => {
 
     // Clear address error
     if (errors.address) {
       setErrors(prev => ({ ...prev, address: '' }));
+    }
+    if (errors.overrideReason) {
+      setErrors(prev => ({ ...prev, overrideReason: '' }));
     }
 
     // Clear existing validation timeout
@@ -562,232 +668,30 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       clearTimeout(validationTimeoutRef.current);
     }
 
-    // Check if this is a suggestion selection (has details with city/postalCode/coordinates)
-    const isFromSuggestion = details && (details.city || details.postalCode || details.coordinates);
+    const isFromSuggestion = Boolean(details?.fromSuggestion);
 
     if (isFromSuggestion) {
-      // User selected a suggestion - fill all fields and validate
-      console.log('✅ Suggestion selected, filling city/postal and validating:', { address, details });
       setFormData(prev => ({
         ...prev,
         address,
-        city: details.city || prev.city,
-        postalCode: details.postalCode || prev.postalCode,
+        city: details?.city || prev.city,
+        postalCode: details?.postalCode || prev.postalCode,
       }));
-
-      // Show delivery validation and trigger it immediately for selected address
+      setSelectedAddressDetails(details || null);
+      setAddressCoordinates(details?.coordinates || null);
+      setOverrideApplied(false);
+      setOverrideReason('');
       setShowDeliveryValidation(true);
       validationTimeoutRef.current = setTimeout(() => {
-        console.log('⏰ Triggering delivery validation for selected address:', address);
-        validateDeliveryAddress(address, details.coordinates);
-      }, 300); // Quick validation after selection
-    } else {
-      // User is just typing - only update address, don't validate yet
-      console.log('⌨️ User typing, just updating address (no validation):', address);
-      setFormData(prev => ({
-        ...prev,
-        address,
-      }));
-
-      // Hide delivery validation while typing
-      if (address.trim().length === 0) {
-        setShowDeliveryValidation(false);
-        setDeliveryValidationResult(null);
-      }
-    }
-  };
-  // Normalize Admin API response shape to legacy shape used by UI
-  const normalizeDeliveryValidation = (res: any) => {
-    try {
-      if (res && typeof res === 'object' && ('isValid' in res || 'selectedZone' in res)) {
-        const z = res.selectedZone || null;
-        return {
-          success: true,
-          deliveryAvailable: Boolean((res as any).isValid),
-          message: (res as any).reason || null,
-          zone: z ? {
-            id: z.id,
-            name: z.name,
-            deliveryFee: z.delivery_fee ?? z.deliveryFee ?? null,
-            minimumOrderAmount: z.minimum_order_amount ?? z.minimumOrderAmount ?? null,
-            estimatedTime: {
-              min: z.estimated_delivery_time_min ?? z.estimatedTime?.min ?? null,
-              max: z.estimated_delivery_time_max ?? z.estimatedTime?.max ?? null,
-            }
-          } : null,
-          override: undefined,
-          coordinates: (res as any).coordinates || undefined,
-        };
-      }
-    } catch { }
-    // Already in expected shape or unknown – return as-is
-    return res;
-  };
-
-
-  // Attempt server-side geocoding (search-places + place-details) and re-validate
-  const attemptAutoGeocodeAndRevalidate = async (addr: string) => {
-    try {
-      const searchUrl = getApiUrl('google-maps/search-places');
-      console.log('🧭 Auto-geocode: searching', { addr, searchUrl });
-      const searchRes = await fetch(searchUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: addr + ', Greece',
-          branchId: terminalBranchId || getCachedTerminalCredentials().branchId || undefined,
-        }),
-      });
-      if (!searchRes.ok) {
-        console.warn('🧭 Auto-geocode: search failed', searchRes.status);
-        return;
-      }
-      const searchJson = await searchRes.json();
-      const first = Array.isArray(searchJson?.places) ? searchJson.places[0] : null;
-      if (!first) {
-        console.warn('🧭 Auto-geocode: no candidates');
-        return;
-      }
-
-      // Optionally enrich with details to extract coordinates
-      let coords: { lat: number; lng: number } | undefined = first?.location;
-      try {
-        const detailsUrl = getApiUrl('google-maps/place-details');
-        const detRes = await fetch(detailsUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ place_id: first.place_id, location: first.location, formatted_address: first.formatted_address }),
-        });
-        if (detRes.ok) {
-          const details = await detRes.json();
-          const loc = details?.result?.geometry?.location;
-          if (loc && typeof loc.lat === 'number' && typeof loc.lng === 'number') {
-            coords = { lat: loc.lat, lng: loc.lng };
-          }
-          // Do NOT auto-fill the address - let user keep their input
-        }
-      } catch { }
-
-      if (coords) {
-        setAddressCoordinates(coords);
-        console.log('🧭 Auto-geocode: got coords', coords, '→ re-validating');
-        await validateDeliveryAddress(addr, coords, 1);
-      }
-    } catch (e) {
-      console.warn('🧭 Auto-geocode failed:', e);
-    }
-  };
-
-  const validateDeliveryAddress = async (address: string, coords?: { lat: number; lng: number }, retryCount: number = 0) => {
-    console.log('🚀 validateDeliveryAddress called with:', address);
-    if (!address.trim()) {
-      console.log('❌ Address is empty, skipping validation');
+        void validateDeliveryAddress(address, details);
+      }, 250);
       return;
     }
-
-    console.log('⏳ Starting delivery validation...');
-    setIsValidatingDelivery(true);
-    try {
-      // Use POS-specific endpoint that accepts terminal authentication
-      const apiUrl = getApiUrl('pos/delivery-zones/validate');
-      console.log('📡 Calling API:', apiUrl);
-
-      // Get API credentials for authentication
-      let posKey = '';
-      let termId = '';
-
-      try {
-        const [apiKeyResult, terminalIdResult] = await Promise.allSettled([
-          bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
-          bridge.terminalConfig.getTerminalId(),
-        ]);
-        if (apiKeyResult.status === 'fulfilled') {
-          posKey = (apiKeyResult.value || '').toString().trim();
-          console.log('[validateDeliveryAddress] Got API key from bridge:', posKey ? `(len: ${posKey.length})` : '(empty)');
-        }
-        if (terminalIdResult.status === 'fulfilled') {
-          termId = (terminalIdResult.value || '').toString().trim();
-          console.log('[validateDeliveryAddress] Got terminal ID from bridge:', termId || '(empty)');
-        }
-      } catch (e) {
-        console.warn('[validateDeliveryAddress] Error getting credentials from bridge:', e);
-      }
-
-      const refreshed = await getResolvedTerminalCredentials();
-      if (!posKey) {
-        posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim();
-        console.log('[validateDeliveryAddress] Got API key from credential cache:', posKey ? '(present)' : '(empty)');
-      }
-      if (!termId) {
-        termId = (refreshed.terminalId || getCachedTerminalCredentials().terminalId || '').trim();
-        console.log('[validateDeliveryAddress] Got terminal ID from credential cache:', termId || '(empty)');
-      }
-
-      console.log('[validateDeliveryAddress] Final credentials - posKey:', posKey ? `(len: ${posKey.length})` : '(empty)', 'termId:', termId || '(empty)');
-
-      // Build headers with authentication
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (posKey) {
-        headers['x-pos-api-key'] = String(posKey);
-        if (termId) headers['x-terminal-id'] = String(termId);
-      }
-
-      // Call the delivery validation API directly
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          address,
-          coordinates: coords,
-          orderAmount: 0, // Default for customer creation
-          branchId: terminalBranchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined,
-        }),
-      });
-
-      console.log('📡 API Response status:', response.status);
-
-      if (response.ok) {
-        const result = await response.json();
-        console.log('✅ Delivery validation result (raw):', result);
-        const normalized = normalizeDeliveryValidation(result);
-        console.log('✅ Delivery validation result (normalized):', normalized);
-        setDeliveryValidationResult(normalized);
-
-        // Store coordinates if available
-        if (normalized && (normalized as any).coordinates) {
-          setAddressCoordinates((normalized as any).coordinates);
-          console.log('📍 Stored coordinates:', (normalized as any).coordinates);
-        }
-
-        // If server asks for geocoding first, try to autocomplete once then re-validate
-        const suggested = (result as any)?.suggestedAction || (normalized as any)?.suggestedAction || '';
-        const message: string = (normalized as any)?.message || '';
-        if (retryCount === 0 && (!coords) && (suggested === 'geocode_first' || /geocod/i.test(message))) {
-          await attemptAutoGeocodeAndRevalidate(address);
-        }
-      } else {
-        console.error('❌ Delivery validation failed:', response.status);
-        const errorResult = {
-          success: false,
-          deliveryAvailable: false,
-          message: t('modals.addCustomer.validationError'),
-        };
-        setDeliveryValidationResult(errorResult);
-        console.log('❌ Set error result:', errorResult);
-      }
-    } catch (error) {
-      console.error('💥 Delivery validation error:', error);
-      const errorResult = {
-        success: false,
-        deliveryAvailable: false,
-        message: t('modals.addCustomer.validationError'),
-      };
-      setDeliveryValidationResult(errorResult);
-      console.log('💥 Set error result:', errorResult);
-    } finally {
-      console.log('🏁 Validation complete, setting isValidatingDelivery to false');
-      setIsValidatingDelivery(false);
-    }
+    setFormData(prev => ({
+      ...prev,
+      address,
+    }));
+    clearAddressValidation(address);
   };
 
   const validateForm = () => {
@@ -803,8 +707,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
     if (!formData.address.trim()) {
       newErrors.address = t('modals.addCustomer.streetRequired');
-    } else if (deliveryValidationResult && !deliveryValidationResult.deliveryAvailable && !deliveryValidationResult.override?.applied) {
-      newErrors.address = t('modals.addCustomer.addressOutsideArea');
+    }
+
+    if (overrideApplied && overrideReason.trim().length < 6) {
+      newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
 
     if (!formData.nameOnRinger.trim()) {
@@ -833,40 +739,49 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       return;
     }
 
+    const validationForSubmit = await ensureAddressValidationForSubmit();
+    const validationDecisionError = evaluateValidationDecision(validationForSubmit);
+    if (validationDecisionError) {
+      const nextErrors: Record<string, string> = {};
+      const status = validationForSubmit?.validation_status;
+      if ((status === 'out_of_zone' || status === 'unverified_offline') && overrideApplied) {
+        nextErrors.overrideReason = validationDecisionError;
+      } else {
+        nextErrors.address = validationDecisionError;
+      }
+      setErrors((prev) => ({ ...prev, ...nextErrors }));
+      return;
+    }
+
     setIsSubmitting(true);
     console.log('[AddCustomerModal.handleSubmit] Starting submission...');
 
     try {
-      // Get credentials from secure main-process/IPC context
-      let posKey = ''
-      let termId = ''
-
-      // Try to get credentials from typed bridge (most reliable)
-      try {
-        const [mainTerminalId, mainApiKey] = await Promise.all([
-          bridge.terminalConfig.getTerminalId(),
-          bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
-        ])
-        termId = (mainTerminalId || '').toString().trim()
-        posKey = (mainApiKey || '').toString().trim()
-      } catch (e) {
-        console.warn('[AddCustomerModal] Failed to get credentials from bridge:', e)
-      }
-
-      const refreshed = await getResolvedTerminalCredentials()
-      if (!posKey) {
-        posKey = (refreshed.apiKey || getCachedTerminalCredentials().apiKey || '').trim()
-      }
-      if (!termId) {
-        termId = (refreshed.terminalId || getCachedTerminalCredentials().terminalId || '').trim()
-      }
-
-      // Build headers with authentication
-      const headers: any = { 'Content-Type': 'application/json' }
-      if (posKey) {
-        headers['x-pos-api-key'] = String(posKey)
-        if (termId) headers['x-terminal-id'] = String(termId)
-      }
+      const refreshed = await getResolvedTerminalCredentials().catch(() => ({
+        branchId: terminalBranchId || undefined,
+      } as any));
+      const activeValidation = validationForSubmit || deliveryValidationResult;
+      // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
+      const persistedCoords =
+        selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null;
+      const validatedAt = activeValidation ? new Date().toISOString() : null;
+      const normalizedOverrideReason = overrideApplied ? overrideReason.trim() : '';
+      const validationMetadata = {
+        override_applied: overrideApplied,
+        override_reason: normalizedOverrideReason || null,
+        validation_status: activeValidation?.validation_status || null,
+        zone_id: activeValidation?.selectedZone?.id || null,
+        validated_at: validatedAt,
+        validation_source: activeValidation?.validation_source || null,
+        address_fingerprint:
+          activeValidation?.address_fingerprint
+          || validationSnapshot
+          || buildAddressFingerprint(formData.address.trim(), persistedCoords || undefined),
+        place_id: selectedAddressDetails?.placeId || null,
+        input_street_number: extractStreetNumber(formData.address.trim()) || null,
+        resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
+        house_number_match: activeValidation?.house_number_match ?? true,
+      };
 
       // Handle ADD ADDRESS mode - save new address to existing customer via IPC
       if (mode === 'addAddress' && initialCustomer?.id) {
@@ -882,7 +797,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             notes: formData.notes ? formData.notes.trim() : null,
             address_type: 'delivery',
             is_default: false,
-            coordinates: addressCoordinates, // Pass coordinates
+            coordinates: persistedCoords,
+            latitude: persistedCoords?.lat ?? null,
+            longitude: persistedCoords?.lng ?? null,
+            ...validationMetadata,
           };
 
           // Result from IPC is { success: boolean, data?: any, error?: string }
@@ -935,7 +853,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
-            coordinates: addressCoordinates,
+            coordinates: persistedCoords,
+            latitude: persistedCoords?.lat ?? null,
+            longitude: persistedCoords?.lng ?? null,
+            ...validationMetadata,
           };
 
           // Find the address to get its current version
@@ -993,7 +914,10 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             notes: formData.notes ? formData.notes.trim() : undefined,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
             // Pass coordinates if available
-            coordinates: addressCoordinates
+            coordinates: persistedCoords,
+            latitude: persistedCoords?.lat ?? null,
+            longitude: persistedCoords?.lng ?? null,
+            delivery_validation: validationMetadata,
           };
 
           // Use optimistic versioning if available, otherwise fetch fresh version
@@ -1085,28 +1009,26 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         notes: formData.notes ? formData.notes.trim() : undefined,
         name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
         // Branch association - assign customer to the terminal's branch
-        branch_id: terminalBranchId || undefined,
+        branch_id: terminalBranchId || refreshed.branchId || undefined,
         // Include delivery validation data and coordinates
-        coordinates: addressCoordinates,
-        // Note: delivery_validation might require schema update in Main process to be persisted
-        // providing it here in case it is supported or for future support
-        delivery_validation: deliveryValidationResult ? {
+        coordinates: persistedCoords,
+        latitude: persistedCoords?.lat ?? null,
+        longitude: persistedCoords?.lng ?? null,
+        delivery_validation: activeValidation ? {
           validated: true,
-          delivery_available: deliveryValidationResult.deliveryAvailable,
-          zone_id: deliveryValidationResult.zone?.id,
-          zone_name: deliveryValidationResult.zone?.name,
-          delivery_fee: deliveryValidationResult.zone?.deliveryFee,
-          minimum_order_amount: deliveryValidationResult.zone?.minimumOrderAmount,
-          override_applied: deliveryValidationResult.override?.applied || false,
-          override_reason: deliveryValidationResult.override?.reason
+          delivery_available: activeValidation.deliveryAvailable,
+          zone_name: activeValidation.selectedZone?.name ?? null,
+          delivery_fee: activeValidation.selectedZone?.delivery_fee ?? null,
+          minimum_order_amount: activeValidation.selectedZone?.minimum_order_amount ?? null,
+          ...validationMetadata,
         } : null,
       };
 
-      // Cast to any to handle the wrapper object return { success, data }
-      const result = await customerService.createCustomer(newCustomerData as any) as any;
+      const createdRaw = await customerService.createCustomer(newCustomerData as any) as any;
+      const createdCustomer = (createdRaw?.data ?? createdRaw?.customer ?? createdRaw) as any;
 
-      if (result && result.success) {
-        onCustomerAdded(result.data);
+      if (createdCustomer?.id) {
+        onCustomerAdded(createdCustomer);
 
         // Reset form
         setFormData({
@@ -1121,7 +1043,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           notes: '',
         });
       } else {
-        throw new Error(result?.error || 'Failed to create customer');
+        throw new Error(createdRaw?.error || 'Failed to create customer');
       }
     } catch (error) {
       console.error('[AddCustomerModal.handleSubmit] Error:', error);
@@ -1228,21 +1150,24 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
                 {!isValidatingDelivery && deliveryValidationResult && (
                   <div>
-                    {deliveryValidationResult.deliveryAvailable ? (
+                    {deliveryValidationStatus === 'in_zone' ? (
                       <div className="flex items-center gap-2 text-green-600">
                         <CheckCircle className="w-4 h-4" />
                         <span className="text-sm">
                           {t('modals.addCustomer.deliveryAvailable')}
-                          {deliveryValidationResult.zone && (
-                            <span> • {deliveryValidationResult.zone.name} • €{deliveryValidationResult.zone.deliveryFee} {t('modals.addCustomer.deliveryFee')}</span>
+                          {deliveryValidationResult.selectedZone && (
+                            <span> • {deliveryValidationResult.selectedZone.name} • €{deliveryValidationResult.selectedZone.delivery_fee} {t('modals.addCustomer.deliveryFee')}</span>
                           )}
                         </span>
                       </div>
                     ) : (
-                      <div className="flex items-center gap-2 text-red-600">
+                      <div className={`flex items-center gap-2 ${deliveryValidationStatus === 'unverified_offline' ? 'text-yellow-500' : 'text-red-600'}`}>
                         <AlertTriangle className="w-4 h-4" />
                         <span className="text-sm">
-                          {deliveryValidationResult.message || t('modals.addCustomer.addressOutsideArea')}
+                          {deliveryValidationResult.message
+                            || (deliveryValidationStatus === 'requires_selection'
+                              ? t('modals.addCustomer.selectAddressForValidation', 'Select a real address from suggestions to validate delivery.')
+                              : t('modals.addCustomer.addressOutsideArea'))}
                         </span>
                       </div>
                     )}
@@ -1251,28 +1176,58 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               </div>
 
               {/* Validation Details */}
-              {deliveryValidationResult && deliveryValidationResult.zone && (
+              {deliveryValidationResult && deliveryValidationResult.selectedZone && (
                 <div className="bg-black/20 rounded-lg p-3 space-y-2 border border-white/5">
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.zone')}:</span>
-                      <span className="ml-2 font-medium">{deliveryValidationResult.zone.name}</span>
+                      <span className="ml-2 font-medium">{deliveryValidationResult.selectedZone.name}</span>
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.deliveryFee')}:</span>
-                      <span className="ml-2 font-medium">€{deliveryValidationResult.zone.deliveryFee}</span>
+                      <span className="ml-2 font-medium">€{deliveryValidationResult.selectedZone.delivery_fee}</span>
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.minimumOrder')}:</span>
-                      <span className="ml-2 font-medium">€{deliveryValidationResult.zone.minimumOrderAmount}</span>
+                      <span className="ml-2 font-medium">€{deliveryValidationResult.selectedZone.minimum_order_amount}</span>
                     </div>
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">{t('modals.addCustomer.estimatedTime')}:</span>
                       <span className="ml-2 font-medium">
-                        {deliveryValidationResult.zone.estimatedTime?.min || 30}-{deliveryValidationResult.zone.estimatedTime?.max || 45} min
+                        {deliveryValidationResult.selectedZone.estimated_delivery_time_min || 30}-{deliveryValidationResult.selectedZone.estimated_delivery_time_max || 45} min
                       </span>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {(deliveryValidationStatus === 'out_of_zone' || deliveryValidationStatus === 'unverified_offline') && (
+                <div className="space-y-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3">
+                  <label className="flex items-center gap-2 text-sm text-orange-200">
+                    <input
+                      type="checkbox"
+                      checked={overrideApplied}
+                      onChange={(e) => setOverrideApplied(e.target.checked)}
+                    />
+                    {deliveryValidationStatus === 'out_of_zone'
+                      ? t('modals.addCustomer.acceptOutOfZone', 'Accept out-of-zone delivery')
+                      : t('modals.addCustomer.acceptOfflineUnverified', 'Accept offline unverified delivery')}
+                  </label>
+                  <textarea
+                    value={overrideReason}
+                    onChange={(e) => {
+                      setOverrideReason(e.target.value);
+                      if (errors.overrideReason) {
+                        setErrors((prev) => ({ ...prev, overrideReason: '' }));
+                      }
+                    }}
+                    placeholder={t('modals.addCustomer.overrideReasonPlaceholder', 'Add override reason (minimum 6 characters)')}
+                    rows={2}
+                    className={`${inputBase(resolvedTheme)} resize-none`}
+                  />
+                  {errors.overrideReason && (
+                    <p className="text-xs text-red-400">{errors.overrideReason}</p>
+                  )}
                 </div>
               )}
             </div>
