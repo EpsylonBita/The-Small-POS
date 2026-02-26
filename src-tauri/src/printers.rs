@@ -542,7 +542,10 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
     let role = profile
         .get("role")
         .and_then(|v| v.as_str())
-        .unwrap_or("receipt");
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("receipt")
+        .to_string();
     let is_default = profile
         .get("isDefault")
         .or_else(|| profile.get("is_default"))
@@ -561,10 +564,28 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .get("greekRenderMode")
         .or_else(|| profile.get("greek_render_mode"))
         .and_then(|v| v.as_str());
-    let receipt_template = profile
+    let requested_template = profile
         .get("receiptTemplate")
         .or_else(|| profile.get("receipt_template"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let receipt_template = match requested_template {
+        Some("classic") => Some("classic".to_string()),
+        Some("modern") => Some("modern".to_string()),
+        Some(other) => {
+            return Err(format!(
+                "Invalid receipt_template: {other}. Must be 'classic' or 'modern'"
+            ))
+        }
+        None => {
+            if role == "receipt" || role == "kitchen" {
+                Some("modern".to_string())
+            } else {
+                None
+            }
+        }
+    };
     let fallback_printer_id = profile
         .get("fallbackPrinterId")
         .or_else(|| profile.get("fallback_printer_id"))
@@ -579,9 +600,9 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
             "Unsupported driver_type: {driver_type}. Must be 'windows' or 'escpos'"
         ));
     }
-    if paper_width_mm != 58 && paper_width_mm != 80 {
+    if paper_width_mm != 58 && paper_width_mm != 80 && paper_width_mm != 112 {
         return Err(format!(
-            "Invalid paper_width_mm: {paper_width_mm}. Must be 58 or 80"
+            "Invalid paper_width_mm: {paper_width_mm}. Must be 58, 80, or 112"
         ));
     }
     if drawer_mode != "none" && drawer_mode != "escpos_tcp" {
@@ -685,7 +706,7 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .and_then(|v| v.as_i64())
     {
         let w = v as i32;
-        if w != 58 && w != 80 {
+        if w != 58 && w != 80 && w != 112 {
             return Err(format!("Invalid paper_width_mm: {w}"));
         }
         sets.push("paper_width_mm = ?");
@@ -796,6 +817,11 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .or_else(|| profile.get("receipt_template"))
         .and_then(|v| v.as_str())
     {
+        if v != "classic" && v != "modern" {
+            return Err(format!(
+                "Invalid receipt_template: {v}. Must be 'classic' or 'modern'"
+            ));
+        }
         sets.push("receipt_template = ?");
         vals.push(Box::new(v.to_string()));
     }
@@ -1266,6 +1292,7 @@ mod tests {
         assert_eq!(arr[0]["paperWidthMm"], 80);
         assert_eq!(arr[0]["cutPaper"], true);
         assert_eq!(arr[0]["openCashDrawer"], false);
+        assert_eq!(arr[0]["receiptTemplate"], "modern");
     }
 
     #[test]
@@ -1510,6 +1537,52 @@ mod tests {
             }),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_112mm_paper_width_accepted() {
+        let db = test_db();
+        let result = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Wide",
+                "printerName": "POS-112",
+                "paperWidthMm": 112,
+            }),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_invalid_receipt_template_rejected() {
+        let db = test_db();
+        let create_err = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "BadTpl",
+                "printerName": "TplPrinter",
+                "receiptTemplate": "fancy",
+            }),
+        );
+        assert!(create_err.is_err());
+
+        let created = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "GoodTpl",
+                "printerName": "TplPrinter2",
+            }),
+        )
+        .unwrap();
+        let id = created["profileId"].as_str().unwrap();
+        let update_err = update_printer_profile(
+            &db,
+            &serde_json::json!({
+                "id": id,
+                "receiptTemplate": "broken",
+            }),
+        );
+        assert!(update_err.is_err());
     }
 
     #[test]

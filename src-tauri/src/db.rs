@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 19;
+const CURRENT_SCHEMA_VERSION: i32 = 22;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -158,6 +158,15 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 19 {
         migrate_v19(conn)?;
+    }
+    if current < 20 {
+        migrate_v20(conn)?;
+    }
+    if current < 21 {
+        migrate_v21(conn)?;
+    }
+    if current < 22 {
+        migrate_v22(conn)?;
     }
 
     Ok(())
@@ -1303,6 +1312,213 @@ fn migrate_v19(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v20:
+/// - add payload snapshot support for queued print jobs (`entity_payload_json`)
+/// - allow 112mm printer profiles
+/// - rollout `receipt_template = modern` for receipt/kitchen profiles
+fn migrate_v20(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "print_jobs", "entity_payload_json")? {
+        conn.execute(
+            "ALTER TABLE print_jobs ADD COLUMN entity_payload_json TEXT",
+            [],
+        )
+        .map_err(|e| format!("migration v20 add print_jobs.entity_payload_json: {e}"))?;
+    }
+
+    // Rebuild printer_profiles to update paper width CHECK (58, 80, 112) and
+    // modern template default for new rows.
+    conn.execute_batch(
+        "
+        CREATE TABLE printer_profiles_v20 (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            driver_type TEXT NOT NULL DEFAULT 'windows'
+                CHECK (driver_type IN ('windows', 'escpos')),
+            printer_name TEXT NOT NULL,
+            paper_width_mm INTEGER NOT NULL DEFAULT 80
+                CHECK (paper_width_mm IN (58, 80, 112)),
+            copies_default INTEGER NOT NULL DEFAULT 1,
+            cut_paper INTEGER NOT NULL DEFAULT 1,
+            open_cash_drawer INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            drawer_mode TEXT NOT NULL DEFAULT 'none'
+                CHECK (drawer_mode IN ('none', 'escpos_tcp')),
+            drawer_host TEXT,
+            drawer_port INTEGER NOT NULL DEFAULT 9100,
+            drawer_pulse_ms INTEGER NOT NULL DEFAULT 200,
+            printer_type TEXT NOT NULL DEFAULT 'system',
+            role TEXT NOT NULL DEFAULT 'receipt',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            character_set TEXT NOT NULL DEFAULT 'PC437_USA',
+            greek_render_mode TEXT DEFAULT 'text',
+            receipt_template TEXT DEFAULT 'modern',
+            fallback_printer_id TEXT,
+            connection_json TEXT
+        );
+
+        INSERT INTO printer_profiles_v20
+            SELECT id, name, driver_type, printer_name, paper_width_mm,
+                   copies_default, cut_paper, open_cash_drawer,
+                   created_at, updated_at,
+                   drawer_mode, drawer_host, drawer_port, drawer_pulse_ms,
+                   printer_type, role, is_default, enabled,
+                   character_set, greek_render_mode, receipt_template,
+                   fallback_printer_id, connection_json
+            FROM printer_profiles;
+
+        DROP TABLE printer_profiles;
+        ALTER TABLE printer_profiles_v20 RENAME TO printer_profiles;
+
+        CREATE INDEX IF NOT EXISTS idx_printer_profiles_name
+            ON printer_profiles(printer_name);
+        ",
+    )
+    .map_err(|e| format!("migration v20 rebuild printer_profiles: {e}"))?;
+
+    conn.execute(
+        "UPDATE printer_profiles
+         SET receipt_template = 'modern'
+         WHERE role IN ('receipt', 'kitchen')
+           AND (
+               receipt_template IS NULL
+               OR TRIM(receipt_template) = ''
+               OR LOWER(TRIM(receipt_template)) = 'classic'
+           )",
+        [],
+    )
+    .map_err(|e| format!("migration v20 rollout modern templates: {e}"))?;
+
+    conn.execute_batch("INSERT INTO schema_version (version) VALUES (20);")
+        .map_err(|e| {
+            error!("Migration v20 failed: {e}");
+            format!("migration v20: {e}")
+        })?;
+
+    info!("Applied migration v20 (print payloads + 112mm + modern receipt rollout)");
+    Ok(())
+}
+
+/// Migration v21:
+/// - extend local `orders` with delivery detail columns used on delivery receipts
+/// - add explicit driver assignment columns (`driver_id`, `driver_name`)
+fn migrate_v21(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "delivery_city")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN delivery_city TEXT", [])
+            .map_err(|e| format!("migration v21 add orders.delivery_city: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "delivery_postal_code")? {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN delivery_postal_code TEXT",
+            [],
+        )
+        .map_err(|e| format!("migration v21 add orders.delivery_postal_code: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "delivery_floor")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN delivery_floor TEXT", [])
+            .map_err(|e| format!("migration v21 add orders.delivery_floor: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "driver_id")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN driver_id TEXT", [])
+            .map_err(|e| format!("migration v21 add orders.driver_id: {e}"))?;
+    }
+    if !column_exists(conn, "orders", "driver_name")? {
+        conn.execute("ALTER TABLE orders ADD COLUMN driver_name TEXT", [])
+            .map_err(|e| format!("migration v21 add orders.driver_name: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_driver_id ON orders(driver_id);
+        INSERT INTO schema_version (version) VALUES (21);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v21 failed: {e}");
+        format!("migration v21: {e}")
+    })?;
+
+    info!("Applied migration v21 (delivery detail + driver assignment columns)");
+    Ok(())
+}
+
+/// Migration v22: Loyalty module tables (settings cache, customer balances, transactions).
+fn migrate_v22(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        -- Cached loyalty settings from admin dashboard
+        CREATE TABLE IF NOT EXISTS loyalty_settings (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            points_per_euro REAL NOT NULL DEFAULT 1.0,
+            redemption_rate REAL NOT NULL DEFAULT 0.01,
+            min_redemption_points INTEGER NOT NULL DEFAULT 100,
+            tier_bronze_threshold INTEGER DEFAULT 0,
+            tier_silver_threshold INTEGER DEFAULT 500,
+            tier_gold_threshold INTEGER DEFAULT 2000,
+            tier_platinum_threshold INTEGER DEFAULT 5000,
+            welcome_bonus_points INTEGER DEFAULT 0,
+            birthday_bonus_points INTEGER DEFAULT 0,
+            referral_bonus_points INTEGER DEFAULT 0,
+            last_synced_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- Cached customer loyalty balances
+        CREATE TABLE IF NOT EXISTS loyalty_customers (
+            id TEXT PRIMARY KEY,
+            user_profile_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            points_balance INTEGER NOT NULL DEFAULT 0,
+            total_earned INTEGER NOT NULL DEFAULT 0,
+            total_redeemed INTEGER NOT NULL DEFAULT 0,
+            tier TEXT NOT NULL DEFAULT 'none',
+            customer_name TEXT,
+            customer_email TEXT,
+            customer_phone TEXT,
+            loyalty_card_uid TEXT,
+            last_synced_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_profile_id, organization_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_loyalty_customers_org ON loyalty_customers(organization_id);
+        CREATE INDEX IF NOT EXISTS idx_loyalty_customers_card ON loyalty_customers(loyalty_card_uid);
+        CREATE INDEX IF NOT EXISTS idx_loyalty_customers_phone ON loyalty_customers(customer_phone);
+
+        -- Local loyalty transaction log with sync tracking
+        CREATE TABLE IF NOT EXISTS loyalty_transactions (
+            id TEXT PRIMARY KEY,
+            customer_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            points INTEGER NOT NULL,
+            transaction_type TEXT NOT NULL CHECK (transaction_type IN ('earn', 'redeem', 'adjustment', 'expire')),
+            order_id TEXT,
+            description TEXT,
+            sync_state TEXT NOT NULL DEFAULT 'pending' CHECK (sync_state IN ('pending', 'syncing', 'applied', 'failed')),
+            sync_last_error TEXT,
+            sync_retry_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_loyalty_tx_customer ON loyalty_transactions(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_loyalty_tx_sync ON loyalty_transactions(sync_state);
+        CREATE INDEX IF NOT EXISTS idx_loyalty_tx_order ON loyalty_transactions(order_id);
+
+        INSERT INTO schema_version (version) VALUES (22);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v22 failed: {e}");
+        format!("migration v22: {e}")
+    })?;
+
+    info!("Applied migration v22 (loyalty settings, customers, transactions)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -1915,6 +2131,19 @@ mod tests {
         conn.execute("DELETE FROM print_jobs WHERE id = 'pj-sc-test'", [])
             .expect("cleanup");
 
+        // v20: payload snapshot column should exist for queued snapshot prints
+        let _payload_check: Result<Option<String>, _> = conn.query_row(
+            "SELECT entity_payload_json FROM print_jobs LIMIT 0",
+            [],
+            |row| row.get(0),
+        );
+        let _delivery_columns_check: Result<Option<String>, _> = conn.query_row(
+            "SELECT delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
+             FROM orders LIMIT 0",
+            [],
+            |row| row.get(0),
+        );
+
         // v14 tables
         assert!(
             tables.contains(&"driver_earnings".to_string()),
@@ -2213,6 +2442,14 @@ mod tests {
             })
             .expect("count printer_profiles");
         assert_eq!(count, 1);
+
+        // Verify 112mm profile is accepted.
+        conn.execute(
+            "INSERT INTO printer_profiles (id, name, driver_type, printer_name, paper_width_mm, created_at, updated_at)
+             VALUES ('pp-112', 'Wide Printer', 'windows', 'POS-112 Printer', 112, datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert 112mm printer profile");
 
         // Verify CHECK constraint rejects invalid driver_type
         let bad_driver = conn.execute(
@@ -2616,11 +2853,28 @@ mod tests {
         )
         .expect("insert profile with defaults");
 
-        let (def_type, def_role, def_default, def_enabled, def_charset): (String, String, i32, i32, String) = conn
+        let (def_type, def_role, def_default, def_enabled, def_charset, def_template): (
+            String,
+            String,
+            i32,
+            i32,
+            String,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT printer_type, role, is_default, enabled, character_set FROM printer_profiles WHERE id = 'pp-defaults'",
+                "SELECT printer_type, role, is_default, enabled, character_set, receipt_template
+                 FROM printer_profiles WHERE id = 'pp-defaults'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(def_type, "system");
@@ -2628,6 +2882,7 @@ mod tests {
         assert_eq!(def_default, 0);
         assert_eq!(def_enabled, 1);
         assert_eq!(def_charset, "PC437_USA");
+        assert_eq!(def_template, Some("modern".to_string()));
     }
 
     #[test]

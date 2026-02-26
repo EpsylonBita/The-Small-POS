@@ -376,7 +376,7 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
   }
 
   return (
-    <div className="h-full overflow-y-auto pr-2 space-y-3">
+    <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {activeOrders.map((order, index) => {
         const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
@@ -515,7 +515,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
   }
 
   return (
-    <div className="h-full overflow-y-auto pr-2 space-y-3">
+    <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {deliveredOrders.map((order, index) => {
         const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
@@ -653,7 +653,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
   }
 
   return (
-    <div className="h-full overflow-y-auto pr-2 space-y-3">
+    <div className="h-full overflow-y-auto pr-2 space-y-3 scrollbar-hide">
       {canceledOrders.map((order, index) => {
         const orderNumber = order.orderNumber || order.order_number || `#${index + 1}`;
         const tableNumber = order.tableNumber || order.table_number || '-';
@@ -912,7 +912,7 @@ const TablesTabContent: React.FC<TablesTabContentProps> = memo(({
         </div>
 
         {/* Tables Grid */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto scrollbar-hide">
           <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
             {filteredTables.map(table => (
               <button

@@ -281,7 +281,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
       searchDebounceRef.current = null;
     }
 
-    if (input.length < 3) {
+    if (input.length < 2) {
       searchRequestRef.current += 1;
       setIsLoadingAddresses(false);
       setSuggestions([]);
@@ -496,7 +496,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
             </div>
 
             {suggestions.length > 0 && (
-              <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-xl shadow-lg max-h-48 overflow-y-auto">
+              <div className="absolute z-10 w-full mt-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border liquid-glass-modal-border rounded-xl shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {suggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}

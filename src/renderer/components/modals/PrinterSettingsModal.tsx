@@ -146,6 +146,21 @@ const dedupeDiscoveredPrinters = (printers: DiscoveredPrinter[]): DiscoveredPrin
   return out
 }
 
+const parseBooleanSetting = (value: unknown): boolean => {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value === 1
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on'
+  }
+  return false
+}
+
+const asTrimmedString = (value: unknown): string => {
+  if (typeof value !== 'string') return ''
+  return value.trim()
+}
+
 // View modes for the modal
 type ViewMode = 'list' | 'add' | 'edit' | 'discover' | 'diagnostics'
 
@@ -236,6 +251,11 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const [logoEnabled, setLogoEnabled] = useState(false)
+  const [logoSourceOverride, setLogoSourceOverride] = useState('')
+  const [orgLogoSource, setOrgLogoSource] = useState('')
+  const [logoSaving, setLogoSaving] = useState(false)
+  const [logoLoaded, setLogoLoaded] = useState(false)
 
   // Form state for add/edit
   const [formData, setFormData] = useState({
@@ -253,7 +273,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     paperSize: '80mm' as PaperSize,
     characterSet: 'PC437_USA',
     greekRenderMode: 'text' as GreekRenderMode,
-    receiptTemplate: 'classic' as ReceiptTemplate,
+    receiptTemplate: 'modern' as ReceiptTemplate,
     role: 'receipt' as PrinterRole,
     isDefault: false,
     fallbackPrinterId: '',
@@ -283,13 +303,82 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }, [api])
 
+  const loadReceiptLogoSettings = useCallback(async () => {
+    try {
+      const [showLogoRaw, logoSourceRaw, orgLogoRaw] = await Promise.all([
+        bridge.settings.get({ category: 'receipt', key: 'show_logo', defaultValue: false }),
+        bridge.settings.get({ category: 'receipt', key: 'logo_source' }),
+        bridge.settings.get({ category: 'organization', key: 'logo_url' }),
+      ])
+      setLogoEnabled(parseBooleanSetting(showLogoRaw))
+      setLogoSourceOverride(asTrimmedString(logoSourceRaw))
+      setOrgLogoSource(asTrimmedString(orgLogoRaw))
+      setLogoLoaded(true)
+    } catch (e) {
+      console.error('Failed to load receipt logo settings:', e)
+      setLogoLoaded(true)
+    }
+  }, [bridge])
+
+  const handleSaveLogoSettings = useCallback(async () => {
+    setLogoSaving(true)
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'receipt',
+        settings: {
+          show_logo: logoEnabled,
+          logo_source: logoSourceOverride.trim(),
+        },
+      })
+      toast.success(t('settings.printer.logoSettingsSaved', 'Receipt logo settings saved'))
+    } catch (e) {
+      console.error('Failed to save logo settings:', e)
+      toast.error(t('settings.printer.logoSettingsSaveFailed', 'Failed to save receipt logo settings'))
+    } finally {
+      setLogoSaving(false)
+    }
+  }, [bridge, logoEnabled, logoSourceOverride, t])
+
+  const handleLogoFileSelected = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0]
+      if (!file) return
+      const mime = (file.type || '').toLowerCase()
+      if (!mime.includes('png') && !mime.includes('jpeg') && !mime.includes('jpg')) {
+        toast.error(t('settings.printer.logoFileTypeUnsupported', 'Please choose a PNG or JPG file'))
+        return
+      }
+      if (file.size > 2 * 1024 * 1024) {
+        toast.error(t('settings.printer.logoFileTooLarge', 'Logo file is too large (max 2MB).'))
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = typeof reader.result === 'string' ? reader.result : ''
+        if (!result.startsWith('data:image/')) {
+          toast.error(t('settings.printer.logoFileReadFailed', 'Failed to read logo file'))
+          return
+        }
+        setLogoSourceOverride(result)
+        toast.success(t('settings.printer.logoFileLoaded', 'Logo file loaded. Save settings to apply.'))
+      }
+      reader.onerror = () => {
+        toast.error(t('settings.printer.logoFileReadFailed', 'Failed to read logo file'))
+      }
+      reader.readAsDataURL(file)
+      event.target.value = ''
+    },
+    [t],
+  )
+
   // Initial load (status updates are pushed by Rust monitor events)
   useEffect(() => {
     if (!isOpen) return
     loadPrinters()
     loadStatuses()
+    loadReceiptLogoSettings()
     return
-  }, [isOpen, loadPrinters, loadStatuses])
+  }, [isOpen, loadPrinters, loadStatuses, loadReceiptLogoSettings])
 
   // Listen for real-time status changes
   useEffect(() => {
@@ -478,7 +567,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       greekRenderMode: 'text',
-      receiptTemplate: 'classic',
+      receiptTemplate: 'modern',
       role: 'receipt',
       isDefault: printers.length === 0,
       fallbackPrinterId: '',
@@ -679,7 +768,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: printer.paperSize,
       characterSet: printer.characterSet,
       greekRenderMode: printer.greekRenderMode || 'text',
-      receiptTemplate: printer.receiptTemplate || 'classic',
+      receiptTemplate:
+        printer.receiptTemplate || ((printer.role === 'receipt' || printer.role === 'kitchen') ? 'modern' : 'classic'),
       role: printer.role,
       isDefault: printer.isDefault,
       fallbackPrinterId: printer.fallbackPrinterId || '',
@@ -705,7 +795,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       greekRenderMode: 'text',
-      receiptTemplate: 'classic',
+      receiptTemplate: 'modern',
       role: 'receipt',
       isDefault: false,
       fallbackPrinterId: '',
@@ -809,6 +899,90 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         >
           {t('settings.printer.discoverBluetooth')}
         </button>
+      </div>
+
+      {/* Receipt logo settings */}
+      <div className="p-3 rounded-lg bg-white/5 border border-white/10 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="font-medium liquid-glass-modal-text">
+              {t('settings.printer.receiptLogoTitle', 'Receipt Logo')}
+            </div>
+            <div className="text-xs liquid-glass-modal-text-muted">
+              {t('settings.printer.receiptLogoHint', 'Optional per-organization logo for printed receipts (PNG/JPG supported).')}
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={logoEnabled}
+              onChange={e => setLogoEnabled(e.target.checked)}
+              className="rounded"
+            />
+            <span className="text-sm liquid-glass-modal-text">
+              {t('settings.printer.enableLogo', 'Enable logo')}
+            </span>
+          </label>
+        </div>
+
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className={liquidGlassModalButton('secondary', 'sm')}>
+            {t('settings.printer.chooseLogoFile', 'Choose file')}
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              className="hidden"
+              onChange={handleLogoFileSelected}
+            />
+          </label>
+          <button
+            onClick={() => setLogoSourceOverride('')}
+            className={liquidGlassModalButton('secondary', 'sm')}
+            type="button"
+          >
+            {t('settings.printer.useOrgLogo', 'Use org logo fallback')}
+          </button>
+          <button
+            onClick={handleSaveLogoSettings}
+            className={liquidGlassModalButton('primary', 'sm')}
+            disabled={logoSaving}
+            type="button"
+          >
+            {logoSaving
+              ? t('common.actions.saving', 'Saving...')
+              : t('common.actions.save', 'Save')}
+          </button>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+            {t('settings.printer.logoSource', 'Logo source (URL / file path / data URL)')}
+          </label>
+          <input
+            value={logoSourceOverride}
+            onChange={e => setLogoSourceOverride(e.target.value)}
+            className="liquid-glass-modal-input"
+            placeholder={t('settings.printer.logoSourcePlaceholder', 'Paste URL or choose file') as string}
+          />
+          <p className="text-xs liquid-glass-modal-text-muted mt-1">
+            {logoSourceOverride.trim()
+              ? t('settings.printer.logoSourceCustomActive', 'Custom receipt logo source is active.')
+              : t('settings.printer.logoSourceFallbackActive', 'Using organization logo fallback from terminal settings.')}
+          </p>
+        </div>
+
+        {logoLoaded && (logoSourceOverride.trim() || orgLogoSource.trim()) && (
+          <div className="rounded-md bg-black/20 border border-white/10 p-2">
+            <div className="text-xs liquid-glass-modal-text-muted mb-2">
+              {t('settings.printer.logoPreview', 'Preview')}
+            </div>
+            <img
+              src={logoSourceOverride.trim() || orgLogoSource.trim()}
+              alt="Receipt logo preview"
+              className="max-h-20 object-contain bg-white rounded p-1"
+            />
+          </div>
+        )}
       </div>
 
       {/* Role assignments summary */}
@@ -1126,8 +1300,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
       )}
 
-      {/* Receipt Template - only show for receipt printers */}
-      {formData.role === 'receipt' && (
+      {/* Receipt Template - show for receipt and kitchen printers */}
+      {(formData.role === 'receipt' || formData.role === 'kitchen') && (
         <div>
           <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
             {t('settings.printer.receiptTemplate', 'Receipt Template')}
@@ -1137,11 +1311,11 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             onChange={e => setFormData(prev => ({ ...prev, receiptTemplate: e.target.value as ReceiptTemplate }))}
             className="liquid-glass-modal-input"
           >
-            <option value="classic">{t('settings.printer.receiptTemplateClassic', 'Classic (simple text layout)')}</option>
-            <option value="modern">{t('settings.printer.receiptTemplateModern', 'Modern (styled with headers)')}</option>
+            <option value="classic">{t('settings.printer.receiptTemplateClassic', 'Classic (operational)')}</option>
+            <option value="modern">{t('settings.printer.receiptTemplateModern', 'Modern (branded)')}</option>
           </select>
           <p className="text-xs text-gray-400 mt-1">
-            {t('settings.printer.receiptTemplateHint', 'Classic: simple text-based layout. Modern: styled layout with pillow-shaped section headers.')}
+            {t('settings.printer.receiptTemplateHint', 'Classic: compact speed-first text layout. Modern: larger and bolder hierarchy with detailed ingredient lines.')}
           </p>
         </div>
       )}

@@ -20,10 +20,10 @@ import {
   List
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { subscriptionManager, type SubscriptionStatus } from '../services/SubscriptionManager';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 
 interface KitchenOrder {
   id: string;
@@ -36,6 +36,10 @@ interface KitchenOrder {
   priority: 'normal' | 'rush' | 'vip';
   notes?: string;
   station_id?: string;
+  source: 'ticket' | 'live-draft';
+  isDraft: boolean;
+  draftSessionId?: string;
+  sourceTerminalId?: string;
 }
 
 interface KitchenOrderItem {
@@ -56,13 +60,20 @@ interface KdsStation {
 
 const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
-const KDS_FALLBACK_POLL_INTERVAL_MS = 4000;
+const KDS_FALLBACK_POLL_INTERVAL_MS = 1500;
 
 const KitchenDisplayPage: React.FC = () => {
   const bridge = getBridge();
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
+  const {
+    branchId,
+    organizationId,
+    isResolving: isIdentityResolving,
+    isReady: isIdentityReady,
+    missing,
+    refresh: refreshIdentity,
+  } = useResolvedPosIdentity('branch');
   const [loading, setLoading] = useState(true);
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
   const [stations, setStations] = useState<KdsStation[]>([]);
@@ -72,7 +83,6 @@ const KitchenDisplayPage: React.FC = () => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
-  const [isFallbackPollingActive, setIsFallbackPollingActive] = useState(false);
   const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isDark = resolvedTheme === 'dark';
@@ -117,22 +127,23 @@ const KitchenDisplayPage: React.FC = () => {
   };
 
   const fetchOrders = useCallback(async (showLoading = true) => {
-    if (!staff?.organizationId || !staff?.branchId) return;
+    if (!branchId) {
+      if (showLoading) {
+        setLoading(false);
+      }
+      return;
+    }
     if (showLoading) {
       setLoading(true);
     }
     setError(null);
     try {
-      // Only fetch pending and preparing tickets - completed tickets clear from KDS
       const statusParam = 'pending,preparing';
-      // Don't send station_id as it expects UUID - filter client-side instead
       const result = await bridge.adminApi.fetchFromAdmin(
-        `/api/pos/kds?status=${statusParam}`
+        `/api/pos/kds?status=${statusParam}&include_live_drafts=true`
       );
 
-      // Note: fetchFromApi wraps responses in { success, data, status }
       if (result?.success && result?.data?.success && result?.data?.tickets) {
-        // Extract dynamic stations from API config
         if (result.data.config?.stations) {
           setStations(result.data.config.stations.map((s: Record<string, unknown>) => ({
             id: s['id'] as string,
@@ -141,11 +152,11 @@ const KitchenDisplayPage: React.FC = () => {
           })));
         }
 
-        const kitchenOrders: KitchenOrder[] = result.data.tickets
+        const ticketOrders: KitchenOrder[] = result.data.tickets
           .map((ticket: Record<string, unknown>) => {
             const status = mapApiStatusToUi(ticket['status'] as string);
-            // Skip completed tickets (should not happen with new filter, but defensive)
             if (status === null) return null;
+            const ticketItems = Array.isArray(ticket['items']) ? (ticket['items'] as Record<string, unknown>[]) : [];
             return {
               id: ticket['id'] as string,
               order_number: ticket['order_number'] as string || ticket['ticket_number'] as string,
@@ -156,11 +167,15 @@ const KitchenDisplayPage: React.FC = () => {
               table_number: ticket['table_number'] as string | undefined,
               priority: (ticket['priority'] as 'normal' | 'rush' | 'vip') || 'normal',
               station_id: ticket['station_id'] as string | undefined,
-              items: ((ticket['items'] as Record<string, unknown>[]) || []).map((item: Record<string, unknown>) => ({
+              source: 'ticket',
+              isDraft: false,
+              draftSessionId: undefined,
+              sourceTerminalId: undefined,
+              items: ticketItems.map((item: Record<string, unknown>) => ({
                 id: item['id'] as string,
                 name: item['name'] as string || 'Unknown',
                 quantity: item['quantity'] as number || 1,
-                station: (item['station'] as string) || 'hot',
+                station: (item['station'] as string) || (ticket['station_id'] as string) || 'hot',
                 status: (item['status'] as 'pending' | 'preparing' | 'ready') || 'pending',
                 notes: item['notes'] as string | undefined,
                 modifiers: item['modifiers'] as string[] | undefined
@@ -168,7 +183,43 @@ const KitchenDisplayPage: React.FC = () => {
             };
           })
           .filter((order: KitchenOrder | null): order is KitchenOrder => order !== null);
-        // Filter by station client-side if needed (match by station_id on ticket or item station field)
+
+        const liveDraftsPayload = Array.isArray(result.data.live_drafts)
+          ? (result.data.live_drafts as Record<string, unknown>[])
+          : [];
+
+        const liveDraftOrders: KitchenOrder[] = liveDraftsPayload.map((draft: Record<string, unknown>) => {
+          const sessionId = (draft['session_id'] as string | undefined) || '';
+          const shortSession = sessionId ? sessionId.slice(0, 8).toUpperCase() : 'LIVE';
+          const draftItemsRaw = Array.isArray(draft['items']) ? (draft['items'] as Record<string, unknown>[]) : [];
+          return {
+            id: `live-draft-${draft['id'] as string}`,
+            order_number: (draft['customer_name'] as string) || `LIVE-${shortSession}`,
+            order_type: ((draft['order_type'] as KitchenOrder['order_type']) || 'pickup'),
+            status: 'pending',
+            created_at: (draft['last_activity_at'] as string) || (draft['created_at'] as string) || new Date().toISOString(),
+            notes: undefined,
+            table_number: undefined,
+            priority: 'normal',
+            station_id: draft['station_id'] as string | undefined,
+            source: 'live-draft',
+            isDraft: true,
+            draftSessionId: sessionId || undefined,
+            sourceTerminalId: draft['source_terminal_id'] as string | undefined,
+            items: draftItemsRaw.map((item: Record<string, unknown>, index: number) => ({
+              id: (item['id'] as string) || `live-item-${index + 1}`,
+              name: (item['name'] as string) || 'Draft Item',
+              quantity: (item['quantity'] as number) || 1,
+              station: (item['station_id'] as string) || (draft['station_id'] as string) || 'hot',
+              status: 'pending',
+              notes: item['notes'] as string | undefined,
+              modifiers: item['modifiers'] as string[] | undefined,
+            })),
+          };
+        });
+
+        const kitchenOrders = [...ticketOrders, ...liveDraftOrders];
+
         const filteredOrders = stationFilter === 'all'
           ? kitchenOrders
           : kitchenOrders.filter(order =>
@@ -188,16 +239,29 @@ const KitchenDisplayPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [bridge, staff?.organizationId, staff?.branchId, stationFilter, t]);
+  }, [branchId, bridge, stationFilter, t]);
 
   useEffect(() => {
+    if (isIdentityResolving) {
+      setLoading(true);
+      setError(null);
+      return;
+    }
+
+    if (!isIdentityReady) {
+      setLoading(false);
+      setOrders([]);
+      setStations([]);
+      setError(null);
+      return;
+    }
+
     void fetchOrders(true);
-  }, [fetchOrders]);
+  }, [fetchOrders, isIdentityReady, isIdentityResolving]);
 
   useEffect(() => {
-    if (!autoRefresh || !staff?.branchId) {
+    if (!autoRefresh || !isIdentityReady || !branchId) {
       setIsRealtimeConnected(false);
-      setIsFallbackPollingActive(false);
       return;
     }
 
@@ -216,10 +280,10 @@ const KitchenDisplayPage: React.FC = () => {
     const unsubscribeRealtime = subscriptionManager.subscribe(KDS_REALTIME_SUBSCRIPTION_KEY, {
       table: 'kds_tickets',
       event: '*',
-      filter: `branch_id=eq.${staff.branchId}`,
+      filter: `branch_id=eq.${branchId}`,
       callback: (payload) => {
         const record = payload?.new || payload?.old;
-        if (staff?.organizationId && record?.organization_id && record.organization_id !== staff.organizationId) {
+        if (organizationId && record?.organization_id && record.organization_id !== organizationId) {
           return;
         }
         scheduleRealtimeRefresh(120);
@@ -227,16 +291,8 @@ const KitchenDisplayPage: React.FC = () => {
       onStatusChange: (status: SubscriptionStatus) => {
         if (status.status === 'active') {
           setIsRealtimeConnected(true);
-          setIsFallbackPollingActive(false);
           return;
         }
-
-        if (status.status === 'error' || status.status === 'closed') {
-          setIsRealtimeConnected(false);
-          setIsFallbackPollingActive(autoRefresh);
-          return;
-        }
-
         setIsRealtimeConnected(false);
       },
     });
@@ -249,12 +305,11 @@ const KitchenDisplayPage: React.FC = () => {
         realtimeRefreshTimerRef.current = null;
       }
       setIsRealtimeConnected(false);
-      setIsFallbackPollingActive(false);
     };
-  }, [autoRefresh, fetchOrders, staff?.branchId, staff?.organizationId]);
+  }, [autoRefresh, branchId, fetchOrders, isIdentityReady, organizationId]);
 
   useEffect(() => {
-    if (!autoRefresh || !isFallbackPollingActive) {
+    if (!autoRefresh || !isIdentityReady || !branchId) {
       return;
     }
 
@@ -263,7 +318,7 @@ const KitchenDisplayPage: React.FC = () => {
     }, KDS_FALLBACK_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, fetchOrders, isFallbackPollingActive]);
+  }, [autoRefresh, branchId, fetchOrders, isIdentityReady]);
 
   // Auto-refresh from Rust-driven events when enabled.
   useEffect(() => {
@@ -329,6 +384,9 @@ const KitchenDisplayPage: React.FC = () => {
   const handleBumpOrder = async (orderId: string) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
+    if (order.isDraft || order.source !== 'ticket') {
+      return;
+    }
     // UI uses: pending -> preparing -> ready (clears from KDS)
     // API maps: preparing -> in_progress, ready -> completed
     // When status becomes 'ready', ticket disappears and order.status becomes 'ready'
@@ -386,9 +444,11 @@ const KitchenDisplayPage: React.FC = () => {
     total: orders.length,
     avgTime: orders.length > 0 ? Math.round(orders.reduce((sum, o) => sum + (Date.now() - new Date(o.created_at).getTime()) / 60000, 0) / orders.length) : 0
   };
+  const showMissingContext = !isIdentityResolving && !isIdentityReady;
 
   const OrderCard = ({ order }: { order: KitchenOrder }) => {
     const timeColor = getTimeColor(order.created_at);
+    const isLiveDraft = order.isDraft;
     return (
       <motion.div
         layout
@@ -399,10 +459,17 @@ const KitchenDisplayPage: React.FC = () => {
       >
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-xl font-bold">#{order.order_number}</span>
+            <span className="text-xl font-bold">
+              {isLiveDraft ? t('kitchen.liveDraft.badge', 'Live Draft') : `#${order.order_number}`}
+            </span>
             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getOrderTypeBadgeColor(order.order_type)}`}>
               {formatOrderType(order.order_type)}
             </span>
+            {isLiveDraft && (
+              <span className={`px-2 py-1 rounded-full text-xs font-medium ${isDark ? 'bg-cyan-500/20 text-cyan-300' : 'bg-cyan-100 text-cyan-700'}`}>
+                {t('kitchen.liveDraft.subtitle', 'Live cart in progress')}
+              </span>
+            )}
             {order.table_number && <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{order.table_number}</span>}
           </div>
           <div className={`flex items-center gap-1 ${timeColor}`}>
@@ -427,16 +494,22 @@ const KitchenDisplayPage: React.FC = () => {
             <p className="text-sm text-yellow-600">{order.notes}</p>
           </div>
         )}
-        <button
-          onClick={() => handleBumpOrder(order.id)}
-          className={`w-full py-3 rounded-xl font-medium transition-all ${order.status === 'pending' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'} text-white`}
-        >
-          {order.status === 'pending' ? (
-            <><Play className="w-4 h-4 inline mr-2" />{t('kitchen.startPreparing', 'Start Preparing')}</>
-          ) : (
-            <><CheckCircle className="w-4 h-4 inline mr-2" />{t('kitchen.markReady', 'Mark Ready')}</>
-          )}
-        </button>
+        {isLiveDraft ? (
+          <div className={`w-full py-3 rounded-xl text-center font-medium ${isDark ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+            {t('kitchen.liveDraft.noAction', 'Waiting for checkout')}
+          </div>
+        ) : (
+          <button
+            onClick={() => handleBumpOrder(order.id)}
+            className={`w-full py-3 rounded-xl font-medium transition-all ${order.status === 'pending' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-green-500 hover:bg-green-600'} text-white`}
+          >
+            {order.status === 'pending' ? (
+              <><Play className="w-4 h-4 inline mr-2" />{t('kitchen.startPreparing', 'Start Preparing')}</>
+            ) : (
+              <><CheckCircle className="w-4 h-4 inline mr-2" />{t('kitchen.markReady', 'Mark Ready')}</>
+            )}
+          </button>
+        )}
       </motion.div>
     );
   };
@@ -471,7 +544,11 @@ const KitchenDisplayPage: React.FC = () => {
           </button>
           <button
             onClick={() => {
-              void fetchOrders(true);
+              if (isIdentityReady) {
+                void fetchOrders(true);
+                return;
+              }
+              void refreshIdentity();
             }}
             className={`p-3 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}
           >
@@ -546,6 +623,30 @@ const KitchenDisplayPage: React.FC = () => {
               <div className="h-12 bg-gray-600 rounded mt-4" />
             </div>
           ))}
+        </div>
+      ) : showMissingContext ? (
+        <div className={`p-12 rounded-xl text-center ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>
+          <AlertTriangle className="w-16 h-16 mx-auto mb-4 text-amber-500 opacity-75" />
+          <h3 className="text-xl font-semibold mb-2">
+            {t('kitchen.contextMissing.title', 'Kitchen context is missing')}
+          </h3>
+          <p className={`mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+            {t(
+              'kitchen.contextMissing.body',
+              missing.branch
+                ? 'This terminal is not assigned to a branch. Check terminal settings and try again.'
+                : 'Kitchen context is incomplete. Check terminal settings and try again.'
+            )}
+          </p>
+          <button
+            onClick={() => {
+              void refreshIdentity();
+            }}
+            className="px-6 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white font-medium transition-colors"
+          >
+            <RefreshCw className="w-4 h-4 inline mr-2" />
+            {t('kitchen.contextMissing.action', 'Retry Context')}
+          </button>
         </div>
       ) : error ? (
         <div className={`p-12 rounded-xl text-center ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg`}>

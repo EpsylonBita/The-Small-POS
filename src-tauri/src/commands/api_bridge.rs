@@ -139,6 +139,11 @@ pub async fn admin_sync_terminal_config(
             }
         }
     }
+    if let Ok(snapshot_updates) = crate::cache_terminal_settings_snapshot(&db, &resp) {
+        if !snapshot_updates.is_empty() {
+            updated.extend(snapshot_updates);
+        }
+    }
     tracing::info!("admin_sync_terminal_config: updated {:?}", updated);
     crate::scrub_sensitive_local_settings(&db);
     let _ = app.emit(

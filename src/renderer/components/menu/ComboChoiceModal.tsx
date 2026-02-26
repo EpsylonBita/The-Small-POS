@@ -169,7 +169,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="p-4 max-h-[60vh] overflow-y-auto space-y-3">
+        <div className="p-4 max-h-[60vh] overflow-y-auto space-y-3 scrollbar-hide">
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-500 border-t-transparent" />
@@ -237,7 +237,7 @@ export const ComboChoiceModal: React.FC<ComboChoiceModalProps> = ({
                     </button>
 
                     {openDropdown === index && (
-                      <div className={`absolute left-0 right-0 mt-1 rounded-lg border shadow-lg z-10 max-h-48 overflow-y-auto ${
+                      <div className={`absolute left-0 right-0 mt-1 rounded-lg border shadow-lg z-10 max-h-48 overflow-y-auto scrollbar-hide ${
                         resolvedTheme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
                       }`}>
                         {catItems.length === 0 ? (

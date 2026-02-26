@@ -14,8 +14,11 @@ export interface AddressSuggestion {
   place_id: string;
   name: string;
   formatted_address: string;
+  main_text?: string;
+  secondary_text?: string;
   location?: { lat: number; lng: number };
   types?: string[];
+  verified?: boolean;
   source: 'online' | 'offline_cache';
   city?: string;
   postal_code?: string;
@@ -111,9 +114,6 @@ function isAddressLikeSuggestion(candidate: AddressSuggestion): boolean {
   if (types.some((t) => ['locality', 'sublocality', 'sublocality_level_1', 'neighborhood', 'postal_town', 'administrative_area_level_3'].includes(t))) {
     return true;
   }
-  if (types.some((t) => ['establishment', 'point_of_interest', 'restaurant', 'store'].includes(t))) {
-    return false;
-  }
   if ((candidate.formatted_address || '').includes(',')) {
     return true;
   }
@@ -197,6 +197,8 @@ function normalizeOnlinePlaces(raw: any): AddressSuggestion[] {
     ? raw.predictions.map((pred: any) => ({
         place_id: pred.place_id,
         name: pred.structured_formatting?.main_text || pred.main_text || pred.description,
+        main_text: pred.structured_formatting?.main_text || pred.main_text || pred.description,
+        secondary_text: pred.structured_formatting?.secondary_text || pred.secondary_text || pred.description,
         formatted_address: pred.description || pred.formatted_address || '',
         location: pred.location,
         types: pred.types,
@@ -213,6 +215,16 @@ function normalizeOnlinePlaces(raw: any): AddressSuggestion[] {
         sanitizeString(place.name)
         || sanitizeString(place.formatted_address).split(',')[0]
         || 'Address',
+      main_text:
+        sanitizeString(place.main_text)
+        || sanitizeString(place.structured_formatting?.main_text)
+        || sanitizeString(place.name)
+        || sanitizeString(place.formatted_address).split(',')[0]
+        || 'Address',
+      secondary_text:
+        sanitizeString(place.secondary_text)
+        || sanitizeString(place.structured_formatting?.secondary_text)
+        || sanitizeString(place.formatted_address || place.description || place.name),
       formatted_address: sanitizeString(place.formatted_address || place.description || place.name),
       location:
         place.location &&
@@ -236,11 +248,15 @@ function normalizeOnlinePlaces(raw: any): AddressSuggestion[] {
     const existingScore =
       (existing.location ? 2 : 0)
       + ((existing.types?.length || 0) > 0 ? 1 : 0)
-      + (existing.formatted_address.length > 0 ? 1 : 0);
+      + (existing.formatted_address.length > 0 ? 1 : 0)
+      + (existing.main_text ? 1 : 0)
+      + (existing.secondary_text ? 1 : 0);
     const nextScore =
       (normalized.location ? 2 : 0)
       + ((normalized.types?.length || 0) > 0 ? 1 : 0)
-      + (normalized.formatted_address.length > 0 ? 1 : 0);
+      + (normalized.formatted_address.length > 0 ? 1 : 0)
+      + (normalized.main_text ? 1 : 0)
+      + (normalized.secondary_text ? 1 : 0);
     if (nextScore > existingScore) {
       deduped.set(key, normalized);
     }
@@ -259,6 +275,8 @@ function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
   return places.map((place: any) => ({
     place_id: normalizePlaceId(place),
     name: sanitizeString(place.name || place.street_address || place.address) || 'Address',
+    main_text: sanitizeString(place.name || place.street_address || place.address) || 'Address',
+    secondary_text: sanitizeString(place.formatted_address || place.city || place.postal_code || ''),
     formatted_address: sanitizeString(place.formatted_address || place.name || place.street_address),
     city: sanitizeString(place.city),
     postal_code: sanitizeString(place.postal_code),
@@ -269,6 +287,7 @@ function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
         ? { lat: Number(place.location.lat), lng: Number(place.location.lng) }
         : undefined,
     types: Array.isArray(place.types) ? place.types : [],
+    verified: place?.verified === true,
     source: 'offline_cache',
     validation_source: 'offline_cache',
     resolved_street_number: sanitizeString(place.resolved_street_number) || undefined,
@@ -291,6 +310,7 @@ async function fetchOnlineSuggestions(
     language,
   };
 
+  const merged = new Map<string, AddressSuggestion>();
   for (const path of ['pos/address/autocomplete', 'pos/google-maps/search-places']) {
     try {
       const response = await posApiPost<any>(path, payload);
@@ -301,15 +321,18 @@ async function fetchOnlineSuggestions(
       if (normalized.length === 0) {
         continue;
       }
-      return normalized
-        .filter(isAddressLikeSuggestion)
-        .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
-        .slice(0, options.limit || 5);
+      for (const candidate of normalized) {
+        if (!merged.has(candidate.place_id)) {
+          merged.set(candidate.place_id, candidate);
+        }
+      }
     } catch {
       // Continue fallback chain.
     }
   }
-  return [];
+  return Array.from(merged.values())
+    .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
+    .slice(0, options.limit || 5);
 }
 
 async function fetchLocalSuggestions(
@@ -324,7 +347,7 @@ async function fetchLocalSuggestions(
     limit: options.limit || 5,
   }).catch(() => ({ places: [] }));
   return normalizeLocalPlaces(raw)
-    .filter(isAddressLikeSuggestion)
+    .filter((candidate) => candidate.verified === true)
     .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
     .slice(0, options.limit || 5);
 }
@@ -333,7 +356,7 @@ export async function searchAddressSuggestions(
   query: string,
   options: SearchOptions = {}
 ): Promise<AddressSuggestion[]> {
-  if (query.trim().length < 3) {
+  if (query.trim().length < 2) {
     return [];
   }
 
@@ -440,18 +463,7 @@ export async function resolveAddressSuggestion(
     }
   }
 
-  const fingerprint = buildAddressFingerprint(fallbackStreet, coords);
-  return {
-    streetAddress: fallbackStreet,
-    city: suggestion.city || '',
-    postalCode: suggestion.postal_code || '',
-    coordinates: coords,
-    placeId: suggestion.place_id,
-    formattedAddress: suggestion.formatted_address,
-    resolvedStreetNumber: extractStreetNumber(fallbackStreet),
-    addressFingerprint: fingerprint,
-    validationSource: 'online',
-  };
+  throw new Error('Unable to resolve suggestion details');
 }
 
 function normalizeDeliveryValidation(raw: any, fallbackSource: 'online' | 'offline_cache'): DeliveryValidationResult {

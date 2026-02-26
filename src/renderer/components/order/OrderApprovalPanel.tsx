@@ -6,6 +6,7 @@ import type { Order, OrderItem } from '../../types/orders';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
 import { getBridge } from '../../../lib';
+import { calculateSubtotalFromItems } from './order-math';
 
 interface OrderApprovalPanelProps {
   order: Order;
@@ -46,37 +47,6 @@ function parseItemsFromJson(items: any): any[] {
 
   console.warn('[OrderApprovalPanel] Items is not an array or string:', typeof items);
   return [];
-}
-
-/**
- * Calculates subtotal from order items using total_price values.
- * Requirements: 2.3, 6.1, 6.3
- *
- * @param items - Array of order items
- * @returns Calculated subtotal
- */
-export function calculateSubtotalFromItems(items: any[]): number {
-  if (!Array.isArray(items) || items.length === 0) return 0;
-
-  return items.reduce((sum: number, item: any) => {
-    // Prefer total_price which includes customizations
-    // Fall back to unit_price * quantity or price * quantity
-    const quantity = item.quantity || 1;
-
-    if (typeof item.total_price === 'number' && item.total_price > 0) {
-      return sum + item.total_price;
-    }
-
-    if (typeof item.totalPrice === 'number' && item.totalPrice > 0) {
-      return sum + item.totalPrice;
-    }
-
-    // Calculate from unit price and quantity
-    const unitPrice = typeof item.unit_price === 'number' ? item.unit_price :
-                      typeof item.price === 'number' ? item.price : 0;
-
-    return sum + (unitPrice * quantity);
-  }, 0);
 }
 
 /**
@@ -543,7 +513,7 @@ export function OrderApprovalPanel({
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 scrollbar-hide">
           <div className="space-y-6">
 
             {/* Order Type Banner */}

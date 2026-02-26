@@ -188,7 +188,7 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             <h3 className="text-sm font-medium text-gray-400">
               {t('ecr.discovery.found', 'Found Devices')} ({devices.length})
             </h3>
-            <div className="space-y-2 max-h-64 overflow-y-auto">
+            <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
               {devices.map((device, index) => (
                 <div
                   key={index}

@@ -9,6 +9,7 @@ import BulkActionsBar from './BulkActionsBar';
 import DriverAssignmentModal from './modals/DriverAssignmentModal';
 import OrderCancellationModal from './modals/OrderCancellationModal';
 import EditOptionsModal from './modals/EditOptionsModal';
+import EditPaymentMethodModal from './modals/EditPaymentMethodModal';
 import { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
 import EditOrderItemsModal from './modals/EditOrderItemsModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
@@ -35,6 +36,7 @@ import type { Order } from '../types/orders';
 import type { RestaurantTable, TableStatus } from '../types/tables';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { openExternalUrl } from '../utils/electron-api';
 import {
   getCachedTerminalCredentials,
@@ -84,6 +86,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Get organizationId from module context (with terminal cache fallback)
   const { organizationId: moduleOrgId } = useModules();
+  const {
+    branchId: resolvedIdentityBranchId,
+    organizationId: resolvedIdentityOrganizationId,
+  } = useResolvedPosIdentity('branch+organization');
 
   // Get branchId and organizationId from terminal credential cache / IPC
   const [branchId, setBranchId] = useState<string | null>(null);
@@ -126,14 +132,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   }, []);
 
   // Use module context organizationId if available, otherwise fall back to cache
-  const organizationId = moduleOrgId || localOrgId;
+  const organizationId = resolvedIdentityOrganizationId || moduleOrgId || localOrgId;
+  const effectiveBranchId = resolvedIdentityBranchId || branchId;
 
   // Fetch tables for the Tables tab - use actual IDs
   // Only enable fetching when both IDs are available
   const { tables } = useTables({
-    branchId: branchId || '',
+    branchId: effectiveBranchId || '',
     organizationId: organizationId || '',
-    enabled: Boolean(branchId && organizationId)
+    enabled: Boolean(effectiveBranchId && organizationId)
   });
 
   // State for computed values
@@ -171,6 +178,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [showEditCustomerModal, setShowEditCustomerModal] = useState(false);
   const [showEditOrderModal, setShowEditOrderModal] = useState(false);
   const [showEditMenuModal, setShowEditMenuModal] = useState(false); // New: Menu-based edit modal
+  const [showEditPaymentModal, setShowEditPaymentModal] = useState(false);
+  const [isUpdatingPaymentMethod, setIsUpdatingPaymentMethod] = useState(false);
+  const [editPaymentTarget, setEditPaymentTarget] = useState<{
+    orderId: string;
+    orderNumber?: string;
+    currentMethod: 'cash' | 'card';
+    paymentStatus: string;
+  } | null>(null);
   const [pendingEditOrders, setPendingEditOrders] = useState<string[]>([]);
   const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(null);
   const [editingOrderType, setEditingOrderType] = useState<'pickup' | 'delivery'>('pickup'); // Track order type for editing
@@ -203,6 +218,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Receipt preview state
   const [receiptPreviewHtml, setReceiptPreviewHtml] = useState<string | null>(null);
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
+  const [receiptPreviewOrderId, setReceiptPreviewOrderId] = useState<string | null>(null);
+  const [receiptPreviewPrinting, setReceiptPreviewPrinting] = useState(false);
 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
@@ -1404,6 +1421,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
+        branch_id: effectiveBranchId || null,
+        organization_id: organizationId || null,
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
         payment_method: orderData.paymentData?.method || 'cash',
@@ -1450,6 +1469,20 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
               .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
               .catch((e: any) => console.warn('[OrderDashboard] Cash register print error (non-blocking):', e));
           }
+
+          // Auto-earn loyalty points (fire-and-forget, non-blocking)
+          const loyaltyCustomerId = orderToCreate.customer_id;
+          if (loyaltyCustomerId && !isGhostOrder) {
+            bridge.loyalty.earnPoints({
+              customerId: loyaltyCustomerId,
+              orderId: result.orderId,
+              amount: total,
+            }).then((res: any) => {
+              if (res?.success && res?.pointsEarned > 0) {
+                toast.success(t('loyalty.pointsEarned', { points: res.pointsEarned, defaultValue: '+{{points}} loyalty points earned' }));
+              }
+            }).catch(() => {}); // Non-blocking
+          }
         } else {
           console.warn('[OrderDashboard] No orderId in result, skipping auto-print');
         }
@@ -1490,6 +1523,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
             const html = (result as any)?.html ?? (result as any)?.data?.html;
             if ((result as any)?.success !== false && html) {
               setReceiptPreviewHtml(html);
+              setReceiptPreviewOrderId(selectedOrders[0]);
               setShowReceiptPreview(true);
             } else {
               toast.error((result as any)?.error || 'Failed to generate receipt preview');
@@ -1684,6 +1718,77 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     setShowEditCustomerModal(true);
   };
 
+  const editablePaymentOrder = React.useMemo(() => {
+    if (pendingEditOrders.length !== 1) return null;
+    return orders.find(order => order.id === pendingEditOrders[0]) || null;
+  }, [pendingEditOrders, orders]);
+
+  const editablePaymentMethod = React.useMemo<'cash' | 'card' | null>(() => {
+    if (!editablePaymentOrder) return null;
+    const method = String(
+      (editablePaymentOrder as any).payment_method ||
+      (editablePaymentOrder as any).paymentMethod ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+    return method === 'cash' || method === 'card' ? method : null;
+  }, [editablePaymentOrder]);
+
+  const paymentEditIneligibilityReason = React.useMemo(() => {
+    if (pendingEditOrders.length !== 1) {
+      return t('orderDashboard.paymentMethodEditUnavailable');
+    }
+
+    if (!editablePaymentOrder) {
+      return t('orderDashboard.paymentMethodEditUnavailable');
+    }
+
+    const status = String((editablePaymentOrder as any).status || '')
+      .trim()
+      .toLowerCase();
+    if (status === 'cancelled' || status === 'canceled') {
+      return t('orderDashboard.paymentMethodEditUnavailable');
+    }
+
+    if (!editablePaymentMethod) {
+      return t('orderDashboard.paymentMethodEditUnavailable');
+    }
+
+    return undefined;
+  }, [pendingEditOrders.length, editablePaymentOrder, editablePaymentMethod, t]);
+
+  const canEditPaymentMethod = !paymentEditIneligibilityReason;
+
+  const handleEditPayment = () => {
+    if (!canEditPaymentMethod) {
+      toast.error(paymentEditIneligibilityReason || t('orderDashboard.paymentMethodEditUnavailable'));
+      return;
+    }
+
+    if (!editablePaymentOrder || !editablePaymentMethod) {
+      toast.error(t('orderDashboard.paymentMethodEditUnavailable'));
+      return;
+    }
+
+    const paymentStatus = String(
+      (editablePaymentOrder as any).payment_status ||
+      (editablePaymentOrder as any).paymentStatus ||
+      'pending'
+    )
+      .trim()
+      .toLowerCase() || 'pending';
+
+    setEditPaymentTarget({
+      orderId: editablePaymentOrder.id,
+      orderNumber: (editablePaymentOrder as any).order_number || (editablePaymentOrder as any).orderNumber,
+      currentMethod: editablePaymentMethod,
+      paymentStatus,
+    });
+    setShowEditOptionsModal(false);
+    setShowEditPaymentModal(true);
+  };
+
   const handleEditOrder = () => {
     setShowEditOptionsModal(false);
 
@@ -1717,6 +1822,51 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     setShowEditOptionsModal(false);
     setPendingEditOrders([]);
     setEditingSingleOrder(null);
+  };
+
+  const handleEditPaymentClose = () => {
+    if (isUpdatingPaymentMethod) return;
+    setShowEditPaymentModal(false);
+    setEditPaymentTarget(null);
+    setPendingEditOrders([]);
+    setEditingSingleOrder(null);
+  };
+
+  const handlePaymentMethodSave = async (nextMethod: 'cash' | 'card') => {
+    if (!editPaymentTarget) {
+      toast.error(t('orderDashboard.paymentMethodEditUnavailable'));
+      return;
+    }
+
+    if (editPaymentTarget.currentMethod === nextMethod) {
+      toast.success(t('orderDashboard.paymentMethodNoChange'));
+      return;
+    }
+
+    setIsUpdatingPaymentMethod(true);
+    try {
+      const result: any = await bridge.payments.updatePaymentStatus(
+        editPaymentTarget.orderId,
+        editPaymentTarget.paymentStatus,
+        nextMethod
+      );
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to update payment method');
+      }
+
+      toast.success(t('orderDashboard.paymentMethodUpdated'));
+      await loadOrders();
+      setShowEditPaymentModal(false);
+      setEditPaymentTarget(null);
+      setPendingEditOrders([]);
+      setEditingSingleOrder(null);
+      setSelectedOrders([]);
+    } catch (error) {
+      console.error('Failed to update payment method:', error);
+      toast.error(t('orderDashboard.paymentMethodUpdateFailed'));
+    } finally {
+      setIsUpdatingPaymentMethod(false);
+    }
   };
 
   // Handle customer info edit
@@ -2236,7 +2386,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         orderCount={pendingEditOrders.length}
         onEditInfo={handleEditInfo}
         onEditOrder={handleEditOrder}
+        onEditPayment={handleEditPayment}
+        canEditPayment={canEditPaymentMethod}
+        paymentEditHint={paymentEditIneligibilityReason}
         onClose={handleEditOptionsClose}
+      />
+
+      <EditPaymentMethodModal
+        isOpen={showEditPaymentModal}
+        orderNumber={editPaymentTarget?.orderNumber}
+        currentMethod={editPaymentTarget?.currentMethod || 'cash'}
+        isSaving={isUpdatingPaymentMethod}
+        onSave={handlePaymentMethodSave}
+        onClose={handleEditPaymentClose}
       />
 
       <EditCustomerInfoModal
@@ -2273,10 +2435,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       {/* Receipt Preview Modal */}
       <PrintPreviewModal
         isOpen={showReceiptPreview}
-        onClose={() => { setShowReceiptPreview(false); setReceiptPreviewHtml(null); }}
-        onPrint={() => { /* Physical printing not yet wired */ }}
+        onClose={() => {
+          if (receiptPreviewPrinting) return;
+          setShowReceiptPreview(false);
+          setReceiptPreviewHtml(null);
+          setReceiptPreviewOrderId(null);
+        }}
+        onPrint={async () => {
+          if (!receiptPreviewOrderId || receiptPreviewPrinting) {
+            return;
+          }
+          setReceiptPreviewPrinting(true);
+          try {
+            const result: any = await bridge.payments.printReceipt(receiptPreviewOrderId);
+            if (result?.success === false) {
+              throw new Error(result?.error || 'Failed to queue receipt print');
+            }
+            toast.success(t('orderDashboard.receiptQueued') || 'Receipt print queued');
+          } catch (error: any) {
+            console.error('[OrderDashboard] Failed to print receipt from preview:', error);
+            toast.error(error?.message || 'Failed to print receipt');
+          } finally {
+            setReceiptPreviewPrinting(false);
+          }
+        }}
         title={t('orderDashboard.receiptPreview') || 'Receipt Preview'}
         previewHtml={receiptPreviewHtml || ''}
+        isPrinting={receiptPreviewPrinting}
       />
     </div>
   );

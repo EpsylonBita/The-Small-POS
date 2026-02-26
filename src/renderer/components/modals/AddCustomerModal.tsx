@@ -205,7 +205,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
       clearTimeout(timeoutRef.current);
     }
 
-    if (newValue.length < 3) {
+    if (newValue.length < 2) {
       searchRequestRef.current += 1;
       setIsLoading(false);
       setSuggestions([]);
@@ -289,7 +289,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
       {/* Suggestions Dropdown */}
       {showSuggestions && (suggestions.length > 0 || isLoading) && (
-        <div className="absolute left-0 right-0 top-full z-[9999] mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto">
+        <div className="absolute left-0 right-0 top-full z-[9999] mt-1 liquid-glass-modal-card shadow-2xl max-h-60 overflow-y-auto scrollbar-hide">
           {isLoading && (
             <div className="p-3 text-center text-gray-500 dark:text-gray-400">
               {t('modals.addCustomer.searchingAddresses')}

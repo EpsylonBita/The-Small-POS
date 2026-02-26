@@ -7,6 +7,9 @@ interface EditOptionsModalProps {
   orderCount: number;
   onEditInfo: () => void;
   onEditOrder: () => void;
+  onEditPayment: () => void;
+  canEditPayment: boolean;
+  paymentEditHint?: string;
   onClose: () => void;
 }
 
@@ -15,6 +18,9 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
   orderCount,
   onEditInfo,
   onEditOrder,
+  onEditPayment,
+  canEditPayment,
+  paymentEditHint,
   onClose
 }) => {
   const { t } = useTranslation();
@@ -64,6 +70,42 @@ export const EditOptionsModal: React.FC<EditOptionsModalProps> = ({
                   <div>
                     <div className="font-medium">{t('modals.editOptions.editOrderItems')}</div>
                     <div className="text-sm opacity-75 liquid-glass-modal-text-muted">{t('modals.editOptions.editOrderItemsDesc')}</div>
+                  </div>
+                </div>
+              </button>
+
+              {/* Edit Payment Method Option */}
+              <button
+                onClick={onEditPayment}
+                disabled={!canEditPayment}
+                className={`w-full p-4 rounded-lg border text-left transition-all duration-200 liquid-glass-modal-text ${
+                  canEditPayment
+                    ? 'border-amber-200/50 dark:border-amber-400/30 bg-amber-50/50 dark:bg-amber-500/10 hover:bg-amber-100/50 dark:hover:bg-amber-500/20'
+                    : 'border-gray-200/50 dark:border-gray-400/20 bg-gray-50/40 dark:bg-gray-500/5 opacity-70 cursor-not-allowed'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center backdrop-blur-sm ${
+                    canEditPayment
+                      ? 'bg-amber-500/20 dark:bg-amber-500/30'
+                      : 'bg-gray-400/20 dark:bg-gray-500/20'
+                  }`}>
+                    <svg className={`w-5 h-5 ${
+                      canEditPayment
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-gray-500 dark:text-gray-400'
+                    }`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.25 8.25h19.5m-18 7.5h3m-3 3h5.25m9-10.5H5.25A2.25 2.25 0 003 10.5v6A2.25 2.25 0 005.25 18.75h13.5A2.25 2.25 0 0021 16.5v-6A2.25 2.25 0 0018.75 8.25z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="font-medium">{t('modals.editOptions.editPaymentMethod')}</div>
+                    <div className="text-sm opacity-75 liquid-glass-modal-text-muted">
+                      {canEditPayment
+                        ? t('modals.editOptions.editPaymentMethodDesc')
+                        : (paymentEditHint || t('orderDashboard.paymentMethodEditUnavailable'))
+                      }
+                    </div>
                   </div>
                 </div>
               </button>

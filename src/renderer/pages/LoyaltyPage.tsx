@@ -9,14 +9,12 @@ import {
   TrendingUp,
   Gift,
   Star,
-  Phone,
   Mail
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
-import { posApiGet } from '../utils/api-helpers';
+import { getBridge } from '../../lib';
 
 interface LoyaltySettings {
   points_per_euro: number;
@@ -40,7 +38,7 @@ interface CustomerLoyalty {
 const LoyaltyPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
+  const bridge = getBridge();
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState<LoyaltySettings | null>(null);
   const [customers, setCustomers] = useState<CustomerLoyalty[]>([]);
@@ -51,34 +49,41 @@ const LoyaltyPage: React.FC = () => {
   const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchData = useCallback(async () => {
-    if (!staff?.organizationId) return;
     setLoading(true);
     try {
+      // Use local IPC commands (reads from SQLite cache)
       const [settingsRes, customersRes] = await Promise.all([
-        posApiGet<{ settings: LoyaltySettings }>(
-          `pos/loyalty/settings?organization_id=${staff.organizationId}`
-        ),
-        posApiGet<{ customers: CustomerLoyalty[] }>(
-          `pos/loyalty/customers?organization_id=${staff.organizationId}`
-        ),
-      ]);
+        bridge.loyalty.getSettings(),
+        bridge.loyalty.getCustomers(),
+      ]) as [any, any];
 
-      if (!settingsRes.success || !customersRes.success) {
-        throw new Error(settingsRes.error || customersRes.error || 'Failed to load loyalty data');
-      }
+      setSettings(settingsRes?.settings || null);
+      setCustomers(customersRes?.customers || []);
 
-      setSettings(settingsRes.data?.settings || null);
-      setCustomers(customersRes.data?.customers || []);
+      // Trigger background sync to refresh cache from admin API, then re-read
+      Promise.all([
+        bridge.loyalty.syncSettings().catch(() => null),
+        bridge.loyalty.syncCustomers().catch(() => null),
+      ]).then(async () => {
+        try {
+          const [freshSettings, freshCustomers] = await Promise.all([
+            bridge.loyalty.getSettings(),
+            bridge.loyalty.getCustomers(),
+          ]) as [any, any];
+          if (freshSettings?.settings) setSettings(freshSettings.settings);
+          if (freshCustomers?.customers) setCustomers(freshCustomers.customers);
+        } catch { /* ignore */ }
+      });
     } catch (error) {
       console.error('Failed to fetch loyalty data:', error);
       toast.error(t('loyalty.errors.loadFailed', 'Failed to load loyalty data'));
     } finally {
       setLoading(false);
     }
-  }, [staff?.organizationId, t]);
+  }, [bridge.loyalty, t]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
   }, [fetchData]);
 
   const getTierColor = (tier: string) => {
@@ -116,7 +121,7 @@ const LoyaltyPage: React.FC = () => {
     );
   }
 
-  if (!settings?.is_active) {
+  if (!loading && !settings?.is_active) {
     return (
       <div className={`h-full flex items-center justify-center p-4 ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
         <div className={`p-8 rounded-xl text-center max-w-md ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} border ${isDark ? 'border-gray-700' : 'border-gray-200'}`}>
@@ -146,7 +151,7 @@ const LoyaltyPage: React.FC = () => {
           </div>
         </div>
         <button
-          onClick={fetchData}
+          onClick={() => void fetchData()}
           className={`p-2 rounded-lg ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'}`}
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />

@@ -180,7 +180,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
             </button>
           </div>
 
-          <div className="space-y-2 max-h-64 overflow-y-auto">
+          <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
             {Object.entries(groupedUpdates).map(([category, updates]) => (
               <div key={category} className="border border-gray-200 rounded">
                 <div className="flex items-center justify-between p-2 bg-gray-50">

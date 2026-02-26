@@ -43,6 +43,9 @@ fn factory_reset_from_sync(db: &DbState, app: &AppHandle) {
     if let Ok(conn) = db.conn.lock() {
         let _ = conn.execute_batch(
             "BEGIN IMMEDIATE;
+             DELETE FROM loyalty_transactions;
+             DELETE FROM loyalty_customers;
+             DELETE FROM loyalty_settings;
              DELETE FROM payment_adjustments;
              DELETE FROM order_payments;
              DELETE FROM shift_expenses;
@@ -318,8 +321,41 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     let order_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
-    let branch_id = storage::get_credential("branch_id").unwrap_or_default();
+    let normalize_identity = |value: Option<String>| -> Option<String> {
+        value.and_then(|raw| {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            if lower == "default-branch"
+                || lower == "default-terminal"
+                || lower == "default-organization"
+                || lower == "default-org"
+                || lower == "default"
+            {
+                return None;
+            }
+            Some(trimmed)
+        })
+    };
+
+    let terminal_id = normalize_identity(
+        str_field(payload, "terminalId").or_else(|| str_field(payload, "terminal_id")),
+    )
+    .or_else(|| normalize_identity(storage::get_credential("terminal_id")))
+    .unwrap_or_default();
+
+    let branch_id = normalize_identity(
+        str_field(payload, "branchId").or_else(|| str_field(payload, "branch_id")),
+    )
+    .or_else(|| normalize_identity(storage::get_credential("branch_id")))
+    .unwrap_or_default();
+
+    let organization_id = normalize_identity(
+        str_field(payload, "organizationId").or_else(|| str_field(payload, "organization_id")),
+    )
+    .or_else(|| normalize_identity(storage::get_credential("organization_id")));
 
     // Extract fields from payload with defaults
     let order_number = Some(next_order_number(&conn));
@@ -348,6 +384,12 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         str_field(payload, "tableNumber").or_else(|| str_field(payload, "table_number"));
     let delivery_address =
         str_field(payload, "deliveryAddress").or_else(|| str_field(payload, "delivery_address"));
+    let delivery_city =
+        str_field(payload, "deliveryCity").or_else(|| str_field(payload, "delivery_city"));
+    let delivery_postal_code = str_field(payload, "deliveryPostalCode")
+        .or_else(|| str_field(payload, "delivery_postal_code"));
+    let delivery_floor =
+        str_field(payload, "deliveryFloor").or_else(|| str_field(payload, "delivery_floor"));
     let delivery_notes =
         str_field(payload, "deliveryNotes").or_else(|| str_field(payload, "delivery_notes"));
     let name_on_ringer =
@@ -364,6 +406,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     let payment_method =
         str_field(payload, "paymentMethod").or_else(|| str_field(payload, "payment_method"));
     let staff_id = str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let driver_id = str_field(payload, "driverId")
+        .or_else(|| str_field(payload, "driver_id"))
+        .or_else(|| staff_id.clone());
+    let driver_name =
+        str_field(payload, "driverName").or_else(|| str_field(payload, "driver_name"));
     let staff_shift_id =
         str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
     let discount_percentage = num_field(payload, "discountPercentage")
@@ -433,20 +480,21 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         "INSERT INTO orders (
             id, order_number, customer_name, customer_phone, customer_email,
             items, total_amount, tax_amount, subtotal, status,
-            order_type, table_number, delivery_address, delivery_notes,
-            name_on_ringer, special_instructions, created_at, updated_at,
-            estimated_time, sync_status, payment_status, payment_method,
-            staff_shift_id, staff_id, discount_percentage, discount_amount,
-            tip_amount, version, terminal_id, branch_id, plugin, tax_rate, delivery_fee,
-            client_request_id, is_ghost, ghost_source, ghost_metadata
+            order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
+            delivery_floor, delivery_notes, name_on_ringer, special_instructions,
+            created_at, updated_at, estimated_time, sync_status, payment_status, payment_method,
+            staff_shift_id, staff_id, driver_id, driver_name, discount_percentage,
+            discount_amount, tip_amount, version, terminal_id, branch_id, plugin, tax_rate,
+            delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18,
-            ?19, 'pending', ?20, ?21,
-            ?22, ?23, ?24, ?25,
-            ?26, 1, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35
+            ?11, ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18, ?19,
+            ?20, ?21, ?22, 'pending', ?23, ?24,
+            ?25, ?26, ?27, ?28, ?29,
+            ?30, ?31, 1, ?32, ?33, ?34, ?35,
+            ?36, ?37, ?38, ?39, ?40
         )",
         params![
             &order_id,
@@ -462,6 +510,9 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &order_type,
             &table_number,
             &delivery_address,
+            &delivery_city,
+            &delivery_postal_code,
+            &delivery_floor,
             &delivery_notes,
             &name_on_ringer,
             &special_instructions,
@@ -472,6 +523,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &payment_method,
             &staff_shift_id,
             &staff_id,
+            &driver_id,
+            &driver_name,
             &discount_percentage,
             &discount_amount,
             &tip_amount,
@@ -494,6 +547,21 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     if let Value::Object(obj) = &mut sync_data {
         obj.entry("orderId".to_string())
             .or_insert_with(|| Value::String(order_id.clone()));
+        if !terminal_id.trim().is_empty() {
+            obj.insert("terminalId".to_string(), Value::String(terminal_id.clone()));
+            obj.insert(
+                "terminal_id".to_string(),
+                Value::String(terminal_id.clone()),
+            );
+        }
+        if !branch_id.trim().is_empty() {
+            obj.insert("branchId".to_string(), Value::String(branch_id.clone()));
+            obj.insert("branch_id".to_string(), Value::String(branch_id.clone()));
+        }
+        if let Some(org_id) = organization_id.as_ref() {
+            obj.insert("organizationId".to_string(), Value::String(org_id.clone()));
+            obj.insert("organization_id".to_string(), Value::String(org_id.clone()));
+        }
         // Ensure the Rust-generated order number is synced to admin
         if let Some(ref num) = order_number {
             obj.insert("orderNumber".to_string(), Value::String(num.clone()));
@@ -566,7 +634,8 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     discount_percentage, discount_amount, tip_amount,
                     version, updated_by, last_synced_at, remote_version,
                     terminal_id, branch_id, plugin, external_plugin_order_id,
-                    tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
+                    tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
+                    delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
              ORDER BY created_at DESC",
@@ -632,6 +701,16 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "ghostSource": row.get::<_, Option<String>>(41)?,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
+                "deliveryCity": row.get::<_, Option<String>>(43)?,
+                "delivery_city": row.get::<_, Option<String>>(43)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(44)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(44)?,
+                "deliveryFloor": row.get::<_, Option<String>>(45)?,
+                "delivery_floor": row.get::<_, Option<String>>(45)?,
+                "driverId": row.get::<_, Option<String>>(46)?,
+                "driver_id": row.get::<_, Option<String>>(46)?,
+                "driverName": row.get::<_, Option<String>>(47)?,
+                "driver_name": row.get::<_, Option<String>>(47)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -661,7 +740,8 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 discount_percentage, discount_amount, tip_amount,
                 version, updated_by, last_synced_at, remote_version,
                 terminal_id, branch_id, plugin, external_plugin_order_id,
-                tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
+                tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
+                delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
          FROM orders WHERE id = ?1",
         params![id],
         |row| {
@@ -722,6 +802,16 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "ghostSource": ghost_source,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
+                "deliveryCity": row.get::<_, Option<String>>(43)?,
+                "delivery_city": row.get::<_, Option<String>>(43)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(44)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(44)?,
+                "deliveryFloor": row.get::<_, Option<String>>(45)?,
+                "delivery_floor": row.get::<_, Option<String>>(45)?,
+                "driverId": row.get::<_, Option<String>>(46)?,
+                "driver_id": row.get::<_, Option<String>>(46)?,
+                "driverName": row.get::<_, Option<String>>(47)?,
+                "driver_name": row.get::<_, Option<String>>(47)?,
             }))
         },
     );
@@ -1828,6 +1918,12 @@ fn materialize_remote_order(
         str_any(remote_order, &["order_type", "orderType"]).unwrap_or_else(|| "pickup".to_string());
     let table_number = str_any(remote_order, &["table_number", "tableNumber"]);
     let delivery_address = str_any(remote_order, &["delivery_address", "deliveryAddress"]);
+    let delivery_city = str_any(remote_order, &["delivery_city", "deliveryCity"]);
+    let delivery_postal_code = str_any(
+        remote_order,
+        &["delivery_postal_code", "deliveryPostalCode"],
+    );
+    let delivery_floor = str_any(remote_order, &["delivery_floor", "deliveryFloor"]);
     let delivery_notes = str_any(remote_order, &["delivery_notes", "deliveryNotes"]);
     let name_on_ringer = str_any(remote_order, &["name_on_ringer", "nameOnRinger"]);
     let special_instructions = str_any(
@@ -1849,6 +1945,8 @@ fn materialize_remote_order(
     );
     let staff_shift_id = str_any(remote_order, &["staff_shift_id", "staffShiftId"]);
     let staff_id = str_any(remote_order, &["staff_id", "staffId"]);
+    let driver_id = str_any(remote_order, &["driver_id", "driverId"]).or_else(|| staff_id.clone());
+    let driver_name = str_any(remote_order, &["driver_name", "driverName"]);
     let discount_percentage =
         num_any(remote_order, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
     let discount_amount =
@@ -1890,23 +1988,24 @@ fn materialize_remote_order(
         "INSERT INTO orders (
             id, order_number, customer_name, customer_phone, customer_email,
             items, total_amount, tax_amount, subtotal, status,
-            order_type, table_number, delivery_address, delivery_notes,
-            name_on_ringer, special_instructions, created_at, updated_at,
-            estimated_time, supabase_id, sync_status, payment_status, payment_method,
-            payment_transaction_id, staff_shift_id, staff_id, discount_percentage,
-            discount_amount, tip_amount, version, terminal_id, branch_id,
-            plugin, external_plugin_order_id, tax_rate, delivery_fee,
-            is_ghost, ghost_source, ghost_metadata
+            order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
+            delivery_floor, delivery_notes, name_on_ringer, special_instructions,
+            created_at, updated_at, estimated_time, supabase_id, sync_status,
+            payment_status, payment_method, payment_transaction_id, staff_shift_id,
+            staff_id, driver_id, driver_name, discount_percentage, discount_amount,
+            tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
+            tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14,
-            ?15, ?16, ?17, ?18,
-            ?19, ?20, 'synced', ?21, ?22,
-            ?23, ?24, ?25, ?26,
-            ?27, ?28, ?29, ?30, ?31,
-            ?32, ?33, ?34, ?35,
-            ?36, ?37, ?38
+            ?11, ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18, ?19,
+            ?20, ?21, ?22, ?23, 'synced',
+            ?24, ?25, ?26, ?27,
+            ?28, ?29, ?30, ?31, ?32,
+            ?33, ?34, ?35, ?36, ?37,
+            ?38, ?39, ?40, ?41,
+            ?42, ?43
         )",
         params![
             local_id,
@@ -1922,6 +2021,9 @@ fn materialize_remote_order(
             order_type,
             table_number,
             delivery_address,
+            delivery_city,
+            delivery_postal_code,
+            delivery_floor,
             delivery_notes,
             name_on_ringer,
             special_instructions,
@@ -1934,6 +2036,8 @@ fn materialize_remote_order(
             payment_tx,
             staff_shift_id,
             staff_id,
+            driver_id,
+            driver_name,
             discount_percentage,
             discount_amount,
             tip_amount,
@@ -2317,12 +2421,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     let mut payment_items: Vec<&SyncItem> = Vec::new();
     let mut adjustment_items: Vec<&SyncItem> = Vec::new();
     let mut zreport_items: Vec<&SyncItem> = Vec::new();
+    let mut loyalty_items: Vec<&SyncItem> = Vec::new();
     for item in &pending_items {
         match item.1.as_str() {
             "shift" | "shift_expense" => shift_items.push(item),
             "payment" => payment_items.push(item),
             "payment_adjustment" => adjustment_items.push(item),
             "z_report" => zreport_items.push(item),
+            "loyalty_transaction" => loyalty_items.push(item),
             _ => order_items.push(item),
         }
     }
@@ -2529,6 +2635,12 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
             &zreport_items,
         )
         .await;
+        total_progress += synced;
+    }
+
+    // Sync loyalty transactions (earn/redeem)
+    if !loyalty_items.is_empty() {
+        let synced = sync_loyalty_items(&admin_url, &api_key, db, &loyalty_items).await;
         total_progress += synced;
     }
 
@@ -3802,6 +3914,146 @@ async fn sync_z_report_items(
     }
 
     synced
+}
+
+/// Sync loyalty transaction items to the admin dashboard.
+///
+/// Each loyalty transaction is POSTed individually to either
+/// `/api/pos/loyalty/earn` or `/api/pos/loyalty/redeem` depending on the
+/// `transaction_type` field in the sync payload. On success the local
+/// `loyalty_transactions` row is marked `sync_state = 'applied'`.
+async fn sync_loyalty_items(
+    admin_url: &str,
+    api_key: &str,
+    db: &DbState,
+    items: &[&SyncItem],
+) -> usize {
+    let mut synced = 0;
+
+    for item in items {
+        let (
+            id,
+            _etype,
+            entity_id,
+            _operation,
+            payload,
+            _idem_key,
+            retry_count,
+            max_retries,
+            _,
+            _,
+            _,
+        ) = item;
+
+        match sync_loyalty_transaction(admin_url, api_key, entity_id, payload).await {
+            Ok(_) => {
+                let now = Utc::now().to_rfc3339();
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
+                        params![now, id],
+                    );
+                    let _ = conn.execute(
+                        "UPDATE loyalty_transactions SET sync_state = 'applied' WHERE id = ?1",
+                        params![entity_id],
+                    );
+                }
+                synced += 1;
+                info!(loyalty_tx_id = %entity_id, "Loyalty transaction synced to admin");
+            }
+            Err(e) => {
+                warn!(loyalty_tx_id = %entity_id, error = %e, "Loyalty sync failed");
+                if let Ok(conn) = db.conn.lock() {
+                    let new_retry = retry_count + 1;
+                    let (queue_status, lt_state) = if new_retry >= *max_retries {
+                        ("failed", "failed")
+                    } else {
+                        ("pending", "pending")
+                    };
+                    let _ = conn.execute(
+                        "UPDATE sync_queue SET status = ?1, retry_count = ?2, last_error = ?3, updated_at = datetime('now') WHERE id = ?4",
+                        params![queue_status, new_retry, e, id],
+                    );
+                    let _ = conn.execute(
+                        "UPDATE loyalty_transactions SET sync_state = ?1 WHERE id = ?2",
+                        params![lt_state, entity_id],
+                    );
+                }
+            }
+        }
+    }
+
+    synced
+}
+
+/// Sync a single loyalty transaction to the admin dashboard.
+///
+/// Routes the transaction to `/api/pos/loyalty/earn` or `/api/pos/loyalty/redeem`
+/// based on the `transaction_type` field in the payload. Returns `Ok(())` on
+/// success or an error string describing the failure.
+async fn sync_loyalty_transaction(
+    admin_url: &str,
+    api_key: &str,
+    entity_id: &str,
+    raw_payload: &str,
+) -> Result<(), String> {
+    let payload: Value = serde_json::from_str(raw_payload)
+        .map_err(|e| format!("Invalid loyalty sync payload: {e}"))?;
+
+    let tx_type = payload
+        .get("transaction_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("earn");
+
+    let endpoint = match tx_type {
+        "earn" => "/api/pos/loyalty/earn",
+        "redeem" => "/api/pos/loyalty/redeem",
+        _ => return Err(format!("Unknown loyalty transaction type: {tx_type}")),
+    };
+
+    let body = match tx_type {
+        "earn" => {
+            serde_json::json!({
+                "customer_id": payload.get("customer_id").and_then(|v| v.as_str()).unwrap_or_default(),
+                "order_id": payload.get("order_id").and_then(|v| v.as_str()),
+                "amount": payload.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "description": payload.get("description").and_then(|v| v.as_str()),
+            })
+        }
+        "redeem" => {
+            // The local payload stores points as negative; the admin API expects a positive value
+            let points = payload
+                .get("points")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .abs();
+            serde_json::json!({
+                "customer_id": payload.get("customer_id").and_then(|v| v.as_str()).unwrap_or_default(),
+                "points": points,
+                "order_id": payload.get("order_id").and_then(|v| v.as_str()),
+                "description": payload.get("description").and_then(|v| v.as_str()),
+            })
+        }
+        _ => unreachable!(),
+    };
+
+    let resp = api::fetch_from_admin(admin_url, api_key, endpoint, "POST", Some(body))
+        .await
+        .map_err(|e| format!("Loyalty sync HTTP error for {entity_id}: {e}"))?;
+
+    let success = resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !success {
+        let error_msg = resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        return Err(format!("Loyalty sync rejected: {error_msg}"));
+    }
+
+    Ok(())
 }
 
 /// Mark a batch of items as failed/deferred.

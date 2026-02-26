@@ -194,7 +194,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
         {t('modals.editOrderItems.message', { count: orderCount })}
       </p>
 
-      <div className="flex-1 overflow-y-auto space-y-4 mb-6">
+      <div className="flex-1 overflow-y-auto space-y-4 mb-6 scrollbar-hide">
         {/* Order Items */}
         <div className="space-y-3">
           {items.map((item) => (

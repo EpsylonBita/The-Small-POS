@@ -140,7 +140,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   if (comboMode && onComboSelect) {
     if (combos.length === 0) {
       return (
-        <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
+        <div className="flex-1 p-4 overflow-y-auto scrollbar-hide flex items-center justify-center">
           <div className="text-center">
             <Utensils className={`w-12 h-12 mb-4 mx-auto ${
               resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
@@ -173,7 +173,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
 
   if (loading) {
     return (
-      <div className="flex-1 p-2 sm:p-4 overflow-y-auto">
+      <div className="flex-1 p-2 sm:p-4 overflow-y-auto scrollbar-hide">
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-5 gap-3 sm:gap-4">
           {[1, 2, 3, 4, 5, 6, 7, 8].map(i => (
             <div
@@ -190,7 +190,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
 
   if (error) {
     return (
-      <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
+      <div className="flex-1 p-4 overflow-y-auto scrollbar-hide flex items-center justify-center">
         <div className="text-center">
           <AlertTriangle className={`w-12 h-12 mb-4 mx-auto ${
             resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'
@@ -224,7 +224,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
 
   if (menuItems.length === 0) {
     return (
-      <div className="flex-1 p-4 overflow-y-auto flex items-center justify-center">
+      <div className="flex-1 p-4 overflow-y-auto scrollbar-hide flex items-center justify-center">
         <div className="text-center">
           <Utensils className={`w-12 h-12 mb-4 mx-auto ${
             resolvedTheme === 'dark' ? 'text-gray-600' : 'text-gray-400'

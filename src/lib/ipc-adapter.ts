@@ -739,6 +739,20 @@ export interface PlatformBridge {
     fiscalPrint(orderId: string): Promise<IpcResult>;
   };
 
+  // -- Loyalty ---------------------------------------------------------------
+  loyalty: {
+    getSettings(): Promise<IpcResult>;
+    syncSettings(): Promise<IpcResult>;
+    syncCustomers(): Promise<IpcResult>;
+    getCustomers(opts?: { search?: string }): Promise<IpcResult>;
+    getCustomerBalance(customerId: string): Promise<IpcResult>;
+    lookupByPhone(phone: string): Promise<IpcResult>;
+    lookupByCard(uid: string): Promise<IpcResult>;
+    earnPoints(opts: { customerId: string; orderId?: string; amount: number }): Promise<IpcResult>;
+    redeemPoints(opts: { customerId: string; points: number; orderId?: string }): Promise<IpcResult>;
+    getTransactions(customerId: string): Promise<IpcResult>;
+  };
+
   // -- Modules ---------------------------------------------------------------
   modules: {
     fetchFromAdmin(): Promise<IpcResult>;
@@ -1133,6 +1147,18 @@ export const CHANNEL_MAP: Record<string, string> = {
   'ecr:test-connection': 'ecr.testConnection',
   'ecr:test-print': 'ecr.testPrint',
   'ecr:fiscal-print': 'ecr.fiscalPrint',
+
+  // Loyalty
+  'loyalty:get-settings': 'loyalty.getSettings',
+  'loyalty:sync-settings': 'loyalty.syncSettings',
+  'loyalty:sync-customers': 'loyalty.syncCustomers',
+  'loyalty:get-customers': 'loyalty.getCustomers',
+  'loyalty:get-balance': 'loyalty.getCustomerBalance',
+  'loyalty:lookup-phone': 'loyalty.lookupByPhone',
+  'loyalty:lookup-card': 'loyalty.lookupByCard',
+  'loyalty:earn': 'loyalty.earnPoints',
+  'loyalty:redeem': 'loyalty.redeemPoints',
+  'loyalty:transactions': 'loyalty.getTransactions',
 
   // Modules
   'modules:fetch-from-admin': 'modules.fetchFromAdmin',
@@ -1560,6 +1586,19 @@ export class TauriBridge implements PlatformBridge {
     testConnection: (did: string) => this.inv('ecr:test-connection', did),
     testPrint: (did: string) => this.inv('ecr:test-print', did),
     fiscalPrint: (oid: string) => this.inv('ecr:fiscal-print', oid),
+  };
+
+  loyalty = {
+    getSettings: () => this.inv('loyalty:get-settings'),
+    syncSettings: () => this.inv('loyalty:sync-settings'),
+    syncCustomers: () => this.inv('loyalty:sync-customers'),
+    getCustomers: (opts?: { search?: string }) => this.inv('loyalty:get-customers', opts),
+    getCustomerBalance: (customerId: string) => this.inv('loyalty:get-balance', { customerId }),
+    lookupByPhone: (phone: string) => this.inv('loyalty:lookup-phone', { phone }),
+    lookupByCard: (uid: string) => this.inv('loyalty:lookup-card', { uid }),
+    earnPoints: (opts: { customerId: string; orderId?: string; amount: number }) => this.inv('loyalty:earn', opts),
+    redeemPoints: (opts: { customerId: string; points: number; orderId?: string }) => this.inv('loyalty:redeem', opts),
+    getTransactions: (customerId: string) => this.inv('loyalty:transactions', { customerId }),
   };
 
   modules = {

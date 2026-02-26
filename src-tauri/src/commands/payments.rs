@@ -140,6 +140,7 @@ pub async fn payment_update_payment_status(
     let order_id_raw = payload.order_id;
     let payment_status = payload.payment_status;
     let payment_method = payload.payment_method;
+    let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     conn.execute(
@@ -149,22 +150,28 @@ pub async fn payment_update_payment_status(
              sync_status = 'pending',
              updated_at = ?3
          WHERE id = ?4",
-        rusqlite::params![
-            payment_status,
-            payment_method,
-            Utc::now().to_rfc3339(),
-            order_id
-        ],
+        rusqlite::params![payment_status, payment_method, now, order_id],
     )
     .map_err(|e| format!("update payment status: {e}"))?;
-    drop(conn);
-    let payload = serde_json::json!({
-        "orderId": order_id_raw,
+
+    let event_payload = serde_json::json!({
+        "orderId": order_id,
         "paymentStatus": payment_status,
         "paymentMethod": payment_method
     });
-    let _ = app.emit("order_payment_updated", payload.clone());
-    Ok(serde_json::json!({ "success": true, "data": payload }))
+    let idem = format!(
+        "order:update-payment-method:{}:{}",
+        order_id,
+        Utc::now().timestamp_millis()
+    );
+    let _ = conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('order', ?1, 'update', ?2, ?3)",
+        rusqlite::params![order_id, event_payload.to_string(), idem],
+    );
+    drop(conn);
+    let _ = app.emit("order_payment_updated", event_payload.clone());
+    Ok(serde_json::json!({ "success": true, "data": event_payload }))
 }
 
 #[tauri::command]

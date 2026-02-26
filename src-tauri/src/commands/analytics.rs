@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, escpos, print, printers, value_str, zreport};
+use crate::{db, print, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -218,6 +218,7 @@ fn extract_z_report_id_from_payload(payload: &serde_json::Value) -> Option<Strin
         .filter(|id| !id.is_empty())
 }
 
+#[allow(dead_code)]
 fn number_from_value(value: &serde_json::Value) -> Option<f64> {
     value
         .as_f64()
@@ -225,6 +226,7 @@ fn number_from_value(value: &serde_json::Value) -> Option<f64> {
         .or_else(|| value.as_u64().map(|v| v as f64))
 }
 
+#[allow(dead_code)]
 fn number_from_pointers(value: &serde_json::Value, pointers: &[&str]) -> Option<f64> {
     for pointer in pointers {
         if let Some(v) = value.pointer(pointer).and_then(number_from_value) {
@@ -1018,265 +1020,34 @@ pub async fn report_print_z_report(
         return zreport::print_z_report(&db, &serde_json::json!({ "zReportId": z_report_id }));
     }
 
-    let Some(snapshot) = snapshot_or_payload(&payload) else {
+    let Some(mut snapshot) = snapshot_or_payload(&payload) else {
         return Ok(serde_json::json!({
             "success": false,
-            "error": "Missing snapshot payload for native z-report print",
+            "error": "Missing snapshot payload for queued z-report print",
         }));
     };
 
-    let profile = match printers::resolve_printer_profile(&db, None) {
-        Ok(Some(profile)) => profile,
-        Ok(None) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": "No printer profile configured",
-            }));
+    if snapshot.get("terminalName").is_none() {
+        if let Some(terminal_name) = value_str(&payload, &["terminalName", "terminal_name"]) {
+            if let Some(obj) = snapshot.as_object_mut() {
+                obj.insert(
+                    "terminalName".to_string(),
+                    serde_json::Value::String(terminal_name),
+                );
+            }
         }
-        Err(error) => {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to resolve printer profile: {error}"),
-            }));
-        }
-    };
-
-    let printer_name =
-        value_str(&profile, &["printerName", "printer_name", "name"]).unwrap_or_default();
-    if printer_name.trim().is_empty() {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": "Printer profile has no printerName configured",
-        }));
     }
-
-    let paper_mm = profile
-        .get("paperWidthMm")
-        .or_else(|| profile.get("paper_width_mm"))
-        .and_then(|value| value.as_i64())
-        .unwrap_or(80) as i32;
-    let paper = escpos::PaperWidth::from_mm(paper_mm);
 
     let report_date = value_str(&snapshot, &["date", "reportDate", "report_date"])
         .or_else(|| string_from_pointers(&snapshot, &["/date", "/reportDate", "/report_date"]))
         .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let terminal_name = value_str(&payload, &["terminalName", "terminal_name"])
-        .or_else(|| {
-            value_str(
-                &snapshot,
-                &["terminalName", "terminal_name", "terminalId", "terminal_id"],
-            )
-        })
-        .or_else(|| {
-            string_from_pointers(
-                &snapshot,
-                &[
-                    "/terminalName",
-                    "/terminal_name",
-                    "/terminalId",
-                    "/terminal_id",
-                ],
-            )
-        });
+    let synthetic_id = format!(
+        "snapshot-{}-{}",
+        report_date.replace(|ch: char| !ch.is_ascii_alphanumeric(), ""),
+        Utc::now().timestamp_millis()
+    );
 
-    let shifts_total = number_from_pointers(
-        &snapshot,
-        &["/shifts/total", "/shiftsTotal", "/shifts_total"],
-    )
-    .unwrap_or(0.0)
-    .round() as i64;
-    let shifts_cashier = number_from_pointers(
-        &snapshot,
-        &[
-            "/shifts/cashier",
-            "/shifts/cashiers",
-            "/cashierShifts",
-            "/cashier_shifts",
-        ],
-    )
-    .unwrap_or(0.0)
-    .round() as i64;
-    let shifts_driver = number_from_pointers(
-        &snapshot,
-        &[
-            "/shifts/driver",
-            "/shifts/drivers",
-            "/driverShifts",
-            "/driver_shifts",
-        ],
-    )
-    .unwrap_or(0.0)
-    .round() as i64;
-
-    let total_orders = number_from_pointers(
-        &snapshot,
-        &[
-            "/sales/totalOrders",
-            "/sales/total_orders",
-            "/daySummary/totalOrders",
-            "/daySummary/total_orders",
-            "/totalOrders",
-            "/total_orders",
-        ],
-    )
-    .unwrap_or(0.0)
-    .round() as i64;
-    let total_sales = number_from_pointers(
-        &snapshot,
-        &[
-            "/sales/totalSales",
-            "/sales/total_sales",
-            "/daySummary/total",
-            "/daySummary/totalAmount",
-            "/totalSales",
-            "/total_sales",
-        ],
-    )
-    .unwrap_or(0.0);
-    let cash_sales = number_from_pointers(
-        &snapshot,
-        &[
-            "/sales/cashSales",
-            "/sales/cash_sales",
-            "/daySummary/cashTotal",
-            "/cashSales",
-            "/cash_sales",
-        ],
-    )
-    .unwrap_or(0.0);
-    let card_sales = number_from_pointers(
-        &snapshot,
-        &[
-            "/sales/cardSales",
-            "/sales/card_sales",
-            "/daySummary/cardTotal",
-            "/cardSales",
-            "/card_sales",
-        ],
-    )
-    .unwrap_or(0.0);
-
-    let expenses_total = number_from_pointers(
-        &snapshot,
-        &["/expenses/total", "/expensesTotal", "/expenses_total"],
-    )
-    .unwrap_or(0.0);
-    let driver_earnings_total = number_from_pointers(
-        &snapshot,
-        &[
-            "/driverEarnings/totalEarnings",
-            "/driverEarnings/total_earnings",
-            "/driverEarningsTotal",
-        ],
-    )
-    .unwrap_or(0.0);
-    let driver_deliveries = number_from_pointers(
-        &snapshot,
-        &[
-            "/driverEarnings/totalDeliveries",
-            "/driverEarnings/total_deliveries",
-            "/driverDeliveries",
-        ],
-    )
-    .unwrap_or(0.0)
-    .round() as i64;
-    let cash_variance = number_from_pointers(
-        &snapshot,
-        &[
-            "/cashDrawer/totalVariance",
-            "/cashDrawer/cashVariance",
-            "/cashDrawer/total_variance",
-            "/cashVariance",
-        ],
-    )
-    .unwrap_or(0.0);
-    let cash_drops = number_from_pointers(
-        &snapshot,
-        &[
-            "/cashDrawer/totalCashDrops",
-            "/cashDrawer/cash_drops",
-            "/cashDrops",
-        ],
-    )
-    .unwrap_or(0.0);
-
-    let generated_at = Utc::now().to_rfc3339();
-    let mut receipt = escpos::EscPosBuilder::new().with_paper(paper);
-    receipt
-        .init()
-        .center()
-        .bold(true)
-        .text("Z REPORT\n")
-        .bold(false)
-        .separator()
-        .left()
-        .line_pair("Date", &report_date);
-
-    if let Some(name) = terminal_name.as_ref() {
-        receipt.line_pair("Terminal", name);
-    }
-
-    receipt
-        .line_pair("Generated", &generated_at)
-        .separator()
-        .line_pair("Shifts", &shifts_total.to_string());
-    if shifts_cashier > 0 {
-        receipt.line_pair("Cashier Shifts", &shifts_cashier.to_string());
-    }
-    if shifts_driver > 0 {
-        receipt.line_pair("Driver Shifts", &shifts_driver.to_string());
-    }
-
-    receipt
-        .separator()
-        .line_pair("Orders", &total_orders.to_string())
-        .line_pair("Sales", &format!("{total_sales:.2}"))
-        .line_pair("Cash Sales", &format!("{cash_sales:.2}"))
-        .line_pair("Card Sales", &format!("{card_sales:.2}"))
-        .separator()
-        .line_pair("Expenses", &format!("{expenses_total:.2}"))
-        .line_pair("Driver Earn", &format!("{driver_earnings_total:.2}"))
-        .line_pair("Deliveries", &driver_deliveries.to_string())
-        .separator()
-        .line_pair("Variance", &format!("{cash_variance:.2}"))
-        .line_pair("Cash Drops", &format!("{cash_drops:.2}"))
-        .separator()
-        .center()
-        .text("End of Z Report\n")
-        .feed(4)
-        .cut();
-
-    let bytes = receipt.build();
-    match printers::print_raw_to_windows(&printer_name, &bytes, "POS Z Report") {
-        Ok(dispatch) => {
-            info!(
-                printer_name = %printer_name,
-                report_date = %report_date,
-                "Printed z-report receipt from snapshot payload"
-            );
-            Ok(serde_json::json!({
-                "success": true,
-                "printerName": printer_name,
-                "reportDate": report_date,
-                "bytesRequested": dispatch.bytes_requested,
-                "bytesWritten": dispatch.bytes_written,
-            }))
-        }
-        Err(error) => {
-            warn!(
-                printer_name = %printer_name,
-                report_date = %report_date,
-                error = %error,
-                "Failed to print z-report receipt from snapshot payload"
-            );
-            Ok(serde_json::json!({
-                "success": false,
-                "error": error,
-                "printerName": printer_name,
-                "reportDate": report_date,
-            }))
-        }
-    }
+    print::enqueue_print_job_with_payload(&db, "z_report", &synthetic_id, None, Some(&snapshot))
 }
 
 #[tauri::command]

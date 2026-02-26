@@ -43,6 +43,7 @@ export { default as OrderCancellationModal } from './modals/OrderCancellationMod
 export { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
 export { default as EditAddressModal } from './modals/EditAddressModal';
 export { default as EditOptionsModal } from './modals/EditOptionsModal';
+export { default as EditPaymentMethodModal } from './modals/EditPaymentMethodModal';
 export { default as EditOrderItemsModal } from './modals/EditOrderItemsModal';
 
 // Order flow

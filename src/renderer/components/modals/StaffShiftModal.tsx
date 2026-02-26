@@ -49,6 +49,28 @@ interface StaffMember {
   hourly_rate?: number;
 }
 
+const INVALID_CONTEXT_VALUES = new Set([
+  '',
+  'default-organization',
+  'default-org',
+  'default-branch',
+  'default-terminal',
+]);
+
+function normalizeContextId(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (INVALID_CONTEXT_VALUES.has(trimmed.toLowerCase())) {
+    return undefined;
+  }
+  return trimmed;
+}
+
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
 
 export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false, isMobileWaiter = false }: StaffShiftModalProps) {
@@ -779,6 +801,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           if (val) organizationId = val as string;
         } catch { }
       }
+      organizationId = normalizeContextId(organizationId);
 
       // Validate branchId before attempting check-in
       if (!branchId || (typeof branchId === 'string' && branchId.trim() === '')) {
@@ -979,8 +1002,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Resolve terminal + branch from TerminalConfig first (avoid stale 'local-branch')
       let resolvedTerminalId = staff.terminalId;
       let resolvedBranchId = staff.branchId;
+      let resolvedOrganizationId = normalizeContextId(staff.organizationId);
       try { resolvedTerminalId = (await bridge.terminalConfig.getTerminalId()) || resolvedTerminalId; } catch { }
       try { resolvedBranchId = (await bridge.terminalConfig.getBranchId()) || resolvedBranchId; } catch { }
+      try {
+        resolvedOrganizationId = normalizeContextId(await bridge.terminalConfig.getOrganizationId()) || resolvedOrganizationId;
+      } catch { }
+      if (!resolvedOrganizationId) {
+        try {
+          resolvedOrganizationId =
+            normalizeContextId(await bridge.terminalConfig.getSetting('terminal', 'organization_id')) ||
+            resolvedOrganizationId;
+        } catch { }
+      }
+      if (!resolvedOrganizationId) {
+        resolvedOrganizationId = normalizeContextId(getSetting?.('terminal', 'organization_id'));
+      }
 
       // Cashiers must manually count and enter opening amount - no automatic comparison with previous day
       // Validate that cashiers have entered a valid opening cash amount
@@ -1044,6 +1081,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           role: roleType,
           branchId: resolvedBranchId,
           terminalId: resolvedTerminalId,
+          organizationId: resolvedOrganizationId,
         });
         // Optimistically mark shift active immediately with a minimal stub, so UI unlocks at once
         try {
@@ -2502,7 +2540,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
 
                       {showDetailedView && (
-                        <div className="space-y-3 max-h-96 overflow-y-auto animate-in fade-in slide-in-from-top-4 duration-300">
+                        <div className="space-y-3 max-h-96 overflow-y-auto scrollbar-hide animate-in fade-in slide-in-from-top-4 duration-300">
                           {deliveries.map((delivery: any) => (
                             <div key={delivery.id} className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-4 border liquid-glass-modal-border mb-3">
                               {/* Order Header */}
@@ -2712,7 +2750,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
 
                       {showDetailedTableView && (
-                        <div className="space-y-3 max-h-96 overflow-y-auto animate-in fade-in slide-in-from-top-4 duration-300">
+                        <div className="space-y-3 max-h-96 overflow-y-auto scrollbar-hide animate-in fade-in slide-in-from-top-4 duration-300">
                           {waiterTables.map((table: any) => (
                             <div key={table.table_number} className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-4 border liquid-glass-modal-border mb-3">
                               {/* Table Header */}
@@ -3181,7 +3219,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                   {/* List of Recorded Payments from current session */}
                   {staffPaymentsList.length > 0 && (
-                    <div className="space-y-2 max-h-48 overflow-auto pr-1">
+                    <div className="space-y-2 max-h-48 overflow-auto pr-1 scrollbar-hide">
                       <div className="text-xs text-gray-400 uppercase tracking-wide mb-2">{t('modals.staffShift.recordedThisSession', 'Recorded This Session')}</div>
                       {staffPaymentsList.map((p) => (
                         <div key={p.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/10 text-sm">

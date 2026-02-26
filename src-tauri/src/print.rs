@@ -9,8 +9,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use base64::Engine as _;
 use chrono::Utc;
+use image::imageops::FilterType;
 use rusqlite::params;
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -18,8 +21,12 @@ use uuid::Uuid;
 
 use crate::db::DbState;
 use crate::drawer;
-use crate::payments;
 use crate::printers;
+use crate::receipt_renderer::{
+    self, AdjustmentLine, KitchenTicketDoc, LayoutConfig, OrderReceiptDoc, PaymentLine,
+    ReceiptCustomizationLine, ReceiptDocument, ReceiptItem, ReceiptTemplate, ShiftCheckoutDoc,
+    TotalsLine, ZReportDoc,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,6 +48,17 @@ pub fn enqueue_print_job(
     entity_type: &str,
     entity_id: &str,
     printer_profile_id: Option<&str>,
+) -> Result<Value, String> {
+    enqueue_print_job_with_payload(db, entity_type, entity_id, printer_profile_id, None)
+}
+
+/// Create a new print job and optionally persist payload snapshot JSON.
+pub fn enqueue_print_job_with_payload(
+    db: &DbState,
+    entity_type: &str,
+    entity_id: &str,
+    printer_profile_id: Option<&str>,
+    entity_payload_json: Option<&Value>,
 ) -> Result<Value, String> {
     if entity_type != "order_receipt"
         && entity_type != "kitchen_ticket"
@@ -76,12 +94,21 @@ pub fn enqueue_print_job(
 
     let job_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    let payload_string =
+        entity_payload_json.and_then(|payload| serde_json::to_string(payload).ok());
 
     conn.execute(
-        "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id,
+        "INSERT INTO print_jobs (id, entity_type, entity_id, entity_payload_json, printer_profile_id,
                                  status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?5)",
-        params![job_id, entity_type, entity_id, printer_profile_id, now],
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?6)",
+        params![
+            job_id,
+            entity_type,
+            entity_id,
+            payload_string,
+            printer_profile_id,
+            now
+        ],
     )
     .map_err(|e| format!("enqueue print job: {e}"))?;
 
@@ -107,22 +134,23 @@ pub fn list_print_jobs(db: &DbState, status_filter: Option<&str>) -> Result<Valu
             "id": row.get::<_, String>(0)?,
             "entityType": row.get::<_, String>(1)?,
             "entityId": row.get::<_, String>(2)?,
-            "printerProfileId": row.get::<_, Option<String>>(3)?,
-            "status": row.get::<_, String>(4)?,
-            "outputPath": row.get::<_, Option<String>>(5)?,
-            "retryCount": row.get::<_, i32>(6)?,
-            "maxRetries": row.get::<_, i32>(7)?,
-            "nextRetryAt": row.get::<_, Option<String>>(8)?,
-            "lastError": row.get::<_, Option<String>>(9)?,
-            "warningCode": row.get::<_, Option<String>>(10)?,
-            "warningMessage": row.get::<_, Option<String>>(11)?,
-            "lastAttemptAt": row.get::<_, Option<String>>(12)?,
-            "createdAt": row.get::<_, String>(13)?,
-            "updatedAt": row.get::<_, String>(14)?,
+            "entityPayloadJson": row.get::<_, Option<String>>(3)?,
+            "printerProfileId": row.get::<_, Option<String>>(4)?,
+            "status": row.get::<_, String>(5)?,
+            "outputPath": row.get::<_, Option<String>>(6)?,
+            "retryCount": row.get::<_, i32>(7)?,
+            "maxRetries": row.get::<_, i32>(8)?,
+            "nextRetryAt": row.get::<_, Option<String>>(9)?,
+            "lastError": row.get::<_, Option<String>>(10)?,
+            "warningCode": row.get::<_, Option<String>>(11)?,
+            "warningMessage": row.get::<_, Option<String>>(12)?,
+            "lastAttemptAt": row.get::<_, Option<String>>(13)?,
+            "createdAt": row.get::<_, String>(14)?,
+            "updatedAt": row.get::<_, String>(15)?,
         }))
     };
 
-    let cols = "id, entity_type, entity_id, printer_profile_id, status,
+    let cols = "id, entity_type, entity_id, entity_payload_json, printer_profile_id, status,
                 output_path, retry_count, max_retries, next_retry_at,
                 last_error, warning_code, warning_message, last_attempt_at,
                 created_at, updated_at";
@@ -275,6 +303,1099 @@ fn is_non_retryable_print_error(error_msg: &str) -> bool {
     normalized.contains("no hardware printer profile resolved")
 }
 
+fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Option<String> {
+    crate::db::get_setting(conn, category, key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool {
+    let raw = setting_text(conn, category, key).unwrap_or_default();
+    matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn parse_number(value: &Value) -> Option<f64> {
+    if let Some(number) = value.as_f64() {
+        return Some(number);
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number as f64);
+    }
+    if let Some(text) = value.as_str() {
+        return text.trim().parse::<f64>().ok();
+    }
+    None
+}
+
+fn parse_bool(value: &Value) -> Option<bool> {
+    if let Some(flag) = value.as_bool() {
+        return Some(flag);
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number != 0);
+    }
+    if let Some(text) = value.as_str() {
+        let normalized = text.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+            return Some(true);
+        }
+        if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+            return Some(false);
+        }
+    }
+    None
+}
+
+fn value_from_keys<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    for key in keys {
+        if let Some(found) = value.get(*key) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn text_from_keys(value: &Value, keys: &[&str]) -> Option<String> {
+    value_from_keys(value, keys)
+        .and_then(Value::as_str)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn number_from_keys(value: &Value, keys: &[&str]) -> Option<f64> {
+    value_from_keys(value, keys).and_then(parse_number)
+}
+
+fn bool_from_keys(value: &Value, keys: &[&str]) -> bool {
+    value_from_keys(value, keys)
+        .and_then(parse_bool)
+        .unwrap_or(false)
+}
+
+fn looks_like_customization_object(value: &Value) -> bool {
+    if !value.is_object() {
+        return false;
+    }
+    value.get("ingredient").is_some()
+        || value.get("name").is_some()
+        || value.get("name_en").is_some()
+        || value.get("name_el").is_some()
+        || value.get("label").is_some()
+        || value.get("optionName").is_some()
+        || value.get("isWithout").is_some()
+        || value.get("is_without").is_some()
+        || value.get("without").is_some()
+        || value.get("price").is_some()
+}
+
+fn flatten_customization_values(value: &Value) -> Vec<Value> {
+    if let Some(array) = value.as_array() {
+        return array.clone();
+    }
+    if value.is_object() {
+        if looks_like_customization_object(value) {
+            return vec![value.clone()];
+        }
+        if let Some(object) = value.as_object() {
+            return object.values().cloned().collect();
+        }
+    }
+    if let Some(raw) = value.as_str() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            return flatten_customization_values(&parsed);
+        }
+    }
+    Vec::new()
+}
+
+fn extract_customization_name(entry: &Value) -> Option<String> {
+    if let Some(ingredient) = entry.get("ingredient") {
+        if let Some(name) = text_from_keys(ingredient, &["name", "name_en", "name_el"]) {
+            return Some(name);
+        }
+    }
+    text_from_keys(
+        entry,
+        &["name", "name_en", "name_el", "label", "optionName"],
+    )
+}
+
+fn extract_customization_price(entry: &Value, is_without: bool) -> Option<f64> {
+    if is_without {
+        return None;
+    }
+
+    if let Some(ingredient) = entry.get("ingredient") {
+        if let Some(price) = number_from_keys(
+            ingredient,
+            &[
+                "price",
+                "pickup_price",
+                "delivery_price",
+                "base_price",
+                "additionalPrice",
+                "extra_price",
+            ],
+        )
+        .filter(|value| *value > 0.0)
+        {
+            return Some(price);
+        }
+    }
+
+    number_from_keys(
+        entry,
+        &[
+            "price",
+            "pickup_price",
+            "delivery_price",
+            "base_price",
+            "additionalPrice",
+            "extra_price",
+        ],
+    )
+    .filter(|value| *value > 0.0)
+}
+
+fn parse_customization_entries(raw: &Value) -> Vec<ReceiptCustomizationLine> {
+    flatten_customization_values(raw)
+        .into_iter()
+        .filter_map(|entry| {
+            let name = extract_customization_name(&entry)?;
+            let is_without = bool_from_keys(&entry, &["isWithout", "is_without", "without"]);
+            let quantity = number_from_keys(&entry, &["quantity", "qty"])
+                .filter(|value| *value > 0.0)
+                .unwrap_or(1.0);
+            let is_little = bool_from_keys(&entry, &["isLittle", "is_little", "little"]);
+            let price = extract_customization_price(&entry, is_without);
+            Some(ReceiptCustomizationLine {
+                name,
+                quantity,
+                is_without,
+                is_little,
+                price,
+            })
+        })
+        .collect()
+}
+
+fn parse_item_customizations(item: &Value) -> Vec<ReceiptCustomizationLine> {
+    for key in [
+        "customizations",
+        "modifiers",
+        "ingredients",
+        "selectedIngredients",
+    ] {
+        if let Some(raw) = item.get(key) {
+            let parsed = parse_customization_entries(raw);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_item_total(item: &Value) -> f64 {
+    item.get("totalPrice")
+        .or_else(|| item.get("total_price"))
+        .or_else(|| item.get("price"))
+        .or_else(|| item.get("unitPrice"))
+        .and_then(parse_number)
+        .unwrap_or(0.0)
+}
+
+fn extract_last4_digits(input: &str) -> Option<String> {
+    let digits: String = input.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.len() >= 4 {
+        digits.get(digits.len() - 4..).map(ToString::to_string)
+    } else {
+        None
+    }
+}
+
+fn resolve_layout_config(
+    db: &DbState,
+    profile: &Value,
+    entity_type: &str,
+) -> Result<LayoutConfig, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let paper_mm = profile
+        .get("paperWidthMm")
+        .or_else(|| profile.get("paper_width_mm"))
+        .and_then(Value::as_i64)
+        .unwrap_or(80) as i32;
+    let template = ReceiptTemplate::from_value(
+        profile
+            .get("receiptTemplate")
+            .or_else(|| profile.get("receipt_template"))
+            .and_then(Value::as_str),
+    );
+    let organization_name = setting_text(&conn, "organization", "name")
+        .or_else(|| setting_text(&conn, "restaurant", "name"))
+        .or_else(|| setting_text(&conn, "terminal", "store_name"))
+        .unwrap_or_else(|| "The Small".to_string());
+    let store_address = setting_text(&conn, "restaurant", "address")
+        .or_else(|| setting_text(&conn, "terminal", "store_address"));
+    let store_phone = setting_text(&conn, "restaurant", "phone")
+        .or_else(|| setting_text(&conn, "terminal", "store_phone"));
+    let footer_text = setting_text(&conn, "receipt", "footer_text")
+        .or_else(|| setting_text(&conn, "restaurant", "receipt_footer"))
+        .or(Some("Thank you".to_string()));
+    let qr_data = setting_text(&conn, "receipt", "qr_url")
+        .or_else(|| setting_text(&conn, "restaurant", "website"));
+    let show_qr_code = setting_bool(&conn, "receipt", "show_qr_code");
+    let show_logo = setting_bool(&conn, "receipt", "show_logo");
+    let logo_url = setting_text(&conn, "receipt", "logo_source")
+        .or_else(|| setting_text(&conn, "organization", "logo_url"));
+    let copy_label = setting_text(&conn, "receipt", "copy_label").or_else(|| {
+        if entity_type == "kitchen_ticket" {
+            None
+        } else {
+            setting_text(&conn, "receipt", "copy_type").map(|value| value.to_ascii_uppercase())
+        }
+    });
+    let character_set = profile
+        .get("characterSet")
+        .or_else(|| profile.get("character_set"))
+        .and_then(Value::as_str)
+        .unwrap_or("PC437_USA")
+        .to_string();
+    let greek_render_mode = profile
+        .get("greekRenderMode")
+        .or_else(|| profile.get("greek_render_mode"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+
+    Ok(LayoutConfig {
+        paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
+        template,
+        organization_name,
+        store_address,
+        store_phone,
+        footer_text,
+        show_qr_code,
+        qr_data,
+        show_logo,
+        logo_url,
+        copy_label,
+        character_set,
+        greek_render_mode,
+    })
+}
+
+fn paper_logo_max_width_dots(paper: crate::escpos::PaperWidth) -> u32 {
+    match paper {
+        crate::escpos::PaperWidth::Mm58 => 384,
+        crate::escpos::PaperWidth::Mm80 => 576,
+        crate::escpos::PaperWidth::Mm112 => 832,
+    }
+}
+
+fn parse_data_url_image(source: &str) -> Option<Vec<u8>> {
+    let trimmed = source.trim();
+    if !trimmed.starts_with("data:image/") {
+        return None;
+    }
+    let (_, payload) = trimmed.split_once(',')?;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()
+}
+
+fn read_logo_source_bytes(source: &str) -> Result<Vec<u8>, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Logo source is empty".to_string());
+    }
+
+    if let Some(bytes) = parse_data_url_image(trimmed) {
+        return Ok(bytes);
+    }
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let url = trimmed.to_string();
+        return tauri::async_runtime::block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|e| format!("logo HTTP client: {e}"))?;
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("logo fetch failed: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!("logo fetch failed with HTTP {}", response.status()));
+            }
+            response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|e| format!("logo fetch bytes failed: {e}"))
+        });
+    }
+
+    let path_value = if trimmed.starts_with("file://") {
+        let raw = trimmed.trim_start_matches("file://");
+        if cfg!(windows) && raw.starts_with('/') {
+            let bytes = raw.as_bytes();
+            if bytes.len() >= 3 && bytes[2] == b':' {
+                raw[1..].to_string()
+            } else {
+                raw.to_string()
+            }
+        } else {
+            raw.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    fs::read(&path_value).map_err(|e| format!("logo file read failed ({path_value}): {e}"))
+}
+
+fn rasterize_logo_to_escpos_prefix(
+    image_bytes: &[u8],
+    paper: crate::escpos::PaperWidth,
+) -> Result<Vec<u8>, String> {
+    let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
+    let gray = decoded.to_luma8();
+    let (src_w, src_h) = gray.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return Err("logo image has invalid dimensions".to_string());
+    }
+
+    let max_width = paper_logo_max_width_dots(paper).max(8);
+    let mut target_w = src_w.min(max_width);
+    if target_w == 0 {
+        target_w = 1;
+    }
+    let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
+    // Keep logos compact on thermal paper.
+    if target_h > 220 {
+        target_h = 220;
+        target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
+    }
+
+    let resized = if target_w != src_w || target_h != src_h {
+        image::imageops::resize(&gray, target_w, target_h, FilterType::Triangle)
+    } else {
+        gray
+    };
+
+    let width = resized.width();
+    let height = resized.height();
+    let width_bytes = width.div_ceil(8);
+    let mut packed = Vec::with_capacity((width_bytes * height) as usize);
+    for y in 0..height {
+        for xb in 0..width_bytes {
+            let mut byte = 0u8;
+            for bit in 0..8u32 {
+                let x = xb * 8 + bit;
+                if x >= width {
+                    continue;
+                }
+                let luma = resized.get_pixel(x, y).0[0];
+                if luma < 160 {
+                    byte |= 0x80 >> bit;
+                }
+            }
+            packed.push(byte);
+        }
+    }
+
+    let mut builder = crate::escpos::EscPosBuilder::new();
+    builder
+        .center()
+        .raster_image(width_bytes as u16, height as u16, &packed)
+        .lf()
+        .left();
+    Ok(builder.build())
+}
+
+fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>, String> {
+    if !layout.show_logo {
+        return Ok(None);
+    }
+    let Some(source) = layout
+        .logo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let bytes = read_logo_source_bytes(source)?;
+    let prefix = rasterize_logo_to_escpos_prefix(&bytes, layout.paper_width)?;
+    Ok(Some(prefix))
+}
+
+fn resolve_driver_name_from_shifts(conn: &rusqlite::Connection, staff_id: &str) -> Option<String> {
+    let staff_id = staff_id.trim();
+    if staff_id.is_empty() {
+        return None;
+    }
+
+    conn.query_row(
+        "SELECT staff_name
+         FROM staff_shifts
+         WHERE staff_id = ?1
+           AND TRIM(COALESCE(staff_name, '')) <> ''
+         ORDER BY COALESCE(check_in_time, created_at, updated_at) DESC, updated_at DESC
+         LIMIT 1",
+        params![staff_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .map(|name| name.trim().to_string())
+    .filter(|name| !name.is_empty())
+}
+
+fn non_empty_field(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order = conn
+        .query_row(
+            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
+                    COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
+                    COALESCE(items, '[]'), COALESCE(total_amount, 0), COALESCE(subtotal, 0),
+                    COALESCE(tax_amount, 0), COALESCE(discount_amount, 0), COALESCE(delivery_fee, 0),
+                    COALESCE(tip_amount, 0), COALESCE(delivery_address, ''),
+                    COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
+                    COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
+                    COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, '')
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, f64>(7)?,
+                    row.get::<_, f64>(8)?,
+                    row.get::<_, f64>(9)?,
+                    row.get::<_, f64>(10)?,
+                    row.get::<_, f64>(11)?,
+                    row.get::<_, f64>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, String>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, String>(20)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Order not found: {order_id}"))?;
+    let (
+        order_number,
+        order_type,
+        status,
+        created_at,
+        table_number,
+        customer_name,
+        items_json,
+        total_amount,
+        subtotal,
+        tax_amount,
+        discount_amount,
+        delivery_fee,
+        tip_amount,
+        delivery_address,
+        delivery_city,
+        delivery_postal_code,
+        delivery_floor,
+        name_on_ringer,
+        driver_id,
+        driver_name,
+        staff_id,
+    ) = order;
+
+    let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| ReceiptItem {
+            name: item
+                .get("name")
+                .or_else(|| item.get("itemName"))
+                .or_else(|| item.get("menu_item_name"))
+                .or_else(|| item.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or("Item")
+                .to_string(),
+            quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
+            total: parse_item_total(&item),
+            note: item
+                .get("notes")
+                .or_else(|| item.get("special_instructions"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            customizations: parse_item_customizations(&item),
+        })
+        .collect();
+
+    let mut totals = Vec::new();
+    totals.push(TotalsLine {
+        label: "Subtotal".to_string(),
+        amount: subtotal,
+        emphasize: false,
+    });
+    if discount_amount > 0.0 {
+        totals.push(TotalsLine {
+            label: "Discount".to_string(),
+            amount: -discount_amount,
+            emphasize: false,
+        });
+    }
+    if tax_amount > 0.0 {
+        totals.push(TotalsLine {
+            label: "Tax".to_string(),
+            amount: tax_amount,
+            emphasize: false,
+        });
+    }
+    if delivery_fee > 0.0 {
+        totals.push(TotalsLine {
+            label: "Delivery".to_string(),
+            amount: delivery_fee,
+            emphasize: false,
+        });
+    }
+    if tip_amount > 0.0 {
+        totals.push(TotalsLine {
+            label: "Tip".to_string(),
+            amount: tip_amount,
+            emphasize: false,
+        });
+    }
+    totals.push(TotalsLine {
+        label: "TOTAL".to_string(),
+        amount: total_amount,
+        emphasize: true,
+    });
+
+    let mut payments_stmt = conn
+        .prepare(
+            "SELECT COALESCE(method, ''), COALESCE(amount, 0), cash_received, change_given, COALESCE(transaction_ref, '')
+             FROM order_payments
+             WHERE order_id = ?1 AND status = 'completed'
+             ORDER BY created_at ASC",
+        )
+        .map_err(|e| format!("prepare payments: {e}"))?;
+
+    type PaymentRow = (String, f64, Option<f64>, Option<f64>, String);
+    let payment_rows: Vec<PaymentRow> = payments_stmt
+        .query_map(params![order_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| format!("query payments: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut payments = Vec::new();
+    let mut masked_card = None;
+    for (method, amount, cash_received, change_given, transaction_ref) in payment_rows {
+        let label = match method.as_str() {
+            "cash" => "Cash",
+            "card" => "Card",
+            _ => "Other",
+        };
+        payments.push(PaymentLine {
+            label: label.to_string(),
+            amount,
+            detail: None,
+        });
+        if let Some(received) = cash_received {
+            if received > 0.0 {
+                payments.push(PaymentLine {
+                    label: "Received".to_string(),
+                    amount: received,
+                    detail: None,
+                });
+            }
+        }
+        if let Some(change) = change_given {
+            if change > 0.0 {
+                payments.push(PaymentLine {
+                    label: "Change".to_string(),
+                    amount: change,
+                    detail: None,
+                });
+            }
+        }
+        if masked_card.is_none() && method == "card" {
+            masked_card =
+                extract_last4_digits(&transaction_ref).map(|last4| format!("****{last4}"));
+        }
+    }
+
+    let mut adjustments_stmt = conn
+        .prepare(
+            "SELECT COALESCE(adjustment_type, ''), COALESCE(amount, 0), COALESCE(reason, '')
+             FROM payment_adjustments WHERE order_id = ?1 ORDER BY created_at ASC",
+        )
+        .map_err(|e| format!("prepare adjustments: {e}"))?;
+    let adjustments: Vec<AdjustmentLine> = adjustments_stmt
+        .query_map(params![order_id], |row| {
+            let kind: String = row.get(0)?;
+            let label = match kind.as_str() {
+                "void" => "Void",
+                "refund" => "Refund",
+                _ => "Adjustment",
+            };
+            Ok(AdjustmentLine {
+                label: label.to_string(),
+                amount: row.get::<_, f64>(1)?,
+                reason: row
+                    .get::<_, String>(2)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            })
+        })
+        .map_err(|e| format!("query adjustments: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let resolved_driver_name = non_empty_field(driver_name)
+        .or_else(|| resolve_driver_name_from_shifts(&conn, &driver_id))
+        .or_else(|| resolve_driver_name_from_shifts(&conn, &staff_id));
+
+    Ok(OrderReceiptDoc {
+        order_id: order_id.to_string(),
+        order_number: if order_number.is_empty() {
+            order_id.to_string()
+        } else {
+            order_number
+        },
+        order_type,
+        status,
+        created_at,
+        table_number: non_empty_field(table_number),
+        customer_name: non_empty_field(customer_name),
+        delivery_address: non_empty_field(delivery_address),
+        delivery_city: non_empty_field(delivery_city),
+        delivery_postal_code: non_empty_field(delivery_postal_code),
+        delivery_floor: non_empty_field(delivery_floor),
+        name_on_ringer: non_empty_field(name_on_ringer),
+        driver_name: resolved_driver_name,
+        items,
+        totals,
+        payments,
+        adjustments,
+        masked_card,
+    })
+}
+
+fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicketDoc, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (
+        order_number,
+        order_type,
+        created_at,
+        table_number,
+        delivery_address,
+        delivery_notes,
+        special_instructions,
+        items_json,
+    ) = conn
+        .query_row(
+            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
+                    COALESCE(table_number, ''), COALESCE(delivery_address, ''), COALESCE(delivery_notes, ''),
+                    COALESCE(special_instructions, ''), COALESCE(items, '[]')
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Order not found: {order_id}"))?;
+
+    let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| ReceiptItem {
+            name: item
+                .get("name")
+                .or_else(|| item.get("itemName"))
+                .or_else(|| item.get("menu_item_name"))
+                .or_else(|| item.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or("Item")
+                .to_string(),
+            quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
+            total: parse_item_total(&item),
+            note: item
+                .get("notes")
+                .or_else(|| item.get("special_instructions"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            customizations: parse_item_customizations(&item),
+        })
+        .collect();
+
+    Ok(KitchenTicketDoc {
+        order_id: order_id.to_string(),
+        order_number: if order_number.is_empty() {
+            order_id.to_string()
+        } else {
+            order_number
+        },
+        order_type,
+        created_at,
+        table_number: if table_number.is_empty() {
+            None
+        } else {
+            Some(table_number)
+        },
+        delivery_address: if delivery_address.is_empty() {
+            None
+        } else {
+            Some(delivery_address)
+        },
+        delivery_notes: if delivery_notes.is_empty() {
+            None
+        } else {
+            Some(delivery_notes)
+        },
+        special_instructions: if special_instructions.is_empty() {
+            None
+        } else {
+            Some(special_instructions)
+        },
+        items,
+    })
+}
+
+fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckoutDoc, String> {
+    let summary = crate::shifts::get_shift_summary(db, shift_id)?;
+    let shift = summary
+        .get("shift")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let cash_drawer = summary
+        .get("cashDrawer")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    Ok(ShiftCheckoutDoc {
+        shift_id: shift_id.to_string(),
+        role_type: shift
+            .get("role_type")
+            .or_else(|| shift.get("roleType"))
+            .and_then(Value::as_str)
+            .unwrap_or("staff")
+            .to_string(),
+        staff_name: shift
+            .get("staff_name")
+            .or_else(|| shift.get("staffName"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Unknown")
+            .to_string(),
+        terminal_name: shift
+            .get("terminal_id")
+            .or_else(|| shift.get("terminalId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        check_in: shift
+            .get("check_in_time")
+            .or_else(|| shift.get("checkInTime"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        check_out: shift
+            .get("check_out_time")
+            .or_else(|| shift.get("checkOutTime"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        orders_count: summary
+            .get("ordersCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        sales_amount: summary
+            .get("salesAmount")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        total_expenses: summary
+            .get("totalExpenses")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        cash_refunds: summary
+            .get("cashRefunds")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        opening_amount: cash_drawer
+            .get("opening_amount")
+            .or_else(|| cash_drawer.get("openingAmount"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        expected_amount: cash_drawer
+            .get("expected_amount")
+            .or_else(|| cash_drawer.get("expectedAmount"))
+            .and_then(Value::as_f64),
+        closing_amount: cash_drawer
+            .get("closing_amount")
+            .or_else(|| cash_drawer.get("closingAmount"))
+            .and_then(Value::as_f64),
+        variance_amount: cash_drawer
+            .get("variance_amount")
+            .or_else(|| cash_drawer.get("varianceAmount"))
+            .and_then(Value::as_f64),
+    })
+}
+
+fn number_from_paths(payload: &Value, paths: &[&str]) -> Option<f64> {
+    for path in paths {
+        if let Some(value) = payload.pointer(path) {
+            if let Some(number) = value.as_f64() {
+                return Some(number);
+            }
+            if let Some(number) = value.as_i64() {
+                return Some(number as f64);
+            }
+            if let Some(text) = value.as_str() {
+                if let Ok(number) = text.trim().parse::<f64>() {
+                    return Some(number);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn text_from_paths(payload: &Value, paths: &[&str]) -> Option<String> {
+    for path in paths {
+        if let Some(text) = payload.pointer(path).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportDoc {
+    let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let total_orders = number_from_paths(
+        payload,
+        &[
+            "/sales/totalOrders",
+            "/sales/total_orders",
+            "/daySummary/totalOrders",
+            "/totalOrders",
+        ],
+    )
+    .unwrap_or(0.0)
+    .round() as i64;
+    let gross_sales = number_from_paths(
+        payload,
+        &[
+            "/sales/totalSales",
+            "/sales/total_sales",
+            "/daySummary/total",
+            "/daySummary/totalAmount",
+        ],
+    )
+    .unwrap_or(0.0);
+    let cash_sales = number_from_paths(
+        payload,
+        &[
+            "/sales/cashSales",
+            "/sales/cash_sales",
+            "/daySummary/cashTotal",
+        ],
+    )
+    .unwrap_or(0.0);
+    let card_sales = number_from_paths(
+        payload,
+        &[
+            "/sales/cardSales",
+            "/sales/card_sales",
+            "/daySummary/cardTotal",
+        ],
+    )
+    .unwrap_or(0.0);
+    let refunds_total = number_from_paths(
+        payload,
+        &["/refunds/total", "/refundsTotal", "/refunds_total"],
+    )
+    .unwrap_or(0.0);
+    let voids_total =
+        number_from_paths(payload, &["/voids/total", "/voidsTotal", "/voids_total"]).unwrap_or(0.0);
+    let discounts_total = number_from_paths(
+        payload,
+        &["/discounts/total", "/discountsTotal", "/discounts_total"],
+    )
+    .unwrap_or(0.0);
+    let expenses_total = number_from_paths(
+        payload,
+        &["/expenses/total", "/expensesTotal", "/expenses_total"],
+    )
+    .unwrap_or(0.0);
+    let cash_variance = number_from_paths(
+        payload,
+        &[
+            "/cashDrawer/totalVariance",
+            "/cashDrawer/cashVariance",
+            "/cashVariance",
+        ],
+    )
+    .unwrap_or(0.0);
+    let net_sales = gross_sales - discounts_total - refunds_total - voids_total;
+
+    ZReportDoc {
+        report_id: entity_id.to_string(),
+        report_date,
+        generated_at: Utc::now().to_rfc3339(),
+        shift_ref: text_from_paths(payload, &["/shiftId", "/shift_id", "/id"])
+            .unwrap_or_else(|| "snapshot".to_string()),
+        terminal_name: text_from_paths(
+            payload,
+            &[
+                "/terminalName",
+                "/terminal_name",
+                "/terminalId",
+                "/terminal_id",
+            ],
+        )
+        .unwrap_or_default(),
+        total_orders,
+        gross_sales,
+        net_sales,
+        cash_sales,
+        card_sales,
+        refunds_total,
+        voids_total,
+        discounts_total,
+        expenses_total,
+        cash_variance,
+    }
+}
+
+fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT id, shift_id, terminal_id, report_date, generated_at,
+                gross_sales, net_sales, total_orders, cash_sales, card_sales,
+                refunds_total, voids_total, discounts_total, expenses_total,
+                cash_variance
+         FROM z_reports WHERE id = ?1",
+        params![z_report_id],
+        |row| {
+            Ok(ZReportDoc {
+                report_id: row.get(0)?,
+                shift_ref: row.get(1)?,
+                terminal_name: row.get(2)?,
+                report_date: row.get(3)?,
+                generated_at: row.get(4)?,
+                gross_sales: row.get(5)?,
+                net_sales: row.get(6)?,
+                total_orders: row.get(7)?,
+                cash_sales: row.get(8)?,
+                card_sales: row.get(9)?,
+                refunds_total: row.get(10)?,
+                voids_total: row.get(11)?,
+                discounts_total: row.get(12)?,
+                expenses_total: row.get(13)?,
+                cash_variance: row.get(14)?,
+            })
+        },
+    )
+    .map_err(|_| format!("Z-report not found: {z_report_id}"))
+}
+
+fn build_document_for_job(
+    db: &DbState,
+    entity_type: &str,
+    entity_id: &str,
+    payload_json: Option<&str>,
+) -> Result<ReceiptDocument, String> {
+    match entity_type {
+        "order_receipt" => Ok(ReceiptDocument::OrderReceipt(build_order_receipt_doc(
+            db, entity_id,
+        )?)),
+        "kitchen_ticket" => Ok(ReceiptDocument::KitchenTicket(build_kitchen_ticket_doc(
+            db, entity_id,
+        )?)),
+        "shift_checkout" => Ok(ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(
+            db, entity_id,
+        )?)),
+        "z_report" => {
+            if let Some(raw_payload) = payload_json {
+                if let Ok(payload) = serde_json::from_str::<Value>(raw_payload) {
+                    return Ok(ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                        &payload, entity_id,
+                    )));
+                }
+            }
+            Ok(ReceiptDocument::ZReport(build_z_report_doc(db, entity_id)?))
+        }
+        _ => Err(format!("Unknown entity_type: {entity_type}")),
+    }
+}
+
+fn write_print_html_file(
+    data_dir: &Path,
+    entity_type: &str,
+    entity_id: &str,
+    html: &str,
+) -> Result<String, String> {
+    let receipts_dir = data_dir.join(RECEIPTS_DIR);
+    fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("{entity_type}_{entity_id}_{timestamp}.html");
+    let file_path = receipts_dir.join(filename);
+    fs::write(&file_path, html).map_err(|e| format!("write print artifact: {e}"))?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Receipt file generation
 // ---------------------------------------------------------------------------
@@ -287,46 +1408,17 @@ pub fn generate_receipt_file(
     order_id: &str,
     data_dir: &Path,
 ) -> Result<String, String> {
-    // Use the existing receipt preview generator
-    let preview = payments::get_receipt_preview(db, order_id)?;
-    let html = preview["html"]
-        .as_str()
-        .ok_or("Receipt preview did not return HTML")?;
-
-    // Wrap in a full HTML document for standalone viewing
-    let full_html = format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Receipt - {order_id}</title>
-<style>
-  body {{ margin: 0; padding: 16px; background: #fff; font-family: monospace; }}
-  @media print {{ body {{ padding: 0; }} }}
-</style>
-</head>
-<body>
-{html}
-</body>
-</html>"#
-    );
-
-    // Write to receipts directory
-    let receipts_dir = data_dir.join(RECEIPTS_DIR);
-    fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
-
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("receipt_{order_id}_{timestamp}.html");
-    let file_path = receipts_dir.join(&filename);
-
-    fs::write(&file_path, full_html).map_err(|e| format!("write receipt file: {e}"))?;
-
-    let path_str = file_path.to_string_lossy().to_string();
+    let document = ReceiptDocument::OrderReceipt(build_order_receipt_doc(db, order_id)?);
+    let profile = printers::resolve_printer_profile_for_role(db, None, Some("receipt"))?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let layout = resolve_layout_config(db, &profile, "order_receipt")?;
+    let html = receipt_renderer::render_html(&document, &layout);
+    let path_str = write_print_html_file(data_dir, "receipt", order_id, &html)?;
     info!(order_id = %order_id, path = %path_str, "Receipt file generated");
     Ok(path_str)
 }
 
+#[allow(dead_code)]
 fn escape_html(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -334,6 +1426,7 @@ fn escape_html(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[allow(dead_code)]
 fn generate_kitchen_ticket_file(
     db: &DbState,
     order_id: &str,
@@ -467,6 +1560,7 @@ Order Notes: {special_instructions}
     Ok(path_str)
 }
 
+#[allow(dead_code)]
 fn generate_shift_checkout_file(
     db: &DbState,
     shift_id: &str,
@@ -624,10 +1718,8 @@ fn dispatch_to_printer(
     db: &DbState,
     entity_type: &str,
     job_profile_id: Option<&str>,
-    html_path: &str,
-) -> Result<Option<Value>, String> {
-    use crate::escpos;
-
+    document: &ReceiptDocument,
+) -> Result<(Value, Vec<receipt_renderer::RenderWarning>), String> {
     let role = match entity_type {
         "kitchen_ticket" => "kitchen",
         "order_receipt" | "shift_checkout" | "z_report" => "receipt",
@@ -651,139 +1743,60 @@ fn dispatch_to_printer(
     if printer_name.trim().is_empty() {
         return Err("Resolved printer profile has empty printerName".into());
     }
-    let paper_mm = profile
-        .get("paperWidthMm")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(80) as i32;
     let should_cut = profile
         .get("cutPaper")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let layout = resolve_layout_config(db, &profile, entity_type)?;
+    let mut rendered = receipt_renderer::render_escpos(document, &layout);
+    match build_logo_prefix_for_layout(&layout) {
+        Ok(Some(prefix)) => {
+            if rendered.bytes.starts_with(&[0x1B, 0x40]) {
+                let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len());
+                combined.extend_from_slice(&rendered.bytes[..2]);
+                combined.extend_from_slice(&prefix);
+                combined.extend_from_slice(&rendered.bytes[2..]);
+                rendered.bytes = combined;
+            } else {
+                let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len());
+                combined.extend_from_slice(&prefix);
+                combined.extend_from_slice(&rendered.bytes);
+                rendered.bytes = combined;
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            rendered.warnings.push(receipt_renderer::RenderWarning {
+                code: "logo_text_fallback".to_string(),
+                message: format!("Logo rendering failed; using text header fallback ({err})"),
+            });
+        }
+    }
 
     match driver_type {
         // Raw ESC/POS dispatch (default for thermal printers)
         "windows" | "escpos" => {
-            // Read the HTML receipt and strip to plain text for ESC/POS
-            let html_content = fs::read_to_string(html_path)
-                .map_err(|e| format!("Failed to read receipt file: {e}"))?;
-            let plain_text = strip_html_to_text(&html_content);
-
-            let paper = escpos::PaperWidth::from_mm(paper_mm);
-            let mut builder = escpos::EscPosBuilder::new().with_paper(paper);
-            builder.init();
-
-            // Emit each line of plain text
-            for line in plain_text.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    builder.lf();
-                } else {
-                    builder.text(trimmed).lf();
+            if should_cut {
+                // Renderer already includes cut command by default.
+            } else {
+                // If profile opts out of cutting, drop the trailing cut command.
+                let len = rendered.bytes.len();
+                if len >= 4 && rendered.bytes[len - 4..] == [0x1D, 0x56, 0x41, 0x10] {
+                    rendered.bytes.truncate(len - 4);
                 }
             }
-
-            builder.feed(3);
-            if should_cut {
-                builder.cut();
-            }
-
-            let data = builder.build();
             let doc_name = match entity_type {
                 "kitchen_ticket" => "POS Kitchen Ticket",
                 "shift_checkout" => "POS Shift Checkout",
                 "z_report" => "POS Z Report",
                 _ => "POS Receipt",
             };
-            let _dispatch = printers::print_raw_to_windows(printer_name, &data, doc_name)?;
-            Ok(Some(profile))
+            let _dispatch =
+                printers::print_raw_to_windows(printer_name, &rendered.bytes, doc_name)?;
+            Ok((profile, rendered.warnings))
         }
         other => Err(format!("Unsupported driver_type: {other}")),
     }
-}
-
-/// Strip HTML tags from a string and normalize whitespace to produce readable
-/// plain text for ESC/POS printing. This is a lightweight tag stripper, not a
-/// full HTML parser.
-fn strip_html_to_text(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut last_was_space = false;
-
-    // Insert a newline for block-level tags
-    let block_tags = [
-        "<br", "<p", "<div", "<tr", "<li", "<h1", "<h2", "<h3", "<hr",
-    ];
-
-    let lower = html.to_lowercase();
-    let chars: Vec<char> = html.chars().collect();
-    let lower_chars: Vec<char> = lower.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        if chars[i] == '<' {
-            // Check for block-level tag to insert newline
-            let remaining: String = lower_chars[i..].iter().collect();
-            for tag in &block_tags {
-                if remaining.starts_with(tag) && !last_was_space {
-                    out.push('\n');
-                    last_was_space = true;
-                    break;
-                }
-            }
-            in_tag = true;
-            i += 1;
-            continue;
-        }
-
-        if chars[i] == '>' {
-            in_tag = false;
-            i += 1;
-            continue;
-        }
-
-        if !in_tag {
-            // Decode common HTML entities
-            if chars[i] == '&' {
-                let remaining: String = chars[i..].iter().take(10).collect();
-                if remaining.starts_with("&amp;") {
-                    out.push('&');
-                    i += 5;
-                } else if remaining.starts_with("&lt;") {
-                    out.push('<');
-                    i += 4;
-                } else if remaining.starts_with("&gt;") {
-                    out.push('>');
-                    i += 4;
-                } else if remaining.starts_with("&nbsp;") {
-                    out.push(' ');
-                    i += 6;
-                } else if remaining.starts_with("&#8364;") || remaining.starts_with("&euro;") {
-                    out.push('€');
-                    i += if remaining.starts_with("&#") { 7 } else { 6 };
-                } else {
-                    out.push(chars[i]);
-                    i += 1;
-                }
-                last_was_space = false;
-                continue;
-            }
-
-            if chars[i] == '\n' || chars[i] == '\r' {
-                if !last_was_space {
-                    out.push('\n');
-                    last_was_space = true;
-                }
-            } else {
-                out.push(chars[i]);
-                last_was_space = chars[i] == ' ';
-            }
-        }
-
-        i += 1;
-    }
-
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +1814,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     // Fetch pending jobs that are ready (no next_retry_at or it's in the past)
     let mut stmt = conn
         .prepare(
-            "SELECT id, entity_type, entity_id, printer_profile_id FROM print_jobs
+            "SELECT id, entity_type, entity_id, entity_payload_json, printer_profile_id FROM print_jobs
              WHERE status = 'pending'
                AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday(?1))
              ORDER BY created_at ASC
@@ -809,9 +1822,16 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
         )
         .map_err(|e| e.to_string())?;
 
-    let jobs: Vec<(String, String, String, Option<String>)> = stmt
+    type PrintJob = (String, String, String, Option<String>, Option<String>);
+    let jobs: Vec<PrintJob> = stmt
         .query_map(params![now_str], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
@@ -822,7 +1842,7 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
 
     let count = jobs.len();
 
-    for (job_id, entity_type, entity_id, profile_id) in jobs {
+    for (job_id, entity_type, entity_id, payload_json, profile_id) in jobs {
         // Mark as printing
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -832,48 +1852,63 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
             );
         }
 
-        // Generate the receipt/ticket file first, then attempt hardware dispatch.
-        let file_result = match entity_type.as_str() {
-            "order_receipt" => generate_receipt_file(db, &entity_id, data_dir),
-            "kitchen_ticket" => generate_kitchen_ticket_file(db, &entity_id, data_dir),
-            "shift_checkout" => generate_shift_checkout_file(db, &entity_id, data_dir),
-            "z_report" => crate::zreport::generate_z_report_file(db, &entity_id, data_dir),
-            _ => {
-                mark_print_job_failed(db, &job_id, &format!("Unknown entity_type: {entity_type}"))?;
+        let document =
+            match build_document_for_job(db, &entity_type, &entity_id, payload_json.as_deref()) {
+                Ok(document) => document,
+                Err(error) => {
+                    mark_print_job_failed(db, &job_id, &error)?;
+                    continue;
+                }
+            };
+
+        let role = if entity_type == "kitchen_ticket" {
+            "kitchen"
+        } else {
+            "receipt"
+        };
+        let html_profile =
+            printers::resolve_printer_profile_for_role(db, profile_id.as_deref(), Some(role))
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| serde_json::json!({}));
+        let html_layout =
+            resolve_layout_config(db, &html_profile, &entity_type).unwrap_or_default();
+        let html = receipt_renderer::render_html(&document, &html_layout);
+        let path = match write_print_html_file(data_dir, &entity_type, &entity_id, &html) {
+            Ok(path) => path,
+            Err(error) => {
+                mark_print_job_failed(db, &job_id, &error)?;
                 continue;
             }
         };
 
-        match file_result {
-            Ok(path) => {
-                // Try to dispatch to hardware printer
-                match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &path) {
-                    Ok(resolved_profile) => {
-                        mark_print_job_printed(db, &job_id, &path)?;
+        // Try to dispatch to hardware printer from structured render path.
+        match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &document) {
+            Ok((resolved_profile, render_warnings)) => {
+                mark_print_job_printed(db, &job_id, &path)?;
 
-                        // Non-fatal drawer kick: if profile has open_cash_drawer
-                        // enabled, attempt to open the drawer. Failures are logged
-                        // and recorded as a warning but do NOT change the job status.
-                        if let Some(ref prof) = resolved_profile {
-                            if let Err(e) = drawer::try_drawer_kick_after_print(db, prof) {
-                                let _ =
-                                    set_print_job_warning(db, &job_id, "drawer_kick_failed", &e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Receipt file exists, but hardware print failed
-                        warn!(job_id = %job_id, error = %e, "Hardware print failed, file generated at {path}");
-                        if is_non_retryable_print_error(&e) {
-                            mark_print_job_failed_non_retryable(db, &job_id, &e)?;
-                        } else {
-                            mark_print_job_failed(db, &job_id, &e)?;
-                        }
-                    }
+                if !render_warnings.is_empty() {
+                    let combined = render_warnings
+                        .iter()
+                        .map(|warning| warning.message.clone())
+                        .collect::<Vec<String>>()
+                        .join(" | ");
+                    let _ = set_print_job_warning(db, &job_id, "render_warning", &combined);
+                }
+
+                // Non-fatal drawer kick: if profile has open_cash_drawer enabled,
+                // attempt to open the drawer. Failures are warnings only.
+                if let Err(error) = drawer::try_drawer_kick_after_print(db, &resolved_profile) {
+                    let _ = set_print_job_warning(db, &job_id, "drawer_kick_failed", &error);
                 }
             }
-            Err(e) => {
-                mark_print_job_failed(db, &job_id, &e)?;
+            Err(error) => {
+                warn!(job_id = %job_id, error = %error, "Hardware print failed, file generated at {path}");
+                if is_non_retryable_print_error(&error) {
+                    mark_print_job_failed_non_retryable(db, &job_id, &error)?;
+                } else {
+                    mark_print_job_failed(db, &job_id, &error)?;
+                }
             }
         }
     }
@@ -930,6 +1965,164 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_item_customizations_from_array() {
+        let item = serde_json::json!({
+            "customizations": [
+                {
+                    "ingredient": { "name": "Feta", "price": 0.5 },
+                    "quantity": 2
+                },
+                {
+                    "name": "Onion",
+                    "isWithout": true
+                }
+            ]
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Feta");
+        assert_eq!(parsed[0].quantity, 2.0);
+        assert_eq!(parsed[0].price, Some(0.5));
+        assert!(!parsed[0].is_without);
+        assert_eq!(parsed[1].name, "Onion");
+        assert!(parsed[1].is_without);
+        assert!(parsed[1].price.is_none());
+    }
+
+    #[test]
+    fn test_parse_item_customizations_from_json_string_map() {
+        let item = serde_json::json!({
+            "modifiers": "{\"a\":{\"ingredient\":{\"name_en\":\"Olives\",\"pickup_price\":\"0.20\"},\"quantity\":\"2\"},\"b\":{\"label\":\"Tomato\",\"without\":true}}"
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "Olives");
+        assert_eq!(parsed[0].quantity, 2.0);
+        assert_eq!(parsed[0].price, Some(0.2));
+        assert_eq!(parsed[1].name, "Tomato");
+        assert!(parsed[1].is_without);
+    }
+
+    #[test]
+    fn test_parse_item_customizations_handles_malformed_json() {
+        let item = serde_json::json!({
+            "customizations": "{bad json",
+            "ingredients": "[]"
+        });
+
+        let parsed = parse_item_customizations(&item);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_parse_data_url_image_png() {
+        let mut encoded = Vec::new();
+        let logo =
+            image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([0])));
+        logo.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        );
+        let bytes = parse_data_url_image(&data_url).expect("data url should decode");
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn test_build_logo_prefix_for_layout_from_data_url() {
+        let mut encoded = Vec::new();
+        let logo =
+            image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(2, 2, image::Luma([0])));
+        logo.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        );
+        let layout = LayoutConfig {
+            show_logo: true,
+            logo_url: Some(data_url),
+            ..LayoutConfig::default()
+        };
+        let prefix = build_logo_prefix_for_layout(&layout)
+            .expect("logo prefix result")
+            .expect("logo prefix present");
+        assert!(prefix
+            .windows(4)
+            .any(|window| window == [0x1D, b'v', b'0', 0x00]));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_includes_delivery_fields() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    delivery_address, delivery_city, delivery_postal_code, delivery_floor,
+                    name_on_ringer, driver_name, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-delivery', 'ORD-DEL-1', '[]', 10.0, 10.0, 'delivered', 'delivery',
+                    'Main St 42', 'Athens', '10558', '2', 'Papadopoulos', 'Nikos Driver',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-delivery").unwrap();
+        assert_eq!(doc.status, "delivered");
+        assert_eq!(doc.delivery_address.as_deref(), Some("Main St 42"));
+        assert_eq!(doc.delivery_city.as_deref(), Some("Athens"));
+        assert_eq!(doc.delivery_postal_code.as_deref(), Some("10558"));
+        assert_eq!(doc.delivery_floor.as_deref(), Some("2"));
+        assert_eq!(doc.name_on_ringer.as_deref(), Some("Papadopoulos"));
+        assert_eq!(doc.driver_name.as_deref(), Some("Nikos Driver"));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_resolves_driver_name_from_shift() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, check_in_time, status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'shift-driver', 'driver-1', 'Shift Driver', 'driver', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    driver_id, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-delivery-fallback', 'ORD-DEL-2', '[]', 8.0, 8.0, 'completed', 'delivery',
+                    'driver-1', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-delivery-fallback").unwrap();
+        assert_eq!(doc.driver_name.as_deref(), Some("Shift Driver"));
+    }
+
+    #[test]
     fn test_enqueue_and_list() {
         let db = test_db();
 
@@ -962,6 +2155,33 @@ mod tests {
         // Total jobs should still be 1
         let jobs2 = list_print_jobs(&db, None).unwrap();
         assert_eq!(jobs2.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_enqueue_with_payload_persists_snapshot_json() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "date": "2026-02-24",
+            "sales": { "totalSales": 123.45 }
+        });
+        let result = enqueue_print_job_with_payload(
+            &db,
+            "z_report",
+            "snapshot-20260224",
+            None,
+            Some(&payload),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        let job_id = result["jobId"].as_str().unwrap().to_string();
+
+        let jobs = list_print_jobs(&db, None).unwrap();
+        let arr = jobs.as_array().unwrap();
+        let job = arr.iter().find(|value| value["id"] == job_id).unwrap();
+        assert!(job["entityPayloadJson"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("\"date\""));
     }
 
     #[test]

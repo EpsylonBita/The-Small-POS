@@ -811,7 +811,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       >
                         {t('sync.system.removeInvalidOrders', { defaultValue: 'Remove Invalid Orders' })}
                       </button>
-                      <div className="space-y-0.5 max-h-20 overflow-auto">
+                      <div className="space-y-0.5 max-h-20 overflow-auto scrollbar-hide">
                         {systemHealth.invalidOrders!.details.slice(0, 5).map((order) => (
                           <div
                             key={order.order_id}

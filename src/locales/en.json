@@ -2621,7 +2621,20 @@
       "editCustomerInfoDesc": "Update customer name, phone, address",
       "editOrderItems": "Edit Order Items",
       "editOrderItemsDesc": "Modify items, quantities, notes",
+      "editPaymentMethod": "Edit Payment Method",
+      "editPaymentMethodDesc": "Switch between cash and card",
       "cancel": "Cancel"
+    },
+    "editPaymentMethod": {
+      "title": "Edit Payment Method",
+      "message": "Choose the new payment method for this order.",
+      "save": "Save Changes",
+      "saving": "Saving...",
+      "cancel": "Cancel",
+      "methods": {
+        "cash": "Cash",
+        "card": "Card"
+      }
     },
     "driverAssignment": {
       "title": "Assign Driver",
@@ -3043,6 +3056,10 @@
     "customerInfoFailed": "Failed to update customer information",
     "orderItemsUpdated": "Order items updated for {{count}} order(s)",
     "orderItemsFailed": "Failed to update order items",
+    "paymentMethodUpdated": "Payment method updated",
+    "paymentMethodUpdateFailed": "Failed to update payment method",
+    "paymentMethodNoChange": "Payment method is already selected",
+    "paymentMethodEditUnavailable": "Payment method can be edited only for one non-cancelled cash/card order",
     "conflictResolved": "Conflict resolved successfully",
     "conflictFailed": "Failed to resolve conflict",
     "bulkDeliveryDisabled": "Cannot select in bulk different order types",
@@ -3819,6 +3836,42 @@
         "paymentAtCashier": "Payment handled at cashier checkout"
       }
     }
+  },
+  "kitchen": {
+    "liveDraft": {
+      "badge": "Live Draft",
+      "subtitle": "Live cart in progress",
+      "noAction": "Waiting for checkout"
+    },
+    "contextMissing": {
+      "title": "Kitchen context is missing",
+      "body": "This terminal is not assigned to the required context. Check terminal settings and try again.",
+      "action": "Retry Context"
+    }
+  },
+  "loyalty": {
+    "contextMissing": {
+      "title": "Loyalty context is missing",
+      "body": "This terminal is missing organization settings. Check terminal settings and try again.",
+      "action": "Retry Context"
+    },
+    "pointsEarned": "+{{points}} loyalty points earned",
+    "customerFound": "Loyalty customer: {{name}}",
+    "cardNotFound": "Loyalty card not recognized",
+    "balanceInfo": "{{points}} points available",
+    "redeemTitle": "Redeem Loyalty Points",
+    "redeemConfirm": "Apply {{discount}} discount",
+    "redeemCancel": "Skip",
+    "pointsToRedeem": "Points to redeem",
+    "discountPreview": "Discount: {{amount}}",
+    "insufficientPoints": "Minimum {{min}} points required",
+    "redeemSuccess": "Redeemed {{points}} points for {{discount}} discount",
+    "lastSynced": "Last synced: {{time}}",
+    "syncNow": "Sync Now",
+    "offlineNote": "Showing cached data",
+    "noMembers": "No Loyalty Members",
+    "noMembersDesc": "Customers will appear here when they join the loyalty program.",
+    "unknownCustomer": "Unknown Customer"
   },
   "updates": {
     "title": {

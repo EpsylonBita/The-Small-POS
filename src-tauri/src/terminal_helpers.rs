@@ -117,6 +117,119 @@ pub(crate) fn extract_ghost_mode_feature_from_terminal_settings_response(
     )
 }
 
+fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Bool(flag) => Some(if *flag { "true" } else { "false" }.to_string()),
+        serde_json::Value::Number(num) => Some(num.to_string()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            serde_json::to_string(value).ok().and_then(|encoded| {
+                let trimmed = encoded.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+        }
+    }
+}
+
+/// Persist terminal settings snapshot from `/api/pos/settings/{terminal_id}`
+/// into local settings for offline rendering.
+pub(crate) fn cache_terminal_settings_snapshot(
+    db: &db::DbState,
+    resp: &serde_json::Value,
+) -> Result<Vec<String>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut updated = Vec::new();
+
+    if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
+        for (category, category_values) in settings_obj {
+            let Some(values_obj) = category_values.as_object() else {
+                continue;
+            };
+            for (key, raw_value) in values_obj {
+                if category == "terminal" && is_sensitive_terminal_setting(key) {
+                    continue;
+                }
+                let Some(serialized) = setting_value_to_string(raw_value) else {
+                    continue;
+                };
+                db::set_setting(&conn, category, key, &serialized)?;
+                updated.push(format!("{category}.{key}"));
+            }
+        }
+    }
+
+    if let Some(org) = resp
+        .get("organization_branding")
+        .and_then(|value| value.as_object())
+    {
+        if let Some(name) = org
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            db::set_setting(&conn, "organization", "name", name)?;
+            updated.push("organization.name".to_string());
+        }
+        if let Some(logo_url) = org
+            .get("logo_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            db::set_setting(&conn, "organization", "logo_url", logo_url)?;
+            updated.push("organization.logo_url".to_string());
+        }
+    }
+
+    // Persist explicit terminal fallbacks for printing paths.
+    if let Some(store_name) = nested_value_str(
+        resp,
+        &[
+            "/settings/restaurant/name",
+            "/settings/terminal/store_name",
+            "/organization_branding/name",
+        ],
+    ) {
+        db::set_setting(&conn, "terminal", "store_name", &store_name)?;
+        updated.push("terminal.store_name".to_string());
+    }
+    if let Some(store_address) = nested_value_str(
+        resp,
+        &[
+            "/settings/restaurant/address",
+            "/settings/terminal/store_address",
+        ],
+    ) {
+        db::set_setting(&conn, "terminal", "store_address", &store_address)?;
+        updated.push("terminal.store_address".to_string());
+    }
+    if let Some(store_phone) = nested_value_str(
+        resp,
+        &[
+            "/settings/restaurant/phone",
+            "/settings/terminal/store_phone",
+        ],
+    ) {
+        db::set_setting(&conn, "terminal", "store_phone", &store_phone)?;
+        updated.push("terminal.store_phone".to_string());
+    }
+
+    Ok(updated)
+}
+
 pub(crate) fn credential_key_for_terminal_setting(setting_key: &str) -> Option<&'static str> {
     match setting_key {
         "terminal_id" => Some("terminal_id"),

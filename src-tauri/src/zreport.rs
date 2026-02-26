@@ -1293,6 +1293,7 @@ pub fn finalize_end_of_day(db: &DbState, report_date: &str) -> Result<Value, Str
 ///
 /// Called by the print worker when processing a `z_report` print job.
 /// Returns the absolute file path to the generated HTML.
+#[allow(dead_code)]
 pub fn generate_z_report_file(
     db: &DbState,
     z_report_id: &str,

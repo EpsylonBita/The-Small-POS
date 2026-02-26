@@ -100,7 +100,7 @@ const EditAddressModal: React.FC<EditAddressModalProps> = ({
       size="md"
       className="!max-w-lg max-h-[90vh]"
     >
-      <div className="overflow-y-auto">
+      <div className="overflow-y-auto scrollbar-hide">
             {/* Form */}
             <form onSubmit={handleSubmit} className="space-y-4">
               {/* Address Field */}

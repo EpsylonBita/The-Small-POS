@@ -32,6 +32,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<string | null>(null);
+  const [printing, setPrinting] = useState(false);
 
   const [staffSortBy, setStaffSortBy] = useState<'name' | 'role' | 'orders' | 'sales'>('role');
 
@@ -209,7 +210,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
         </div>
 
         {/* Scrollable Content */}
-        <div className="max-h-[55vh] overflow-y-auto mb-4 rounded-lg">
+        <div className="max-h-[55vh] overflow-y-auto mb-4 rounded-lg scrollbar-hide">
         {loading && (
           <div className="py-12 text-center text-sm liquid-glass-modal-text-muted">{t('modals.zReport.loading')}</div>
         )}
@@ -721,28 +722,33 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
         <button
           onClick={async () => {
             if (!zReport) return;
+            setPrinting(true);
             try {
               const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
-              const result = await bridge.invoke('report:print-z-report', {
+              const result: any = await bridge.invoke('report:print-z-report', {
                 snapshot: zReport,
                 terminalName: typeof terminalName === 'string' ? terminalName : undefined,
               });
-              if (result?.success) {
-                console.log('[ZReportModal] Z-Report printed successfully');
-              } else {
-                console.error('[ZReportModal] Z-Report print failed:', result?.error);
-                // Fallback to browser print if thermal print fails
-                window.print();
+              if (result?.success === false) {
+                throw new Error(result?.error || t('modals.zReport.printFailed', 'Failed to queue print'));
               }
+              setSubmitResult(t('modals.zReport.printQueued', 'Z-Report print queued'));
             } catch (err) {
               console.error('[ZReportModal] Z-Report print error:', err);
-              // Fallback to browser print
-              window.print();
+              setSubmitResult(
+                t('modals.zReport.printFailed', {
+                  defaultValue: `Print failed: ${(err as any)?.message || 'unknown error'}`,
+                  error: (err as any)?.message || 'unknown error',
+                })
+              );
+            } finally {
+              setPrinting(false);
             }
           }}
-          className={liquidGlassModalButton('primary', 'sm') + ' text-sm'}
+          className={`${liquidGlassModalButton('primary', 'sm')} text-sm ${printing ? 'opacity-60 cursor-not-allowed' : ''}`}
+          disabled={printing || !zReport}
         >
-          {t('modals.zReport.print')}
+          {printing ? t('modals.zReport.printing', 'Printing...') : t('modals.zReport.print')}
         </button>
         {/* Z-Report Submit Button - disabled for mobile waiter terminals */}
         {canExecuteZReport ? (
@@ -829,4 +835,3 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
 };
 
 export default ZReportModal;
-

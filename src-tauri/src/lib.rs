@@ -37,6 +37,7 @@ mod menu;
 mod payments;
 mod print;
 mod printers;
+mod receipt_renderer;
 mod refunds;
 mod scale;
 mod scanner;
@@ -129,7 +130,8 @@ pub(crate) use data_helpers::{
     read_local_json_array, resolve_order_id, validate_external_url, write_local_json,
 };
 pub(crate) use terminal_helpers::{
-    credential_key_for_terminal_setting, extract_branch_id_from_terminal_settings_response,
+    cache_terminal_settings_snapshot, credential_key_for_terminal_setting,
+    extract_branch_id_from_terminal_settings_response,
     extract_ghost_mode_feature_from_terminal_settings_response,
     extract_org_id_from_terminal_settings_response, handle_invalid_terminal_credentials,
     hydrate_terminal_credentials_from_local_settings, is_sensitive_terminal_setting,
@@ -582,6 +584,16 @@ pub fn run() {
                                     }
                                 }
                             }
+                            if let Ok(updated) =
+                                cache_terminal_settings_snapshot(startup_db.as_ref(), &resp)
+                            {
+                                if !updated.is_empty() {
+                                    info!(
+                                        count = updated.len(),
+                                        "Startup: cached terminal settings snapshot"
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             warn!("Startup: failed to fetch terminal config: {e}");
@@ -852,6 +864,17 @@ pub fn run() {
             commands::hardware::loyalty_reader_stop,
             commands::hardware::loyalty_process_card,
             commands::hardware::loyalty_reader_status,
+            // Loyalty module
+            commands::loyalty::loyalty_get_settings,
+            commands::loyalty::loyalty_sync_settings,
+            commands::loyalty::loyalty_sync_customers,
+            commands::loyalty::loyalty_get_customers,
+            commands::loyalty::loyalty_get_customer_balance,
+            commands::loyalty::loyalty_lookup_by_phone,
+            commands::loyalty::loyalty_lookup_by_card,
+            commands::loyalty::loyalty_earn_points,
+            commands::loyalty::loyalty_redeem_points,
+            commands::loyalty::loyalty_get_transactions,
             // Hardware manager
             commands::hardware::hardware_get_status,
             commands::hardware::hardware_reconnect,

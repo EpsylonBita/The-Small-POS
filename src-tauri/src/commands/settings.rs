@@ -279,6 +279,15 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         }
     }
 
+    if let Ok(updated) = crate::cache_terminal_settings_snapshot(db, &resp) {
+        if !updated.is_empty() {
+            tracing::info!(
+                count = updated.len(),
+                "Cached terminal settings snapshot from admin"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -890,43 +899,12 @@ pub async fn update_settings(
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_settings() -> Result<Value, String> {
-    // readFromSettings() in terminal-credentials.ts expects either:
-    //   settings['terminal.terminal_id']  (dot-notation flat key)
-    //   settings.terminal?.terminal_id    (nested object)
-    // Build both forms so the frontend can find credentials either way.
-    let flat = storage::get_full_config();
-    let tid = flat
-        .get("terminal_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let api = flat.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
-    let org = flat
-        .get("organization_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let bid = flat.get("branch_id").and_then(|v| v.as_str()).unwrap_or("");
-    let ghost_mode_feature_enabled = flat
-        .get("ghost_mode_feature_enabled")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    Ok(serde_json::json!({
-        // Nested form: settings.terminal?.terminal_id
-        "terminal": {
-            "terminal_id": tid,
-            "pos_api_key": api,
-            "organization_id": org,
-            "branch_id": bid,
-            "ghost_mode_feature_enabled": ghost_mode_feature_enabled,
-        },
-        // Dot-notation form: settings['terminal.terminal_id']
-        "terminal.terminal_id": tid,
-        "terminal.pos_api_key": api,
-        "terminal.organization_id": org,
-        "terminal.branch_id": bid,
-        "terminal.ghost_mode_feature_enabled": ghost_mode_feature_enabled,
-    }))
+pub async fn terminal_config_get_settings(
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    // Keep this endpoint aligned with renderer expectations by returning the
+    // merged local settings map (nested + flat terminal keys).
+    get_settings(db).await
 }
 
 #[tauri::command]

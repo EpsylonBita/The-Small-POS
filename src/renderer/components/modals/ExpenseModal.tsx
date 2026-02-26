@@ -201,7 +201,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         </div>
 
         {/* Scrollable Content */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 scrollbar-hide">
           <div className="space-y-6">
 
             {/* Add Expense Form */}

@@ -6,6 +6,7 @@ pub mod customers;
 pub mod diagnostics;
 pub mod ecr;
 pub mod hardware;
+pub mod loyalty;
 pub mod menu;
 pub mod modules;
 pub mod orders;

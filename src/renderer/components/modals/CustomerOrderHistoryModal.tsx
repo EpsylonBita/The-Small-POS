@@ -166,7 +166,7 @@ const CustomerOrderHistoryModal: React.FC<CustomerOrderHistoryModalProps> = ({
                 </div>
 
                 {/* Scrollable Content */}
-                <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
+                <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0 scrollbar-hide">
                     {loading ? (
                         <div className="flex items-center justify-center py-12">
                             <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>

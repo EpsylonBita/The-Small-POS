@@ -21,9 +21,6 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
     const [noPinSet, setNoPinSet] = useState(false);
-    const [organizationLogo, setOrganizationLogo] = useState<string | null>(null);
-    const [organizationName, setOrganizationName] = useState<string | null>(null);
-    const [logoError, setLogoError] = useState(false);
     const [showPinSetup, setShowPinSetup] = useState(false);
     const [pinResetRequired, setPinResetRequired] = useState(false);
     const [newPin, setNewPin] = useState("");
@@ -46,40 +43,6 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
             }
         };
         loadVersion();
-    }, []);
-
-    // Load organization branding on mount
-    useEffect(() => {
-        const loadBranding = async () => {
-            try {
-                console.log('[LoginPage] Loading organization branding...');
-                // Try to get from local settings first (cached)
-                const snapshot = await bridge.settings.getLocal();
-                const cachedLogo = snapshot?.['organization.logo_url'] ?? snapshot?.organization?.logo_url;
-                const cachedName = snapshot?.['organization.name'] ?? snapshot?.organization?.name;
-
-                if (cachedLogo) {
-                    console.log('[LoginPage] Using cached organization logo:', cachedLogo);
-                    setOrganizationLogo(cachedLogo);
-                    setOrganizationName(cachedName || null);
-                }
-
-                // Also try to get fresh branding from terminal config
-                const terminalSettings = await bridge.terminalConfig.getSettings();
-                const freshLogo = terminalSettings?.organization_branding?.logo_url;
-                const freshName = terminalSettings?.organization_branding?.name;
-
-                if (freshLogo) {
-                    console.log('[LoginPage] Using fresh organization logo:', freshLogo);
-                    setOrganizationLogo(freshLogo);
-                    setOrganizationName(freshName || cachedName || null);
-                }
-            } catch (err) {
-                console.warn('[LoginPage] Failed to load organization branding:', err);
-            }
-        };
-
-        loadBranding();
     }, []);
 
     // Check if PIN is set on mount and when window gains focus
@@ -266,30 +229,16 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 <div className="pos-login-glow" />
 
                 <div className="absolute inset-x-0 -top-10 sm:-top-14 z-20 flex justify-center">
-                    {organizationLogo && !logoError ? (
-                        <img
-                            src={organizationLogo}
-                            alt={organizationName || 'Organization Logo'}
-                            className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl"
-                            onError={() => {
-                                console.warn('[LoginPage] Organization logo failed to load:', organizationLogo);
-                                setLogoError(true);
-                            }}
-                        />
-                    ) : (
-                        <>
-                            <img
-                                src={logoWhite}
-                                alt="The Small"
-                                className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl dark:hidden"
-                            />
-                            <img
-                                src={logoBlack}
-                                alt="The Small"
-                                className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl hidden dark:block"
-                            />
-                        </>
-                    )}
+                    <img
+                        src={logoWhite}
+                        alt="The Small"
+                        className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl dark:hidden"
+                    />
+                    <img
+                        src={logoBlack}
+                        alt="The Small"
+                        className="w-20 h-20 sm:w-28 sm:h-28 object-contain drop-shadow-2xl hidden dark:block"
+                    />
                 </div>
 
                 <div className="text-center mt-2 sm:mt-4 mb-4 sm:mb-8 relative z-10">

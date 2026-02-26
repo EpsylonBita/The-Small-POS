@@ -287,10 +287,64 @@ fn parse_menu_combo_update_payload(
     Ok(parsed)
 }
 
+fn should_run_menu_sync_for_digest(last_token: Option<&str>, digest_token: &str) -> bool {
+    match last_token {
+        Some(previous) => previous != digest_token,
+        None => true,
+    }
+}
+
+fn handle_menu_monitor_sync_error(
+    app: &tauri::AppHandle,
+    db: &db::DbState,
+    error: String,
+    source: &str,
+) {
+    let mut success = false;
+    let mut event_error: Option<&str> = Some(error.as_str());
+
+    if is_terminal_auth_failure(&error) {
+        handle_invalid_terminal_credentials(Some(db), app, source, &error);
+    } else if is_menu_connectivity_error(&error) {
+        if should_emit_menu_offline_info() {
+            info!(
+                error = %error,
+                throttle_secs = MENU_MONITOR_OFFLINE_LOG_THROTTLE_SECS,
+                "Menu version monitor offline; continuing with cached menu"
+            );
+        } else {
+            debug!(
+                error = %error,
+                "Menu version monitor offline log suppressed by throttle"
+            );
+        }
+        success = true;
+        event_error = None;
+    } else if is_menu_payload_shape_error(&error) {
+        if should_emit_menu_payload_warn() {
+            warn!(
+                error = %error,
+                throttle_secs = MENU_MONITOR_WARN_THROTTLE_SECS,
+                "Menu version monitor sync payload missing expected sections"
+            );
+        } else {
+            debug!(
+                error = %error,
+                "Menu version monitor payload warning suppressed by throttle"
+            );
+        }
+    } else {
+        warn!(error = %error, "Menu version monitor sync iteration failed");
+    }
+
+    emit_menu_version_checked_event(app, source, success, false, None, None, event_error);
+}
+
 pub fn start_menu_version_monitor(app: tauri::AppHandle, db: Arc<db::DbState>, interval_secs: u64) {
     let cadence = Duration::from_secs(interval_secs.max(MENU_VERSION_MONITOR_MIN_INTERVAL_SECS));
 
     tauri::async_runtime::spawn(async move {
+        let mut last_digest_token: Option<String> = None;
         info!(
             interval_secs = cadence.as_secs(),
             "Starting menu version monitor"
@@ -300,84 +354,107 @@ pub fn start_menu_version_monitor(app: tauri::AppHandle, db: Arc<db::DbState>, i
             if storage::is_configured() {
                 hydrate_terminal_credentials_from_local_settings(db.as_ref());
 
-                match menu::sync_menu(db.as_ref()).await {
-                    Ok(result) => {
-                        let (updated, version, counts, timestamp) = menu_sync_snapshot(&result);
-                        emit_menu_version_checked_event(
-                            &app,
-                            "menu_version_monitor",
-                            true,
-                            updated,
-                            Some(&version),
-                            Some(&counts),
-                            None,
+                match menu::fetch_menu_version_digest(db.as_ref()).await {
+                    Ok(digest) => {
+                        let should_sync = should_run_menu_sync_for_digest(
+                            last_digest_token.as_deref(),
+                            digest.token.as_str(),
                         );
-
-                        if updated {
-                            emit_menu_sync_event(
+                        let version_for_event = digest
+                            .latest_updated_at
+                            .as_deref()
+                            .unwrap_or(digest.token.as_str());
+                        if !should_sync {
+                            emit_menu_version_checked_event(
                                 &app,
                                 "menu_version_monitor",
                                 true,
-                                &version,
-                                &counts,
-                                &timestamp,
+                                false,
+                                Some(version_for_event),
+                                Some(&digest.counts),
+                                None,
                             );
+                        } else {
+                            match menu::sync_menu(db.as_ref()).await {
+                                Ok(result) => {
+                                    let (updated, version, counts, timestamp) =
+                                        menu_sync_snapshot(&result);
+                                    emit_menu_version_checked_event(
+                                        &app,
+                                        "menu_version_monitor",
+                                        true,
+                                        updated,
+                                        Some(&version),
+                                        Some(&counts),
+                                        None,
+                                    );
+
+                                    if updated {
+                                        emit_menu_sync_event(
+                                            &app,
+                                            "menu_version_monitor",
+                                            true,
+                                            &version,
+                                            &counts,
+                                            &timestamp,
+                                        );
+                                    }
+
+                                    last_digest_token = Some(digest.token);
+                                }
+                                Err(error) => {
+                                    handle_menu_monitor_sync_error(
+                                        &app,
+                                        db.as_ref(),
+                                        error,
+                                        "menu_version_monitor",
+                                    );
+                                }
+                            }
                         }
                     }
-                    Err(error) => {
-                        let mut success = false;
-                        let mut event_error: Option<&str> = Some(error.as_str());
-
-                        if is_terminal_auth_failure(&error) {
-                            handle_invalid_terminal_credentials(
-                                Some(db.as_ref()),
-                                &app,
-                                "menu_version_monitor",
-                                &error,
-                            );
-                        } else if is_menu_connectivity_error(&error) {
-                            if should_emit_menu_offline_info() {
-                                info!(
-                                    error = %error,
-                                    throttle_secs = MENU_MONITOR_OFFLINE_LOG_THROTTLE_SECS,
-                                    "Menu version monitor offline; continuing with cached menu"
-                                );
-                            } else {
-                                debug!(
-                                    error = %error,
-                                    "Menu version monitor offline log suppressed by throttle"
-                                );
-                            }
-                            success = true;
-                            event_error = None;
-                        } else if is_menu_payload_shape_error(&error) {
-                            if should_emit_menu_payload_warn() {
-                                warn!(
-                                    error = %error,
-                                    throttle_secs = MENU_MONITOR_WARN_THROTTLE_SECS,
-                                    "Menu version monitor sync payload missing expected sections"
-                                );
-                            } else {
-                                debug!(
-                                    error = %error,
-                                    "Menu version monitor payload warning suppressed by throttle"
-                                );
-                            }
-                        } else {
+                    Err(digest_error) => {
+                        if !is_menu_connectivity_error(&digest_error) {
                             warn!(
-                                error = %error,
-                                "Menu version monitor sync iteration failed"
+                                error = %digest_error,
+                                "Menu version digest check failed; falling back to direct menu sync"
                             );
                         }
-                        emit_menu_version_checked_event(
-                            &app,
-                            "menu_version_monitor",
-                            success,
-                            false,
-                            None,
-                            None,
-                            event_error,
-                        );
+
+                        match menu::sync_menu(db.as_ref()).await {
+                            Ok(result) => {
+                                let (updated, version, counts, timestamp) =
+                                    menu_sync_snapshot(&result);
+                                emit_menu_version_checked_event(
+                                    &app,
+                                    "menu_version_monitor",
+                                    true,
+                                    updated,
+                                    Some(&version),
+                                    Some(&counts),
+                                    None,
+                                );
+
+                                if updated {
+                                    emit_menu_sync_event(
+                                        &app,
+                                        "menu_version_monitor",
+                                        true,
+                                        &version,
+                                        &counts,
+                                        &timestamp,
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                handle_menu_monitor_sync_error(
+                                    &app,
+                                    db.as_ref(),
+                                    error,
+                                    "menu_version_monitor",
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -902,5 +979,12 @@ mod dto_tests {
             Some(0)
         );
         assert!(!timestamp.trim().is_empty());
+    }
+
+    #[test]
+    fn should_run_menu_sync_for_digest_when_token_changes() {
+        assert!(should_run_menu_sync_for_digest(None, "token-a"));
+        assert!(should_run_menu_sync_for_digest(Some("token-a"), "token-b"));
+        assert!(!should_run_menu_sync_for_digest(Some("token-a"), "token-a"));
     }
 }

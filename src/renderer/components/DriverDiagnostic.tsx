@@ -180,7 +180,7 @@ export const DriverDiagnostic: React.FC<{ isOpen: boolean; onClose: () => void }
                 <h3 className="text-lg font-semibold text-white mb-2">
                   Orders Without Driver ({result.ordersWithoutDriver.length})
                 </h3>
-                <div className="max-h-60 overflow-y-auto space-y-2">
+                <div className="max-h-60 overflow-y-auto space-y-2 scrollbar-hide">
                   {result.ordersWithoutDriver.map((order) => (
                     <div
                       key={order.id}

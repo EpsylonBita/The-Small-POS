@@ -10,6 +10,7 @@ import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
@@ -132,6 +133,16 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     (selectedCustomer?.phone && selectedCustomer.phone.trim()) ||
     (selectedCustomer?.phone_number && selectedCustomer.phone_number.trim())
   );
+
+  useKdsLiveDraftSync({
+    enabled: !editMode,
+    isOpen,
+    cartItems,
+    orderType,
+    customerName: orderType === 'pickup'
+      ? (pickupCustomerName || selectedCustomer?.name || null)
+      : (selectedCustomer?.name || null),
+  });
 
   // Combos state
   const [combos, setCombos] = useState<MenuCombo[]>([]);

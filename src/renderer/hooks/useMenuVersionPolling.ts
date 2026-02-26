@@ -47,6 +47,8 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
 
       const success = payload?.success !== false
       const updated = payload?.updated === true
+      const source = typeof payload?.source === 'string' ? payload.source : ''
+      const isMonitorUpdate = source === 'menu_version_monitor'
       const version =
         normalizeVersion(payload?.version) ??
         normalizeVersion(payload?.timestamp) ??
@@ -64,7 +66,7 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
 
       if (updated) {
         emitMenuRefreshed(version)
-        if (!version || lastToastedVersionRef.current !== version) {
+        if (isMonitorUpdate && (!version || lastToastedVersionRef.current !== version)) {
           lastToastedVersionRef.current = version
           toast.success('Menu updated')
         }
@@ -101,14 +103,6 @@ export function useMenuVersionPolling(options?: { intervalMs?: number; enabled?:
         error,
         checks: prev.checks + 1,
       }))
-
-      if (success && updated) {
-        emitMenuRefreshed(version)
-        if (!version || lastToastedVersionRef.current !== version) {
-          lastToastedVersionRef.current = version
-          toast.success('Menu updated')
-        }
-      }
     } catch (error: any) {
       if (!mountedRef.current) return
       setState((prev) => ({

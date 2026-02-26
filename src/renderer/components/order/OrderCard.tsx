@@ -149,12 +149,63 @@ export const OrderCard = memo<OrderCardProps>(({
     }
   };
 
+  const PaymentMethodIcon = ({ method }: { method: string }) => {
+    const iconSize = 20;
+
+    if (method === 'cash') {
+      return (
+        <svg
+          width={iconSize}
+          height={iconSize}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#16a34a"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          role="img"
+          aria-label={t('modals.editPaymentMethod.methods.cash', { defaultValue: 'Cash' })}
+        >
+          <title>{t('modals.editPaymentMethod.methods.cash', { defaultValue: 'Cash' })}</title>
+          <rect x="2" y="6" width="20" height="12" rx="2" />
+          <circle cx="12" cy="12" r="2.5" />
+          <path d="M6 12h.01M18 12h.01" />
+        </svg>
+      );
+    }
+
+    if (method === 'card') {
+      return (
+        <svg
+          width={iconSize}
+          height={iconSize}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#2563eb"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          role="img"
+          aria-label={t('modals.editPaymentMethod.methods.card', { defaultValue: 'Card' })}
+        >
+          <title>{t('modals.editPaymentMethod.methods.card', { defaultValue: 'Card' })}</title>
+          <rect x="2" y="5" width="20" height="14" rx="2" />
+          <path d="M2 10h20" />
+          <path d="M6 15h4" />
+        </svg>
+      );
+    }
+
+    return null;
+  };
+
   const orderCreatedAt = order.created_at || order.createdAt;
   const isRedGlow = shouldShowRedGlow(orderCreatedAt);
   const orderTypeNormalized = (order.order_type || order.orderType || '').toString();
   const customerNameNormalized = order.customer_name || order.customerName || '';
   const customerPhoneNormalized = order.customer_phone || order.customerPhone || '';
   const deliveryAddressNormalized = order.delivery_address || order.address || (order as any).deliveryAddress || '';
+  const paymentMethodNormalized = (order.payment_method || order.paymentMethod || '').toString().trim().toLowerCase();
   const [resolvedAddress, setResolvedAddress] = useState<string>('');
 
   // Format address for display - only show street/road and number, not city, postal code, or floor
@@ -347,13 +398,16 @@ export const OrderCard = memo<OrderCardProps>(({
           </div>
         </div>
 
-        {/* Right Section - Price & Order Type Icon */}
+        {/* Right Section - Price, Order Type, and Payment Icon */}
         <div className="flex flex-col items-center gap-1 sm:gap-2 mr-8 sm:mr-12 flex-shrink-0">
           <span className={`text-base sm:text-xl font-bold ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white/90'
             }`}>
             €{totalNormalized.toFixed(2)}
           </span>
-          <OrderTypeIcon orderType={orderTypeNormalized} />
+          <div className="flex items-center gap-2">
+            <OrderTypeIcon orderType={orderTypeNormalized} />
+            <PaymentMethodIcon method={paymentMethodNormalized} />
+          </div>
         </div>
       </div>
 

@@ -330,7 +330,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               ))}
             </div>
             {/* Product Grid */}
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto scrollbar-hide">
               {isLoading ? (
                 <div className="flex items-center justify-center h-full">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
@@ -391,7 +391,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               </div>
             )}
             {/* Cart Items */}
-            <div className="flex-1 overflow-y-auto space-y-2">
+            <div className="flex-1 overflow-y-auto space-y-2 scrollbar-hide">
               {cartItems.length === 0 ? (
                 <div className="text-center text-gray-400 py-8">
                   {t('productCatalog.emptyCart', 'Cart is empty')}

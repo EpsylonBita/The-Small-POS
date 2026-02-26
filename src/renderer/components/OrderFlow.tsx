@@ -22,6 +22,7 @@ import type { DeliveryBoundaryValidationResponse } from '../../shared/types/deli
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { AlertTriangle } from 'lucide-react';
 import {
   getCachedTerminalCredentials,
@@ -110,6 +111,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   // Get organizationId and businessType from module context (with credential cache fallback)
   const { organizationId: moduleOrgId, businessType } = useModules();
+  const {
+    branchId: resolvedIdentityBranchId,
+    organizationId: resolvedIdentityOrganizationId,
+  } = useResolvedPosIdentity('branch+organization');
 
   // Check if this is a retail vertical (uses product catalog instead of menu)
   // forceRetailMode allows ProductCatalogView to force retail mode regardless of businessType
@@ -156,14 +161,15 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   }, []);
 
   // Use module context organizationId if available, otherwise fall back to cache
-  const organizationId = moduleOrgId || localOrgId;
+  const organizationId = resolvedIdentityOrganizationId || moduleOrgId || localOrgId;
+  const effectiveBranchId = resolvedIdentityBranchId || branchId || staff?.branchId || null;
 
   // Fetch tables for table orders - use actual IDs
   // Only enable fetching when both IDs are available
   const { tables } = useTables({ 
-    branchId: branchId || '', 
+    branchId: effectiveBranchId || '', 
     organizationId: organizationId || '',
-    enabled: Boolean(branchId && organizationId)
+    enabled: Boolean(effectiveBranchId && organizationId)
   });
 
   // Table order flow states
@@ -585,6 +591,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         customer_id: selectedCustomer?.id !== 'pickup-customer' ? selectedCustomer?.id : null,
         clientRequestId,
         items: normalizedItems,
+        branch_id: effectiveBranchId,
+        organization_id: organizationId || null,
 
         // Use total_amount instead of total (matching shared types)
         total_amount: total_amount,
@@ -637,7 +645,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
       // Ensure a cashier shift is active before allowing order creation
       try {
-        const resolvedBranchId = staff?.branchId || await bridge.terminalConfig.getBranchId();
+        const resolvedBranchId = effectiveBranchId || await bridge.terminalConfig.getBranchId();
         const resolvedTerminalId = staff?.terminalId || await bridge.terminalConfig.getTerminalId();
         if (!resolvedBranchId || !resolvedTerminalId) {
           throw new Error('Missing branch or terminal id');
@@ -742,7 +750,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId]);
 
   return (
     <div className={`order-flow ${className}`}>

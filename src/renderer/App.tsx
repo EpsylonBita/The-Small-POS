@@ -31,8 +31,73 @@ import { getBridge, isBrowser, offEvent, onEvent } from "../lib";
 import {
   getCachedTerminalCredentials,
   clearTerminalCredentialCache,
+  refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
+
+const INVALID_SESSION_IDENTITY_VALUES = new Set([
+  '',
+  'default-branch',
+  'default-terminal',
+  'default-organization',
+  'default-org',
+]);
+
+function normalizeSessionIdentityValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (INVALID_SESSION_IDENTITY_VALUES.has(trimmed.toLowerCase())) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+async function resolveSessionOrganizationId(userData: any): Promise<string | undefined> {
+  const userOrganizationId = normalizeSessionIdentityValue(userData?.organizationId);
+  if (userOrganizationId) {
+    return userOrganizationId;
+  }
+
+  const cached = getCachedTerminalCredentials();
+  const cachedOrganizationId = normalizeSessionIdentityValue(cached.organizationId);
+  if (cachedOrganizationId) {
+    return cachedOrganizationId;
+  }
+
+  try {
+    const refreshed = await refreshTerminalCredentialCache();
+    const refreshedOrganizationId = normalizeSessionIdentityValue(refreshed.organizationId);
+    if (refreshedOrganizationId) {
+      return refreshedOrganizationId;
+    }
+  } catch (error) {
+    console.warn('[App] Failed to refresh terminal identity for session shaping:', error);
+  }
+
+  return undefined;
+}
+
+async function enrichSessionUserWithOrganization(userData: any): Promise<any> {
+  if (!userData || typeof userData !== 'object') {
+    return userData;
+  }
+
+  const organizationId = await resolveSessionOrganizationId(userData);
+  if (!organizationId) {
+    return userData;
+  }
+
+  updateTerminalCredentialCache({ organizationId });
+  return {
+    ...userData,
+    organizationId,
+  };
+}
 
 function ConfigGuard({ children }: { children: React.ReactNode }) {
   const { t } = useI18n();
@@ -267,7 +332,7 @@ function AppContent() {
   const bridge = getBridge();
   const [user, setUser] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const { setStaff, clearShift } = useShift();
+  const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
 
   // Auto-check for updates on app startup
@@ -312,20 +377,23 @@ function AppContent() {
           // For local simple PIN login, just restore the session directly
           // (no database validation needed)
           if (parsedUser.staffId === 'local-simple-pin') {
-            setUser(parsedUser);
+            const enrichedUser = await enrichSessionUserWithOrganization(parsedUser);
+            localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+            setUser(enrichedUser);
             setStaff({
-              staffId: parsedUser.staffId,
-              name: parsedUser.staffName,
-              role: parsedUser.role?.name || 'staff',
-              branchId: parsedUser.branchId || 'default-branch',
-              terminalId: parsedUser.terminalId || 'default-terminal'
+              staffId: enrichedUser.staffId,
+              name: enrichedUser.staffName,
+              role: enrichedUser.role?.name || 'staff',
+              branchId: enrichedUser.branchId || 'default-branch',
+              terminalId: enrichedUser.terminalId || 'default-terminal',
+              organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
             });
             try {
               ActivityTracker.setContext({
-                staffId: parsedUser.staffId,
-                sessionId: parsedUser.sessionId,
-                terminalId: parsedUser.terminalId,
-                branchId: parsedUser.branchId,
+                staffId: enrichedUser.staffId,
+                sessionId: enrichedUser.sessionId,
+                terminalId: enrichedUser.terminalId,
+                branchId: enrichedUser.branchId,
               })
             } catch { }
             setIsLoading(false);
@@ -352,21 +420,24 @@ function AppContent() {
             }
           }
 
-          setUser(parsedUser);
+          const enrichedUser = await enrichSessionUserWithOrganization(parsedUser);
+          localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
+          setUser(enrichedUser);
           // Set staff in shift context
           setStaff({
-            staffId: parsedUser.staffId,
-            name: parsedUser.staffName,
-            role: parsedUser.role?.name || 'staff',
-            branchId: parsedUser.branchId || 'default-branch',
-            terminalId: parsedUser.terminalId || 'default-terminal'
+            staffId: enrichedUser.staffId,
+            name: enrichedUser.staffName,
+            role: enrichedUser.role?.name || 'staff',
+            branchId: enrichedUser.branchId || 'default-branch',
+            terminalId: enrichedUser.terminalId || 'default-terminal',
+            organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
           });
           try {
             ActivityTracker.setContext({
-              staffId: parsedUser.staffId,
-              sessionId: parsedUser.sessionId,
-              terminalId: parsedUser.terminalId,
-              branchId: parsedUser.branchId,
+              staffId: enrichedUser.staffId,
+              sessionId: enrichedUser.sessionId,
+              terminalId: enrichedUser.terminalId,
+              branchId: enrichedUser.branchId,
             })
           } catch { }
 
@@ -411,26 +482,29 @@ function AppContent() {
       if (result && result.success && userData) {
         console.log('[App.tsx handleLogin] Login successful, setting user state...');
 
+        const enrichedUser = await enrichSessionUserWithOrganization(userData);
+
         // Store session in localStorage
-        localStorage.setItem('pos-user', JSON.stringify(userData));
+        localStorage.setItem('pos-user', JSON.stringify(enrichedUser));
 
         // Update React state
-        setUser(userData);
+        setUser(enrichedUser);
         setStaff({
-          staffId: userData.staffId,
-          name: userData.staffName,
-          role: userData.role.name,
-          branchId: userData.branchId,
-          terminalId: userData.terminalId,
+          staffId: enrichedUser.staffId,
+          name: enrichedUser.staffName,
+          role: enrichedUser.role?.name || 'staff',
+          branchId: enrichedUser.branchId || 'default-branch',
+          terminalId: enrichedUser.terminalId || 'default-terminal',
+          organizationId: normalizeSessionIdentityValue(enrichedUser.organizationId),
         });
 
         // Initialize activity tracking
         try {
           ActivityTracker.setContext({
-            staffId: userData.staffId,
-            sessionId: userData.sessionId,
-            terminalId: userData.terminalId,
-            branchId: userData.branchId,
+            staffId: enrichedUser.staffId,
+            sessionId: enrichedUser.sessionId,
+            terminalId: enrichedUser.terminalId,
+            branchId: enrichedUser.branchId,
           });
         } catch { }
 

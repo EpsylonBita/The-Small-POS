@@ -171,6 +171,27 @@ fn parse_order_delete_payload(
     Ok(payload)
 }
 
+fn resolve_driver_display_name(conn: &rusqlite::Connection, driver_id: &str) -> Option<String> {
+    let driver_id = driver_id.trim();
+    if driver_id.is_empty() {
+        return None;
+    }
+
+    conn.query_row(
+        "SELECT staff_name
+         FROM staff_shifts
+         WHERE staff_id = ?1
+           AND TRIM(COALESCE(staff_name, '')) <> ''
+         ORDER BY COALESCE(check_in_time, created_at, updated_at) DESC, updated_at DESC
+         LIMIT 1",
+        rusqlite::params![driver_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .map(|name| name.trim().to_string())
+    .filter(|name| !name.is_empty())
+}
+
 #[tauri::command]
 pub async fn order_get_all(
     db: tauri::State<'_, db::DbState>,
@@ -499,6 +520,10 @@ pub async fn order_save_from_remote(
         &order_data,
         &["delivery_address", "deliveryAddress", "address"],
     );
+    let delivery_city = value_str(&order_data, &["delivery_city", "deliveryCity"]);
+    let delivery_postal_code =
+        value_str(&order_data, &["delivery_postal_code", "deliveryPostalCode"]);
+    let delivery_floor = value_str(&order_data, &["delivery_floor", "deliveryFloor"]);
     let delivery_notes = value_str(&order_data, &["delivery_notes", "deliveryNotes"]);
     let name_on_ringer = value_str(&order_data, &["name_on_ringer", "nameOnRinger"]);
     let special_instructions = value_str(&order_data, &["special_instructions", "notes"]);
@@ -512,6 +537,8 @@ pub async fn order_save_from_remote(
     );
     let staff_shift_id = value_str(&order_data, &["staff_shift_id", "staffShiftId"]);
     let staff_id = value_str(&order_data, &["staff_id", "staffId"]);
+    let driver_id = value_str(&order_data, &["driver_id", "driverId"]).or_else(|| staff_id.clone());
+    let driver_name = value_str(&order_data, &["driver_name", "driverName"]);
     let discount_pct =
         value_f64(&order_data, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
     let discount_amount =
@@ -584,23 +611,24 @@ pub async fn order_save_from_remote(
             "INSERT INTO orders (
                 id, order_number, customer_name, customer_phone, customer_email,
                 items, total_amount, tax_amount, subtotal, status,
-                order_type, table_number, delivery_address, delivery_notes,
-                name_on_ringer, special_instructions, created_at, updated_at,
-                estimated_time, supabase_id, sync_status, payment_status, payment_method,
-                payment_transaction_id, staff_shift_id, staff_id, discount_percentage,
-                discount_amount, tip_amount, version, terminal_id, branch_id,
-                plugin, external_plugin_order_id, tax_rate, delivery_fee,
-                is_ghost, ghost_source, ghost_metadata
+                order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
+                delivery_floor, delivery_notes, name_on_ringer, special_instructions,
+                created_at, updated_at, estimated_time, supabase_id, sync_status,
+                payment_status, payment_method, payment_transaction_id, staff_shift_id,
+                staff_id, driver_id, driver_name, discount_percentage, discount_amount,
+                tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
+                tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8, ?9, ?10,
-                ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18,
-                ?19, ?20, 'synced', ?21, ?22,
-                ?23, ?24, ?25, ?26,
-                ?27, ?28, 1, ?29, ?30,
-                ?31, ?32, ?33, ?34,
-                ?35, ?36, ?37
+                ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19,
+                ?20, ?21, ?22, ?23, 'synced',
+                ?24, ?25, ?26, ?27,
+                ?28, ?29, ?30, ?31, ?32,
+                ?33, ?34, ?35, ?36, ?37,
+                ?38, ?39, ?40, ?41,
+                ?42, ?43
             )",
             rusqlite::params![
                 local_id,
@@ -616,6 +644,9 @@ pub async fn order_save_from_remote(
                 order_type,
                 table_number,
                 delivery_address,
+                delivery_city,
+                delivery_postal_code,
+                delivery_floor,
                 delivery_notes,
                 name_on_ringer,
                 special_instructions,
@@ -628,6 +659,8 @@ pub async fn order_save_from_remote(
                 payment_tx_id,
                 staff_shift_id,
                 staff_id,
+                driver_id,
+                driver_name,
                 discount_pct,
                 discount_amount,
                 tip_amount,
@@ -959,14 +992,17 @@ pub async fn order_assign_driver(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let driver_name = resolve_driver_display_name(&conn, &driver_id);
     conn.execute(
         "UPDATE orders
          SET staff_id = ?1,
-             delivery_notes = COALESCE(?2, delivery_notes),
+             driver_id = ?1,
+             driver_name = ?2,
+             delivery_notes = COALESCE(?3, delivery_notes),
              sync_status = 'pending',
-             updated_at = ?3
-         WHERE id = ?4",
-        rusqlite::params![driver_id, notes, now, order_id],
+             updated_at = ?4
+         WHERE id = ?5",
+        rusqlite::params![driver_id, driver_name, notes, now, order_id],
     )
     .map_err(|e| format!("assign driver: {e}"))?;
     drop(conn);
@@ -982,6 +1018,7 @@ pub async fn order_assign_driver(
     let payload = serde_json::json!({
         "orderId": order_id_raw,
         "driverId": driver_id,
+        "driverName": driver_name,
         "notes": notes
     });
     let _ = app.emit("order_realtime_update", payload.clone());

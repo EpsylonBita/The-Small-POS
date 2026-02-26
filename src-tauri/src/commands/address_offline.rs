@@ -2,9 +2,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    db, read_local_json, read_local_json_array, value_f64, value_str, write_local_json,
-};
+use crate::{db, read_local_json, read_local_json_array, value_f64, value_str, write_local_json};
 
 const DELIVERY_ZONES_CACHE_KEY: &str = "delivery_zones_cache_v1";
 const ADDRESS_CANDIDATES_CACHE_KEY: &str = "address_candidates_cache_v1";
@@ -78,8 +76,8 @@ fn point_in_polygon(lat: f64, lng: f64, polygon: &[Value]) -> bool {
         let xj = value_f64(pj, &["lng", "longitude"]).unwrap_or(0.0);
         let yj = value_f64(pj, &["lat", "latitude"]).unwrap_or(0.0);
 
-        let intersects = (yi > y) != (yj > y)
-            && x < ((xj - xi) * (y - yi)) / ((yj - yi).max(f64::EPSILON)) + xi;
+        let intersects =
+            (yi > y) != (yj > y) && x < ((xj - xi) * (y - yi)) / ((yj - yi).max(f64::EPSILON)) + xi;
 
         if intersects {
             inside = !inside;
@@ -123,7 +121,11 @@ pub async fn delivery_zone_cache_refresh(
         existing = json!({});
     }
 
-    if existing.get("branches").and_then(Value::as_object).is_none() {
+    if existing
+        .get("branches")
+        .and_then(Value::as_object)
+        .is_none()
+    {
         existing["branches"] = json!({});
     }
 
@@ -173,8 +175,7 @@ pub async fn delivery_zone_validate_local(
         .or_else(|| parse_lat_lng(payload.get("location")))
         .or_else(|| parse_lat_lng(payload.get("address")));
     let input_number = normalize_number(
-        value_str(&payload, &["input_street_number"])
-            .or_else(|| extract_number_token(&address)),
+        value_str(&payload, &["input_street_number"]).or_else(|| extract_number_token(&address)),
     );
     let resolved_number = normalize_number(value_str(&payload, &["resolved_street_number"]));
     let house_number_match = match (input_number.as_ref(), resolved_number.as_ref()) {
@@ -182,13 +183,8 @@ pub async fn delivery_zone_validate_local(
         _ => true,
     };
 
-    let address_fingerprint = value_str(&payload, &["address_fingerprint"]).unwrap_or_else(|| {
-        build_fingerprint(
-            &address,
-            coords.map(|c| c.0),
-            coords.map(|c| c.1),
-        )
-    });
+    let address_fingerprint = value_str(&payload, &["address_fingerprint"])
+        .unwrap_or_else(|| build_fingerprint(&address, coords.map(|c| c.0), coords.map(|c| c.1)));
 
     if !house_number_match {
         return Ok(json!({
@@ -266,7 +262,8 @@ pub async fn delivery_zone_validate_local(
     }
 
     if let Some(zone) = selected_zone {
-        let min_order = value_f64(&zone, &["minimum_order_amount", "min_order_amount"]).unwrap_or(0.0);
+        let min_order =
+            value_f64(&zone, &["minimum_order_amount", "min_order_amount"]).unwrap_or(0.0);
         return Ok(json!({
             "success": true,
             "isValid": true,
@@ -383,7 +380,8 @@ pub async fn address_search_local(
 
         if let Some(addresses) = customer.get("addresses").and_then(Value::as_array) {
             for addr in addresses {
-                let street = value_str(addr, &["street_address", "street", "address"]).unwrap_or_default();
+                let street =
+                    value_str(addr, &["street_address", "street", "address"]).unwrap_or_default();
                 if street.is_empty() {
                     continue;
                 }
@@ -430,8 +428,12 @@ pub async fn address_search_local(
         }
         seen.insert(key);
 
-        let name = value_str(&candidate, &["name"]).unwrap_or_default().to_lowercase();
-        let formatted = value_str(&candidate, &["formatted_address"]).unwrap_or_default().to_lowercase();
+        let name = value_str(&candidate, &["name"])
+            .unwrap_or_default()
+            .to_lowercase();
+        let formatted = value_str(&candidate, &["formatted_address"])
+            .unwrap_or_default()
+            .to_lowercase();
         let mut score = 0;
         if name.starts_with(&query_lower) {
             score += 100;
@@ -515,10 +517,18 @@ pub async fn address_upsert_local_candidate(
             let b_ts = value_str(b, &["last_used_at", "updated_at"]).unwrap_or_default();
             b_ts.cmp(&a_ts)
         });
-        trimmed.extend(branch_candidates.into_iter().take(MAX_CANDIDATES_PER_BRANCH));
+        trimmed.extend(
+            branch_candidates
+                .into_iter()
+                .take(MAX_CANDIDATES_PER_BRANCH),
+        );
     }
 
-    write_local_json(&db, ADDRESS_CANDIDATES_CACHE_KEY, &Value::Array(trimmed.clone()))?;
+    write_local_json(
+        &db,
+        ADDRESS_CANDIDATES_CACHE_KEY,
+        &Value::Array(trimmed.clone()),
+    )?;
 
     Ok(json!({
         "success": true,

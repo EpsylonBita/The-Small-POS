@@ -5,6 +5,8 @@ import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
+import { getBridge } from '../../../lib';
+import toast from 'react-hot-toast';
 
 const LINE_PRICE_HOLD_DURATION_MS = 5000;
 const LINE_PRICE_HOLD_TICK_MS = 100;
@@ -206,17 +208,33 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     onApplyCoupon(scannedCode);
   }, [isCouponModalOpen, onApplyCoupon]);
 
-  const handleLoyaltyCardScanned = React.useCallback((card: { uid: string }) => {
-    if (!isCouponModalOpen || !onApplyCoupon) {
+  const handleLoyaltyCardScanned = React.useCallback(async (card: { uid: string }) => {
+    const uid = (card?.uid || '').trim().toUpperCase();
+    if (!uid) return;
+
+    // If the coupon modal is open, fall through to apply the card UID as a coupon code
+    if (isCouponModalOpen && onApplyCoupon) {
+      setCouponInput(uid);
+      onApplyCoupon(uid);
       return;
     }
-    const scannedCode = (card?.uid || '').trim().toUpperCase();
-    if (!scannedCode) {
-      return;
+
+    // Otherwise, perform a loyalty card lookup via IPC
+    try {
+      const bridge = getBridge();
+      const result = await bridge.loyalty.lookupByCard(uid) as any;
+      if (result?.success && result?.customer) {
+        toast.success(t('loyalty.customerFound', { name: result.customer.customer_name || '', defaultValue: 'Loyalty customer found: {{name}}' }));
+        if (result.customer.points_balance > 0) {
+          toast(t('loyalty.balanceInfo', { points: result.customer.points_balance, defaultValue: 'Balance: {{points}} points' }), { icon: '\uD83C\uDF81' });
+        }
+      } else {
+        toast.error(t('loyalty.cardNotFound', 'Card not linked to any loyalty account'));
+      }
+    } catch (err) {
+      console.warn('[MenuCart] Loyalty card lookup failed:', err);
     }
-    setCouponInput(scannedCode);
-    onApplyCoupon(scannedCode);
-  }, [isCouponModalOpen, onApplyCoupon]);
+  }, [isCouponModalOpen, onApplyCoupon, t]);
 
   const { start: startLoyaltyReader } = useLoyaltyReader(isCouponModalOpen, handleLoyaltyCardScanned);
 

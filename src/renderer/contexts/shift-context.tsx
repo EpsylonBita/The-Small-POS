@@ -26,6 +26,27 @@ interface ShiftContextType {
 }
 
 const ShiftContext = createContext<ShiftContextType | undefined>(undefined);
+const INVALID_CONTEXT_VALUES = new Set([
+  '',
+  'default-branch',
+  'default-terminal',
+  'default-organization',
+  'default-org',
+]);
+
+function normalizeContextValue(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (INVALID_CONTEXT_VALUES.has(trimmed.toLowerCase())) {
+    return null;
+  }
+  return trimmed;
+}
 
 export function ShiftProvider({ children }: { children: ReactNode }) {
   const bridge = getBridge();
@@ -229,6 +250,46 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
   }, [staff?.staffId]);
 
+  // Hardening: if staff exists but organization is missing, merge from shift/terminal context.
+  useEffect(() => {
+    let disposed = false;
+
+    const hydrateMissingStaffOrganization = async () => {
+      if (!staff || normalizeContextValue(staff.organizationId)) {
+        return;
+      }
+
+      let resolvedOrganizationId =
+        normalizeContextValue((activeShift as any)?.organization_id) ||
+        normalizeContextValue(getCachedTerminalCredentials().organizationId);
+
+      if (!resolvedOrganizationId) {
+        try {
+          const refreshed = await refreshTerminalCredentialCache();
+          resolvedOrganizationId = normalizeContextValue(refreshed.organizationId);
+        } catch (error) {
+          console.warn('[ShiftContext] Failed to refresh terminal identity for org hydration:', error);
+        }
+      }
+
+      if (!resolvedOrganizationId || disposed) {
+        return;
+      }
+
+      const mergedStaff = {
+        ...staff,
+        organizationId: resolvedOrganizationId,
+      };
+      setStaffState(mergedStaff);
+      localStorage.setItem('staff', JSON.stringify(mergedStaff));
+    };
+
+    void hydrateMissingStaffOrganization();
+    return () => {
+      disposed = true;
+    };
+  }, [activeShift, staff]);
+
   const refreshActiveShift = async (overrideStaffId?: string) => {
     const sid = overrideStaffId || staff?.staffId;
     if (!sid) {
@@ -364,4 +425,3 @@ export function useShift() {
   }
   return context;
 }
-

@@ -246,7 +246,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       searchDebounceRef.current = null;
     }
 
-    if (input.length < 3) {
+    if (input.length < 2) {
       searchRequestRef.current += 1;
       setIsLoadingAddresses(false);
       setAddressSuggestions([]);
@@ -413,7 +413,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
       size="xl"
       className="!max-w-3xl"
     >
-      <div className="overflow-y-auto max-h-[70vh]">
+      <div className="overflow-y-auto max-h-[70vh] scrollbar-hide">
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
           {t('modals.editCustomer.updateMessage', { count: orderCount })}
         </p>
@@ -466,7 +466,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             </div>
 
             {addressSuggestions.length > 0 && (
-              <div className="absolute z-60 w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+              <div className="absolute z-60 w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}

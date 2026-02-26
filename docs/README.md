@@ -12,6 +12,7 @@ This folder and top-level markdown files document the current native-only `pos-t
 - `../SUPPORT.md`: diagnostics workflow and incident playbooks.
 - `../PARITY_GATES.md`: active parity gate definitions and execution model.
 - `../PARITY_CHECKLIST.md`: active parity status tracker.
+- `receipt-printing-2026.md`: receipt template system, queue payload snapshots, width/charset behavior, and print fallbacks.
 
 ## Security/Native Migration Set
 

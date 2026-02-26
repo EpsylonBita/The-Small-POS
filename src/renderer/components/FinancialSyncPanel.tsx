@@ -170,7 +170,7 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 overflow-auto p-6 max-h-[calc(85vh-100px)]">
+                <div className="flex-1 overflow-auto p-6 max-h-[calc(85vh-100px)] scrollbar-hide">
                     {loading ? (
                         <div className="flex justify-center items-center h-40">
                             <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500/30 border-t-blue-500"></div>

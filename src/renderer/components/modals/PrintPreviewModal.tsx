@@ -76,7 +76,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                 </div>
 
                 {/* Preview Area - Simulated 80mm Receipt */}
-                <div className="flex-1 overflow-auto bg-black/40 rounded-lg p-8 flex justify-center border border-white/5 relative">
+                <div className="flex-1 overflow-auto scrollbar-hide bg-black/40 rounded-lg p-8 flex justify-center border border-white/5 relative">
                     <div
                         className="bg-white text-black shadow-xl transition-transform origin-top duration-200 ease-out"
                         style={{

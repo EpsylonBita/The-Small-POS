@@ -15,6 +15,7 @@ const LF: u8 = 0x0A;
 pub enum PaperWidth {
     Mm58,
     Mm80,
+    Mm112,
 }
 
 impl PaperWidth {
@@ -22,12 +23,15 @@ impl PaperWidth {
         match self {
             PaperWidth::Mm58 => 32,
             PaperWidth::Mm80 => 48,
+            PaperWidth::Mm112 => 64,
         }
     }
 
     pub fn from_mm(mm: i32) -> Self {
         if mm <= 58 {
             PaperWidth::Mm58
+        } else if mm >= 100 {
+            PaperWidth::Mm112
         } else {
             PaperWidth::Mm80
         }
@@ -212,6 +216,45 @@ impl EscPosBuilder {
         }
         self.text(value);
         self.lf()
+    }
+
+    /// Print a QR code using standard ESC/POS 2D barcode commands.
+    pub fn qr(&mut self, data: &str) -> &mut Self {
+        if data.is_empty() {
+            return self;
+        }
+
+        let payload = data.as_bytes();
+        let store_len = payload.len() + 3;
+        let p_l = (store_len & 0xFF) as u8;
+        let p_h = ((store_len >> 8) & 0xFF) as u8;
+
+        // Model 2
+        self.raw(&[GS, b'(', b'k', 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]);
+        // Module size
+        self.raw(&[GS, b'(', b'k', 0x03, 0x00, 0x31, 0x43, 0x06]);
+        // Error correction level M
+        self.raw(&[GS, b'(', b'k', 0x03, 0x00, 0x31, 0x45, 0x31]);
+        // Store data
+        self.raw(&[GS, b'(', b'k', p_l, p_h, 0x31, 0x50, 0x30]);
+        self.raw(payload);
+        // Print symbol
+        self.raw(&[GS, b'(', b'k', 0x03, 0x00, 0x31, 0x51, 0x30]);
+        self
+    }
+
+    /// Print a raster bit image (GS v 0), where `width_bytes` is the number
+    /// of horizontal bytes per row and `height_dots` is total rows.
+    ///
+    /// `data` length must be `width_bytes * height_dots`.
+    pub fn raster_image(&mut self, width_bytes: u16, height_dots: u16, data: &[u8]) -> &mut Self {
+        let x_l = (width_bytes & 0x00FF) as u8;
+        let x_h = ((width_bytes >> 8) & 0x00FF) as u8;
+        let y_l = (height_dots & 0x00FF) as u8;
+        let y_h = ((height_dots >> 8) & 0x00FF) as u8;
+        self.raw(&[GS, b'v', b'0', 0x00, x_l, x_h, y_l, y_h]);
+        self.raw(data);
+        self
     }
 
     // -----------------------------------------------------------------------
@@ -470,6 +513,12 @@ mod tests {
     }
 
     #[test]
+    fn test_paper_width_112_chars() {
+        assert_eq!(PaperWidth::Mm112.chars(), 64);
+        assert!(matches!(PaperWidth::from_mm(112), PaperWidth::Mm112));
+    }
+
+    #[test]
     fn test_text_size() {
         let data = {
             let mut b = EscPosBuilder::new();
@@ -488,6 +537,19 @@ mod tests {
             b.build()
         };
         assert_eq!(data, vec![0x1B, 0x70, 0x00, 0x19, 0x78]);
+    }
+
+    #[test]
+    fn test_qr_command_emits_data() {
+        let data = {
+            let mut b = EscPosBuilder::new();
+            b.qr("https://example.com");
+            b.build()
+        };
+        assert!(data.len() > 20);
+        assert_eq!(data[0], 0x1D);
+        assert_eq!(data[1], b'(');
+        assert_eq!(data[2], b'k');
     }
 
     #[test]
