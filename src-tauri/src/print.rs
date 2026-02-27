@@ -621,26 +621,21 @@ fn read_logo_source_bytes(source: &str) -> Result<Vec<u8>, String> {
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        let url = trimmed.to_string();
-        return tauri::async_runtime::block_on(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .build()
-                .map_err(|e| format!("logo HTTP client: {e}"))?;
-            let response = client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| format!("logo fetch failed: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!("logo fetch failed with HTTP {}", response.status()));
-            }
-            response
-                .bytes()
-                .await
-                .map(|bytes| bytes.to_vec())
-                .map_err(|e| format!("logo fetch bytes failed: {e}"))
-        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|e| format!("logo HTTP client: {e}"))?;
+        let response = client
+            .get(trimmed)
+            .send()
+            .map_err(|e| format!("logo fetch failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("logo fetch failed with HTTP {}", response.status()));
+        }
+        return response
+            .bytes()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| format!("logo fetch bytes failed: {e}"));
     }
 
     let path_value = if trimmed.starts_with("file://") {
