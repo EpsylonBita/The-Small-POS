@@ -62,6 +62,21 @@ const BACKGROUND_SYNC_REFRESH_MIN_MS = 30000;
 const KDS_REALTIME_SUBSCRIPTION_KEY = 'kds-tickets-kitchen-display';
 const KDS_FALLBACK_POLL_INTERVAL_MS = 1500;
 
+const buildStationsSignature = (stations: KdsStation[]): string =>
+  stations
+    .map((station) => `${station.id}|${station.name}|${station.station_type}`)
+    .join('||');
+
+const buildOrderItemsSignature = (items: KitchenOrderItem[]): string =>
+  items
+    .map((item) => `${item.id}|${item.name}|${item.quantity}|${item.station}|${item.status}|${item.notes || ''}`)
+    .join(';;');
+
+const buildOrdersSignature = (orders: KitchenOrder[]): string =>
+  orders
+    .map((order) => `${order.id}|${order.status}|${order.order_type}|${order.station_id || ''}|${order.created_at}|${order.source}|${buildOrderItemsSignature(order.items)}`)
+    .join('||');
+
 const KitchenDisplayPage: React.FC = () => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -84,6 +99,8 @@ const KitchenDisplayPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const realtimeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastOrdersSignatureRef = useRef<string>('');
+  const lastStationsSignatureRef = useRef<string>('');
 
   const isDark = resolvedTheme === 'dark';
 
@@ -145,11 +162,16 @@ const KitchenDisplayPage: React.FC = () => {
 
       if (result?.success && result?.data?.success && result?.data?.tickets) {
         if (result.data.config?.stations) {
-          setStations(result.data.config.stations.map((s: Record<string, unknown>) => ({
+          const mappedStations = result.data.config.stations.map((s: Record<string, unknown>) => ({
             id: s['id'] as string,
             name: s['name'] as string,
             station_type: s['station_type'] as string,
-          })));
+          }));
+          const nextStationsSignature = buildStationsSignature(mappedStations);
+          if (nextStationsSignature !== lastStationsSignatureRef.current) {
+            setStations(mappedStations);
+            lastStationsSignatureRef.current = nextStationsSignature;
+          }
         }
 
         const ticketOrders: KitchenOrder[] = result.data.tickets
@@ -226,7 +248,11 @@ const KitchenDisplayPage: React.FC = () => {
               order.station_id === stationFilter ||
               order.items.some(item => item.station === stationFilter)
             );
-        setOrders(filteredOrders);
+        const nextOrdersSignature = buildOrdersSignature(filteredOrders);
+        if (nextOrdersSignature !== lastOrdersSignatureRef.current) {
+          setOrders(filteredOrders);
+          lastOrdersSignatureRef.current = nextOrdersSignature;
+        }
       } else {
         throw new Error(result?.data?.error || result?.error || 'Failed to fetch kitchen orders');
       }
@@ -234,6 +260,7 @@ const KitchenDisplayPage: React.FC = () => {
       console.error('Failed to fetch kitchen orders:', err);
       setError(err instanceof Error ? err.message : t('kitchen.loadError', 'Unable to load orders'));
       setOrders([]);
+      lastOrdersSignatureRef.current = '';
     } finally {
       if (showLoading) {
         setLoading(false);
@@ -252,6 +279,8 @@ const KitchenDisplayPage: React.FC = () => {
       setLoading(false);
       setOrders([]);
       setStations([]);
+      lastOrdersSignatureRef.current = '';
+      lastStationsSignatureRef.current = '';
       setError(null);
       return;
     }
@@ -451,8 +480,7 @@ const KitchenDisplayPage: React.FC = () => {
     const isLiveDraft = order.isDraft;
     return (
       <motion.div
-        layout
-        initial={{ opacity: 0, scale: 0.9 }}
+        initial={false}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.9 }}
         className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white'} shadow-lg ${order.priority === 'rush' ? 'ring-2 ring-red-500' : ''}`}
@@ -670,7 +698,7 @@ const KitchenDisplayPage: React.FC = () => {
           <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>{t('kitchen.noOrdersDesc', 'New orders will appear here automatically')}</p>
         </div>
       ) : (
-        <AnimatePresence>
+        <AnimatePresence initial={false}>
           <div className={viewMode === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4' : 'space-y-4'}>
             {orders.map((order) => (
               <OrderCard key={order.id} order={order} />

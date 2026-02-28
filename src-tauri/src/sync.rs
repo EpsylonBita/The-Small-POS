@@ -2152,6 +2152,7 @@ async fn reconcile_remote_orders(
 
         let mut newest_updated_at: Option<String> = None;
         let mut newly_materialized_order_ids: Vec<String> = Vec::new();
+        let mut reconciled_order_events: Vec<(String, Option<String>)> = Vec::new();
 
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -2232,6 +2233,15 @@ async fn reconcile_remote_orders(
                     );
                 } else {
                     // Only apply remote changes if they're at least as new as local
+                    let previous_status: Option<String> = conn
+                        .query_row(
+                            "SELECT status FROM orders WHERE id = ?1",
+                            params![local_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+
                     let local_updated_at: Option<String> = conn
                         .query_row(
                             "SELECT updated_at FROM orders WHERE id = ?1",
@@ -2269,6 +2279,18 @@ async fn reconcile_remote_orders(
                             .unwrap_or(0);
                         if updated > 0 {
                             reconciled += 1;
+                            let status_changed = previous_status
+                                .as_deref()
+                                .map(|prev| prev != status)
+                                .unwrap_or(true);
+                            reconciled_order_events.push((
+                                local_id.clone(),
+                                if status_changed {
+                                    Some(status.to_string())
+                                } else {
+                                    None
+                                },
+                            ));
                         }
                     } else {
                         // Remote is stale, just ensure supabase_id is set
@@ -2281,6 +2303,27 @@ async fn reconcile_remote_orders(
 
                 // Always promote payments regardless of reconciliation outcome
                 promote_payments_for_order(&conn, &local_id);
+            }
+        }
+
+        for (local_id, status_event) in reconciled_order_events {
+            if let Ok(order_json) = get_order_by_id(db, &local_id) {
+                let _ = app.emit("order_realtime_update", order_json);
+            } else {
+                let _ = app.emit(
+                    "order_realtime_update",
+                    serde_json::json!({ "orderId": local_id.clone() }),
+                );
+            }
+
+            if let Some(status) = status_event {
+                let _ = app.emit(
+                    "order_status_updated",
+                    serde_json::json!({
+                        "orderId": local_id.clone(),
+                        "status": status
+                    }),
+                );
             }
         }
 

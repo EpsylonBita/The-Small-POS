@@ -618,6 +618,27 @@ const OrdersPage: React.FC = () => {
         orderId={selectedOrder?.id || selectedOrder?.order_number || ''}
         order={selectedOrder}
         onClose={() => setSelectedOrder(null)}
+        onPrintReceipt={async () => {
+          const orderId = selectedOrder?.id;
+          window.alert(`Print clicked! Order ID: ${orderId || 'NONE'}`);
+          if (!orderId) {
+            toast.error('No order ID available for printing');
+            return;
+          }
+          toast.loading('Printing receipt...', { id: 'print-receipt' });
+          try {
+            const result = await bridge.payments.printReceipt(orderId);
+            console.log('[OrdersPage] printReceipt result:', result);
+            if (result?.success) {
+              toast.success('Receipt sent to printer', { id: 'print-receipt' });
+            } else {
+              toast.error(result?.error || 'Print job queued but may fail', { id: 'print-receipt' });
+            }
+          } catch (err: any) {
+            console.error('[OrdersPage] printReceipt error:', err);
+            toast.error(`Print failed: ${err?.message || err}`, { id: 'print-receipt' });
+          }
+        }}
         onShowCustomerHistory={(phone) => {
           setCustomerHistoryPhone(phone);
           setShowCustomerHistory(true);

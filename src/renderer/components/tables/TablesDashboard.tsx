@@ -332,6 +332,8 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
           ? 'bg-purple-500/20 text-purple-400 border-purple-500/30'
           : 'bg-purple-100 text-purple-700 border-purple-300';
       case 'ready':
+      case 'completed':
+      case 'delivered':
         return isDark
           ? 'bg-green-500/20 text-green-400 border-green-500/30'
           : 'bg-green-100 text-green-700 border-green-300';
@@ -350,6 +352,10 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
         return t('tablesDashboard.status.preparing', { defaultValue: 'Preparing' });
       case 'ready':
         return t('tablesDashboard.status.ready', { defaultValue: 'Ready' });
+      case 'completed':
+        return t('orders.status.completed', { defaultValue: 'Completed' });
+      case 'delivered':
+        return t('orders.status.delivered', { defaultValue: 'Delivered' });
       default:
         return status;
     }
@@ -383,6 +389,11 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
         const totalAmount = order.totalAmount || order.total_amount || 0;
         const createdAt = order.createdAt || order.created_at || '';
         const customerName = order.customerName || order.customer_name || '';
+        const orderStatusNormalized = (order.status || '').toLowerCase();
+        const showReadyBadgeIcon =
+          orderStatusNormalized === 'ready' ||
+          orderStatusNormalized === 'completed' ||
+          orderStatusNormalized === 'delivered';
 
         return (
           <div
@@ -414,7 +425,8 @@ const OrdersTabContent: React.FC<OrdersTabContentProps> = memo(({ orders, today,
               </div>
 
               {/* Center: Status badge */}
-              <div className={`px-3 py-1 rounded-full text-xs font-medium border ${getStatusBadgeColor(order.status)}`}>
+              <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border ${getStatusBadgeColor(order.status)}`}>
+                {showReadyBadgeIcon && <CheckCircle className="w-3 h-3" />}
                 {getStatusLabel(order.status)}
               </div>
 

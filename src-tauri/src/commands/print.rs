@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 use crate::{
@@ -271,9 +271,21 @@ pub async fn payment_print_receipt(
     arg0: Option<serde_json::Value>,
     _arg1: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
-    print::enqueue_print_job(&db, "order_receipt", &order_id, None)
+    let enqueue_result = print::enqueue_print_job(&db, "order_receipt", &order_id, None)?;
+
+    // Process the job immediately instead of waiting for the background worker
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    if let Err(e) = print::process_pending_jobs(&db, &data_dir) {
+        warn!(order_id = %order_id, error = %e, "Immediate print processing failed, worker will retry");
+    }
+
+    Ok(enqueue_result)
 }
 
 #[tauri::command]

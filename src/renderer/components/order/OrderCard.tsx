@@ -235,6 +235,12 @@ export const OrderCard = memo<OrderCardProps>(({
   const driverNameNormalized = order.driverName || (order as any).driver_name || '';
   const orderStatusNormalized = (order.status || '').toLowerCase();
   const isDeliveredOrCompleted = orderStatusNormalized === 'completed' || orderStatusNormalized === 'delivered';
+  const showReadyStatusPill = orderStatusNormalized === 'ready' || isDeliveredOrCompleted;
+  const readyStatusKey = orderStatusNormalized === 'ready' ? 'ready' : 'completed';
+  const readyStatusBadgeClass = getStatusBadgeColor('ready');
+  const readyStatusLabel = t(`orders.status.${readyStatusKey}`, {
+    defaultValue: readyStatusKey === 'ready' ? 'Ready' : 'Completed'
+  });
 
   // Debug: log driver info when order is delivered/completed
   if (orderTypeNormalized === 'delivery' && isDeliveredOrCompleted) {
@@ -324,6 +330,14 @@ export const OrderCard = memo<OrderCardProps>(({
             <span className={`text-base sm:text-lg font-bold min-w-[50px] sm:min-w-[80px] ${resolvedTheme === 'light' ? 'text-gray-900' : 'text-white'}`}>
               {formatOrderNumber()}
             </span>
+            {showReadyStatusPill && (
+              <span className={`inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-semibold border ${readyStatusBadgeClass}`}>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+                {readyStatusLabel}
+              </span>
+            )}
             <span className={`text-xs sm:text-sm font-medium ${getTimeColorClass(order.created_at || order.createdAt)}`}>
               {t('orders.time.minutes', { minutes: getElapsedMinutes(order.created_at || order.createdAt) })}
             </span>

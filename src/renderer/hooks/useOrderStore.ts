@@ -8,6 +8,7 @@ import { TIMING, RETRY, ERROR_MESSAGES } from '../../shared/constants';
 import type { Order } from '../../shared/types/orders';
 import { OrderService } from '../../services/OrderService';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { pollFiscalReceiptStatus } from '../services/fiscal-status';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
@@ -879,6 +880,30 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
         get()._invalidateCache();
         get()._setLoading(operation, false);
+
+        if (newOrder.id) {
+          pollFiscalReceiptStatus(newOrder.id, { timeoutMs: 30000, intervalMs: 2500 })
+            .then((fiscalStatus) => {
+              if (!fiscalStatus) {
+                return;
+              }
+
+              if (fiscalStatus.status === 'NEEDS_FIX' || fiscalStatus.status === 'REJECTED') {
+                console.warn('[useOrderStore] Fiscal submission requires attention', {
+                  orderId: newOrder.id,
+                  status: fiscalStatus.status,
+                  error: fiscalStatus.error,
+                  errorCode: fiscalStatus.error_code,
+                });
+              }
+            })
+            .catch((error) => {
+              console.debug('[useOrderStore] Fiscal status polling skipped', {
+                orderId: newOrder.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        }
 
         return { success: true, orderId: newOrder.id, orderNumber: newOrder.orderNumber || newOrder.order_number };
       } catch (error) {
