@@ -6,14 +6,15 @@
 //! via the `printers` module. Missing/unavailable hardware profile resolution
 //! is treated as a non-retryable failure.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::Utc;
-use image::imageops::FilterType;
+
 use rusqlite::params;
 use serde_json::Value;
 use tracing::{error, info, warn};
@@ -301,6 +302,8 @@ pub fn mark_print_job_failed_non_retryable(
 fn is_non_retryable_print_error(error_msg: &str) -> bool {
     let normalized = error_msg.to_ascii_lowercase();
     normalized.contains("no hardware printer profile resolved")
+        || normalized.contains("not found")
+        || normalized.contains("unknown entity_type")
 }
 
 fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Option<String> {
@@ -546,6 +549,9 @@ fn resolve_layout_config(
         .or_else(|| setting_text(&conn, "terminal", "store_address"));
     let store_phone = setting_text(&conn, "restaurant", "phone")
         .or_else(|| setting_text(&conn, "terminal", "store_phone"));
+    let vat_number = setting_text(&conn, "organization", "vat_number")
+        .or_else(|| setting_text(&conn, "restaurant", "vat_number"));
+    let tax_office = setting_text(&conn, "organization", "tax_office");
     let footer_text = setting_text(&conn, "receipt", "footer_text")
         .or_else(|| setting_text(&conn, "restaurant", "receipt_footer"))
         .or(Some("Thank you".to_string()));
@@ -562,17 +568,76 @@ fn resolve_layout_config(
             setting_text(&conn, "receipt", "copy_type").map(|value| value.to_ascii_uppercase())
         }
     });
-    let character_set = profile
+    // --- Auto-detection: brand, character set, code page ---
+    let printer_name = profile
+        .get("printerName")
+        .or_else(|| profile.get("printer_name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let detected_brand = printers::detect_printer_brand(printer_name);
+
+    let app_language = setting_text(&conn, "general", "language").unwrap_or_default();
+    info!(
+        printer_name = %printer_name,
+        detected_brand = %detected_brand.label(),
+        app_language = %app_language,
+        "Auto-detection: brand and language"
+    );
+
+    // Profile character set (manual override)
+    let profile_character_set = profile
         .get("characterSet")
         .or_else(|| profile.get("character_set"))
         .and_then(Value::as_str)
-        .unwrap_or("PC437_USA")
-        .to_string();
+        .unwrap_or("PC437_USA");
+
+    // Auto-upgrade: if profile uses the default PC437_USA and app language is not English,
+    // use the language-appropriate character set instead.
+    let character_set =
+        if profile_character_set == "PC437_USA" && !app_language.is_empty() && app_language != "en"
+        {
+            let auto_cs = receipt_renderer::language_to_character_set(&app_language);
+            info!(
+                language = %app_language,
+                auto_character_set = %auto_cs,
+                "Auto-detected character set from app language"
+            );
+            auto_cs.to_string()
+        } else {
+            profile_character_set.to_string()
+        };
+
     let greek_render_mode = profile
         .get("greekRenderMode")
         .or_else(|| profile.get("greek_render_mode"))
         .and_then(Value::as_str)
         .map(ToString::to_string);
+
+    // Manual code page override takes priority
+    let manual_code_page = profile
+        .get("escposCodePage")
+        .or_else(|| profile.get("escpos_code_page"))
+        .and_then(Value::as_u64)
+        .map(|v| v as u8);
+
+    let escpos_code_page = if manual_code_page.is_some() {
+        info!(
+            manual_code_page = ?manual_code_page,
+            "Using manual code page override"
+        );
+        manual_code_page
+    } else {
+        let auto_cp = receipt_renderer::resolve_auto_code_page(detected_brand, &character_set);
+        if auto_cp.is_some() {
+            info!(
+                brand = %detected_brand.label(),
+                character_set = %character_set,
+                auto_code_page = ?auto_cp,
+                "Auto-resolved code page for brand"
+            );
+        }
+        auto_cp
+    };
 
     Ok(LayoutConfig {
         paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
@@ -580,6 +645,8 @@ fn resolve_layout_config(
         organization_name,
         store_address,
         store_phone,
+        vat_number,
+        tax_office,
         footer_text,
         show_qr_code,
         qr_data,
@@ -588,6 +655,9 @@ fn resolve_layout_config(
         copy_label,
         character_set,
         greek_render_mode,
+        escpos_code_page,
+        detected_brand,
+        language: app_language,
     })
 }
 
@@ -621,21 +691,67 @@ fn read_logo_source_bytes(source: &str) -> Result<Vec<u8>, String> {
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(8))
-            .build()
-            .map_err(|e| format!("logo HTTP client: {e}"))?;
-        let response = client
-            .get(trimmed)
-            .send()
-            .map_err(|e| format!("logo fetch failed: {e}"))?;
-        if !response.status().is_success() {
-            return Err(format!("logo fetch failed with HTTP {}", response.status()));
+        // Check for cached logo (avoids repeated HTTP fetches)
+        let cache_path = std::env::temp_dir().join("thesmall_logo_cache.bin");
+        let cache_url_path = std::env::temp_dir().join("thesmall_logo_cache_url.txt");
+        if cache_path.exists() {
+            if let Ok(cached_url) = fs::read_to_string(&cache_url_path) {
+                if cached_url.trim() == trimmed {
+                    if let Ok(metadata) = fs::metadata(&cache_path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if modified.elapsed().unwrap_or(Duration::from_secs(86401))
+                                < Duration::from_secs(86400)
+                            {
+                                return fs::read(&cache_path)
+                                    .map_err(|e| format!("logo cache read: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
         }
-        return response
-            .bytes()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|e| format!("logo fetch bytes failed: {e}"));
+
+        // Must run on a dedicated OS thread — reqwest::blocking panics
+        // if called from within a Tokio async runtime.
+        let url = trimmed.to_string();
+        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|e| format!("logo HTTP client: {e}"))?;
+            let response = client
+                .get(&url)
+                .send()
+                .map_err(|e| format!("logo fetch failed: {e}"))?;
+            if !response.status().is_success() {
+                return Err(format!("logo fetch failed with HTTP {}", response.status()));
+            }
+            // Reject non-image responses (e.g. HTML error pages from CDN)
+            if let Some(ct) = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+            {
+                if !ct.starts_with("image/") {
+                    return Err(format!(
+                        "logo URL returned content-type '{ct}', expected image/*"
+                    ));
+                }
+            }
+            response
+                .bytes()
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("logo fetch bytes failed: {e}"))
+        });
+        let bytes = handle
+            .join()
+            .map_err(|_| "logo fetch thread panicked".to_string())??;
+
+        // Cache the fetched logo for subsequent prints
+        let _ = fs::write(&cache_path, &bytes);
+        let _ = fs::write(&cache_url_path, trimmed);
+
+        return Ok(bytes);
     }
 
     let path_value = if trimmed.starts_with("file://") {
@@ -661,12 +777,29 @@ fn rasterize_logo_to_escpos_prefix(
     image_bytes: &[u8],
     paper: crate::escpos::PaperWidth,
 ) -> Result<Vec<u8>, String> {
+    // Validate that the bytes look like an image, not HTML or other text
+    if image_bytes.len() > 4 {
+        let head = &image_bytes[..4];
+        if head.starts_with(b"<!DO")
+            || head.starts_with(b"<htm")
+            || head.starts_with(b"<HTM")
+            || head.starts_with(b"<?xm")
+        {
+            return Err("Logo URL returned HTML/XML instead of an image".to_string());
+        }
+    }
+
     let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
-    let gray = decoded.to_luma8();
-    let (src_w, src_h) = gray.dimensions();
+    // Composite transparent backgrounds onto white before converting to grayscale.
+    let rgba = decoded.to_rgba8();
+    let (src_w, src_h) = rgba.dimensions();
     if src_w == 0 || src_h == 0 {
         return Err("logo image has invalid dimensions".to_string());
     }
+    let mut white_bg =
+        image::RgbaImage::from_pixel(src_w, src_h, image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
+    let gray = image::DynamicImage::ImageRgba8(white_bg).to_luma8();
 
     let max_width = paper_logo_max_width_dots(paper).max(8);
     let mut target_w = src_w.min(max_width);
@@ -680,40 +813,302 @@ fn rasterize_logo_to_escpos_prefix(
         target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
     }
 
+    info!(
+        src_w = src_w,
+        src_h = src_h,
+        target_w = target_w,
+        target_h = target_h,
+        paper = ?paper,
+        "Rasterizing logo for ESC/POS"
+    );
+
     let resized = if target_w != src_w || target_h != src_h {
-        image::imageops::resize(&gray, target_w, target_h, FilterType::Triangle)
+        image::DynamicImage::ImageLuma8(gray)
+            .thumbnail(target_w, target_h)
+            .to_luma8()
     } else {
         gray
     };
 
     let width = resized.width();
     let height = resized.height();
-    let width_bytes = width.div_ceil(8);
-    let mut packed = Vec::with_capacity((width_bytes * height) as usize);
-    for y in 0..height {
-        for xb in 0..width_bytes {
-            let mut byte = 0u8;
-            for bit in 0..8u32 {
-                let x = xb * 8 + bit;
-                if x >= width {
-                    continue;
+
+    // Use ESC * column-format bit image (m=33, 24-dot double-density) for
+    // maximum printer compatibility.  GS v 0 raster images are not reliably
+    // supported by all Star, Citizen, and older Epson firmware.
+    //
+    // ESC * sends the image in horizontal strips of 24 rows each.  Each strip
+    // is a single ESC * command:  ESC * 33 nL nH [column data…]
+    // For each column, 3 bytes encode 24 vertical pixels (MSB at top).
+    let strips = height.div_ceil(24);
+    let mut builder = crate::escpos::EscPosBuilder::new();
+    builder.center();
+    for strip in 0..strips {
+        let y_start = strip * 24;
+        // ESC * m nL nH — select bit-image mode
+        //   m = 33 (24-dot double-density)
+        //   nL/nH = number of columns (little-endian)
+        let n_l = (width & 0xFF) as u8;
+        let n_h = ((width >> 8) & 0xFF) as u8;
+        builder.raw(&[0x1B, b'*', 33, n_l, n_h]);
+        for x in 0..width {
+            let mut col = [0u8; 3];
+            for dy in 0..24u32 {
+                let y = y_start + dy;
+                if y >= height {
+                    break;
                 }
                 let luma = resized.get_pixel(x, y).0[0];
                 if luma < 160 {
-                    byte |= 0x80 >> bit;
+                    col[(dy / 8) as usize] |= 0x80 >> (dy % 8);
                 }
             }
-            packed.push(byte);
+            builder.raw(&col);
+        }
+        builder.lf();
+    }
+    builder.left();
+
+    let result = builder.build();
+    info!(
+        strips = strips,
+        total_bytes = result.len(),
+        "Logo ESC/POS prefix generated"
+    );
+    Ok(result)
+}
+
+/// Rasterize a logo image to GS v 0 raster format — compatible with Star and
+/// most modern thermal printers.  Unlike the column-format ESC * 33 used by
+/// `rasterize_logo_to_escpos_prefix`, GS v 0 sends a single block of raster
+/// data which Star mC-Print3 (and similar) handles correctly.
+fn rasterize_logo_to_escpos_raster(
+    image_bytes: &[u8],
+    paper: crate::escpos::PaperWidth,
+    brand: crate::printers::PrinterBrand,
+) -> Result<Vec<u8>, String> {
+    if image_bytes.len() > 4 {
+        let head = &image_bytes[..4];
+        if head.starts_with(b"<!DO")
+            || head.starts_with(b"<htm")
+            || head.starts_with(b"<HTM")
+            || head.starts_with(b"<?xm")
+        {
+            return Err("Logo URL returned HTML/XML instead of an image".to_string());
         }
     }
 
+    let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
+
+    // Composite transparent backgrounds onto white before converting to grayscale.
+    // Without this, PNG transparency → black in luma, causing a black background.
+    let rgba = decoded.to_rgba8();
+    let (src_w, src_h) = rgba.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return Err("logo image has invalid dimensions".to_string());
+    }
+    if src_w > 1200 || src_h > 1200 {
+        warn!(
+            src_w, src_h,
+            "Logo source image is very large — consider resizing to \u{2264}600\u{00D7}600 for faster first-print"
+        );
+    }
+    let mut white_bg =
+        image::RgbaImage::from_pixel(src_w, src_h, image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
+    let gray = image::DynamicImage::ImageRgba8(white_bg).to_luma8();
+
+    let max_width = paper_logo_max_width_dots(paper).max(8);
+    let use_star_raster = brand == crate::printers::PrinterBrand::Star;
+
+    // Scale to a reasonable size: max paper width, max 400 dots tall (~50mm).
+    let mut target_w = src_w.min(max_width);
+    if target_w == 0 {
+        target_w = 1;
+    }
+    let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
+    let max_h = 400u32;
+    if target_h > max_h {
+        target_h = max_h;
+        target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
+    }
+
+    // For Star raster: use full paper width and center the image data in each row.
+    // Star raster mode ignores ESC alignment commands.
+    let paper_width_bytes = (max_width.div_ceil(8)) as u16;
+    let raster_w = if use_star_raster {
+        // Full paper width for Star (centered)
+        paper_width_bytes as u32 * 8
+    } else {
+        target_w.div_ceil(8) * 8
+    };
+
+    info!(
+        src_w, src_h, target_w, target_h, raster_w,
+        star_mode = use_star_raster,
+        paper = ?paper,
+        "Rasterizing logo for raster format"
+    );
+
+    let resized = if target_w != src_w || target_h != src_h {
+        // Use thumbnail() for large downscale ratios (e.g. 5905→400) — it picks
+        // the fastest filter automatically and is orders of magnitude quicker
+        // than resize() with Triangle for big images.
+        image::DynamicImage::ImageLuma8(gray)
+            .thumbnail(target_w, target_h)
+            .to_luma8()
+    } else {
+        gray
+    };
+
+    let width = resized.width();
+    let height = resized.height();
+    let width_bytes = if use_star_raster {
+        paper_width_bytes
+    } else {
+        (target_w.div_ceil(8)) as u16
+    };
+
+    // For Star centering: offset to center image within the full paper width row
+    let left_pad_bytes = if use_star_raster {
+        let image_bytes_per_row = target_w.div_ceil(8) as u16;
+        (width_bytes.saturating_sub(image_bytes_per_row)) / 2
+    } else {
+        0
+    };
+
+    // Build raster data: each row is width_bytes bytes, MSB first
+    let mut raster_data = Vec::with_capacity((width_bytes as u32 * height) as usize);
+    for y in 0..height {
+        for bx in 0..width_bytes {
+            // Check if this byte falls within the centered image area
+            let img_bx = bx as i32 - left_pad_bytes as i32;
+            if img_bx < 0 || (img_bx as u32) * 8 >= target_w.div_ceil(8) * 8 {
+                raster_data.push(0u8); // padding byte
+                continue;
+            }
+            let mut byte_val = 0u8;
+            for bit in 0..8u32 {
+                let x = img_bx as u32 * 8 + bit;
+                if x < width {
+                    let luma = resized.get_pixel(x, y).0[0];
+                    if luma < 160 {
+                        byte_val |= 0x80 >> bit;
+                    }
+                }
+            }
+            raster_data.push(byte_val);
+        }
+    }
+
+    // Trim leading blank rows (white space at top of image)
+    let wb = width_bytes as usize;
+    let mut leading_blank = 0usize;
+    for row in 0..height as usize {
+        let row_start = row * wb;
+        let row_end = row_start + wb;
+        if raster_data[row_start..row_end].iter().all(|&b| b == 0) {
+            leading_blank += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Trim trailing blank rows (white space at bottom of image)
+    let mut effective_height = height as usize;
+    while effective_height > leading_blank {
+        let row_start = (effective_height - 1) * wb;
+        let row_end = row_start + wb;
+        if raster_data[row_start..row_end].iter().all(|&b| b == 0) {
+            effective_height -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // Apply trimming: remove leading and trailing blank rows
+    if leading_blank > 0 || effective_height < height as usize {
+        let trimmed_data = raster_data[leading_blank * wb..effective_height * wb].to_vec();
+        raster_data = trimmed_data;
+        let trimmed_height = effective_height - leading_blank;
+        info!(
+            original_height = height,
+            leading_blank,
+            trailing_blank = height as usize - effective_height,
+            trimmed_height,
+            "Trimmed blank rows from logo raster"
+        );
+        effective_height = trimmed_height;
+    } else {
+        effective_height = height as usize;
+    }
+
     let mut builder = crate::escpos::EscPosBuilder::new();
-    builder
-        .center()
-        .raster_image(width_bytes as u16, height as u16, &packed)
-        .lf()
-        .left();
-    Ok(builder.build())
+    if !use_star_raster {
+        builder.center();
+    }
+    if use_star_raster {
+        builder.star_raster_image(width_bytes, effective_height as u16, &raster_data);
+    } else {
+        builder.raster_image(width_bytes, effective_height as u16, &raster_data);
+    }
+    if !use_star_raster {
+        builder.left();
+    }
+
+    let result = builder.build();
+    let format_label = if use_star_raster {
+        "Star Line Mode raster"
+    } else {
+        "GS v 0 raster"
+    };
+    info!(
+        raster_data_bytes = raster_data.len(),
+        total_bytes = result.len(),
+        format = format_label,
+        "Logo raster prefix generated"
+    );
+    Ok(result)
+}
+
+/// In-memory cache for rasterized logo ESC/POS bytes.
+///
+/// Keyed on `"{logo_url}|{paper_width:?}|{brand:?}"`.  Decoding + compositing
+/// + resizing a 5905×5905 source image takes ~8 s; caching makes subsequent
+///   prints near-instant.
+fn logo_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Clear the logo raster cache (e.g. after printer profile or logo URL change).
+#[allow(dead_code)]
+pub fn clear_logo_cache() {
+    if let Ok(mut cache) = logo_cache().lock() {
+        cache.clear();
+    }
+    // Also remove disk-cached raster files.
+    if let Ok(entries) = fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("thesmall_logo_raster_") && name.ends_with(".bin") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    info!("Logo raster cache cleared (memory + disk)");
+}
+
+/// Return a stable path for the on-disk raster cache file.
+/// The filename is a simple hash of the cache key so different logo URLs /
+/// paper widths / brands get separate files.
+fn raster_cache_path(cache_key: &str) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    cache_key.hash(&mut h);
+    std::env::temp_dir().join(format!("thesmall_logo_raster_{:016x}.bin", h.finish()))
 }
 
 fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>, String> {
@@ -729,8 +1124,78 @@ fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>
         return Ok(None);
     };
 
+    // Check cache first — avoids re-decoding + rasterizing the same logo.
+    let cache_key = format!(
+        "{}|{:?}|{:?}",
+        source, layout.paper_width, layout.detected_brand
+    );
+    if let Ok(cache) = logo_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            info!(
+                cache_key = %cache_key,
+                bytes = cached.len(),
+                "Logo raster cache hit (memory)"
+            );
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    // Check persistent disk cache — survives app restarts, avoids the
+    // expensive image-decode + rasterize step (~5 s for very large logos).
+    let disk_path = raster_cache_path(&cache_key);
+    if disk_path.exists() {
+        if let Ok(metadata) = fs::metadata(&disk_path) {
+            // Disk cache valid for 7 days.
+            if metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(7 * 86400))
+            {
+                if let Ok(cached) = fs::read(&disk_path) {
+                    if !cached.is_empty() {
+                        info!(
+                            bytes = cached.len(),
+                            path = %disk_path.display(),
+                            "Logo raster cache hit (disk)"
+                        );
+                        // Populate in-memory cache too.
+                        if let Ok(mut mem) = logo_cache().lock() {
+                            mem.insert(cache_key.clone(), cached.clone());
+                        }
+                        return Ok(Some(cached));
+                    }
+                }
+            }
+        }
+    }
+
     let bytes = read_logo_source_bytes(source)?;
-    let prefix = rasterize_logo_to_escpos_prefix(&bytes, layout.paper_width)?;
+
+    // Star printers can't handle ESC * 33 column bit-image — use Star raster mode
+    let prefix = if layout.detected_brand == crate::printers::PrinterBrand::Star {
+        info!("Using Star Line Mode raster for logo");
+        rasterize_logo_to_escpos_raster(&bytes, layout.paper_width, layout.detected_brand)?
+    } else {
+        rasterize_logo_to_escpos_prefix(&bytes, layout.paper_width)?
+    };
+
+    // Store in memory cache for subsequent prints within this session.
+    if let Ok(mut cache) = logo_cache().lock() {
+        cache.insert(cache_key, prefix.clone());
+    }
+
+    // Persist to disk so next app start skips the decode+rasterize step.
+    if let Err(e) = fs::write(&disk_path, &prefix) {
+        warn!(path = %disk_path.display(), error = %e, "Failed to write logo raster disk cache");
+    } else {
+        info!(
+            bytes = prefix.len(),
+            path = %disk_path.display(),
+            "Logo raster saved to disk cache"
+        );
+    }
+
     Ok(Some(prefix))
 }
 
@@ -1024,11 +1489,22 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
         delivery_notes,
         special_instructions,
         items_json,
+        delivery_city,
+        delivery_postal_code,
+        delivery_floor,
+        name_on_ringer,
+        driver_name,
+        customer_name,
+        customer_phone,
     ) = conn
         .query_row(
             "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(created_at, ''),
                     COALESCE(table_number, ''), COALESCE(delivery_address, ''), COALESCE(delivery_notes, ''),
-                    COALESCE(special_instructions, ''), COALESCE(items, '[]')
+                    COALESCE(special_instructions, ''), COALESCE(items, '[]'),
+                    COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
+                    COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
+                    COALESCE(driver_name, ''), COALESCE(customer_name, ''),
+                    COALESCE(customer_phone, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -1041,6 +1517,13 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
                 ))
             },
         )
@@ -1099,6 +1582,41 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
             None
         } else {
             Some(special_instructions)
+        },
+        delivery_city: if delivery_city.is_empty() {
+            None
+        } else {
+            Some(delivery_city)
+        },
+        delivery_postal_code: if delivery_postal_code.is_empty() {
+            None
+        } else {
+            Some(delivery_postal_code)
+        },
+        delivery_floor: if delivery_floor.is_empty() {
+            None
+        } else {
+            Some(delivery_floor)
+        },
+        name_on_ringer: if name_on_ringer.is_empty() {
+            None
+        } else {
+            Some(name_on_ringer)
+        },
+        driver_name: if driver_name.is_empty() {
+            None
+        } else {
+            Some(driver_name)
+        },
+        customer_name: if customer_name.is_empty() {
+            None
+        } else {
+            Some(customer_name)
+        },
+        customer_phone: if customer_phone.is_empty() {
+            None
+        } else {
+            Some(customer_phone)
         },
         items,
     })
@@ -1743,9 +2261,27 @@ fn dispatch_to_printer(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let layout = resolve_layout_config(db, &profile, entity_type)?;
+    info!(
+        entity_type = %entity_type,
+        printer = %printer_name,
+        character_set = %layout.character_set,
+        escpos_code_page = ?layout.escpos_code_page,
+        show_logo = layout.show_logo,
+        template = ?layout.template,
+        "Dispatch: resolved layout config"
+    );
     let mut rendered = receipt_renderer::render_escpos(document, &layout);
+    info!(
+        escpos_bytes = rendered.bytes.len(),
+        warnings = rendered.warnings.len(),
+        "Dispatch: ESC/POS rendered (before logo)"
+    );
     match build_logo_prefix_for_layout(&layout) {
         Ok(Some(prefix)) => {
+            info!(
+                logo_prefix_bytes = prefix.len(),
+                "Dispatch: logo prefix generated"
+            );
             if rendered.bytes.starts_with(&[0x1B, 0x40]) {
                 let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len());
                 combined.extend_from_slice(&rendered.bytes[..2]);
@@ -1758,8 +2294,14 @@ fn dispatch_to_printer(
                 combined.extend_from_slice(&rendered.bytes);
                 rendered.bytes = combined;
             }
+            info!(
+                total_bytes = rendered.bytes.len(),
+                "Dispatch: total bytes after logo"
+            );
         }
-        Ok(None) => {}
+        Ok(None) => {
+            info!("Dispatch: no logo configured");
+        }
         Err(err) => {
             rendered.warnings.push(receipt_renderer::RenderWarning {
                 code: "logo_text_fallback".to_string(),
@@ -1777,7 +2319,11 @@ fn dispatch_to_printer(
                 // If profile opts out of cutting, drop the trailing cut command.
                 let len = rendered.bytes.len();
                 if len >= 4 && rendered.bytes[len - 4..] == [0x1D, 0x56, 0x41, 0x10] {
+                    // Epson: GS V A 16
                     rendered.bytes.truncate(len - 4);
+                } else if len >= 3 && rendered.bytes[len - 3..] == [0x1B, 0x64, 0x01] {
+                    // Star: ESC d 1
+                    rendered.bytes.truncate(len - 3);
                 }
             }
             let doc_name = match entity_type {
@@ -1798,11 +2344,58 @@ fn dispatch_to_printer(
 // Background print worker
 // ---------------------------------------------------------------------------
 
+/// Recover stale `printing` jobs that were left behind by a crash or error.
+///
+/// Any job in `printing` status for more than 30 seconds is presumed stale and
+/// reset to `pending` so the worker can re-attempt it.
+pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let affected = conn
+        .execute(
+            "UPDATE print_jobs
+             SET status = 'pending', updated_at = ?1
+             WHERE status = 'printing'
+               AND julianday(?1) - julianday(updated_at) > (30.0 / 86400.0)",
+            params![now],
+        )
+        .map_err(|e| format!("recover stale printing jobs: {e}"))?;
+
+    if affected > 0 {
+        warn!(
+            count = affected,
+            "Recovered stale print jobs from 'printing' back to 'pending'"
+        );
+    }
+
+    // Purge old failed/printed jobs (older than 24 hours) to prevent queue bloat
+    let purged = conn
+        .execute(
+            "DELETE FROM print_jobs
+             WHERE status IN ('failed', 'printed')
+               AND julianday(?1) - julianday(updated_at) > 1.0",
+            params![now],
+        )
+        .unwrap_or(0);
+
+    if purged > 0 {
+        info!(
+            count = purged,
+            "Purged old completed/failed print jobs (>24h)"
+        );
+    }
+
+    Ok(affected)
+}
+
 /// Process pending print jobs: generate receipt files and mark as printed.
 ///
 /// This is called by the background worker loop.  It processes one batch of
 /// pending jobs each tick.  Returns the number of jobs processed.
 pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, String> {
+    // Recover any stale 'printing' jobs from previous crashes/errors
+    let _ = recover_stale_printing_jobs(db);
+
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now_str = Utc::now().to_rfc3339();
 
@@ -1838,72 +2431,119 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     let count = jobs.len();
 
     for (job_id, entity_type, entity_id, payload_json, profile_id) in jobs {
-        // Mark as printing
-        {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let _ = conn.execute(
-                "UPDATE print_jobs SET status = 'printing', updated_at = ?1 WHERE id = ?2",
-                params![now_str, job_id],
-            );
-        }
-
-        let document =
-            match build_document_for_job(db, &entity_type, &entity_id, payload_json.as_deref()) {
-                Ok(document) => document,
-                Err(error) => {
-                    mark_print_job_failed(db, &job_id, &error)?;
-                    continue;
+        let process_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<(), String> {
+                // Mark as printing
+                {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let _ = conn.execute(
+                        "UPDATE print_jobs SET status = 'printing', updated_at = ?1 WHERE id = ?2",
+                        params![now_str, job_id],
+                    );
                 }
-            };
 
-        let role = if entity_type == "kitchen_ticket" {
-            "kitchen"
-        } else {
-            "receipt"
-        };
-        let html_profile =
-            printers::resolve_printer_profile_for_role(db, profile_id.as_deref(), Some(role))
+                let document = match build_document_for_job(
+                    db,
+                    &entity_type,
+                    &entity_id,
+                    payload_json.as_deref(),
+                ) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        // Document build errors (e.g. "Order not found") are non-retryable:
+                        // the entity data is missing and won't reappear.
+                        let mark_fn = if is_non_retryable_print_error(&error) {
+                            mark_print_job_failed_non_retryable
+                        } else {
+                            mark_print_job_failed
+                        };
+                        if let Err(e) = mark_fn(db, &job_id, &error) {
+                            error!(job_id = %job_id, error = %e, "Failed to mark print job as failed");
+                        }
+                        return Ok(());
+                    }
+                };
+
+                let role = if entity_type == "kitchen_ticket" {
+                    "kitchen"
+                } else {
+                    "receipt"
+                };
+                let html_profile = printers::resolve_printer_profile_for_role(
+                    db,
+                    profile_id.as_deref(),
+                    Some(role),
+                )
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| serde_json::json!({}));
-        let html_layout =
-            resolve_layout_config(db, &html_profile, &entity_type).unwrap_or_default();
-        let html = receipt_renderer::render_html(&document, &html_layout);
-        let path = match write_print_html_file(data_dir, &entity_type, &entity_id, &html) {
-            Ok(path) => path,
-            Err(error) => {
-                mark_print_job_failed(db, &job_id, &error)?;
-                continue;
+                let html_layout =
+                    resolve_layout_config(db, &html_profile, &entity_type).unwrap_or_default();
+                let html = receipt_renderer::render_html(&document, &html_layout);
+                let path = match write_print_html_file(data_dir, &entity_type, &entity_id, &html) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        if let Err(e) = mark_print_job_failed(db, &job_id, &error) {
+                            error!(job_id = %job_id, error = %e, "Failed to mark print job as failed");
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // Try to dispatch to hardware printer from structured render path.
+                match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &document) {
+                    Ok((resolved_profile, render_warnings)) => {
+                        if let Err(e) = mark_print_job_printed(db, &job_id, &path) {
+                            error!(job_id = %job_id, error = %e, "Failed to mark print job as printed");
+                            return Ok(());
+                        }
+
+                        if !render_warnings.is_empty() {
+                            let combined = render_warnings
+                                .iter()
+                                .map(|warning| warning.message.clone())
+                                .collect::<Vec<String>>()
+                                .join(" | ");
+                            let _ = set_print_job_warning(db, &job_id, "render_warning", &combined);
+                        }
+
+                        // Non-fatal drawer kick: if profile has open_cash_drawer enabled,
+                        // attempt to open the drawer. Failures are warnings only.
+                        if let Err(error) =
+                            drawer::try_drawer_kick_after_print(db, &resolved_profile)
+                        {
+                            let _ =
+                                set_print_job_warning(db, &job_id, "drawer_kick_failed", &error);
+                        }
+                    }
+                    Err(error) => {
+                        warn!(job_id = %job_id, error = %error, "Hardware print failed, file generated at {path}");
+                        let mark_result = if is_non_retryable_print_error(&error) {
+                            mark_print_job_failed_non_retryable(db, &job_id, &error)
+                        } else {
+                            mark_print_job_failed(db, &job_id, &error)
+                        };
+                        if let Err(e) = mark_result {
+                            error!(job_id = %job_id, error = %e, "Failed to mark print job as failed");
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+
+        match process_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(job_id = %job_id, error = %e, "Print job processing error");
             }
-        };
-
-        // Try to dispatch to hardware printer from structured render path.
-        match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &document) {
-            Ok((resolved_profile, render_warnings)) => {
-                mark_print_job_printed(db, &job_id, &path)?;
-
-                if !render_warnings.is_empty() {
-                    let combined = render_warnings
-                        .iter()
-                        .map(|warning| warning.message.clone())
-                        .collect::<Vec<String>>()
-                        .join(" | ");
-                    let _ = set_print_job_warning(db, &job_id, "render_warning", &combined);
-                }
-
-                // Non-fatal drawer kick: if profile has open_cash_drawer enabled,
-                // attempt to open the drawer. Failures are warnings only.
-                if let Err(error) = drawer::try_drawer_kick_after_print(db, &resolved_profile) {
-                    let _ = set_print_job_warning(db, &job_id, "drawer_kick_failed", &error);
-                }
-            }
-            Err(error) => {
-                warn!(job_id = %job_id, error = %error, "Hardware print failed, file generated at {path}");
-                if is_non_retryable_print_error(&error) {
-                    mark_print_job_failed_non_retryable(db, &job_id, &error)?;
-                } else {
-                    mark_print_job_failed(db, &job_id, &error)?;
-                }
+            Err(_panic) => {
+                error!(job_id = %job_id, "Print job processing panicked unexpectedly");
+                let _ = mark_print_job_failed_non_retryable(
+                    db,
+                    &job_id,
+                    "Internal error: job processing panicked",
+                );
             }
         }
     }
@@ -1923,9 +2563,13 @@ pub fn start_print_worker(db: Arc<DbState>, data_dir: PathBuf, interval_secs: u6
         let interval = tokio::time::Duration::from_secs(interval_secs);
         loop {
             tokio::time::sleep(interval).await;
-            match process_pending_jobs(&db, &data_dir) {
-                Ok(_) => {}
-                Err(e) => error!("Print worker error: {e}"),
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                process_pending_jobs(&db, &data_dir)
+            }));
+            match result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => error!("Print worker error: {e}"),
+                Err(_) => error!("Print worker panicked, will retry next tick"),
             }
         }
     });
@@ -2051,9 +2695,8 @@ mod tests {
         let prefix = build_logo_prefix_for_layout(&layout)
             .expect("logo prefix result")
             .expect("logo prefix present");
-        assert!(prefix
-            .windows(4)
-            .any(|window| window == [0x1D, b'v', b'0', 0x00]));
+        // ESC * 33 (24-dot double-density column-format bit image)
+        assert!(prefix.windows(3).any(|window| window == [0x1B, b'*', 33]));
     }
 
     #[test]
@@ -2409,5 +3052,89 @@ mod tests {
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["entityType"], "shift_checkout");
+    }
+
+    #[test]
+    fn test_recover_stale_printing_jobs() {
+        let db = test_db();
+
+        // Enqueue a job then manually set it to 'printing' with an old timestamp
+        enqueue_print_job(&db, "order_receipt", "ord-stale", None).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing', updated_at = datetime('now', '-2 minutes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Verify it's stuck in 'printing'
+        let jobs = list_print_jobs(&db, Some("printing")).unwrap();
+        assert_eq!(jobs.as_array().unwrap().len(), 1);
+
+        // Recovery should reset it back to 'pending'
+        let recovered = recover_stale_printing_jobs(&db).unwrap();
+        assert_eq!(recovered, 1);
+
+        // Now it should be 'pending' again
+        let pending = list_print_jobs(&db, Some("pending")).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 1);
+        let printing = list_print_jobs(&db, Some("printing")).unwrap();
+        assert_eq!(printing.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_recent_printing_job_not_recovered() {
+        let db = test_db();
+
+        // Enqueue a job and set it to 'printing' with a recent timestamp (now)
+        enqueue_print_job(&db, "order_receipt", "ord-recent", None).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing', updated_at = datetime('now')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Recovery should NOT touch it — it's only been 'printing' for 0 seconds
+        let recovered = recover_stale_printing_jobs(&db).unwrap();
+        assert_eq!(recovered, 0);
+
+        // Still in 'printing'
+        let printing = list_print_jobs(&db, Some("printing")).unwrap();
+        assert_eq!(printing.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_stuck_printing_job_blocks_reenqueue_then_recovery_unblocks() {
+        let db = test_db();
+
+        // Enqueue and simulate a stuck 'printing' job
+        enqueue_print_job(&db, "order_receipt", "ord-block", None).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE print_jobs SET status = 'printing', updated_at = datetime('now', '-5 minutes')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Trying to enqueue again returns duplicate
+        let dup = enqueue_print_job(&db, "order_receipt", "ord-block", None).unwrap();
+        assert_eq!(dup["duplicate"], true);
+
+        // Recover the stale job
+        recover_stale_printing_jobs(&db).unwrap();
+
+        // After recovery it's 'pending', so re-enqueue still sees the existing pending job
+        let dup2 = enqueue_print_job(&db, "order_receipt", "ord-block", None).unwrap();
+        assert_eq!(dup2["duplicate"], true);
+        // But the job is now 'pending' and will actually be processed
+        let pending = list_print_jobs(&db, Some("pending")).unwrap();
+        assert_eq!(pending.as_array().unwrap().len(), 1);
     }
 }

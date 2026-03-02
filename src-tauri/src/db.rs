@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 22;
+const CURRENT_SCHEMA_VERSION: i32 = 23;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -167,6 +167,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 22 {
         migrate_v22(conn)?;
+    }
+    if current < 23 {
+        migrate_v23(conn)?;
     }
 
     Ok(())
@@ -1516,6 +1519,28 @@ fn migrate_v22(conn: &Connection) -> Result<(), String> {
     })?;
 
     info!("Applied migration v22 (loyalty settings, customers, transactions)");
+    Ok(())
+}
+
+/// Migration v23: Add ESC/POS code page override to printer_profiles.
+///
+/// Different printer models use different code page numbers for the same encoding
+/// (e.g. CP737 is code page 14 on Epson TM-T88III but code page 15 on Star mcPrint).
+/// This column lets users override the auto-detected code page number.
+fn migrate_v23(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        ALTER TABLE printer_profiles ADD COLUMN escpos_code_page INTEGER DEFAULT NULL;
+
+        INSERT INTO schema_version (version) VALUES (23);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v23 failed: {e}");
+        format!("migration v23: {e}")
+    })?;
+
+    info!("Applied migration v23 (printer_profiles.escpos_code_page)");
     Ok(())
 }
 

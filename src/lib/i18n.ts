@@ -3,6 +3,9 @@ import { initReactI18next } from 'react-i18next';
 
 import enTranslations from '../locales/en.json';
 import elTranslations from '../locales/el.json';
+import deTranslations from '../locales/de.json';
+import frTranslations from '../locales/fr.json';
+import itTranslations from '../locales/it.json';
 
 const resources = {
   en: {
@@ -10,6 +13,15 @@ const resources = {
   },
   el: {
     translation: elTranslations,
+  },
+  de: {
+    translation: deTranslations,
+  },
+  fr: {
+    translation: frTranslations,
+  },
+  it: {
+    translation: itTranslations,
   },
 };
 
@@ -19,7 +31,7 @@ const getInitialLanguage = (): string => {
   try {
     if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem('language');
-      if (stored && ['en', 'el'].includes(stored)) {
+      if (stored && ['en', 'el', 'de', 'fr', 'it'].includes(stored)) {
         return stored;
       }
     }
@@ -53,6 +65,9 @@ if (!i18n.isInitialized) {
 // (handles Vite HMR where the module re-evaluates but isInitialized is already true)
 i18n.addResourceBundle('en', 'translation', enTranslations, true, true);
 i18n.addResourceBundle('el', 'translation', elTranslations, true, true);
+i18n.addResourceBundle('de', 'translation', deTranslations, true, true);
+i18n.addResourceBundle('fr', 'translation', frTranslations, true, true);
+i18n.addResourceBundle('it', 'translation', itTranslations, true, true);
 
 /**
  * Update i18n language from database
@@ -61,7 +76,7 @@ i18n.addResourceBundle('el', 'translation', elTranslations, true, true);
 export function updateLanguageFromDatabase(settingsService: any): void {
   try {
     const language = settingsService.getLanguage();
-    if (language && ['en', 'el'].includes(language)) {
+    if (language && ['en', 'el', 'de', 'fr', 'it'].includes(language)) {
       i18n.changeLanguage(language);
       console.log(`[i18n] Language updated from database: ${language}`);
     }

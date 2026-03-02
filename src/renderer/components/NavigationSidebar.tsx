@@ -195,7 +195,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       orders: 'blue',
       menu: 'green',
       users: 'orange',
-      branches: 'purple',
       subscription: 'purple',
       settings: 'green',
 

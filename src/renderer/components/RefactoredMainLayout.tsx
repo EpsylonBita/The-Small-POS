@@ -137,7 +137,6 @@ const InventoryView = () => <InventoryPage />;
 const KitchenDisplayView = () => <KitchenDisplayPage />;
 
 // Placeholder views for modules not yet implemented
-const BranchesView = () => <ComingSoonView moduleName="Branches" />;
 const CustomerWebView = () => <ComingSoonView moduleName="Web Ordering" />;
 const CustomerAppView = () => <ComingSoonView moduleName="Mobile App" />;
 
@@ -233,7 +232,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     menu: MenuView,
     users: CustomersView,
     customers: CustomersView, // alias for users/staff management
-    branches: BranchesView,
     // settings is handled via modal, not a view
 
     // Restaurant vertical (lazy-loaded)

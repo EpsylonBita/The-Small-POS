@@ -117,6 +117,20 @@ pub struct KitchenTicketDoc {
     #[serde(default)]
     pub special_instructions: Option<String>,
     #[serde(default)]
+    pub delivery_city: Option<String>,
+    #[serde(default)]
+    pub delivery_postal_code: Option<String>,
+    #[serde(default)]
+    pub delivery_floor: Option<String>,
+    #[serde(default)]
+    pub name_on_ringer: Option<String>,
+    #[serde(default)]
+    pub driver_name: Option<String>,
+    #[serde(default)]
+    pub customer_name: Option<String>,
+    #[serde(default)]
+    pub customer_phone: Option<String>,
+    #[serde(default)]
     pub items: Vec<ReceiptItem>,
 }
 
@@ -176,6 +190,8 @@ pub struct LayoutConfig {
     pub organization_name: String,
     pub store_address: Option<String>,
     pub store_phone: Option<String>,
+    pub vat_number: Option<String>,
+    pub tax_office: Option<String>,
     pub footer_text: Option<String>,
     pub show_qr_code: bool,
     pub qr_data: Option<String>,
@@ -184,6 +200,9 @@ pub struct LayoutConfig {
     pub copy_label: Option<String>,
     pub character_set: String,
     pub greek_render_mode: Option<String>,
+    pub escpos_code_page: Option<u8>,
+    pub detected_brand: crate::printers::PrinterBrand,
+    pub language: String,
 }
 
 impl Default for LayoutConfig {
@@ -194,6 +213,8 @@ impl Default for LayoutConfig {
             organization_name: "The Small".to_string(),
             store_address: None,
             store_phone: None,
+            vat_number: None,
+            tax_office: None,
             footer_text: Some("Thank you".to_string()),
             show_qr_code: false,
             qr_data: None,
@@ -202,7 +223,186 @@ impl Default for LayoutConfig {
             copy_label: None,
             character_set: "PC437_USA".to_string(),
             greek_render_mode: None,
+            escpos_code_page: None,
+            detected_brand: crate::printers::PrinterBrand::Unknown,
+            language: "en".to_string(),
         }
+    }
+}
+
+/// Translate a receipt label to the given language.
+/// Returns the translated string for known keys, or the original key unchanged.
+pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
+    match lang {
+        "el" => match key {
+            "Order" => "\u{03A0}\u{03B1}\u{03C1}\u{03B1}\u{03B3}\u{03B3}\u{03B5}\u{03BB}\u{03AF}\u{03B1}",
+            "Type" => "\u{03A4}\u{03CD}\u{03C0}\u{03BF}\u{03C2}",
+            "Date" => "\u{0397}\u{03BC}/\u{03BD}\u{03AF}\u{03B1}",
+            "Table" => "\u{03A4}\u{03C1}\u{03B1}\u{03C0}\u{03AD}\u{03B6}\u{03B9}",
+            "Customer" => "\u{03A0}\u{03B5}\u{03BB}\u{03AC}\u{03C4}\u{03B7}\u{03C2}",
+            "DELIVERY" => "\u{03A0}\u{0391}\u{03A1}\u{0391}\u{0394}\u{039F}\u{03A3}\u{0397}",
+            "Driver" => "\u{039F}\u{03B4}\u{03B7}\u{03B3}\u{03CC}\u{03C2}",
+            "Address" => "\u{0394}\u{03B9}\u{03B5}\u{03CD}\u{03B8}\u{03C5}\u{03BD}\u{03C3}\u{03B7}",
+            "City" => "\u{03A0}\u{03CC}\u{03BB}\u{03B7}",
+            "Postal Code" => "\u{03A4}.\u{039A}.",
+            "Floor" => "\u{038C}\u{03C1}\u{03BF}\u{03C6}\u{03BF}\u{03C2}",
+            "Name on ringer" => "\u{039A}\u{03BF}\u{03C5}\u{03B4}\u{03BF}\u{03CD}\u{03BD}\u{03B9}",
+            "ITEMS" => "\u{0395}\u{0399}\u{0394}\u{0397}",
+            "TOTALS" => "\u{03A3}\u{03A5}\u{039D}\u{039F}\u{039B}\u{0391}",
+            "Subtotal" => "\u{03A5}\u{03C0}\u{03BF}\u{03C3}\u{03CD}\u{03BD}\u{03BF}\u{03BB}\u{03BF}",
+            "Discount" => "\u{0388}\u{03BA}\u{03C0}\u{03C4}\u{03C9}\u{03C3}\u{03B7}",
+            "Tax" => "\u{03A6}\u{03A0}\u{0391}",
+            "Delivery" => "\u{039C}\u{03B5}\u{03C4}\u{03B1}\u{03C6}\u{03BF}\u{03C1}\u{03B9}\u{03BA}\u{03AC}",
+            "Tip" => "\u{03A6}\u{03B9}\u{03BB}\u{03BF}\u{03B4}\u{03CE}\u{03C1}\u{03B7}\u{03BC}\u{03B1}",
+            "TOTAL" => "\u{03A3}\u{03A5}\u{039D}\u{039F}\u{039B}\u{039F}",
+            "PAYMENT" => "\u{03A0}\u{039B}\u{0397}\u{03A1}\u{03A9}\u{039C}\u{0397}",
+            "Cash" => "\u{039C}\u{03B5}\u{03C4}\u{03C1}\u{03B7}\u{03C4}\u{03AC}",
+            "Card" => "\u{039A}\u{03AC}\u{03C1}\u{03C4}\u{03B1}",
+            "Received" => "\u{0395}\u{03B9}\u{03C3}\u{03C0}\u{03C1}\u{03AC}\u{03C7}\u{03B8}\u{03B7}\u{03BA}\u{03B5}",
+            "Change" => "\u{03A1}\u{03AD}\u{03C3}\u{03C4}\u{03B1}",
+            "Other" => "\u{0386}\u{03BB}\u{03BB}\u{03BF}",
+            "ADJUSTMENTS" => "\u{03A0}\u{03A1}\u{039F}\u{03A3}\u{0391}\u{03A1}\u{039C}\u{039F}\u{0393}\u{0395}\u{03A3}",
+            "Void" => "\u{0391}\u{03BA}\u{03CD}\u{03C1}\u{03C9}\u{03C3}\u{03B7}",
+            "Refund" => "\u{0395}\u{03C0}\u{03B9}\u{03C3}\u{03C4}\u{03C1}\u{03BF}\u{03C6}\u{03AE}",
+            "VOID" => "\u{0391}\u{039A}\u{03A5}\u{03A1}\u{03A9}\u{03A3}\u{0397}",
+            "REFUND" => "\u{0395}\u{03A0}\u{0399}\u{03A3}\u{03A4}\u{03A1}\u{039F}\u{03A6}\u{0397}",
+            "Thank you" => "\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}",
+            "VAT" => "\u{0391}\u{03A6}\u{039C}",
+            "TAX_OFFICE" => "\u{0394}.\u{039F}.\u{03A5}",
+            "Shift" => "\u{0392}\u{03AC}\u{03C1}\u{03B4}\u{03B9}\u{03B1}",
+            "Staff" => "\u{03A0}\u{03C1}\u{03BF}\u{03C3}\u{03C9}\u{03C0}\u{03B9}\u{03BA}\u{03CC}",
+            "KITCHEN TICKET" => "\u{0394}\u{0395}\u{039B}\u{03A4}\u{0399}\u{039F} \u{039A}\u{039F}\u{03A5}\u{0396}\u{0399}\u{039D}\u{0391}\u{03A3}",
+            "Phone" => "\u{03A4}\u{03B7}\u{03BB}.",
+            "No items" => "\u{03A7}\u{03C9}\u{03C1}\u{03AF}\u{03C2} \u{03B5}\u{03AF}\u{03B4}\u{03B7}",
+            "Road" => "\u{039F}\u{03B4}\u{03CC}\u{03C2}",
+            "Ringer" => "\u{039A}\u{03BF}\u{03C5}\u{03B4}\u{03BF}\u{03CD}\u{03BD}\u{03B9}",
+            "Postal" => "\u{03A4}.\u{039A}.",
+            _ => key,
+        },
+        "de" => match key {
+            "Order" => "Bestellung",
+            "Type" => "Typ",
+            "Date" => "Datum",
+            "Table" => "Tisch",
+            "Customer" => "Kunde",
+            "DELIVERY" => "LIEFERUNG",
+            "Driver" => "Fahrer",
+            "Address" => "Adresse",
+            "City" => "Stadt",
+            "Postal Code" => "PLZ",
+            "Floor" => "Etage",
+            "Name on ringer" => "Name an Klingel",
+            "ITEMS" => "ARTIKEL",
+            "TOTALS" => "SUMMEN",
+            "Subtotal" => "Zwischensumme",
+            "Discount" => "Rabatt",
+            "Tax" => "MwSt",
+            "Delivery" => "Lieferung",
+            "Tip" => "Trinkgeld",
+            "TOTAL" => "GESAMT",
+            "PAYMENT" => "ZAHLUNG",
+            "Cash" => "Bar",
+            "Card" => "Karte",
+            "Received" => "Erhalten",
+            "Change" => "Wechselgeld",
+            "Other" => "Andere",
+            "ADJUSTMENTS" => "KORREKTUREN",
+            "Void" => "Storno",
+            "Refund" => "Erstattung",
+            "Thank you" => "Vielen Dank",
+            "VAT" => "USt-IdNr.",
+            "TAX_OFFICE" => "Finanzamt",
+            "KITCHEN TICKET" => "K\u{00DC}CHENBON",
+            "Phone" => "Tel.",
+            "No items" => "Keine Artikel",
+            "Road" => "Stra\u{00DF}e",
+            "Ringer" => "Klingel",
+            "Postal" => "PLZ",
+            _ => key,
+        },
+        "fr" => match key {
+            "Order" => "Commande",
+            "Type" => "Type",
+            "Date" => "Date",
+            "Table" => "Table",
+            "Customer" => "Client",
+            "DELIVERY" => "LIVRAISON",
+            "Driver" => "Livreur",
+            "Address" => "Adresse",
+            "City" => "Ville",
+            "Postal Code" => "Code postal",
+            "Floor" => "Etage",
+            "Name on ringer" => "Nom sur sonnette",
+            "ITEMS" => "ARTICLES",
+            "TOTALS" => "TOTAUX",
+            "Subtotal" => "Sous-total",
+            "Discount" => "Remise",
+            "Tax" => "TVA",
+            "Delivery" => "Livraison",
+            "Tip" => "Pourboire",
+            "TOTAL" => "TOTAL",
+            "PAYMENT" => "PAIEMENT",
+            "Cash" => "Especes",
+            "Card" => "Carte",
+            "Received" => "Recu",
+            "Change" => "Monnaie",
+            "Other" => "Autre",
+            "ADJUSTMENTS" => "AJUSTEMENTS",
+            "Void" => "Annulation",
+            "Refund" => "Remboursement",
+            "Thank you" => "Merci",
+            "VAT" => "TVA",
+            "TAX_OFFICE" => "Bureau fiscal",
+            "KITCHEN TICKET" => "BON CUISINE",
+            "Phone" => "T\u{00E9}l.",
+            "Road" => "Rue",
+            "Ringer" => "Sonnette",
+            "Postal" => "CP",
+            "No items" => "Aucun article",
+            _ => key,
+        },
+        "it" => match key {
+            "Order" => "Ordine",
+            "Type" => "Tipo",
+            "Date" => "Data",
+            "Table" => "Tavolo",
+            "Customer" => "Cliente",
+            "DELIVERY" => "CONSEGNA",
+            "Driver" => "Corriere",
+            "Address" => "Indirizzo",
+            "City" => "Citta",
+            "Postal Code" => "CAP",
+            "Floor" => "Piano",
+            "Name on ringer" => "Nome citofono",
+            "ITEMS" => "ARTICOLI",
+            "TOTALS" => "TOTALI",
+            "Subtotal" => "Subtotale",
+            "Discount" => "Sconto",
+            "Tax" => "IVA",
+            "Delivery" => "Consegna",
+            "Tip" => "Mancia",
+            "TOTAL" => "TOTALE",
+            "PAYMENT" => "PAGAMENTO",
+            "Cash" => "Contanti",
+            "Card" => "Carta",
+            "Received" => "Ricevuto",
+            "Change" => "Resto",
+            "Other" => "Altro",
+            "ADJUSTMENTS" => "RETTIFICHE",
+            "Void" => "Annullamento",
+            "Refund" => "Rimborso",
+            "Thank you" => "Grazie",
+            "VAT" => "P.IVA",
+            "TAX_OFFICE" => "Ufficio fiscale",
+            "KITCHEN TICKET" => "COMANDA CUCINA",
+            "Phone" => "Tel.",
+            "Road" => "Via",
+            "Ringer" => "Citofono",
+            "Postal" => "CAP",
+            "No items" => "Nessun articolo",
+            _ => key,
+        },
+        _ => key,
     }
 }
 
@@ -289,10 +489,9 @@ fn append_customizations_html(body: &mut String, item: &ReceiptItem) {
     }
 
     if !with_items.is_empty() {
-        body.push_str("<div class=\"note\">+ Ingredients</div>");
         for customization in with_items {
             body.push_str(&format!(
-                "<div class=\"note\">&nbsp;&nbsp;+ {}</div>",
+                "<div class=\"note\">+ {}</div>",
                 esc(&customization_display(customization, true))
             ));
         }
@@ -357,27 +556,75 @@ fn apply_character_set(
     builder: &mut EscPosBuilder,
     character_set: &str,
     greek_render_mode: Option<&str>,
+    escpos_code_page: Option<u8>,
+    brand: crate::printers::PrinterBrand,
 ) -> Vec<RenderWarning> {
     let mut warnings = Vec::new();
     let cs = character_set.trim().to_ascii_uppercase();
-    match cs.as_str() {
-        "PC437_USA" => builder.code_page(0),
-        "PC850_MULTILINGUAL" => builder.code_page(2),
-        "PC852_LATIN2" => builder.code_page(18),
-        "PC866_CYRILLIC" => builder.code_page(17),
-        "PC1252_LATIN1" => builder.code_page(16),
-        "PC737_GREEK" | "CP66_GREEK" | "PC851_GREEK" | "PC869_GREEK" | "PC1253_GREEK" => {
-            builder.greek_mode()
-        }
-        _ => {
-            builder.code_page(0);
-            warnings.push(RenderWarning {
-                code: "character_set_fallback".to_string(),
-                message: format!("Unsupported character set {cs}. Using PC437 fallback"),
-            });
-            builder
+    let is_star = brand == crate::printers::PrinterBrand::Star;
+
+    // When user provides an explicit code page override, use it directly.
+    // This lets users match the exact code page number for their printer model
+    // (e.g. CP737 = 14 on Epson TM-T88III, 15 on Star mcPrint, 17 on some others).
+    let is_greek = matches!(
+        cs.as_str(),
+        "PC737_GREEK" | "CP66_GREEK" | "PC851_GREEK" | "PC869_GREEK" | "PC1253_GREEK"
+    );
+
+    // Helper: select the right code page command for the printer brand.
+    // Star Line Mode uses ESC GS t n (0x1B 0x1D 0x74 n), whereas
+    // standard ESC/POS uses ESC t n (0x1B 0x74 n).
+    let set_code_page = |b: &mut EscPosBuilder, page: u8| {
+        if is_star {
+            b.star_code_page(page);
+        } else {
+            b.code_page(page);
         }
     };
+
+    if let Some(page) = escpos_code_page {
+        if is_greek {
+            set_code_page(builder, page);
+            builder.set_greek_mode(true);
+        } else {
+            set_code_page(builder, page);
+        }
+    } else {
+        // Default code page numbers (standard Epson ESC/POS)
+        match cs.as_str() {
+            "PC437_USA" => {
+                set_code_page(builder, 0);
+            }
+            "PC850_MULTILINGUAL" => {
+                set_code_page(builder, 2);
+            }
+            "PC852_LATIN2" => {
+                set_code_page(builder, 18);
+            }
+            "PC866_CYRILLIC" => {
+                set_code_page(builder, 17);
+            }
+            "PC1252_LATIN1" => {
+                set_code_page(builder, 16);
+            }
+            "PC737_GREEK" | "CP66_GREEK" | "PC851_GREEK" | "PC869_GREEK" | "PC1253_GREEK" => {
+                if is_star {
+                    builder.star_code_page(15);
+                } else {
+                    builder.code_page(14);
+                }
+                builder.set_greek_mode(true);
+            }
+            _ => {
+                set_code_page(builder, 0);
+                warnings.push(RenderWarning {
+                    code: "character_set_fallback".to_string(),
+                    message: format!("Unsupported character set {cs}. Using PC437 fallback"),
+                });
+            }
+        };
+    }
+
     if greek_render_mode
         .map(|v| v.trim().eq_ignore_ascii_case("bitmap"))
         .unwrap_or(false)
@@ -388,6 +635,94 @@ fn apply_character_set(
         });
     }
     warnings
+}
+
+/// Public wrapper for `apply_character_set` used by the Greek test print command.
+pub fn apply_character_set_for_test(
+    builder: &mut EscPosBuilder,
+    character_set: &str,
+    greek_render_mode: Option<&str>,
+    escpos_code_page: Option<u8>,
+    brand: crate::printers::PrinterBrand,
+) -> Vec<RenderWarning> {
+    apply_character_set(
+        builder,
+        character_set,
+        greek_render_mode,
+        escpos_code_page,
+        brand,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Auto-configuration helpers
+// ---------------------------------------------------------------------------
+
+/// Map app language code to the appropriate ESC/POS character set.
+///
+/// Used for plug-and-play auto-configuration: when the user hasn't manually
+/// set a character set and the app language is non-English, this provides
+/// the best default character set for that language.
+pub fn language_to_character_set(language: &str) -> &'static str {
+    match language.trim().to_ascii_lowercase().as_str() {
+        "el" => "PC737_GREEK",
+        "de" | "fr" | "it" | "es" | "pt" | "nl" => "PC850_MULTILINGUAL",
+        "ru" | "uk" | "bg" => "PC866_CYRILLIC",
+        "pl" | "cs" | "sk" | "hr" | "hu" | "ro" => "PC852_LATIN2",
+        _ => "PC437_USA",
+    }
+}
+
+/// Resolve the ESC/POS code page number for a (brand, character_set) pair.
+///
+/// Different printer brands assign different numbers to the same code page
+/// encoding. This lookup table is derived from the escpos-printer-db project
+/// and official programming manuals.
+///
+/// Returns `None` if the combination is unknown.
+pub fn resolve_auto_code_page(
+    brand: crate::printers::PrinterBrand,
+    character_set: &str,
+) -> Option<u8> {
+    use crate::printers::PrinterBrand::*;
+    let cs = character_set.trim().to_ascii_uppercase();
+
+    match cs.as_str() {
+        "PC437_USA" => Some(match brand {
+            Star => 1,
+            _ => 0,
+        }),
+        "PC737_GREEK" => Some(match brand {
+            Star => 15,
+            _ => 14,
+        }),
+        "PC850_MULTILINGUAL" => Some(match brand {
+            Star => 4,
+            _ => 2,
+        }),
+        "PC852_LATIN2" => Some(match brand {
+            Star => 5,
+            _ => 18,
+        }),
+        "PC866_CYRILLIC" => Some(match brand {
+            Star => 10,
+            _ => 17,
+        }),
+        "PC1252_LATIN1" => Some(match brand {
+            Star => 32,
+            _ => 16,
+        }),
+        "PC851_GREEK" => Some(match brand {
+            Star => 15, // Star maps both CP737 and CP851 to page 15
+            _ => 11,
+        }),
+        "PC869_GREEK" => Some(match brand {
+            Star => 17,
+            _ => 15,
+        }),
+        "PC1253_GREEK" | "CP66_GREEK" => None, // non-standard; use profile override
+        _ => None,
+    }
 }
 
 fn html_shell(title: &str, body: &str) -> String {
@@ -602,19 +937,191 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             html_shell("Order Receipt", &body)
         }
         ReceiptDocument::KitchenTicket(doc) => {
+            let lang = cfg.language.as_str();
+            // Store header
             let mut body = format!(
-                "<div class=\"center\"><strong>KITCHEN TICKET</strong></div>\
-                 <div class=\"section\"><div class=\"line\"><span>Order</span><span>#{}</span></div>\
-                 <div class=\"line\"><span>Type</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Date</span><span>{}</span></div></div>\
-                 <div class=\"{}\"><h3>Items</h3>",
-                esc(&doc.order_number),
-                esc(&doc.order_type),
-                esc(&doc.created_at),
-                section_cls
+                "<div class=\"center\"><strong>{}</strong></div>",
+                esc(&cfg.organization_name)
             );
+            if let Some(address) = cfg
+                .store_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!("<div class=\"center\">{}</div>", esc(address)));
+            }
+            if let Some(phone) = cfg
+                .store_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!("<div class=\"center\">{}</div>", esc(phone)));
+            }
+            if let Some(vat) = cfg
+                .vat_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"center\">{}: {}</div>",
+                    esc(receipt_label(lang, "VAT")),
+                    esc(vat)
+                ));
+            }
+            // Title
+            body.push_str(&format!(
+                "<div class=\"center\"><strong>{}</strong></div>",
+                esc(receipt_label(lang, "KITCHEN TICKET"))
+            ));
+            // Order info
+            body.push_str(&format!(
+                "<div class=\"section\">\
+                 <div class=\"line\"><span>{}</span><span>#{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "Order")),
+                esc(&doc.order_number),
+                esc(receipt_label(lang, "Type")),
+                esc(&doc.order_type),
+                esc(receipt_label(lang, "Date")),
+                esc(&doc.created_at),
+            ));
+            // Table number
+            if let Some(table) = doc
+                .table_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Table")),
+                    esc(table)
+                ));
+            }
+            // Customer info
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Customer")),
+                    esc(customer)
+                ));
+            }
+            if let Some(phone) = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Phone")),
+                    esc(phone)
+                ));
+            }
+            body.push_str("</div>");
+            // Delivery section
+            let is_delivery = doc.order_type.trim().eq_ignore_ascii_case("delivery");
+            if is_delivery {
+                body.push_str(&format!(
+                    "<div class=\"section\"><h3>{}</h3>",
+                    esc(receipt_label(lang, "DELIVERY"))
+                ));
+                // Driver first (bold value)
+                if let Some(driver) = doc
+                    .driver_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "Driver")),
+                        esc(driver)
+                    ));
+                }
+                // Address fields (bold values): Address → City → Postal → Floor → Ringer
+                if let Some(address) = doc
+                    .delivery_address
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "Address")),
+                        esc(address)
+                    ));
+                }
+                if let Some(city) = doc
+                    .delivery_city
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "City")),
+                        esc(city)
+                    ));
+                }
+                if let Some(postal) = doc
+                    .delivery_postal_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "Postal")),
+                        esc(postal)
+                    ));
+                }
+                if let Some(floor) = doc
+                    .delivery_floor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "Floor")),
+                        esc(floor)
+                    ));
+                }
+                if let Some(ringer) = doc
+                    .name_on_ringer
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                        esc(receipt_label(lang, "Ringer")),
+                        esc(ringer)
+                    ));
+                }
+                body.push_str("</div>");
+            }
+            // Items section
+            body.push_str(&format!(
+                "<div class=\"{}\"><h3>{}</h3>",
+                section_cls,
+                esc(receipt_label(lang, "ITEMS"))
+            ));
             if doc.items.is_empty() {
-                body.push_str("<div class=\"note\">No items</div>");
+                body.push_str(&format!(
+                    "<div class=\"note\">{}</div>",
+                    esc(receipt_label(lang, "No items"))
+                ));
             } else {
                 for item in &doc.items {
                     body.push_str(&format!(
@@ -634,7 +1141,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 }
             }
             body.push_str("</div>");
-            html_shell("Kitchen Ticket", &body)
+            html_shell(receipt_label(lang, "KITCHEN TICKET"), &body)
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let expected = doc
@@ -726,6 +1233,31 @@ fn emit_pair(builder: &mut EscPosBuilder, label: &str, value: &str, width: usize
         builder.text(&line).lf();
     }
     builder.right().text(value).lf().left();
+}
+
+/// Like `emit_pair` but prints the value in bold.
+fn emit_pair_bold(builder: &mut EscPosBuilder, label: &str, value: &str, width: usize) {
+    let label_len = label.chars().count();
+    let value_len = value.chars().count();
+    if label_len + value_len < width {
+        builder.text(label);
+        let gap = width.saturating_sub(label_len + value_len);
+        for _ in 0..gap {
+            builder.text(" ");
+        }
+        builder.bold(true).text(value).bold(false).lf();
+        return;
+    }
+    for line in wrap(label, width.saturating_sub(value_len + 1).max(8)) {
+        builder.text(&line).lf();
+    }
+    builder
+        .right()
+        .bold(true)
+        .text(value)
+        .bold(false)
+        .lf()
+        .left();
 }
 
 fn emit_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) {
@@ -820,11 +1352,10 @@ fn emit_item_customizations_escpos(builder: &mut EscPosBuilder, item: &ReceiptIt
     let (with_items, without_items) = split_customizations(item);
 
     if !with_items.is_empty() {
-        emit_wrapped(builder, "  + Ingredients", width);
         for customization in with_items {
             emit_wrapped(
                 builder,
-                &format!("    + {}", customization_display(customization, true)),
+                &format!("  + {}", customization_display(customization, true)),
                 width,
             );
         }
@@ -905,6 +1436,24 @@ fn emit_header(
     {
         builder.text(phone).lf();
     }
+    if let Some(vat) = cfg
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let vat_label = receipt_label(&cfg.language, "VAT");
+        builder.text(&format!("{vat_label}: {vat}")).lf();
+    }
+    if let Some(office) = cfg
+        .tax_office
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let office_label = receipt_label(&cfg.language, "TAX_OFFICE");
+        builder.text(&format!("{office_label}: {office}")).lf();
+    }
     builder.left().separator();
 }
 
@@ -917,26 +1466,40 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         &mut builder,
         &cfg.character_set,
         cfg.greek_render_mode.as_deref(),
+        cfg.escpos_code_page,
+        cfg.detected_brand,
     );
     emit_header(&mut builder, cfg, style, &mut warnings);
+
+    let lang = cfg.language.as_str();
 
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
             emit_pair(
                 &mut builder,
-                "Order",
+                receipt_label(lang, "Order"),
                 &format!("#{}", doc.order_number),
                 width,
             );
-            emit_pair(&mut builder, "Type", &doc.order_type, width);
-            emit_pair(&mut builder, "Date", &doc.created_at, width);
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Type"),
+                &doc.order_type,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Date"),
+                &doc.created_at,
+                width,
+            );
             if let Some(table) = doc
                 .table_number
                 .as_deref()
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(&mut builder, "Table", table, width);
+                emit_pair(&mut builder, receipt_label(lang, "Table"), table, width);
             }
             if let Some(customer) = doc
                 .customer_name
@@ -944,17 +1507,27 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(&mut builder, "Customer", customer, width);
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Customer"),
+                    customer,
+                    width,
+                );
             }
             if should_render_delivery_block(doc) {
-                emit_section_header(&mut builder, "DELIVERY", style, width);
+                emit_section_header(&mut builder, receipt_label(lang, "DELIVERY"), style, width);
                 if let Some(driver_name) = doc
                     .driver_name
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "Driver", driver_name, width);
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Driver"),
+                        driver_name,
+                        width,
+                    );
                 }
                 if let Some(address) = doc
                     .delivery_address
@@ -962,7 +1535,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "Address", address, width);
+                    emit_pair(&mut builder, receipt_label(lang, "Address"), address, width);
                 }
                 if let Some(city) = doc
                     .delivery_city
@@ -970,7 +1543,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "City", city, width);
+                    emit_pair(&mut builder, receipt_label(lang, "City"), city, width);
                 }
                 if let Some(postal_code) = doc
                     .delivery_postal_code
@@ -978,7 +1551,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "Postal Code", postal_code, width);
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Postal Code"),
+                        postal_code,
+                        width,
+                    );
                 }
                 if let Some(floor) = doc
                     .delivery_floor
@@ -986,7 +1564,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "Floor", floor, width);
+                    emit_pair(&mut builder, receipt_label(lang, "Floor"), floor, width);
                 }
                 if let Some(name_on_ringer) = doc
                     .name_on_ringer
@@ -994,10 +1572,15 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, "Name on ringer", name_on_ringer, width);
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Name on ringer"),
+                        name_on_ringer,
+                        width,
+                    );
                 }
             }
-            emit_section_header(&mut builder, "ITEMS", style, width);
+            emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
             if doc.items.is_empty() {
                 builder.text("No items").lf();
             } else {
@@ -1020,28 +1603,30 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     }
                 }
             }
-            emit_section_header(&mut builder, "TOTALS", style, width);
+            emit_section_header(&mut builder, receipt_label(lang, "TOTALS"), style, width);
             for total in &doc.totals {
+                let label = receipt_label(lang, &total.label);
                 if total.emphasize {
                     if style.modern && !style.compact_width {
                         builder.bold(true).double_height();
-                        emit_pair(&mut builder, &total.label, &money(total.amount), width);
+                        emit_pair(&mut builder, label, &money(total.amount), width);
                         builder.normal_size().bold(false);
                         continue;
                     }
                     builder.bold(true);
                 }
-                emit_pair(&mut builder, &total.label, &money(total.amount), width);
+                emit_pair(&mut builder, label, &money(total.amount), width);
                 if total.emphasize {
                     builder.bold(false);
                 }
             }
-            emit_section_header(&mut builder, "PAYMENT", style, width);
+            emit_section_header(&mut builder, receipt_label(lang, "PAYMENT"), style, width);
             if doc.payments.is_empty() {
                 builder.text("No payment recorded").lf();
             } else {
                 for payment in &doc.payments {
-                    emit_pair(&mut builder, &payment.label, &money(payment.amount), width);
+                    let label = receipt_label(lang, &payment.label);
+                    emit_pair(&mut builder, label, &money(payment.amount), width);
                 }
             }
             if let Some(masked) = doc
@@ -1050,14 +1635,20 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(&mut builder, "Card", masked, width);
+                emit_pair(&mut builder, receipt_label(lang, "Card"), masked, width);
             }
             if !doc.adjustments.is_empty() {
-                emit_section_header(&mut builder, "ADJUSTMENTS", style, width);
+                emit_section_header(
+                    &mut builder,
+                    receipt_label(lang, "ADJUSTMENTS"),
+                    style,
+                    width,
+                );
                 for adjustment in &doc.adjustments {
+                    let label = receipt_label(lang, &adjustment.label);
                     emit_pair(
                         &mut builder,
-                        &adjustment.label,
+                        label,
                         &format!("-{}", money(adjustment.amount)),
                         width,
                     );
@@ -1075,38 +1666,150 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
         }
         ReceiptDocument::KitchenTicket(doc) => {
+            let title = receipt_label(lang, "KITCHEN TICKET");
             if style.modern && !style.compact_width {
+                // Split translated title on first space for double-height effect
+                let (first, rest) = title.split_once(' ').unwrap_or((title, ""));
                 builder
                     .center()
                     .bold(true)
                     .double_height()
-                    .text("KITCHEN")
+                    .text(first)
                     .lf()
-                    .normal_size()
-                    .text("TICKET")
-                    .lf()
-                    .bold(false)
-                    .left();
+                    .normal_size();
+                if !rest.is_empty() {
+                    builder.text(rest).lf();
+                }
+                builder.bold(false).left();
             } else {
                 builder
                     .center()
                     .bold(true)
-                    .text("KITCHEN TICKET")
+                    .text(title)
                     .lf()
                     .bold(false)
                     .left();
             }
             emit_pair(
                 &mut builder,
-                "Order",
+                receipt_label(lang, "Order"),
                 &format!("#{}", doc.order_number),
                 width,
             );
-            emit_pair(&mut builder, "Type", &doc.order_type, width);
-            emit_pair(&mut builder, "Date", &doc.created_at, width);
-            emit_section_header(&mut builder, "ITEMS", style, width);
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Type"),
+                &doc.order_type,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Date"),
+                &doc.created_at,
+                width,
+            );
+            if let Some(table) = doc
+                .table_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                emit_pair(&mut builder, receipt_label(lang, "Table"), table, width);
+            }
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Customer"),
+                    customer,
+                    width,
+                );
+            }
+            if let Some(phone) = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+            }
+            // Delivery block
+            let is_delivery = doc.order_type.trim().eq_ignore_ascii_case("delivery");
+            if is_delivery {
+                emit_section_header(&mut builder, receipt_label(lang, "DELIVERY"), style, width);
+                // Driver first (bold value)
+                if let Some(driver_name) = doc
+                    .driver_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Driver"),
+                        driver_name,
+                        width,
+                    );
+                }
+                // Address fields (bold values): Address → City → Postal → Floor → Ringer
+                if let Some(address) = doc
+                    .delivery_address
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(&mut builder, receipt_label(lang, "Address"), address, width);
+                }
+                if let Some(city) = doc
+                    .delivery_city
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(&mut builder, receipt_label(lang, "City"), city, width);
+                }
+                if let Some(postal_code) = doc
+                    .delivery_postal_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Postal"),
+                        postal_code,
+                        width,
+                    );
+                }
+                if let Some(floor) = doc
+                    .delivery_floor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(&mut builder, receipt_label(lang, "Floor"), floor, width);
+                }
+                if let Some(name_on_ringer) = doc
+                    .name_on_ringer
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Ringer"),
+                        name_on_ringer,
+                        width,
+                    );
+                }
+            }
+            emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
             if doc.items.is_empty() {
-                builder.text("No items").lf();
+                builder.text(receipt_label(lang, "No items")).lf();
             } else {
                 for item in &doc.items {
                     emit_item_text(
@@ -1232,10 +1935,18 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         .filter(|v| !v.is_empty())
     {
         builder.separator().center();
-        emit_wrapped(&mut builder, footer, width);
+        // Translate the default "Thank you" footer; custom text passes through unchanged
+        let translated = receipt_label(lang, footer);
+        emit_wrapped(&mut builder, translated, width);
         builder.left();
     }
-    builder.feed(4).cut();
+    if cfg.detected_brand == crate::printers::PrinterBrand::Star {
+        // Star Line Mode: LF feed + ESC d 1 partial cut.
+        // Star does not recognize GS V A and prints literal "VA" text.
+        builder.lf().lf().lf().lf().star_cut();
+    } else {
+        builder.feed(4).cut();
+    }
 
     EscPosRender {
         bytes: builder.build(),
@@ -1362,13 +2073,16 @@ mod tests {
 
         let out = render_escpos(&doc, &LayoutConfig::default());
         let text = String::from_utf8_lossy(&out.bytes);
-        assert!(text.contains("+ Ingredients"));
+        assert!(
+            !text.contains("+ Ingredients"),
+            "should not print 'Ingredients' header"
+        );
         assert!(text.contains("- Without"));
         assert!(text.contains("Mushrooms"));
         assert!(text.contains("Onions"));
-        let plus_pos = text.find("+ Ingredients").unwrap_or(usize::MAX);
+        let mushroom_pos = text.find("Mushrooms").unwrap_or(usize::MAX);
         let without_pos = text.find("- Without").unwrap_or(usize::MAX);
-        assert!(plus_pos < without_pos);
+        assert!(mushroom_pos < without_pos);
     }
 
     #[test]

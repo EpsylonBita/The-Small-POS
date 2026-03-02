@@ -35,7 +35,7 @@ const CORE_SCREEN_IDS: Set<string> = new Set(NAVIGATION_CORE_SCREENS);
 export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   // Implemented modules
   'menu',
-  'users',        // Customer management (staff is under Branches/POS settings)
+  'users',        // Customer management (staff is handled in branch configuration)
   'reports',
   'analytics',    // Business analytics dashboard
   'orders',       // Order management
@@ -79,12 +79,28 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
 ]);
 
 /**
+ * Modules that are canonical in the platform but intentionally hidden in POS clients.
+ * They may still be returned by backend module APIs, so UI layers must defensively filter them.
+ */
+export const POS_EXCLUDED_MODULES: Set<string> = new Set([
+  'branches',
+]);
+
+/**
  * Modules that are planned but not yet implemented.
  * These will show as "Coming Soon" if enabled in the admin dashboard.
  */
-export const POS_COMING_SOON_MODULES: Set<string> = new Set([
-  'branches',
-]);
+export const POS_COMING_SOON_MODULES: Set<string> = new Set([]);
+
+/**
+ * Check if a module is explicitly excluded from POS surfaces.
+ *
+ * @param moduleId - The module identifier to check
+ * @returns true if the module must not appear in POS navigation/UI
+ */
+export function isModuleExcludedFromPos(moduleId: string): boolean {
+  return POS_EXCLUDED_MODULES.has(moduleId);
+}
 
 /**
  * Check if a module has an actual implementation in the POS system.
@@ -93,6 +109,7 @@ export const POS_COMING_SOON_MODULES: Set<string> = new Set([
  * @returns true if the module is implemented in the POS system
  */
 export function isModuleImplemented(moduleId: string): boolean {
+  if (isModuleExcludedFromPos(moduleId)) return false;
   return POS_IMPLEMENTED_MODULES.has(moduleId);
 }
 
@@ -103,6 +120,7 @@ export function isModuleImplemented(moduleId: string): boolean {
  * @returns true if the module is coming soon
  */
 export function isModuleComingSoon(moduleId: string): boolean {
+  if (isModuleExcludedFromPos(moduleId)) return false;
   return POS_COMING_SOON_MODULES.has(moduleId);
 }
 
@@ -114,6 +132,7 @@ export function isModuleComingSoon(moduleId: string): boolean {
  * @returns true if the module should appear in navigation
  */
 export function shouldShowInNavigation(moduleId: string): boolean {
+  if (isModuleExcludedFromPos(moduleId)) return false;
   return isModuleImplemented(moduleId) || isModuleComingSoon(moduleId);
 }
 

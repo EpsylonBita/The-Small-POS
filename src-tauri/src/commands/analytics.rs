@@ -548,19 +548,51 @@ pub async fn driver_get_active(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, staff_id, staff_name, branch_id, check_in_time
-             FROM staff_shifts
-             WHERE role_type = 'driver' AND status = 'active'
-               AND (?1 = '' OR branch_id = ?1)
-             ORDER BY check_in_time ASC",
+            "SELECT ss.id, ss.staff_id,
+                    COALESCE(
+                        NULLIF(TRIM(ss.staff_name), ''),
+                        (SELECT s2.staff_name FROM staff_shifts s2
+                         WHERE s2.staff_id = ss.staff_id
+                           AND TRIM(COALESCE(s2.staff_name, '')) <> ''
+                         ORDER BY s2.check_in_time DESC LIMIT 1)
+                    ) AS resolved_name,
+                    ss.branch_id, ss.check_in_time,
+                    COALESCE(oc.active_count, 0) AS active_order_count
+             FROM staff_shifts ss
+             LEFT JOIN (
+                 SELECT driver_id, COUNT(*) AS active_count
+                 FROM orders
+                 WHERE LOWER(COALESCE(order_type, '')) = 'delivery'
+                   AND LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', 'voided', 'delivered')
+                   AND driver_id IS NOT NULL
+                 GROUP BY driver_id
+             ) oc ON oc.driver_id = ss.staff_id
+             WHERE ss.role_type = 'driver' AND ss.status = 'active'
+               AND (?1 = '' OR ss.branch_id = ?1)
+             ORDER BY ss.check_in_time ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![branch_id], |row| {
+            let staff_id: String = row.get(1)?;
+            let staff_name: Option<String> = row.get(2)?;
+            let active_count: i64 = row.get(5)?;
+            let status = if active_count < 3 {
+                "available"
+            } else {
+                "busy"
+            };
             Ok(serde_json::json!({
+                // Fields matching the frontend Driver interface
+                "id": &staff_id,
+                "name": staff_name.as_deref().unwrap_or(""),
+                "phone": "",
+                "status": status,
+                "current_orders": active_count,
+                // Backward-compatible fields
                 "shiftId": row.get::<_, String>(0)?,
-                "staffId": row.get::<_, String>(1)?,
-                "staffName": row.get::<_, Option<String>>(2)?,
+                "staffId": &staff_id,
+                "staffName": &staff_name,
                 "branchId": row.get::<_, Option<String>>(3)?,
                 "checkInTime": row.get::<_, String>(4)?,
             }))

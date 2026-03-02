@@ -7,7 +7,7 @@ import { getBridge } from '../../../lib';
 interface Driver {
   id: string;
   name: string;
-  phone: string;
+  phone?: string;
   status: 'available' | 'busy' | 'offline';
   current_orders?: number;
 }
@@ -61,7 +61,16 @@ export const DriverAssignmentModal: React.FC<DriverAssignmentModalProps> = ({
         return;
       }
 
-      const normalized = (list as Driver[]).slice().sort((a, b) => (a?.name || '').localeCompare(b?.name || ''));
+      // Normalize field names: Rust returns staffId/staffName, frontend expects id/name/status
+      const mapped: Driver[] = list.map((d: any) => ({
+        id: d.id || d.staffId || d.staff_id || '',
+        name: d.name || d.staffName || d.staff_name || 'Unknown Driver',
+        phone: d.phone || '',
+        status: d.status || 'available',
+        current_orders: d.current_orders ?? d.currentOrders ?? 0,
+      }));
+
+      const normalized = mapped.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
       setDrivers(normalized);
     } catch (err) {
       setError(t('modals.driverAssignment.fetchFailed'));

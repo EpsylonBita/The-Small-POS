@@ -1,107 +1,344 @@
-import React, { memo, useState } from 'react';
+import React, { memo, useMemo, useState, useEffect, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
+import { Clock, User, Filter, RefreshCw, WifiOff } from 'lucide-react';
 import { useTheme } from '../../../contexts/theme-context';
-import { Clock, User, Filter } from 'lucide-react';
+import { posApiGet, posApiPatch } from '../../../utils/api-helpers';
+import { offEvent, onEvent } from '../../../../lib';
 
 type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'verified' | 'cancelled';
-// Priority matches DB schema: low, normal, high, urgent (not 'medium')
 type Priority = 'urgent' | 'high' | 'normal' | 'low';
 
 interface HousekeepingTask {
   id: string;
-  roomNumber: string;
-  taskType: 'cleaning' | 'turndown' | 'maintenance';
-  assignedStaff: string;
-  priority: Priority;
+  room_id: string | null;
+  room_number: string | null;
+  floor: number | null;
+  room_type: string | null;
+  task_type: string;
   status: TaskStatus;
-  estimatedTime: number;
+  priority: Priority;
+  assigned_staff_id: string | null;
+  assigned_staff_name: string | null;
+  checklist: Array<{ id: string; label: string; completed: boolean }> | null;
+  notes: string | null;
+  scheduled_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  verified_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
-const MOCK_TASKS: HousekeepingTask[] = Array.from({ length: 20 }, (_, i) => ({
-  id: `task-${i + 1}`,
-  roomNumber: `${Math.floor(i / 4) + 1}${String((i % 4) + 1).padStart(2, '0')}`,
-  taskType: (['cleaning', 'turndown', 'maintenance'] as const)[i % 3],
-  assignedStaff: ['Maria', 'Carlos', 'Anna', 'James'][i % 4],
-  priority: (['high', 'normal', 'low'] as Priority[])[i % 3],
-  status: (['pending', 'in_progress', 'completed'] as TaskStatus[])[i % 3],
-  estimatedTime: [30, 45, 60][i % 3],
-}));
+interface StaffMember {
+  id: string;
+  name: string;
+}
+
+const HOUSEKEEPING_REFRESH_MIN_MS = 30000;
 
 export const HousekeepingView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const [tasks, setTasks] = useState<HousekeepingTask[]>(MOCK_TASKS);
+  const isDark = resolvedTheme === 'dark';
+
+  const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
+
   const [floorFilter, setFloorFilter] = useState<string>('all');
   const [taskTypeFilter, setTaskTypeFilter] = useState<string>('all');
   const [priorityFilter, setPriorityFilter] = useState<string>('all');
   const [staffFilter, setStaffFilter] = useState<string>('all');
-  const isDark = resolvedTheme === 'dark';
 
-  const columns: { status: TaskStatus; label: string }[] = [
+  const priorityColors: Record<Priority, { bg: string; text: string }> = {
+    urgent: { bg: '#7f1d1d', text: '#fecaca' },
+    high: { bg: '#7c2d12', text: '#fed7aa' },
+    normal: { bg: '#78350f', text: '#fde68a' },
+    low: { bg: '#14532d', text: '#bbf7d0' },
+  };
+
+  const columns: Array<{ status: TaskStatus; label: string }> = [
     { status: 'pending', label: t('housekeepingView.status.pending', { defaultValue: 'Pending' }) },
     { status: 'in_progress', label: t('housekeepingView.status.inProgress', { defaultValue: 'In Progress' }) },
     { status: 'completed', label: t('housekeepingView.status.completed', { defaultValue: 'Completed' }) },
+    { status: 'verified', label: t('housekeepingView.status.verified', { defaultValue: 'Verified' }) },
   ];
 
-  const priorityColors: Record<Priority, string> = {
-    urgent: 'red',
-    high: 'orange',
-    normal: 'yellow',
-    low: 'green',
-  };
+  const fetchStaff = useCallback(async () => {
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
 
-  // Extract unique values for filters
-  const floors = [...new Set(tasks.map(t => t.roomNumber.charAt(0)))].sort();
-  const taskTypes = [...new Set(tasks.map(t => t.taskType))];
-  const staffMembers = [...new Set(tasks.map(t => t.assignedStaff))];
+    const response = await posApiGet<{
+      success: boolean;
+      staff?: Array<{ id: string; name: string; firstName?: string; lastName?: string }>;
+    }>(
+      `/api/pos/staff-schedule?start_date=${encodeURIComponent(weekStart.toISOString())}&end_date=${encodeURIComponent(weekEnd.toISOString())}`
+    );
 
-  // Filter tasks
-  const filteredTasks = tasks.filter(task => {
-    if (floorFilter !== 'all' && !task.roomNumber.startsWith(floorFilter)) return false;
-    if (taskTypeFilter !== 'all' && task.taskType !== taskTypeFilter) return false;
-    if (priorityFilter !== 'all' && task.priority !== priorityFilter) return false;
-    if (staffFilter !== 'all' && task.assignedStaff !== staffFilter) return false;
-    return true;
-  });
+    if (!response.success || !response.data?.success) {
+      return;
+    }
 
-  // Calculate stats
-  const completedToday = tasks.filter(t => t.status === 'completed').length;
-  const avgCompletionTime = 42; // Mock average completion time in minutes
+    const loadedStaff = (response.data.staff || []).map((member) => ({
+      id: member.id,
+      name: member.name || `${member.firstName || ''} ${member.lastName || ''}`.trim() || 'Staff',
+    }));
+    setStaff(loadedStaff);
+  }, []);
 
-  const moveTask = (taskId: string, newStatus: TaskStatus) => {
-    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
-  };
+  const fetchTasks = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent || false;
+    if (!silent) {
+      setIsLoading(true);
+      setError(null);
+    }
+
+    const response = await posApiGet<{
+      success: boolean;
+      tasks?: HousekeepingTask[];
+      error?: string;
+    }>('/api/pos/housekeeping?status=all');
+
+    if (!response.success || !response.data?.success) {
+      const errorMessage = response.error || response.data?.error || 'Failed to load housekeeping tasks';
+      if (!silent) {
+        setError(errorMessage);
+      }
+      if (!silent) {
+        toast.error(errorMessage);
+      }
+      setIsLoading(false);
+      return;
+    }
+
+    setTasks(response.data.tasks || []);
+    if (!silent) {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const bootstrap = async () => {
+      await Promise.all([fetchTasks(), fetchStaff()]);
+      if (disposed) return;
+      setIsLoading(false);
+    };
+
+    bootstrap();
+
+    return () => {
+      disposed = true;
+    };
+  }, [fetchTasks, fetchStaff]);
+
+  useEffect(() => {
+    let disposed = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastRefreshAt = Date.now();
+
+    const scheduleRefresh = (delayMs = 250) => {
+      if (disposed || pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        lastRefreshAt = Date.now();
+        void fetchTasks({ silent: true });
+      }, delayMs);
+    };
+
+    const handleSyncStatus = (status?: { inProgress?: boolean }) => {
+      if (status?.inProgress) return;
+      const now = Date.now();
+      if (now - lastRefreshAt < HOUSEKEEPING_REFRESH_MIN_MS) {
+        return;
+      }
+      scheduleRefresh(300);
+    };
+
+    const handleSyncComplete = () => {
+      scheduleRefresh(150);
+    };
+
+    onEvent('sync:status', handleSyncStatus);
+    onEvent('sync:complete', handleSyncComplete);
+
+    return () => {
+      disposed = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      offEvent('sync:status', handleSyncStatus);
+      offEvent('sync:complete', handleSyncComplete);
+    };
+  }, [fetchTasks]);
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    await Promise.all([fetchTasks({ silent: true }), fetchStaff()]);
+    setIsRefreshing(false);
+  }, [fetchTasks, fetchStaff]);
+
+  const handleStatusChange = useCallback(async (taskId: string, status: TaskStatus) => {
+    setUpdatingTaskId(taskId);
+    const response = await posApiPatch<{ success: boolean; error?: string }>(
+      '/api/pos/housekeeping',
+      { task_id: taskId, status }
+    );
+    if (!response.success || response.data?.success === false) {
+      toast.error(response.error || response.data?.error || 'Failed to update task');
+      setUpdatingTaskId(null);
+      return;
+    }
+
+    setTasks((prev) =>
+      prev.map((task) => (task.id === taskId ? { ...task, status, updated_at: new Date().toISOString() } : task))
+    );
+    setUpdatingTaskId(null);
+  }, []);
+
+  const handleAssignStaff = useCallback(async (taskId: string, staffId: string | null) => {
+    setUpdatingTaskId(taskId);
+    const response = await posApiPatch<{ success: boolean; error?: string }>(
+      `/api/pos/housekeeping/${taskId}`,
+      { assigned_staff_id: staffId }
+    );
+
+    if (!response.success || response.data?.success === false) {
+      toast.error(response.error || response.data?.error || 'Failed to assign staff');
+      setUpdatingTaskId(null);
+      return;
+    }
+
+    const staffName = staff.find((member) => member.id === staffId)?.name || null;
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId ? { ...task, assigned_staff_id: staffId, assigned_staff_name: staffName } : task
+      )
+    );
+    setUpdatingTaskId(null);
+  }, [staff]);
+
+  const floors = useMemo(
+    () => [...new Set(tasks.map((task) => String(task.floor ?? '')).filter(Boolean))].sort(),
+    [tasks]
+  );
+  const taskTypes = useMemo(
+    () => [...new Set(tasks.map((task) => task.task_type).filter(Boolean))].sort(),
+    [tasks]
+  );
+
+  const staffNames = useMemo(
+    () => [...new Set(tasks.map((task) => task.assigned_staff_name).filter(Boolean) as string[])].sort(),
+    [tasks]
+  );
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      if (floorFilter !== 'all' && String(task.floor ?? '') !== floorFilter) return false;
+      if (taskTypeFilter !== 'all' && task.task_type !== taskTypeFilter) return false;
+      if (priorityFilter !== 'all' && task.priority !== priorityFilter) return false;
+      if (staffFilter !== 'all' && (task.assigned_staff_name || 'unassigned') !== staffFilter) return false;
+      return true;
+    });
+  }, [tasks, floorFilter, taskTypeFilter, priorityFilter, staffFilter]);
+
+  const completedToday = useMemo(() => {
+    const today = new Date().toISOString().split('T')[0];
+    return tasks.filter((task) => (task.completed_at || '').startsWith(today)).length;
+  }, [tasks]);
+
+  const avgCompletionTime = useMemo(() => {
+    const completed = tasks
+      .map((task) => {
+        if (!task.started_at || !task.completed_at) return null;
+        const start = new Date(task.started_at).getTime();
+        const end = new Date(task.completed_at).getTime();
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+        return Math.round((end - start) / 60000);
+      })
+      .filter((duration): duration is number => duration !== null);
+    if (!completed.length) return 0;
+    return Math.round(completed.reduce((sum, value) => sum + value, 0) / completed.length);
+  }, [tasks]);
+
+  if (isLoading) {
+    return (
+      <div className={`h-full flex items-center justify-center ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+        <RefreshCw className="w-5 h-5 animate-spin mr-2" />
+        {t('housekeepingView.loading', { defaultValue: 'Loading housekeeping tasks...' })}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className={`h-full flex flex-col items-center justify-center ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+        <WifiOff className="w-10 h-10 mb-3" />
+        <p className="font-semibold mb-2">{t('housekeepingView.errorTitle', { defaultValue: 'Unable to load housekeeping tasks' })}</p>
+        <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{error}</p>
+        <button
+          onClick={() => fetchTasks()}
+          className="mt-4 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
+        >
+          {t('common.retry', { defaultValue: 'Retry' })}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col p-4">
-      {/* Stats */}
-      <div className="flex gap-4 mb-4">
-        <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-          <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('housekeepingView.stats.totalTasks', { defaultValue: 'Total Tasks' })}</div>
-          <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.length}</div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex gap-4">
+          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              {t('housekeepingView.stats.totalTasks', { defaultValue: 'Total Tasks' })}
+            </div>
+            <div className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{filteredTasks.length}</div>
+          </div>
+          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              {t('housekeepingView.stats.completedToday', { defaultValue: 'Completed Today' })}
+            </div>
+            <div className="text-xl font-bold text-green-500">{completedToday}</div>
+          </div>
+          <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+            <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              {t('housekeepingView.stats.avgTime', { defaultValue: 'Avg Time' })}
+            </div>
+            <div className="text-xl font-bold text-blue-500">{avgCompletionTime}min</div>
+          </div>
         </div>
-        <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-          <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('housekeepingView.stats.completedToday', { defaultValue: 'Completed Today' })}</div>
-          <div className={`text-xl font-bold text-green-500`}>{completedToday}</div>
-        </div>
-        <div className={`px-4 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-          <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{t('housekeepingView.stats.avgTime', { defaultValue: 'Avg Time' })}</div>
-          <div className={`text-xl font-bold text-blue-500`}>{avgCompletionTime}min</div>
-        </div>
+        <button
+          onClick={handleRefresh}
+          className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+          disabled={isRefreshing}
+          title={t('common.refresh', { defaultValue: 'Refresh' })}
+        >
+          <RefreshCw className={`w-5 h-5 ${isRefreshing ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
-      {/* Filters */}
-      <div className="flex gap-2 mb-4 flex-wrap">
-        <div className="flex items-center gap-1">
-          <Filter className={`w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-        </div>
+      <div className="flex gap-2 mb-4 flex-wrap items-center">
+        <Filter className={`w-4 h-4 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
         <select
           value={floorFilter}
           onChange={(e) => setFloorFilter(e.target.value)}
           className={`px-3 py-1.5 rounded-lg text-sm ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
         >
           <option value="all">{t('housekeepingView.filter.allFloors', { defaultValue: 'All Floors' })}</option>
-          {floors.map(f => <option key={f} value={f}>{t('housekeepingView.filter.floor', { defaultValue: 'Floor' })} {f}</option>)}
+          {floors.map((floor) => (
+            <option key={floor} value={floor}>
+              {t('housekeepingView.filter.floor', { defaultValue: 'Floor' })} {floor}
+            </option>
+          ))}
         </select>
         <select
           value={taskTypeFilter}
@@ -109,7 +346,9 @@ export const HousekeepingView: React.FC = memo(() => {
           className={`px-3 py-1.5 rounded-lg text-sm ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
         >
           <option value="all">{t('housekeepingView.filter.allTypes', { defaultValue: 'All Types' })}</option>
-          {taskTypes.map(type => <option key={type} value={type}>{type}</option>)}
+          {taskTypes.map((type) => (
+            <option key={type} value={type}>{type}</option>
+          ))}
         </select>
         <select
           value={priorityFilter}
@@ -128,48 +367,100 @@ export const HousekeepingView: React.FC = memo(() => {
           className={`px-3 py-1.5 rounded-lg text-sm ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
         >
           <option value="all">{t('housekeepingView.filter.allStaff', { defaultValue: 'All Staff' })}</option>
-          {staffMembers.map(staff => <option key={staff} value={staff}>{staff}</option>)}
+          <option value="unassigned">{t('housekeepingView.filter.unassigned', { defaultValue: 'Unassigned' })}</option>
+          {staffNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
         </select>
       </div>
 
-      {/* Kanban Board */}
-      <div className="flex-1 grid grid-cols-3 gap-4 overflow-hidden">
-        {columns.map(col => {
-          const columnTasks = filteredTasks.filter(t => t.status === col.status);
+      <div className="flex-1 grid grid-cols-2 xl:grid-cols-4 gap-4 overflow-hidden">
+        {columns.map((column) => {
+          const columnTasks = filteredTasks.filter((task) => task.status === column.status);
           return (
-            <div key={col.status} className="flex flex-col min-h-0">
+            <div key={column.status} className="flex flex-col min-h-0">
               <div className={`flex items-center gap-2 mb-3 px-3 py-2 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
-                <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{col.label}</span>
-                <span className={`ml-auto px-2 py-0.5 rounded-full text-sm ${isDark ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{column.label}</span>
+                <span className={`ml-auto px-2 py-0.5 rounded-full text-sm ${isDark ? 'bg-gray-700 text-gray-100' : 'bg-gray-100 text-gray-800'}`}>
                   {columnTasks.length}
                 </span>
               </div>
-              <div className="flex-1 overflow-y-auto space-y-2">
-                {columnTasks.map(task => (
-                  <div key={task.id} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white shadow-sm'}`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className={`font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>{t('housekeepingView.room', { defaultValue: 'Room' })} {task.roomNumber}</span>
-                      <span className={`px-2 py-0.5 rounded text-xs bg-${priorityColors[task.priority]}-500/10 text-${priorityColors[task.priority]}-500`}>
-                        {t(`housekeepingView.priority.${task.priority}`, { defaultValue: task.priority })}
-                      </span>
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+                {columnTasks.map((task) => {
+                  const priorityColor = priorityColors[task.priority] || priorityColors.normal;
+                  const isUpdating = updatingTaskId === task.id;
+                  const availableStaff = staff.length > 0 ? staff : [];
+                  return (
+                    <div key={task.id} className={`p-3 rounded-xl ${isDark ? 'bg-gray-800 border border-gray-700' : 'bg-white shadow-sm'}`}>
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <span className={`font-bold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                          {t('housekeepingView.room', { defaultValue: 'Room' })} {task.room_number || task.room_id || '-'}
+                        </span>
+                        <span
+                          className="px-2 py-0.5 rounded text-xs"
+                          style={{ backgroundColor: priorityColor.bg, color: priorityColor.text }}
+                        >
+                          {t(`housekeepingView.priority.${task.priority}`, { defaultValue: task.priority })}
+                        </span>
+                      </div>
+
+                      <div className={`text-sm capitalize ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                        {task.task_type}
+                      </div>
+
+                      <div className={`flex items-center gap-2 mt-2 text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                        <User className="w-3 h-3" />
+                        <span>{task.assigned_staff_name || t('housekeepingView.unassigned', { defaultValue: 'Unassigned' })}</span>
+                        <Clock className="w-3 h-3 ml-2" />
+                        <span>{task.floor ? `${t('housekeepingView.filter.floor', { defaultValue: 'Floor' })} ${task.floor}` : '-'}</span>
+                      </div>
+
+                      <div className="mt-2">
+                        <select
+                          disabled={isUpdating}
+                          value={task.assigned_staff_id || ''}
+                          onChange={(e) => handleAssignStaff(task.id, e.target.value || null)}
+                          className={`w-full px-2 py-1.5 rounded-lg text-xs ${isDark ? 'bg-gray-900 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
+                        >
+                          <option value="">{t('housekeepingView.assign.none', { defaultValue: 'Unassigned' })}</option>
+                          {availableStaff.map((member) => (
+                            <option key={member.id} value={member.id}>{member.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {column.status === 'pending' && (
+                        <button
+                          disabled={isUpdating}
+                          onClick={() => handleStatusChange(task.id, 'in_progress')}
+                          className="w-full mt-2 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          {t('housekeepingView.action.start', { defaultValue: 'Start' })}
+                        </button>
+                      )}
+
+                      {column.status === 'in_progress' && (
+                        <button
+                          disabled={isUpdating}
+                          onClick={() => handleStatusChange(task.id, 'completed')}
+                          className="w-full mt-2 py-1.5 text-xs rounded-lg bg-green-600 text-white hover:bg-green-700 disabled:opacity-60"
+                        >
+                          {t('housekeepingView.action.complete', { defaultValue: 'Complete' })}
+                        </button>
+                      )}
+
+                      {column.status === 'completed' && (
+                        <button
+                          disabled={isUpdating}
+                          onClick={() => handleStatusChange(task.id, 'verified')}
+                          className="w-full mt-2 py-1.5 text-xs rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-60"
+                        >
+                          {t('housekeepingView.action.verify', { defaultValue: 'Verify' })}
+                        </button>
+                      )}
                     </div>
-                    <div className={`text-sm capitalize ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>{task.taskType}</div>
-                    <div className="flex items-center gap-2 mt-2 text-xs">
-                      <User className="w-3 h-3" /><span>{task.assignedStaff}</span>
-                      <Clock className="w-3 h-3 ml-2" /><span>{task.estimatedTime}min</span>
-                    </div>
-                    {col.status !== 'completed' && (
-                      <button
-                        onClick={() => moveTask(task.id, col.status === 'pending' ? 'in_progress' : 'completed')}
-                        className="w-full mt-2 py-1.5 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700"
-                      >
-                        {col.status === 'pending' 
-                          ? t('housekeepingView.action.start', { defaultValue: 'Start' }) 
-                          : t('housekeepingView.action.complete', { defaultValue: 'Complete' })}
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );
@@ -180,4 +471,6 @@ export const HousekeepingView: React.FC = memo(() => {
 });
 
 HousekeepingView.displayName = 'HousekeepingView';
+
 export default HousekeepingView;
+

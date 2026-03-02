@@ -146,12 +146,12 @@ export function OrderApprovalPanel({
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
   const [fullOrder, setFullOrder] = React.useState<any>(order);
 
-  // Additional delivery fields
-  const deliveryCity = (order as any).delivery_city || '';
-  const deliveryPostalCode = (order as any).delivery_postal_code || '';
-  const deliveryFloor = (order as any).delivery_floor || '';
-  const deliveryNotes = (order as any).delivery_notes || '';
-  const nameOnRinger = (order as any).name_on_ringer || '';
+  // Additional delivery fields (snake_case from normalized data, camelCase from Rust backend)
+  const deliveryCity = (order as any).delivery_city || (order as any).deliveryCity || '';
+  const deliveryPostalCode = (order as any).delivery_postal_code || (order as any).deliveryPostalCode || '';
+  const deliveryFloor = (order as any).delivery_floor || (order as any).deliveryFloor || '';
+  const deliveryNotes = (order as any).delivery_notes || (order as any).deliveryNotes || '';
+  const nameOnRinger = (order as any).name_on_ringer || (order as any).nameOnRinger || '';
 
   // Log payment method for debugging
   console.log('[OrderApprovalPanel] order.payment_method:', (order as any).payment_method);

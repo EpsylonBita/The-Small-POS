@@ -211,20 +211,53 @@ pub(crate) fn cache_terminal_settings_snapshot(
         &[
             "/settings/restaurant/address",
             "/settings/terminal/store_address",
+            "/branch_info/address",
+            "/organization_branding/address",
         ],
     ) {
-        db::set_setting(&conn, "terminal", "store_address", &store_address)?;
-        updated.push("terminal.store_address".to_string());
+        // Compose "address, city" if branch_info provides both.
+        let city = nested_value_str(resp, &["/branch_info/city"]);
+        let full_address = if let Some(city) = city.as_deref().filter(|c| !c.is_empty()) {
+            if store_address.contains(city) {
+                store_address.clone()
+            } else {
+                format!("{store_address}, {city}")
+            }
+        } else {
+            store_address
+        };
+        db::set_setting(&conn, "restaurant", "address", &full_address)?;
+        db::set_setting(&conn, "terminal", "store_address", &full_address)?;
+        updated.push("restaurant.address".to_string());
     }
     if let Some(store_phone) = nested_value_str(
         resp,
         &[
             "/settings/restaurant/phone",
             "/settings/terminal/store_phone",
+            "/branch_info/phone",
+            "/organization_branding/phone",
         ],
     ) {
+        db::set_setting(&conn, "restaurant", "phone", &store_phone)?;
         db::set_setting(&conn, "terminal", "store_phone", &store_phone)?;
-        updated.push("terminal.store_phone".to_string());
+        updated.push("restaurant.phone".to_string());
+    }
+
+    // Branch tax_id → organization.vat_number (for receipt header).
+    // Falls back to organization_branding.vat_number when branch lacks tax_id.
+    if let Some(tax_id) = nested_value_str(
+        resp,
+        &["/branch_info/tax_id", "/organization_branding/vat_number"],
+    ) {
+        db::set_setting(&conn, "organization", "vat_number", &tax_id)?;
+        updated.push("organization.vat_number".to_string());
+    }
+
+    // Branch tax_office → organization.tax_office (for receipt header).
+    if let Some(tax_office) = nested_value_str(resp, &["/branch_info/tax_office"]) {
+        db::set_setting(&conn, "organization", "tax_office", &tax_office)?;
+        updated.push("organization.tax_office".to_string());
     }
 
     Ok(updated)

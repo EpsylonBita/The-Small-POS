@@ -3,8 +3,10 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface ActiveDriver {
   id: string;
+  name: string;
   shiftId: string;
   status: 'available' | 'busy';
+  current_orders: number;
   checkInTime: string;
 }
 
@@ -84,7 +86,17 @@ export function useActiveDrivers(
         console.warn('Invalid drivers data received, using empty array');
         list = [];
       }
-      setDrivers(list as ActiveDriver[]);
+
+      // Normalize field names: Rust returns staffId/staffName, hook expects id/name/status
+      const mapped: ActiveDriver[] = list.map((d: any) => ({
+        id: d.id || d.staffId || d.staff_id || '',
+        name: d.name || d.staffName || d.staff_name || '',
+        shiftId: d.shiftId || d.shift_id || '',
+        status: d.status || 'available',
+        current_orders: d.current_orders ?? d.currentOrders ?? 0,
+        checkInTime: d.checkInTime || d.check_in_time || '',
+      }));
+      setDrivers(mapped);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch active drivers';
       console.error('Error fetching active drivers:', err);

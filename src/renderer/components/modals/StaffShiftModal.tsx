@@ -1064,6 +1064,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       const result = await bridge.shifts.open({
         staffId: selectedStaff.id,
+        staffName: selectedStaff.name,
         branchId: resolvedBranchId,
         terminalId: resolvedTerminalId,
         roleType,

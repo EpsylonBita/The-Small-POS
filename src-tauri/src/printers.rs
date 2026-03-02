@@ -18,6 +18,114 @@ use uuid::Uuid;
 
 use crate::db::{self, DbState};
 
+// ---------------------------------------------------------------------------
+// Printer brand detection
+// ---------------------------------------------------------------------------
+
+/// Known printer brands for ESC/POS auto-configuration.
+///
+/// Different brands assign different code page numbers to the same encoding
+/// (e.g. CP737 Greek = 14 on Epson, 15 on Star). Auto-detecting the brand
+/// from the Windows printer name lets us pick the right number automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrinterBrand {
+    Epson,
+    Star,
+    Citizen,
+    Bixolon,
+    Custom,
+    Sewoo,
+    Rongta,
+    Xprinter,
+    Unknown,
+}
+
+impl PrinterBrand {
+    /// Human-readable label for logs and UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Epson => "Epson",
+            Self::Star => "Star",
+            Self::Citizen => "Citizen",
+            Self::Bixolon => "Bixolon",
+            Self::Custom => "Custom",
+            Self::Sewoo => "Sewoo",
+            Self::Rongta => "Rongta",
+            Self::Xprinter => "Xprinter",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// Detect printer brand from the Windows printer name.
+///
+/// Matches case-insensitively against known brand prefixes and model patterns
+/// (e.g. "Star MCP31", "EPSON TM-T88", "CT-S310II").
+pub fn detect_printer_brand(printer_name: &str) -> PrinterBrand {
+    let lower = printer_name.trim().to_ascii_lowercase();
+
+    // Star: "Star MCP31", "Star TSP143", "Star mC-Print3", "TSP650"
+    if lower.starts_with("star ")
+        || lower.starts_with("star_")
+        || lower.contains("mcprint")
+        || lower.contains("mcp31")
+        || lower.contains("mcp30")
+        || lower.contains("mcp20")
+        || lower.starts_with("tsp")
+        || lower.contains("star mc")
+    {
+        return PrinterBrand::Star;
+    }
+
+    // Epson: "EPSON TM-T88VI", "TM-T20III", "TM-m30"
+    if lower.starts_with("epson")
+        || lower.starts_with("tm-t")
+        || lower.starts_with("tm-m")
+        || lower.starts_with("tm-u")
+        || lower.starts_with("tm-l")
+        || lower.starts_with("tm-p")
+    {
+        return PrinterBrand::Epson;
+    }
+
+    // Citizen: "Citizen CT-S310II", "CT-S801", "CT-E351"
+    if lower.starts_with("citizen")
+        || lower.starts_with("ct-s")
+        || lower.starts_with("ct-e")
+        || lower.starts_with("ct-d")
+    {
+        return PrinterBrand::Citizen;
+    }
+
+    // Bixolon: "BIXOLON SRP-350III", "SRP-330", "Samsung SRP-"
+    if lower.starts_with("bixolon") || lower.starts_with("srp-") || lower.starts_with("samsung srp")
+    {
+        return PrinterBrand::Bixolon;
+    }
+
+    // Custom (Italian brand): "Custom K80", "Custom VKP80"
+    if lower.starts_with("custom ") || lower.starts_with("vkp80") {
+        return PrinterBrand::Custom;
+    }
+
+    // Sewoo: "Sewoo SLK-TS400"
+    if lower.starts_with("sewoo") || lower.starts_with("slk-") {
+        return PrinterBrand::Sewoo;
+    }
+
+    // Rongta: "Rongta RP326"
+    if lower.starts_with("rongta") {
+        return PrinterBrand::Rongta;
+    }
+
+    // Xprinter: "Xprinter XP-Q200", "XP-80C"
+    if lower.starts_with("xprinter") || lower.starts_with("xp-") {
+        return PrinterBrand::Xprinter;
+    }
+
+    PrinterBrand::Unknown
+}
+
 #[derive(Debug, Clone)]
 pub struct RawPrintResult {
     pub bytes_requested: usize,
@@ -594,6 +702,11 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .get("connectionJson")
         .or_else(|| profile.get("connection_json"))
         .and_then(|v| v.as_str());
+    let escpos_code_page: Option<i32> = profile
+        .get("escposCodePage")
+        .or_else(|| profile.get("escpos_code_page"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
 
     if driver_type != "windows" && driver_type != "escpos" {
         return Err(format!(
@@ -622,9 +735,10 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
                                        printer_type, role, is_default, enabled,
                                        character_set, greek_render_mode, receipt_template,
                                        fallback_printer_id, connection_json,
+                                       escpos_code_page,
                                        created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22)",
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23)",
         params![
             id,
             &name,
@@ -647,6 +761,7 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
             receipt_template,
             fallback_printer_id,
             connection_json,
+            escpos_code_page,
             now,
         ],
     )
@@ -841,6 +956,18 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         sets.push("connection_json = ?");
         vals.push(Box::new(v.to_string()));
     }
+    // ESC/POS code page override — accept null to clear
+    if profile.get("escposCodePage").is_some() || profile.get("escpos_code_page").is_some() {
+        let raw = profile
+            .get("escposCodePage")
+            .or_else(|| profile.get("escpos_code_page"));
+        if raw.map(|v| v.is_null()).unwrap_or(false) {
+            sets.push("escpos_code_page = NULL");
+        } else if let Some(v) = raw.and_then(|v| v.as_i64()) {
+            sets.push("escpos_code_page = ?");
+            vals.push(Box::new(v as i32));
+        }
+    }
 
     if sets.is_empty() && requested_default.is_none() {
         return Err("No fields to update".into());
@@ -927,7 +1054,8 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
                     created_at, updated_at,
                     printer_type, role, is_default, enabled,
                     character_set, greek_render_mode, receipt_template,
-                    fallback_printer_id, connection_json
+                    fallback_printer_id, connection_json,
+                    escpos_code_page
              FROM printer_profiles ORDER BY created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -958,6 +1086,7 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
                 "receiptTemplate": row.get::<_, Option<String>>(20)?,
                 "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
                 "connectionJson": row.get::<_, Option<String>>(22)?,
+                "escposCodePage": row.get::<_, Option<i32>>(23)?,
             }))
         })
         .map_err(|e| e.to_string())?
@@ -978,7 +1107,8 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
                 created_at, updated_at,
                 printer_type, role, is_default, enabled,
                 character_set, greek_render_mode, receipt_template,
-                fallback_printer_id, connection_json
+                fallback_printer_id, connection_json,
+                escpos_code_page
          FROM printer_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
@@ -1006,6 +1136,7 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
                 "receiptTemplate": row.get::<_, Option<String>>(20)?,
                 "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
                 "connectionJson": row.get::<_, Option<String>>(22)?,
+                "escposCodePage": row.get::<_, Option<i32>>(23)?,
             }))
         },
     )
@@ -1714,5 +1845,57 @@ mod tests {
             }),
         );
         assert!(update_err.is_err());
+    }
+
+    #[test]
+    fn test_detect_printer_brand_star() {
+        assert_eq!(detect_printer_brand("Star MCP31"), PrinterBrand::Star);
+        assert_eq!(detect_printer_brand("STAR MC-PRINT3"), PrinterBrand::Star);
+        assert_eq!(detect_printer_brand("TSP143IIILAN"), PrinterBrand::Star);
+        assert_eq!(detect_printer_brand("star mcprint"), PrinterBrand::Star);
+        assert_eq!(detect_printer_brand("Star_TSP100"), PrinterBrand::Star);
+    }
+
+    #[test]
+    fn test_detect_printer_brand_epson() {
+        assert_eq!(detect_printer_brand("EPSON TM-T88VI"), PrinterBrand::Epson);
+        assert_eq!(detect_printer_brand("TM-T20III"), PrinterBrand::Epson);
+        assert_eq!(detect_printer_brand("TM-m30II"), PrinterBrand::Epson);
+        assert_eq!(detect_printer_brand("Epson Receipt"), PrinterBrand::Epson);
+    }
+
+    #[test]
+    fn test_detect_printer_brand_citizen() {
+        assert_eq!(
+            detect_printer_brand("Citizen CT-S310II"),
+            PrinterBrand::Citizen
+        );
+        assert_eq!(detect_printer_brand("CT-S801"), PrinterBrand::Citizen);
+    }
+
+    #[test]
+    fn test_detect_printer_brand_others() {
+        assert_eq!(
+            detect_printer_brand("BIXOLON SRP-350"),
+            PrinterBrand::Bixolon
+        );
+        assert_eq!(
+            detect_printer_brand("Xprinter XP-Q200"),
+            PrinterBrand::Xprinter
+        );
+        assert_eq!(detect_printer_brand("XP-80C"), PrinterBrand::Xprinter);
+    }
+
+    #[test]
+    fn test_detect_printer_brand_unknown() {
+        assert_eq!(
+            detect_printer_brand("Generic POS-80"),
+            PrinterBrand::Unknown
+        );
+        assert_eq!(
+            detect_printer_brand("Some Random Printer"),
+            PrinterBrand::Unknown
+        );
+        assert_eq!(detect_printer_brand("POS-58"), PrinterBrand::Unknown);
     }
 }

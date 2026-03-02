@@ -87,16 +87,35 @@ impl EscPosBuilder {
         self
     }
 
-    /// ESC t n — Select character code page.
+    /// ESC t n — Select character code page (standard ESC/POS).
     pub fn code_page(&mut self, page: u8) -> &mut Self {
         self.buffer.extend_from_slice(&[ESC, 0x74, page]);
         self
     }
 
+    /// ESC GS t n — Select character code page (Star Line Mode).
+    ///
+    /// Star printers in native Star Line Mode use a different command from
+    /// standard ESC/POS. This sends `1B 1D 74 n` instead of `1B 74 n`.
+    pub fn star_code_page(&mut self, page: u8) -> &mut Self {
+        self.buffer.extend_from_slice(&[ESC, GS, 0x74, page]);
+        self
+    }
+
     /// Set code page to CP737 (Greek) and enable Greek text encoding.
+    ///
+    /// Uses code page 14 which is the default for CP737 on many Epson models.
+    /// For printers that use a different number (e.g. Star mcPrint uses 15),
+    /// call `code_page(n)` + `set_greek_mode(true)` directly.
     pub fn greek_mode(&mut self) -> &mut Self {
-        self.code_page(14); // CP737
+        self.code_page(14); // CP737 — default for Epson TM-T88III
         self.greek_mode = true;
+        self
+    }
+
+    /// Enable or disable Greek text encoding without changing the code page.
+    pub fn set_greek_mode(&mut self, enabled: bool) -> &mut Self {
+        self.greek_mode = enabled;
         self
     }
 
@@ -209,7 +228,11 @@ impl EscPosBuilder {
     /// Print a line with left-aligned label and right-aligned value.
     pub fn line_pair(&mut self, label: &str, value: &str) -> &mut Self {
         let width = self.paper.chars();
-        let gap = width.saturating_sub(label.len() + value.len());
+        // Use character count (not UTF-8 byte length) so that multi-byte
+        // characters like Greek letters are measured correctly for alignment.
+        let label_chars = label.chars().count();
+        let value_chars = value.chars().count();
+        let gap = width.saturating_sub(label_chars + value_chars);
         self.text(label);
         for _ in 0..gap {
             self.buffer.push(b' ');
@@ -257,6 +280,73 @@ impl EscPosBuilder {
         self
     }
 
+    /// Print a raster image using **Star Line Mode** raster protocol.
+    ///
+    /// Works on all Star printers regardless of emulation mode (Star Line,
+    /// StarPRNT, or ESC/POS compatibility).  The protocol matches the
+    /// battle-tested [StarTSPImage](https://github.com/geftactics/python-StarTSPImage) library:
+    ///
+    /// ```text
+    /// ESC * r A             — enter raster mode
+    /// ESC * r P '0' NUL    — continuous mode (no page boundary)
+    /// ESC * r E '1' NUL    — disable auto-cut on raster exit
+    /// b nL nH [row_data]   — one raster line (repeated per row)
+    /// ESC * r B             — exit raster mode (no page advance, no cut)
+    /// ```
+    ///
+    /// The `ESC * r P '0' NUL` command sets **continuous mode** — the printer
+    /// has no fixed page length, so `ESC * r B` exits without any paper
+    /// advance.  Without this, the printer advances to fill a default
+    /// raster page (~2400 dots ≈ 30 cm of blank paper).
+    ///
+    /// `width_bytes` = ceil(image_width_pixels / 8).
+    /// `data` layout is identical to `raster_image` (row-major, MSB first).
+    pub fn star_raster_image(
+        &mut self,
+        width_bytes: u16,
+        height_dots: u16,
+        data: &[u8],
+    ) -> &mut Self {
+        let wb = width_bytes as usize;
+        let n_l = (width_bytes & 0x00FF) as u8;
+        let n_h = ((width_bytes >> 8) & 0x00FF) as u8;
+
+        // ESC * r A — enter raster mode
+        self.raw(&[ESC, b'*', b'r', b'A']);
+        // ESC * r P '0' NUL — continuous mode (no page boundary).
+        // The '0' is ASCII 0x30, NOT a binary zero.  This tells the printer
+        // there is no fixed page length, so ESC * r B exits without the
+        // automatic page advance that causes ~25 cm of blank paper.
+        self.raw(&[ESC, b'*', b'r', b'P', b'0', 0x00]);
+        // ESC * r E '1' NUL — disable auto-cut after raster exit.
+        // Star mC-Print3 auto-cuts on ESC * r B by default; this prevents
+        // a paper cut between the logo and the receipt text.
+        self.raw(&[ESC, b'*', b'r', b'E', b'1', 0x00]);
+
+        for row in 0..height_dots as usize {
+            let start = row * wb;
+            let end = (start + wb).min(data.len());
+            // b nL nH [row_data]
+            self.raw(&[b'b', n_l, n_h]);
+            if start < data.len() {
+                self.raw(&data[start..end]);
+                // Pad if row data is short
+                if end - start < wb {
+                    let padding = vec![0u8; wb - (end - start)];
+                    self.raw(&padding);
+                }
+            } else {
+                // Blank row
+                let blank = vec![0u8; wb];
+                self.raw(&blank);
+            }
+        }
+        // ESC * r B — exit raster mode.  With continuous mode active,
+        // no page advance occurs.
+        self.raw(&[ESC, b'*', b'r', b'B']);
+        self
+    }
+
     // -----------------------------------------------------------------------
     // Feed / cut
     // -----------------------------------------------------------------------
@@ -276,6 +366,15 @@ impl EscPosBuilder {
     /// GS V 0 — Full cut.
     pub fn full_cut(&mut self) -> &mut Self {
         self.buffer.extend_from_slice(&[GS, 0x56, 0x00]);
+        self
+    }
+
+    /// ESC d 1 — Partial cut (Star Line Mode).
+    ///
+    /// Star printers do not recognize the Epson `GS V A` cut command and will
+    /// print its bytes as literal "VA" text.  Use this method for Star printers.
+    pub fn star_cut(&mut self) -> &mut Self {
+        self.buffer.extend_from_slice(&[ESC, 0x64, 0x01]);
         self
     }
 
@@ -450,6 +549,16 @@ mod tests {
             b.build()
         };
         assert_eq!(data, vec![0x1D, 0x56, 0x41, 0x10]);
+    }
+
+    #[test]
+    fn test_star_cut() {
+        let data = {
+            let mut b = EscPosBuilder::new();
+            b.star_cut();
+            b.build()
+        };
+        assert_eq!(data, vec![0x1B, 0x64, 0x01]);
     }
 
     #[test]

@@ -764,6 +764,45 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               >
                 EL
               </button>
+              <button
+                onClick={() => {
+                  setLanguage('de')
+                  toast.success(t('modals.connectionSettings.languageSaved'))
+                }}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'de'
+                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                  }`}
+                title={t('settings.display.langGerman')}
+              >
+                DE
+              </button>
+              <button
+                onClick={() => {
+                  setLanguage('fr')
+                  toast.success(t('modals.connectionSettings.languageSaved'))
+                }}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'fr'
+                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                  }`}
+                title={t('settings.display.langFrench')}
+              >
+                FR
+              </button>
+              <button
+                onClick={() => {
+                  setLanguage('it')
+                  toast.success(t('modals.connectionSettings.languageSaved'))
+                }}
+                className={`px-3 py-2 rounded-lg transition-all font-medium text-sm ${currentLanguage === 'it'
+                  ? 'bg-blue-500/30 border-2 border-blue-400 shadow-[0_0_12px_rgba(59,130,246,0.5)] text-blue-300'
+                  : 'bg-white/10 border border-gray-600 hover:bg-white/20 text-gray-400'
+                  }`}
+                title={t('settings.display.langItalian')}
+              >
+                IT
+              </button>
             </div>
           </div>
         </div>

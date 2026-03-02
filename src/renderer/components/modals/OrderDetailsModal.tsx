@@ -95,34 +95,36 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const items = displayOrder.items || displayOrder.order_items || [];
   const customer = displayOrder.customer || {};
 
-  // Get customer info from various sources
-  const customerName = customer.name || displayOrder.customer_name || '';
-  const customerPhone = customer.phone || displayOrder.customer_phone || '';
+  // Get customer info from various sources (snake_case from prop, camelCase from Rust backend)
+  const customerName = customer.name || displayOrder.customer_name || displayOrder.customerName || '';
+  const customerPhone = customer.phone || displayOrder.customer_phone || displayOrder.customerPhone || '';
 
   // Build delivery address object from various field patterns
-  // Check for any delivery address field to determine if we have address data
-  const hasDeliveryAddress = displayOrder.delivery_address || 
-    displayOrder.delivery_city || 
-    displayOrder.delivery_postal_code || 
-    displayOrder.delivery_floor ||
-    displayOrder.delivery_notes ||
-    displayOrder.name_on_ringer;
-    
+  // Rust backend returns camelCase (deliveryCity), props may use snake_case (delivery_city)
+  const rawAddress = displayOrder.delivery_address || displayOrder.deliveryAddress;
+  const rawCity = displayOrder.delivery_city || displayOrder.deliveryCity || '';
+  const rawPostalCode = displayOrder.delivery_postal_code || displayOrder.deliveryPostalCode || '';
+  const rawFloor = displayOrder.delivery_floor || displayOrder.deliveryFloor || '';
+  const rawNotes = displayOrder.delivery_notes || displayOrder.deliveryNotes || '';
+  const rawRinger = displayOrder.name_on_ringer || displayOrder.nameOnRinger || '';
+
+  const hasDeliveryAddress = rawAddress || rawCity || rawPostalCode || rawFloor || rawNotes || rawRinger;
+
   const deliveryAddress = hasDeliveryAddress ? {
-    address: typeof displayOrder.delivery_address === 'string' ? displayOrder.delivery_address : (displayOrder.delivery_address?.address || ''),
-    city: displayOrder.delivery_city || displayOrder.delivery_address?.city || '',
-    postal_code: displayOrder.delivery_postal_code || displayOrder.delivery_address?.postal_code || '',
-    floor: displayOrder.delivery_floor || displayOrder.delivery_address?.floor || '',
-    notes: displayOrder.delivery_notes || displayOrder.delivery_address?.notes || '',
-    name_on_ringer: displayOrder.name_on_ringer || displayOrder.delivery_address?.name_on_ringer || '',
+    address: typeof rawAddress === 'string' ? rawAddress : (rawAddress?.address || ''),
+    city: rawCity || rawAddress?.city || '',
+    postal_code: rawPostalCode || rawAddress?.postal_code || '',
+    floor: rawFloor || rawAddress?.floor || '',
+    notes: rawNotes || rawAddress?.notes || '',
+    name_on_ringer: rawRinger || rawAddress?.name_on_ringer || '',
   } : {};
 
   const subtotal = displayOrder.subtotal || 0;
-  const tax = displayOrder.tax || displayOrder.tax_amount || 0;
-  const deliveryFee = displayOrder.delivery_fee || 0;
-  const discountAmount = displayOrder.discount_amount || 0;
-  const discountPercentage = displayOrder.discount_percentage || 0;
-  const total = displayOrder.total || displayOrder.total_amount || 0;
+  const tax = displayOrder.tax || displayOrder.tax_amount || displayOrder.taxAmount || 0;
+  const deliveryFee = displayOrder.delivery_fee || displayOrder.deliveryFee || 0;
+  const discountAmount = displayOrder.discount_amount || displayOrder.discountAmount || 0;
+  const discountPercentage = displayOrder.discount_percentage || displayOrder.discountPercentage || 0;
+  const total = displayOrder.total || displayOrder.total_amount || displayOrder.totalAmount || 0;
   // Calculate original subtotal before discount (for display purposes)
   const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
   const status = displayOrder.status || 'pending';

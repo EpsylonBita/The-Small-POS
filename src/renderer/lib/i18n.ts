@@ -1,9 +1,10 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const enTranslations = require('../../locales/en.json')
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const elTranslations = require('../../locales/el.json')
+import enTranslations from '../../locales/en.json'
+import elTranslations from '../../locales/el.json'
+import deTranslations from '../../locales/de.json'
+import frTranslations from '../../locales/fr.json'
+import itTranslations from '../../locales/it.json'
 
 // Read persisted language from localStorage before initialization
 const savedLanguage = localStorage.getItem('language') || 'en'
@@ -17,6 +18,15 @@ i18n
       },
       el: {
         translation: elTranslations
+      },
+      de: {
+        translation: deTranslations
+      },
+      fr: {
+        translation: frTranslations
+      },
+      it: {
+        translation: itTranslations
       }
     },
     lng: savedLanguage, // Use persisted language or default to 'en'

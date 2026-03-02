@@ -4,7 +4,7 @@ import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
 import { getBridge } from '../../lib';
 
-type SupportedLanguage = 'en' | 'el';
+type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it';
 
 /**
  * Decode the connection string from admin dashboard
@@ -164,6 +164,36 @@ const OnboardingPage: React.FC = () => {
                             >
                                 <span className="text-lg font-medium">{t('onboarding.language.greek', { defaultValue: 'Greek' })}</span>
                                 {language === 'el' && <Check className="w-4 h-4" aria-hidden="true" />}
+                            </button>
+                            <button
+                                onClick={() => handleLanguageSelect('de')}
+                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'de'
+                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                    }`}
+                            >
+                                <span className="text-lg font-medium">{t('onboarding.language.german', { defaultValue: 'Deutsch' })}</span>
+                                {language === 'de' && <Check className="w-4 h-4" aria-hidden="true" />}
+                            </button>
+                            <button
+                                onClick={() => handleLanguageSelect('fr')}
+                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'fr'
+                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                    }`}
+                            >
+                                <span className="text-lg font-medium">{t('onboarding.language.french', { defaultValue: 'Français' })}</span>
+                                {language === 'fr' && <Check className="w-4 h-4" aria-hidden="true" />}
+                            </button>
+                            <button
+                                onClick={() => handleLanguageSelect('it')}
+                                className={`p-4 rounded-xl border-2 transition-all flex items-center justify-between ${language === 'it'
+                                    ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                                    : 'border-slate-600 hover:border-slate-500 hover:bg-slate-700'
+                                    }`}
+                            >
+                                <span className="text-lg font-medium">{t('onboarding.language.italian', { defaultValue: 'Italiano' })}</span>
+                                {language === 'it' && <Check className="w-4 h-4" aria-hidden="true" />}
                             </button>
                         </div>
                     </div>

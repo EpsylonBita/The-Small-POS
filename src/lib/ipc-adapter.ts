@@ -305,6 +305,7 @@ export interface RecordPaymentParams {
 
 export interface OpenShiftParams {
   staffId: string;
+  staffName?: string;
   openingCash: number;
   branchId: string;
   terminalId: string;
@@ -676,7 +677,8 @@ export interface PlatformBridge {
     cancelJob(jobId: string): Promise<IpcResult>;
     retryJob(jobId: string): Promise<IpcResult>;
     test(printerId: string): Promise<IpcResult>;
-    testGreekDirect(mode: string, printerName?: string): Promise<IpcResult>;
+    testGreekDirect(printerId: string): Promise<IpcResult>;
+    getAutoConfig(printerId: string): Promise<any>;
     diagnostics(printerId: string): Promise<any>;
     bluetoothStatus(): Promise<{ available: boolean; error?: string }>;
     openCashDrawer(printerId?: string, drawerNumber?: 1 | 2): Promise<IpcResult>;
@@ -1090,6 +1092,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'printer:retry-job': 'printer.retryJob',
   'printer:test': 'printer.test',
   'printer:test-greek-direct': 'printer.testGreekDirect',
+  'printer:get-auto-config': 'printer.getAutoConfig',
   'printer:diagnostics': 'printer.diagnostics',
   'printer:bluetooth-status': 'printer.bluetoothStatus',
   'printer:open-cash-drawer': 'printer.openCashDrawer',
@@ -1525,7 +1528,8 @@ export class TauriBridge implements PlatformBridge {
     cancelJob: (id: string) => this.inv('printer:cancel-job', id),
     retryJob: (id: string) => this.inv('printer:retry-job', id),
     test: (id: string) => this.inv('printer:test', id),
-    testGreekDirect: (mode: string, name?: string) => this.inv('printer:test-greek-direct', mode, name),
+    testGreekDirect: (id: string) => this.inv('printer:test-greek-direct', id),
+    getAutoConfig: (id: string) => this.inv('printer:get-auto-config', id),
     diagnostics: (id: string) => this.inv('printer:diagnostics', id),
     bluetoothStatus: () => this.inv('printer:bluetooth-status'),
     openCashDrawer: (id?: string, drawer?: 1 | 2) => this.inv('printer:open-cash-drawer', id, drawer),

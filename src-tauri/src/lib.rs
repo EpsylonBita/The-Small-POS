@@ -797,6 +797,7 @@ pub fn run() {
             commands::print::printer_retry_job,
             commands::print::printer_test,
             commands::print::printer_test_greek_direct,
+            commands::print::printer_get_auto_config,
             commands::print::printer_diagnostics,
             commands::print::printer_bluetooth_status,
             commands::print::printer_open_cash_drawer,

@@ -37,6 +37,7 @@ interface PrinterConfig {
   paperSize: PaperSize
   characterSet: string
   greekRenderMode?: GreekRenderMode
+  escposCodePage?: number | null
   receiptTemplate?: ReceiptTemplate
   role: PrinterRole
   isDefault: boolean
@@ -231,6 +232,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       printerUpdate: (printerId: string, updates: any) => bridge.printer.update(printerId, updates),
       printerRemove: (printerId: string) => bridge.printer.remove(printerId),
       printerTest: (printerId: string) => bridge.printer.test(printerId),
+      printerTestGreekDirect: (printerId: string) => bridge.printer.testGreekDirect(printerId),
+      printerGetAutoConfig: (printerId: string) => bridge.printer.getAutoConfig(printerId),
       printerGetDiagnostics: async (printerId: string) => {
         const result: any = await bridge.printer.diagnostics(printerId)
         if (result && typeof result === 'object' && 'success' in result) {
@@ -251,6 +254,12 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const [autoConfig, setAutoConfig] = useState<{
+    detectedBrand: string
+    appLanguage: string
+    autoCharacterSet: string
+    autoCodePage: number | null
+  } | null>(null)
   const [logoEnabled, setLogoEnabled] = useState(false)
   const [logoSourceOverride, setLogoSourceOverride] = useState('')
   const [orgLogoSource, setOrgLogoSource] = useState('')
@@ -273,6 +282,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     paperSize: '80mm' as PaperSize,
     characterSet: 'PC437_USA',
     greekRenderMode: 'text' as GreekRenderMode,
+    escposCodePage: '' as string,
     receiptTemplate: 'modern' as ReceiptTemplate,
     role: 'receipt' as PrinterRole,
     isDefault: false,
@@ -567,6 +577,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       greekRenderMode: 'text',
+      escposCodePage: '',
       receiptTemplate: 'modern',
       role: 'receipt',
       isDefault: printers.length === 0,
@@ -638,6 +649,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         paperSize: formData.paperSize,
         characterSet: formData.characterSet,
         greekRenderMode: formData.greekRenderMode,
+        escposCodePage: formData.escposCodePage ? parseInt(formData.escposCodePage, 10) : null,
         receiptTemplate: formData.receiptTemplate,
         role: formData.role,
         isDefault: formData.isDefault,
@@ -730,6 +742,31 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }
 
+  // Greek test print — uses profile's character set and code page override
+  const handleGreekTestPrint = async (printerId: string) => {
+    setLoading(true)
+    const printer = printers.find(p => p.id === printerId)
+    const printerName = printer?.name || 'Printer'
+
+    try {
+      const result: any = await api?.printerTestGreekDirect?.(printerId)
+      if (result?.success) {
+        const latencyInfo = result.latencyMs ? ` (${result.latencyMs}ms)` : ''
+        const cpInfo = result.escposCodePage != null ? ` [CP=${result.escposCodePage}]` : ' [CP=Auto]'
+        toast.success(`${printerName}: ${t('settings.printer.greekTestPrintSuccess', 'Greek test print sent')}${cpInfo}${latencyInfo}`)
+      } else {
+        const errorMsg = result?.error || t('settings.printer.testPrintFailed')
+        toast.error(`${printerName}: ${errorMsg}`, { duration: 6000 })
+      }
+    } catch (e) {
+      console.error('Greek test print failed:', e)
+      const errorMessage = e instanceof Error ? e.message : String(t('settings.printer.testPrintFailed'))
+      toast.error(`${printerName}: ${errorMessage}`, { duration: 6000 })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   // Get diagnostics
   const handleGetDiagnostics = async (printerId: string) => {
     setLoading(true)
@@ -768,6 +805,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: printer.paperSize,
       characterSet: printer.characterSet,
       greekRenderMode: printer.greekRenderMode || 'text',
+      escposCodePage: printer.escposCodePage != null ? String(printer.escposCodePage) : '',
       receiptTemplate:
         printer.receiptTemplate || ((printer.role === 'receipt' || printer.role === 'kitchen') ? 'modern' : 'classic'),
       role: printer.role,
@@ -775,6 +813,18 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       fallbackPrinterId: printer.fallbackPrinterId || '',
       enabled: printer.enabled,
     })
+    // Fetch auto-config for this printer
+    setAutoConfig(null)
+    api?.printerGetAutoConfig?.(printer.id).then((result: any) => {
+      if (result && result.detectedBrand) {
+        setAutoConfig({
+          detectedBrand: result.detectedBrand,
+          appLanguage: result.appLanguage || 'en',
+          autoCharacterSet: result.autoCharacterSet || 'PC437_USA',
+          autoCodePage: result.autoCodePage ?? null,
+        })
+      }
+    }).catch(() => { /* auto-config is informational — ignore errors */ })
     setViewMode('edit')
   }
 
@@ -795,6 +845,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       paperSize: '80mm',
       characterSet: 'PC437_USA',
       greekRenderMode: 'text',
+      escposCodePage: '',
       receiptTemplate: 'modern',
       role: 'receipt',
       isDefault: false,
@@ -802,6 +853,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       enabled: true,
     })
     setSelectedPrinter(null)
+    setAutoConfig(null)
   }
 
   // Get role label
@@ -1030,6 +1082,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     <Printer className="w-4 h-4" />
                   </button>
                   <button
+                    onClick={() => handleGreekTestPrint(printer.id)}
+                    disabled={loading}
+                    className={liquidGlassModalButton('secondary', 'sm')}
+                    title={t('settings.printer.greekTestPrint', 'Greek Test Print')}
+                  >
+                    <Receipt className="w-4 h-4" />
+                  </button>
+                  <button
                     onClick={() => handleGetDiagnostics(printer.id)}
                     disabled={loading}
                     className={liquidGlassModalButton('secondary', 'sm')}
@@ -1254,6 +1314,26 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </select>
       </div>
 
+      {/* Auto-Detection Info Banner */}
+      {autoConfig && autoConfig.detectedBrand !== 'Unknown' && (
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+          <Info className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+          <div className="text-xs">
+            <div className="font-medium text-blue-300 mb-1">
+              {t('settings.printer.autoDetected', 'Auto-Detected Configuration')}
+            </div>
+            <div className="liquid-glass-modal-text-muted space-y-0.5">
+              <div>{t('settings.printer.detectedBrand', 'Brand')}: <span className="text-blue-300">{autoConfig.detectedBrand}</span></div>
+              <div>{t('settings.printer.autoCharacterSet', 'Character Set')}: <span className="text-blue-300">{autoConfig.autoCharacterSet}</span></div>
+              <div>{t('settings.printer.autoCodePage', 'Code Page')}: <span className="text-blue-300">{autoConfig.autoCodePage ?? 'N/A'}</span></div>
+            </div>
+            <p className="mt-1 text-gray-400">
+              {t('settings.printer.autoDetectedHint', 'These values are used automatically when printing. Manual overrides below take priority.')}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Character Set / Code Page */}
       <div>
         <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
@@ -1276,7 +1356,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           <option value="PC1253_GREEK">PC1253 (Windows Greek)</option>
         </select>
         <p className="text-xs text-gray-400 mt-1">
-          {t('settings.printer.characterSetHint', 'Select the character set that matches your printer\'s default code page. For Greek, try PC737 or PC1253.')}
+          {t('settings.printer.characterSetHint', 'The character set is auto-detected from your app language. Only change this if auto-detection picks the wrong encoding.')}
         </p>
       </div>
 
@@ -1299,6 +1379,25 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </p>
         </div>
       )}
+
+      {/* ESC/POS Code Page Override */}
+      <div>
+        <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+          {t('settings.printer.escposCodePage', 'ESC/POS Code Page Number')}
+        </label>
+        <input
+          type="number"
+          min={0}
+          max={255}
+          value={formData.escposCodePage}
+          onChange={e => setFormData(prev => ({ ...prev, escposCodePage: e.target.value }))}
+          placeholder={t('settings.printer.escposCodePagePlaceholder', 'Auto (leave empty for default)')}
+          className="liquid-glass-modal-input"
+        />
+        <p className="text-xs text-gray-400 mt-1">
+          {t('settings.printer.escposCodePageHint', 'The code page is auto-detected from your printer brand and character set. Only set this if the auto-detected value doesn\'t work correctly.')}
+        </p>
+      </div>
 
       {/* Receipt Template - show for receipt and kitchen printers */}
       {(formData.role === 'receipt' || formData.role === 'kitchen') && (

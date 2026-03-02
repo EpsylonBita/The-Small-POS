@@ -562,6 +562,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
       const normalizedItems = orderData.items.map((item: any) => ({
         menu_item_id: item.menuItemId || item.menu_item_id || item.id, // Use menuItemId (Supabase UUID) instead of id (cart ID)
+        name: item.name || item.menu_item_name || null,
         quantity: item.quantity,
         price: item.price,
         customizations: item.customizations || item.selectedIngredients || null,

@@ -7,8 +7,8 @@ use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 use crate::{
-    db, drawer, escpos, payload_arg0_as_string, print, printers, read_local_json_array, value_str,
-    write_local_json,
+    db, drawer, escpos, payload_arg0_as_string, print, printers, read_local_json_array,
+    receipt_renderer, value_str, write_local_json,
 };
 
 // -- Print -------------------------------------------------------------------
@@ -292,9 +292,21 @@ pub async fn payment_print_receipt(
 pub async fn kitchen_print_ticket(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
-    print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None)
+    let enqueue_result = print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None)?;
+
+    // Process the job immediately instead of waiting for the background worker
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    if let Err(e) = print::process_pending_jobs(&db, &data_dir) {
+        warn!(order_id = %order_id, error = %e, "Immediate kitchen ticket processing failed, worker will retry");
+    }
+
+    Ok(enqueue_result)
 }
 
 #[tauri::command]
@@ -457,6 +469,7 @@ fn profile_to_electron_format(profile: &serde_json::Value) -> serde_json::Value 
         "characterSet": value_str(profile, &["characterSet", "character_set"]).unwrap_or_else(|| "PC437_USA".to_string()),
         "greekRenderMode": value_str(profile, &["greekRenderMode", "greek_render_mode"]),
         "receiptTemplate": value_str(profile, &["receiptTemplate", "receipt_template"]),
+        "escposCodePage": profile.get("escposCodePage").or_else(|| profile.get("escpos_code_page")).and_then(|v| v.as_i64()),
         "role": value_str(profile, &["role"]).unwrap_or_else(|| "receipt".to_string()),
         "isDefault": is_default,
         "fallbackPrinterId": value_str(profile, &["fallbackPrinterId", "fallback_printer_id"]),
@@ -550,6 +563,7 @@ fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> 
         ("greekRenderMode", "greekRenderMode"),
         ("receiptTemplate", "receiptTemplate"),
         ("fallbackPrinterId", "fallbackPrinterId"),
+        ("escposCodePage", "escposCodePage"),
     ];
     for (src, dst) in pass_fields {
         if let Some(v) = obj.and_then(|o| o.get(src)) {
@@ -1668,13 +1682,172 @@ pub async fn printer_test(
 
 #[tauri::command]
 pub async fn printer_test_greek_direct(
-    arg0: Option<String>,
-    arg1: Option<String>,
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
+    let printer_id = parse_printer_id_payload(arg0)?;
+    let profile = printers::get_printer_profile(&db, &printer_id)?;
+    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
+
+    if printer_name.is_empty() {
+        return Err("Printer has no system printer name configured".into());
+    }
+
+    let paper_mm = profile
+        .get("paperWidthMm")
+        .or_else(|| profile.get("paper_width_mm"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(80) as i32;
+    let paper = escpos::PaperWidth::from_mm(paper_mm);
+
+    let character_set = profile
+        .get("characterSet")
+        .or_else(|| profile.get("character_set"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("PC437_USA");
+
+    let escpos_code_page = profile
+        .get("escposCodePage")
+        .or_else(|| profile.get("escpos_code_page"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u8);
+
+    let greek_render_mode = profile
+        .get("greekRenderMode")
+        .or_else(|| profile.get("greek_render_mode"))
+        .and_then(|v| v.as_str());
+
+    let start = std::time::Instant::now();
+
+    let mut builder = escpos::EscPosBuilder::new().with_paper(paper);
+    builder.init();
+
+    // Apply character set using the same logic as receipts
+    let cfg = receipt_renderer::LayoutConfig {
+        paper_width: paper,
+        character_set: character_set.to_string(),
+        greek_render_mode: greek_render_mode.map(ToString::to_string),
+        escpos_code_page,
+        ..Default::default()
+    };
+    let detected_brand = printers::detect_printer_brand(&printer_name);
+    let _warnings = receipt_renderer::apply_character_set_for_test(
+        &mut builder,
+        &cfg.character_set,
+        cfg.greek_render_mode.as_deref(),
+        cfg.escpos_code_page,
+        detected_brand,
+    );
+
+    builder
+        .center()
+        .bold(true)
+        .text("GREEK TEST PRINT\n")
+        .bold(false)
+        .separator()
+        .left()
+        .text(&format!("Character Set: {}\n", character_set))
+        .text(&format!(
+            "Code Page Override: {}\n",
+            escpos_code_page
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "Auto".to_string())
+        ))
+        .separator()
+        .bold(true)
+        .text("Greek Uppercase:\n")
+        .bold(false)
+        .text("\u{0391}\u{0392}\u{0393}\u{0394}\u{0395}\u{0396}\u{0397}\u{0398}\u{0399}\u{039A}\u{039B}\u{039C}\u{039D}\u{039E}\u{039F}\u{03A0}\u{03A1}\u{03A3}\u{03A4}\u{03A5}\u{03A6}\u{03A7}\u{03A8}\u{03A9}\n")
+        .bold(true)
+        .text("Greek Lowercase:\n")
+        .bold(false)
+        .text("\u{03B1}\u{03B2}\u{03B3}\u{03B4}\u{03B5}\u{03B6}\u{03B7}\u{03B8}\u{03B9}\u{03BA}\u{03BB}\u{03BC}\u{03BD}\u{03BE}\u{03BF}\u{03C0}\u{03C1}\u{03C3}\u{03C2}\u{03C4}\u{03C5}\u{03C6}\u{03C7}\u{03C8}\u{03C9}\n")
+        .separator()
+        .bold(true)
+        .text("Sample Receipt Line:\n")
+        .bold(false);
+    builder
+        .line_pair("\u{039A}\u{03B1}\u{03C6}\u{03AD}\u{03C2} \u{0395}\u{03BB}\u{03BB}\u{03B7}\u{03BD}\u{03B9}\u{03BA}\u{03CC}\u{03C2}", "3.50")
+        .line_pair("\u{03A3}\u{03BF}\u{03C5}\u{03B2}\u{03BB}\u{03AC}\u{03BA}\u{03B9}", "6.00")
+        .line_pair("\u{03A3}\u{03CD}\u{03BD}\u{03BF}\u{03BB}\u{03BF}", "9.50");
+    builder.separator().center();
+    builder
+        .text("\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}!\n");
+    builder.feed(4).cut();
+
+    let test_data = builder.build();
+    let byte_count = test_data.len();
+
+    info!(
+        printer = %printer_name,
+        character_set = %character_set,
+        code_page_override = ?escpos_code_page,
+        bytes = byte_count,
+        "Greek test print dispatching"
+    );
+
+    match printers::print_raw_to_windows(&printer_name, &test_data, "POS Greek Test") {
+        Ok(dispatch) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            Ok(serde_json::json!({
+                "success": true,
+                "printerId": printer_id,
+                "printerName": printer_name,
+                "characterSet": character_set,
+                "escposCodePage": escpos_code_page,
+                "latencyMs": latency_ms,
+                "bytesRequested": dispatch.bytes_requested,
+                "bytesWritten": dispatch.bytes_written,
+                "message": "Greek test print dispatched"
+            }))
+        }
+        Err(e) => {
+            warn!(printer = %printer_name, error = %e, "Greek test print failed");
+            Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "printerName": printer_name,
+                "error": e
+            }))
+        }
+    }
+}
+
+/// Returns auto-detected printer configuration based on the printer name and
+/// the app's current language setting.  Used by the UI to show what auto-config
+/// would resolve for a given printer profile.
+#[tauri::command]
+pub async fn printer_get_auto_config(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let printer_id = parse_printer_id_payload(arg0)?;
+    let profile = printers::get_printer_profile(&db, &printer_id)?;
+
+    let printer_name = profile
+        .get("printerName")
+        .or_else(|| profile.get("printer_name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+
+    let brand = printers::detect_printer_brand(printer_name);
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let app_language = db::get_setting(&conn, "general", "language")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "en".to_string());
+
+    let auto_character_set = receipt_renderer::language_to_character_set(&app_language);
+    let auto_code_page = receipt_renderer::resolve_auto_code_page(brand, auto_character_set);
+
     Ok(serde_json::json!({
-        "success": true,
-        "mode": arg0.unwrap_or_else(|| "ascii".to_string()),
-        "printerName": arg1.unwrap_or_else(|| "POS-80".to_string())
+        "printerId": printer_id,
+        "printerName": printer_name,
+        "detectedBrand": brand.label(),
+        "appLanguage": app_language,
+        "autoCharacterSet": auto_character_set,
+        "autoCodePage": auto_code_page,
     }))
 }
 

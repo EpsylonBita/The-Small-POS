@@ -32,6 +32,7 @@ import {
   isCoreModule,
   getCoreModuleIds,
   getRemovedModuleIds,
+  isModuleExcludedFromPos,
 } from '../../shared/constants/pos-modules';
 import { getBridge, offEvent, onEvent } from '../../lib';
 
@@ -244,6 +245,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       const locked: EnabledModule[] = [];
 
       for (const id of moduleIds) {
+        if (isModuleExcludedFromPos(id)) {
+          continue;
+        }
         const metadata = getModuleMetadata(id);
         if (metadata) {
           const requiredPlan = lockedPlans[id];
@@ -333,6 +337,8 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       return modules
         // Filter to only POS-enabled modules (Requirement 2.1)
         .filter((m) => m.pos_enabled)
+        // Exclude modules that should never render in POS clients
+        .filter((m) => !isModuleExcludedFromPos(m.module_id))
         // Filter to only purchased modules OR core modules (core modules always show)
         .filter((m) => m.is_purchased || m.is_core || isCoreModule(m.module_id))
         .map((apiModule): EnabledModule => {
@@ -392,6 +398,10 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
       if (result.success && result.modules) {
         const response = result.modules as POSModulesEnabledResponse;
+        const excludedModules = response.modules.filter((m) => isModuleExcludedFromPos(m.module_id));
+        if (excludedModules.length > 0) {
+          console.debug('[ModuleContext] Excluding POS-hidden modules from API payload:', excludedModules.map((m) => m.module_id));
+        }
         
         // Get previous module IDs for comparison using ref (Requirement 3.4)
         const previousModuleIds = new Set(prevApiModulesRef.current.map(m => m.module_id));
@@ -831,7 +841,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
     // Add enabled modules (including guaranteed core modules)
     for (const m of modulesWithCore) {
-      if (m.module.showInNavigation) {
+      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation) {
         allNavModules.push({
           module: m.module,
           isEnabled: true,
@@ -842,7 +852,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
 
     // Add locked modules (not already in enabled)
     for (const m of lockedModules) {
-      if (m.module.showInNavigation && !enabledIds.has(m.module.id)) {
+      if (!isModuleExcludedFromPos(m.module.id) && m.module.showInNavigation && !enabledIds.has(m.module.id)) {
         allNavModules.push({
           module: m.module,
           isEnabled: false,

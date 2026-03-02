@@ -6,6 +6,7 @@
  */
 
 import React, { memo, useState, useMemo, useCallback, useEffect } from 'react';
+import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
@@ -26,8 +27,16 @@ import {
   AlertTriangle,
   UtensilsCrossed,
   BedDouble,
+  Plus,
+  X,
 } from 'lucide-react';
-import type { Reservation, ReservationStatus, ReservationFilters } from '../../../services/ReservationsService';
+import {
+  reservationsService,
+  type Reservation,
+  type ReservationStatus,
+  type ReservationFilters,
+  type CreateReservationDto,
+} from '../../../services/ReservationsService';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -105,6 +114,25 @@ export const ReservationsView: React.FC = memo(() => {
     // Default to tables if available, otherwise rooms
     return 'tables';
   });
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [selectedReservation, setSelectedReservation] = useState<Reservation | null>(null);
+  const [isDetailsLoading, setIsDetailsLoading] = useState(false);
+  const [isAssigningTable, setIsAssigningTable] = useState(false);
+  const [tableAssignmentId, setTableAssignmentId] = useState('');
+  const [createForm, setCreateForm] = useState({
+    customerName: '',
+    customerPhone: '',
+    customerEmail: '',
+    partySize: '2',
+    reservationDate: '',
+    reservationTime: '19:00',
+    durationMinutes: '90',
+    tableId: '',
+    roomId: '',
+    specialRequests: '',
+    notes: '',
+  });
 
   const isDark = resolvedTheme === 'dark';
 
@@ -116,6 +144,17 @@ export const ReservationsView: React.FC = memo(() => {
       setActiveTab('tables');
     }
   }, [hasTablesModule, hasRoomsModule]);
+
+  useEffect(() => {
+    setCreateForm((prev) => ({
+      ...prev,
+      reservationDate: selectedDate.toISOString().split('T')[0],
+    }));
+  }, [selectedDate]);
+
+  useEffect(() => {
+    setTableAssignmentId(selectedReservation?.tableId || '');
+  }, [selectedReservation?.id, selectedReservation?.tableId]);
 
   // Build filters based on selected date and quick filter
   const filters: ReservationFilters = useMemo(() => {
@@ -147,6 +186,8 @@ export const ReservationsView: React.FC = memo(() => {
     isLoading,
     refetch,
     updateStatus,
+    createReservation,
+    assignTable,
   } = useReservations({
     branchId: branchId || '',
     organizationId: effectiveOrgId || '',
@@ -208,8 +249,97 @@ export const ReservationsView: React.FC = memo(() => {
   }, [selectedDate]);
 
   const handleStatusChange = useCallback(async (reservationId: string, status: ReservationStatus) => {
-    await updateStatus(reservationId, status);
-  }, [updateStatus]);
+    const updated = await updateStatus(reservationId, status);
+    if (!updated) return;
+
+    if (selectedReservation?.id === reservationId) {
+      reservationsService.setContext(branchId || '', effectiveOrgId || '');
+      const refreshed = await reservationsService.fetchReservationById(reservationId);
+      if (refreshed) {
+        setSelectedReservation(refreshed);
+      }
+    }
+  }, [updateStatus, selectedReservation?.id, branchId, effectiveOrgId]);
+
+  const openReservationDetails = useCallback(async (reservationId: string) => {
+    setIsDetailsLoading(true);
+    setSelectedReservation(null);
+    reservationsService.setContext(branchId || '', effectiveOrgId || '');
+    const reservation = await reservationsService.fetchReservationById(reservationId);
+    setSelectedReservation(reservation);
+    setIsDetailsLoading(false);
+  }, [branchId, effectiveOrgId]);
+
+  const handleCreateReservation = useCallback(async () => {
+    const partySize = Number(createForm.partySize);
+    const durationMinutes = Number(createForm.durationMinutes);
+
+    if (!createForm.customerName.trim() || !createForm.customerPhone.trim()) {
+      toast.error(t('reservationsView.validation.customerRequired', { defaultValue: 'Customer name and phone are required' }));
+      return;
+    }
+
+    if (!createForm.reservationDate || !createForm.reservationTime || !Number.isFinite(partySize) || partySize <= 0) {
+      toast.error(t('reservationsView.validation.invalidReservation', { defaultValue: 'Please provide a valid date, time and party size' }));
+      return;
+    }
+
+    const payload: CreateReservationDto = {
+      customerName: createForm.customerName.trim(),
+      customerPhone: createForm.customerPhone.trim(),
+      customerEmail: createForm.customerEmail.trim() || undefined,
+      partySize,
+      reservationDate: createForm.reservationDate,
+      reservationTime: createForm.reservationTime,
+      durationMinutes: Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 90,
+      tableId: createForm.tableId.trim() || undefined,
+      roomId: createForm.roomId.trim() || undefined,
+      specialRequests: createForm.specialRequests.trim() || undefined,
+      notes: createForm.notes.trim() || undefined,
+    };
+
+    setIsCreating(true);
+    const created = await createReservation(payload);
+    setIsCreating(false);
+
+    if (!created) {
+      return;
+    }
+
+    setShowCreateModal(false);
+    setCreateForm({
+      customerName: '',
+      customerPhone: '',
+      customerEmail: '',
+      partySize: '2',
+      reservationDate: selectedDate.toISOString().split('T')[0],
+      reservationTime: '19:00',
+      durationMinutes: '90',
+      tableId: '',
+      roomId: '',
+      specialRequests: '',
+      notes: '',
+    });
+    await refetch();
+    await openReservationDetails(created.id);
+  }, [createForm, createReservation, refetch, selectedDate, openReservationDetails, t]);
+
+  const handleAssignTable = useCallback(async () => {
+    if (!selectedReservation || !tableAssignmentId.trim()) return;
+
+    setIsAssigningTable(true);
+    const updated = await assignTable(selectedReservation.id, tableAssignmentId.trim());
+    setIsAssigningTable(false);
+
+    if (!updated) return;
+
+    reservationsService.setContext(branchId || '', effectiveOrgId || '');
+    const refreshed = await reservationsService.fetchReservationById(selectedReservation.id);
+    if (refreshed) {
+      setSelectedReservation(refreshed);
+    }
+    await refetch();
+  }, [selectedReservation, tableAssignmentId, assignTable, branchId, effectiveOrgId, refetch]);
 
   // Time slots for timeline view (11 AM to 10 PM)
   const timeSlots = Array.from({ length: 12 }, (_, i) => 11 + i);
@@ -369,6 +499,22 @@ export const ReservationsView: React.FC = memo(() => {
         </div>
         <div className="flex gap-2">
           <button
+            onClick={() => {
+              setCreateForm((prev) => ({
+                ...prev,
+                reservationDate: selectedDate.toISOString().split('T')[0],
+              }));
+              setShowCreateModal(true);
+            }}
+            className={`px-3 py-2 rounded-lg flex items-center gap-2 ${
+              isDark ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
+            }`}
+            title={t('reservationsView.create', { defaultValue: 'Create Reservation' })}
+          >
+            <Plus className="w-4 h-4" />
+            {t('reservationsView.create', { defaultValue: 'Create' })}
+          </button>
+          <button
             onClick={() => refetch()}
             className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
             title={t('reservationsView.refresh', { defaultValue: 'Refresh' })}
@@ -469,8 +615,9 @@ export const ReservationsView: React.FC = memo(() => {
               {filteredReservations.map(res => (
                 <div
                   key={res.id}
-                  className={`p-4 rounded-xl ${isDark ? 'bg-gray-800' : 'bg-white shadow-sm'}`}
+                  className={`p-4 rounded-xl cursor-pointer ${isDark ? 'bg-gray-800 hover:bg-gray-700/80' : 'bg-white shadow-sm hover:bg-gray-50'}`}
                   style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
+                  onClick={() => openReservationDetails(res.id)}
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
@@ -525,7 +672,10 @@ export const ReservationsView: React.FC = memo(() => {
                       {getQuickActions(res).map(action => (
                         <button
                           key={action.status}
-                          onClick={() => handleStatusChange(res.id, action.status)}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleStatusChange(res.id, action.status);
+                          }}
                           className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
                             action.variant === 'primary' ? 'bg-blue-600 text-white hover:bg-blue-700' :
                             action.variant === 'success' ? 'bg-green-600 text-white hover:bg-green-700' :
@@ -554,11 +704,12 @@ export const ReservationsView: React.FC = memo(() => {
                     <div className={`min-h-[60px] p-2 rounded-lg ${isDark ? 'bg-gray-800/50' : 'bg-gray-50'}`}>
                       <div className="flex flex-wrap gap-2">
                         {hourReservations.map(res => (
-                          <div
-                            key={res.id}
-                            className={`px-3 py-2 rounded-lg ${isDark ? 'bg-gray-700' : 'bg-white shadow-sm'}`}
-                            style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
-                          >
+                        <div
+                          key={res.id}
+                          className={`px-3 py-2 rounded-lg cursor-pointer ${isDark ? 'bg-gray-700 hover:bg-gray-600/80' : 'bg-white shadow-sm hover:bg-gray-50'}`}
+                          style={{ borderLeft: `4px solid var(--${statusColors[res.status]}-500, #6b7280)` }}
+                          onClick={() => openReservationDetails(res.id)}
+                        >
                             <div className="flex items-center gap-2">
                               <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>
                                 {res.customerName}
@@ -579,7 +730,10 @@ export const ReservationsView: React.FC = memo(() => {
                               {getQuickActions(res).slice(0, 2).map(action => (
                                 <button
                                   key={action.status}
-                                  onClick={() => handleStatusChange(res.id, action.status)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void handleStatusChange(res.id, action.status);
+                                  }}
                                   className={`px-2 py-1 rounded text-xs font-medium ${
                                     action.variant === 'primary' ? 'bg-blue-600 text-white' :
                                     action.variant === 'success' ? 'bg-green-600 text-white' :
@@ -612,6 +766,225 @@ export const ReservationsView: React.FC = memo(() => {
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setShowCreateModal(false)} />
+          <div className={`relative z-10 w-full max-w-2xl mx-4 rounded-xl ${isDark ? 'bg-gray-900 border border-gray-700' : 'bg-white border border-gray-200'} p-5`}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                {t('reservationsView.createTitle', { defaultValue: 'Create Reservation' })}
+              </h3>
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className={`p-1 rounded ${isDark ? 'hover:bg-gray-800 text-gray-300' : 'hover:bg-gray-100 text-gray-600'}`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                value={createForm.customerName}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, customerName: event.target.value }))}
+                placeholder={t('reservationsView.form.customerName', { defaultValue: 'Customer name' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.customerPhone}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, customerPhone: event.target.value }))}
+                placeholder={t('reservationsView.form.customerPhone', { defaultValue: 'Customer phone' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.customerEmail}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, customerEmail: event.target.value }))}
+                placeholder={t('reservationsView.form.customerEmail', { defaultValue: 'Customer email (optional)' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.partySize}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, partySize: event.target.value }))}
+                placeholder={t('reservationsView.form.partySize', { defaultValue: 'Party size' })}
+                type="number"
+                min={1}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.reservationDate}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, reservationDate: event.target.value }))}
+                type="date"
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.reservationTime}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, reservationTime: event.target.value }))}
+                type="time"
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.durationMinutes}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, durationMinutes: event.target.value }))}
+                placeholder={t('reservationsView.form.duration', { defaultValue: 'Duration (minutes)' })}
+                type="number"
+                min={15}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.tableId}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, tableId: event.target.value }))}
+                placeholder={t('reservationsView.form.tableId', { defaultValue: 'Table ID (optional)' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.roomId}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, roomId: event.target.value }))}
+                placeholder={t('reservationsView.form.roomId', { defaultValue: 'Room ID (optional)' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+              <input
+                value={createForm.specialRequests}
+                onChange={(event) => setCreateForm((prev) => ({ ...prev, specialRequests: event.target.value }))}
+                placeholder={t('reservationsView.form.specialRequests', { defaultValue: 'Special requests (optional)' })}
+                className={`px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+              />
+            </div>
+
+            <textarea
+              value={createForm.notes}
+              onChange={(event) => setCreateForm((prev) => ({ ...prev, notes: event.target.value }))}
+              placeholder={t('reservationsView.form.notes', { defaultValue: 'Notes (optional)' })}
+              rows={3}
+              className={`w-full mt-3 px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+            />
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className={`px-4 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-gray-200 hover:bg-gray-700' : 'bg-gray-100 text-gray-800 hover:bg-gray-200'}`}
+              >
+                {t('common.cancel', { defaultValue: 'Cancel' })}
+              </button>
+              <button
+                onClick={() => void handleCreateReservation()}
+                disabled={isCreating}
+                className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+              >
+                {isCreating
+                  ? t('common.creating', { defaultValue: 'Creating...' })
+                  : t('reservationsView.create', { defaultValue: 'Create' })}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(selectedReservation || isDetailsLoading) && (
+        <div className="fixed inset-0 z-30 flex justify-end">
+          <div className="absolute inset-0 bg-black/30" onClick={() => setSelectedReservation(null)} />
+          <div className={`relative h-full w-full max-w-xl p-4 overflow-y-auto ${isDark ? 'bg-gray-900 border-l border-gray-700' : 'bg-white border-l border-gray-200'}`}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className={`text-lg font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                {t('reservationsView.detailTitle', { defaultValue: 'Reservation Details' })}
+              </h3>
+              <button
+                onClick={() => setSelectedReservation(null)}
+                className={`p-1 rounded ${isDark ? 'hover:bg-gray-800 text-gray-300' : 'hover:bg-gray-100 text-gray-600'}`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {isDetailsLoading && (
+              <div className={`flex items-center ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+                <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                {t('common.loading', { defaultValue: 'Loading...' })}
+              </div>
+            )}
+
+            {!isDetailsLoading && selectedReservation && (
+              <div className="space-y-4">
+                <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {t('reservationsView.customer', { defaultValue: 'Customer' })}
+                  </div>
+                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.customerName}</div>
+                  <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>{selectedReservation.customerPhone}</div>
+                  {selectedReservation.customerEmail && (
+                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>{selectedReservation.customerEmail}</div>
+                  )}
+                </div>
+
+                <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {t('reservationsView.when', { defaultValue: 'Date & Time' })}
+                  </div>
+                  <div className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                    {formatDate(selectedReservation.reservationDate)} {selectedReservation.reservationTime}
+                  </div>
+                  <div className={`text-sm ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>
+                    {selectedReservation.partySize} {t('reservationsView.guests', { defaultValue: 'guests' })}
+                  </div>
+                </div>
+
+                {selectedReservation.specialRequests && (
+                  <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                    <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                      {t('reservationsView.specialRequests', { defaultValue: 'Special Requests' })}
+                    </div>
+                    <div className={`${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedReservation.specialRequests}</div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <div className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {t('reservationsView.quickActions', { defaultValue: 'Quick Actions' })}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {getQuickActions(selectedReservation).map((action) => (
+                      <button
+                        key={action.status}
+                        onClick={() => void handleStatusChange(selectedReservation.id, action.status)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium ${
+                          action.variant === 'primary' ? 'bg-blue-600 text-white hover:bg-blue-700' :
+                          action.variant === 'success' ? 'bg-green-600 text-white hover:bg-green-700' :
+                          action.variant === 'danger' ? 'bg-red-600 text-white hover:bg-red-700' :
+                          isDark ? 'bg-gray-700 text-white' : 'bg-gray-200 text-gray-800'
+                        }`}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className={`p-3 rounded-lg ${isDark ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                  <div className={`text-sm mb-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {t('reservationsView.assignTable', { defaultValue: 'Assign Table' })}
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      value={tableAssignmentId}
+                      onChange={(event) => setTableAssignmentId(event.target.value)}
+                      placeholder={t('reservationsView.form.tableId', { defaultValue: 'Table ID' })}
+                      className={`flex-1 px-3 py-2 rounded-lg border ${isDark ? 'bg-gray-900 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'}`}
+                    />
+                    <button
+                      disabled={isAssigningTable || !tableAssignmentId.trim()}
+                      onClick={() => void handleAssignTable()}
+                      className="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                    >
+                      {isAssigningTable
+                        ? t('common.saving', { defaultValue: 'Saving...' })
+                        : t('common.save', { defaultValue: 'Save' })}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
