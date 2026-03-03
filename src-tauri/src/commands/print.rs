@@ -274,7 +274,25 @@ pub async fn payment_print_receipt(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
-    let enqueue_result = print::enqueue_print_job(&db, "order_receipt", &order_id, None)?;
+
+    // Route delivery orders to the delivery slip format
+    let entity_type = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let ot: String = conn
+            .query_row(
+                "SELECT COALESCE(order_type, 'pickup') FROM orders WHERE id = ?1",
+                rusqlite::params![&order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "pickup".to_string());
+        if ot == "delivery" {
+            "delivery_slip"
+        } else {
+            "order_receipt"
+        }
+    };
+
+    let enqueue_result = print::enqueue_print_job(&db, entity_type, &order_id, None)?;
 
     // Process the job immediately instead of waiting for the background worker
     let data_dir = app

@@ -24,6 +24,7 @@ import LoyaltyPage from '../pages/LoyaltyPage';
 import SuppliersPage from '../pages/SuppliersPage';
 import InventoryPage from '../pages/InventoryPage';
 import KitchenDisplayPage from '../pages/KitchenDisplayPage';
+import CustomerDisplayPage from '../pages/CustomerDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
 import AboutPage from '../pages/AboutPage';
@@ -135,6 +136,7 @@ const LoyaltyView = () => <LoyaltyPage />;
 const SuppliersView = () => <SuppliersPage />;
 const InventoryView = () => <InventoryPage />;
 const KitchenDisplayView = () => <KitchenDisplayPage />;
+const CustomerDisplayView = () => <CustomerDisplayPage />;
 
 // Placeholder views for modules not yet implemented
 const CustomerWebView = () => <ComingSoonView moduleName="Web Ordering" />;
@@ -269,6 +271,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     suppliers: SuppliersView,
     inventory: InventoryView,
     kitchen_display: KitchenDisplayView,
+    customer_display: CustomerDisplayView,
 
     // Customer-facing modules
     customer_web: CustomerWebView,

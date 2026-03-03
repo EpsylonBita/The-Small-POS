@@ -73,6 +73,7 @@ export const POS_IMPLEMENTED_MODULES: Set<string> = new Set([
   'suppliers',      // Supplier management
   'inventory',      // Inventory tracking
   'kitchen_display', // Kitchen Display System (KDS)
+  'customer_display', // Customer-facing status board
 
   // Integrations
   'plugin_integrations', // Third-party plugin integrations (Wolt, Efood, etc.)

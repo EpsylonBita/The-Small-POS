@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
@@ -78,6 +79,8 @@ pub struct OrderReceiptDoc {
     pub table_number: Option<String>,
     #[serde(default)]
     pub customer_name: Option<String>,
+    #[serde(default)]
+    pub customer_phone: Option<String>,
     #[serde(default)]
     pub delivery_address: Option<String>,
     #[serde(default)]
@@ -181,6 +184,7 @@ pub enum ReceiptDocument {
     KitchenTicket(KitchenTicketDoc),
     ShiftCheckout(ShiftCheckoutDoc),
     ZReport(ZReportDoc),
+    DeliverySlip(OrderReceiptDoc),
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +207,8 @@ pub struct LayoutConfig {
     pub escpos_code_page: Option<u8>,
     pub detected_brand: crate::printers::PrinterBrand,
     pub language: String,
+    pub store_subtitle: Option<String>,
+    pub currency_symbol: String,
 }
 
 impl Default for LayoutConfig {
@@ -226,6 +232,8 @@ impl Default for LayoutConfig {
             escpos_code_page: None,
             detected_brand: crate::printers::PrinterBrand::Unknown,
             language: "en".to_string(),
+            store_subtitle: None,
+            currency_symbol: String::new(),
         }
     }
 }
@@ -435,6 +443,112 @@ fn qty(value: f64) -> String {
     } else {
         format!("{value:.2}")
     }
+}
+
+fn money_with_currency(value: f64, symbol: &str) -> String {
+    if symbol.is_empty() {
+        money(value)
+    } else {
+        format!("{}{}", money(value), symbol)
+    }
+}
+
+fn header_branch_line(cfg: &LayoutConfig) -> Option<&str> {
+    let org = cfg.organization_name.trim();
+    cfg.store_subtitle
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty() && *value != org && !value.eq_ignore_ascii_case(org)
+        })
+}
+
+fn append_html_header_block(
+    body: &mut String,
+    cfg: &LayoutConfig,
+    lang: &str,
+    include_logo_placeholder: bool,
+) {
+    if include_logo_placeholder && cfg.show_logo {
+        body.push_str("<div class=\"center\" style=\"font-size:24px;margin:8px 0\">[ LOGO ]</div>");
+    }
+
+    body.push_str(&format!(
+        "<div class=\"center\"><strong>{}</strong></div>",
+        esc(&cfg.organization_name)
+    ));
+
+    if let Some(branch_line) = header_branch_line(cfg) {
+        body.push_str(&format!(
+            "<div class=\"center\"><strong>{}</strong></div>",
+            esc(branch_line)
+        ));
+    }
+
+    if let Some(label) = cfg
+        .copy_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!("<div class=\"center\">{}</div>", esc(label)));
+    }
+
+    if let Some(address) = cfg
+        .store_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!("<div class=\"center\">{}</div>", esc(address)));
+    }
+
+    if let Some(phone) = cfg
+        .store_phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!("<div class=\"center\">{}</div>", esc(phone)));
+    }
+
+    if let Some(vat) = cfg
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!(
+            "<div class=\"center\">{}: {}</div>",
+            esc(receipt_label(lang, "VAT")),
+            esc(vat)
+        ));
+    }
+
+    if let Some(tax_office) = cfg
+        .tax_office
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str(&format!(
+            "<div class=\"center\">{}: {}</div>",
+            esc(receipt_label(lang, "TAX_OFFICE")),
+            esc(tax_office)
+        ));
+    }
+}
+
+/// Format an ISO-8601 timestamp to `DD/MM/YYYY HH:MM`.
+fn format_datetime_human(iso: &str) -> String {
+    DateTime::parse_from_rfc3339(iso)
+        .map(|dt| dt.format("%d/%m/%Y %H:%M").to_string())
+        .unwrap_or_else(|_| {
+            let trimmed = &iso[..iso.len().min(26)];
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
+                .map(|dt| dt.format("%d/%m/%Y %H:%M").to_string())
+                .unwrap_or_else(|_| iso.to_string())
+        })
 }
 
 fn customization_qty(value: f64) -> String {
@@ -759,20 +873,54 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
     };
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
-            let mut body = format!(
-                "<div class=\"center\">{}</div><div class=\"center\">{}</div>",
-                esc(&cfg.organization_name),
-                cfg.copy_label.clone().map(|v| esc(&v)).unwrap_or_default()
-            );
+            let render_delivery_block = should_render_delivery_block(doc);
+            let mut body = String::new();
+            append_html_header_block(&mut body, cfg, cfg.language.as_str(), cfg.show_logo);
             body.push_str(&format!(
                 "<div class=\"section\"><div class=\"line\"><span>Order</span><span>#{}\
                  </span></div><div class=\"line\"><span>Type</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Date</span><span>{}</span></div></div>",
+                 <div class=\"line\"><span>Date</span><span>{}</span></div>",
                 esc(&doc.order_number),
                 esc(&doc.order_type),
                 esc(&doc.created_at)
             ));
-            if should_render_delivery_block(doc) {
+            if let Some(table) = doc
+                .table_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>Table</span><span>{}</span></div>",
+                    esc(table)
+                ));
+            }
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>Customer</span><span>{}</span></div>",
+                    esc(customer)
+                ));
+            }
+            if let Some(phone) = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !render_delivery_block {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>Phone</span><span>{}</span></div>",
+                        esc(phone)
+                    ));
+                }
+            }
+            body.push_str("</div>");
+            if render_delivery_block {
                 body.push_str(&format!("<div class=\"{}\"><h3>Delivery</h3>", section_cls));
                 if let Some(driver_name) = doc
                     .driver_name
@@ -794,6 +942,17 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>Address</span><span>{}</span></div>",
                         esc(address)
+                    ));
+                }
+                if let Some(phone) = doc
+                    .customer_phone
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>Phone</span><span>{}</span></div>",
+                        esc(phone)
                     ));
                 }
                 if let Some(city) = doc
@@ -938,39 +1097,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let lang = cfg.language.as_str();
-            // Store header
-            let mut body = format!(
-                "<div class=\"center\"><strong>{}</strong></div>",
-                esc(&cfg.organization_name)
-            );
-            if let Some(address) = cfg
-                .store_address
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                body.push_str(&format!("<div class=\"center\">{}</div>", esc(address)));
-            }
-            if let Some(phone) = cfg
-                .store_phone
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                body.push_str(&format!("<div class=\"center\">{}</div>", esc(phone)));
-            }
-            if let Some(vat) = cfg
-                .vat_number
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                body.push_str(&format!(
-                    "<div class=\"center\">{}: {}</div>",
-                    esc(receipt_label(lang, "VAT")),
-                    esc(vat)
-                ));
-            }
+            let mut body = String::new();
+            append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
             // Title
             body.push_str(&format!(
                 "<div class=\"center\"><strong>{}</strong></div>",
@@ -1142,6 +1270,198 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             }
             body.push_str("</div>");
             html_shell(receipt_label(lang, "KITCHEN TICKET"), &body)
+        }
+        ReceiptDocument::DeliverySlip(doc) => {
+            let lang = cfg.language.as_str();
+            let cur = cfg.currency_symbol.as_str();
+            let mut body = String::new();
+            append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
+            // Order info block
+            body.push_str(&format!(
+                "<div class=\"section\">\
+                 <div class=\"center\"><strong>{} #{}</strong></div>\
+                 <div class=\"center\">{}</div>\
+                 <div class=\"center\">{}</div>\
+                 </div>",
+                esc(receipt_label(lang, "Order")),
+                esc(&doc.order_number),
+                esc(&format_datetime_human(&doc.created_at)),
+                esc(&doc.order_type),
+            ));
+            // Customer info block
+            body.push_str("<div class=\"section\">");
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                body.push_str(&format!(
+                    "<div>{}: <b>{}</b></div>",
+                    esc(receipt_label(lang, "Customer")),
+                    esc(customer)
+                ));
+            }
+            // Phone (always show label, even if empty)
+            let phone_val = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("");
+            body.push_str(&format!(
+                "<div>{}: <b>{}</b></div>",
+                esc(receipt_label(lang, "Phone")),
+                esc(phone_val)
+            ));
+            // Address block
+            let has_address = doc
+                .delivery_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some();
+            if has_address {
+                body.push_str(&format!(
+                    "<div>{}:</div>",
+                    esc(receipt_label(lang, "Address"))
+                ));
+                if let Some(street) = doc
+                    .delivery_address
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!("<div>{}</div>", esc(street)));
+                }
+                // Postal + City on same line
+                let postal = doc
+                    .delivery_postal_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("");
+                let city = doc
+                    .delivery_city
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("");
+                if !postal.is_empty() || !city.is_empty() {
+                    body.push_str(&format!("<div>{} {}</div>", esc(postal), esc(city)));
+                }
+                // Floor | Ringer on same line
+                let floor = doc
+                    .delivery_floor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                let ringer = doc
+                    .name_on_ringer
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                match (floor, ringer) {
+                    (Some(f), Some(r)) => {
+                        body.push_str(&format!(
+                            "<div>{} {} | {}: {}</div>",
+                            esc(f),
+                            esc(receipt_label(lang, "Floor")),
+                            esc(receipt_label(lang, "Ringer")),
+                            esc(r)
+                        ));
+                    }
+                    (Some(f), None) => {
+                        body.push_str(&format!(
+                            "<div>{} {}</div>",
+                            esc(f),
+                            esc(receipt_label(lang, "Floor")),
+                        ));
+                    }
+                    (None, Some(r)) => {
+                        body.push_str(&format!(
+                            "<div>{}: {}</div>",
+                            esc(receipt_label(lang, "Ringer")),
+                            esc(r)
+                        ));
+                    }
+                    (None, None) => {}
+                }
+            }
+            body.push_str("</div>");
+            // Items section
+            body.push_str(&format!(
+                "<div class=\"section\"><h3>{}</h3>",
+                esc(receipt_label(lang, "ITEMS"))
+            ));
+            if doc.items.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"note\">{}</div>",
+                    esc(receipt_label(lang, "No items"))
+                ));
+            } else {
+                for item in &doc.items {
+                    let has_customizations = item
+                        .customizations
+                        .iter()
+                        .any(|c| !c.name.trim().is_empty());
+                    if has_customizations {
+                        // Item name + price on same line, customizations below
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&item.name),
+                            money_with_currency(item.total, cur)
+                        ));
+                        append_customizations_html(&mut body, item);
+                    } else {
+                        // Simple item: name + price
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&item.name),
+                            money_with_currency(item.total, cur)
+                        ));
+                    }
+                    if let Some(note) = item
+                        .note
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        body.push_str(&format!("<div class=\"note\">{}</div>", esc(note)));
+                    }
+                }
+            }
+            body.push_str("</div>");
+            // Totals section
+            body.push_str("<div class=\"section\">");
+            for line in &doc.totals {
+                let label = receipt_label(lang, &line.label);
+                if line.emphasize {
+                    body.push_str("<div style=\"border-top:3px double #111;border-bottom:3px double #111;padding:4px 0;margin-top:4px\">");
+                    body.push_str(&format!(
+                        "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                        esc(label),
+                        money_with_currency(line.amount, cur)
+                    ));
+                    body.push_str("</div>");
+                } else {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(label),
+                        money_with_currency(line.amount, cur)
+                    ));
+                }
+            }
+            body.push_str("</div>");
+            // Footer
+            body.push_str(&format!(
+                "<div class=\"section center\">{}</div>",
+                esc(cfg
+                    .footer_text
+                    .as_deref()
+                    .unwrap_or(receipt_label(lang, "Thank you")))
+            ));
+            html_shell("Delivery Slip", &body)
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let expected = doc
@@ -1408,6 +1728,13 @@ fn emit_header(
             .lf()
             .bold(false);
     }
+    if let Some(branch_line) = header_branch_line(cfg) {
+        if style.modern && !style.compact_width {
+            builder.bold(true).text(branch_line).lf().bold(false);
+        } else {
+            builder.text(branch_line).lf();
+        }
+    }
     if let Some(label) = cfg
         .copy_label
         .as_deref()
@@ -1475,6 +1802,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
 
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
+            let render_delivery_block = should_render_delivery_block(doc);
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Order"),
@@ -1514,7 +1842,17 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     width,
                 );
             }
-            if should_render_delivery_block(doc) {
+            if let Some(phone) = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if !render_delivery_block {
+                    emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                }
+            }
+            if render_delivery_block {
                 emit_section_header(&mut builder, receipt_label(lang, "DELIVERY"), style, width);
                 if let Some(driver_name) = doc
                     .driver_name
@@ -1536,6 +1874,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .filter(|value| !value.is_empty())
                 {
                     emit_pair(&mut builder, receipt_label(lang, "Address"), address, width);
+                }
+                if let Some(phone) = doc
+                    .customer_phone
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
                 }
                 if let Some(city) = doc
                     .delivery_city
@@ -1667,20 +2013,22 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let title = receipt_label(lang, "KITCHEN TICKET");
-            if style.modern && !style.compact_width {
-                // Split translated title on first space for double-height effect
-                let (first, rest) = title.split_once(' ').unwrap_or((title, ""));
+            let use_modern_prominent_header = style.modern && !style.compact_width;
+            if use_modern_prominent_header {
                 builder
                     .center()
                     .bold(true)
                     .double_height()
-                    .text(first)
+                    .text(title)
                     .lf()
-                    .normal_size();
-                if !rest.is_empty() {
-                    builder.text(rest).lf();
-                }
-                builder.bold(false).left();
+                    .normal_size()
+                    .double_width()
+                    .double_height()
+                    .text(&format!("{} #{}", receipt_label(lang, "Order"), doc.order_number))
+                    .lf()
+                    .normal_size()
+                    .bold(false)
+                    .left();
             } else {
                 builder
                     .center()
@@ -1690,12 +2038,22 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .bold(false)
                     .left();
             }
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Order"),
-                &format!("#{}", doc.order_number),
-                width,
-            );
+            if !use_modern_prominent_header {
+                builder.bold(true);
+                if !style.compact_width {
+                    builder.double_height();
+                }
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Order"),
+                    &format!("#{}", doc.order_number),
+                    width,
+                );
+                if !style.compact_width {
+                    builder.normal_size();
+                }
+                builder.bold(false);
+            }
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Type"),
@@ -1827,6 +2185,164 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     {
                         emit_wrapped(&mut builder, &format!("  Note: {note}"), width);
                     }
+                }
+            }
+        }
+        ReceiptDocument::DeliverySlip(doc) => {
+            let cur = cfg.currency_symbol.as_str();
+            builder.separator();
+            // Order info centered
+            builder.center();
+            builder.bold(true);
+            if !style.compact_width {
+                builder.double_height();
+            }
+            builder
+                .text(&format!(
+                    "{} #{}",
+                    receipt_label(lang, "Order"),
+                    doc.order_number
+                ))
+                .lf();
+            if !style.compact_width {
+                builder.normal_size();
+            }
+            builder.bold(false);
+            builder.text(&format_datetime_human(&doc.created_at)).lf();
+            builder.text(&doc.order_type).lf();
+            builder.left();
+            builder.separator();
+            // Customer info
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                builder
+                    .text(receipt_label(lang, "Customer"))
+                    .text(": ")
+                    .bold(true)
+                    .text(customer)
+                    .bold(false)
+                    .lf();
+            }
+            let phone_val = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("");
+            builder
+                .text(receipt_label(lang, "Phone"))
+                .text(": ")
+                .bold(true)
+                .text(phone_val)
+                .bold(false)
+                .lf();
+            // Address block
+            if let Some(street) = doc
+                .delivery_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                builder.text(receipt_label(lang, "Address")).text(":").lf();
+                emit_wrapped(&mut builder, street, width);
+                let postal = doc
+                    .delivery_postal_code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("");
+                let city = doc
+                    .delivery_city
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or("");
+                if !postal.is_empty() || !city.is_empty() {
+                    emit_wrapped(&mut builder, format!("{postal} {city}").trim(), width);
+                }
+                let floor = doc
+                    .delivery_floor
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                let ringer = doc
+                    .name_on_ringer
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                match (floor, ringer) {
+                    (Some(f), Some(r)) => {
+                        emit_wrapped(
+                            &mut builder,
+                            &format!(
+                                "{f} {} | {}: {r}",
+                                receipt_label(lang, "Floor"),
+                                receipt_label(lang, "Ringer"),
+                            ),
+                            width,
+                        );
+                    }
+                    (Some(f), None) => {
+                        emit_wrapped(
+                            &mut builder,
+                            &format!("{f} {}", receipt_label(lang, "Floor")),
+                            width,
+                        );
+                    }
+                    (None, Some(r)) => {
+                        emit_wrapped(
+                            &mut builder,
+                            &format!("{}: {r}", receipt_label(lang, "Ringer")),
+                            width,
+                        );
+                    }
+                    (None, None) => {}
+                }
+            }
+            // Items
+            emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
+            if doc.items.is_empty() {
+                builder.text(receipt_label(lang, "No items")).lf();
+            } else {
+                for item in &doc.items {
+                    let price = money_with_currency(item.total, cur);
+                    emit_item_line(&mut builder, &item.name, &price, width, style);
+                    emit_item_customizations_escpos(&mut builder, item, width);
+                    if let Some(note) = item
+                        .note
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        emit_wrapped(&mut builder, &format!("  Note: {note}"), width);
+                    }
+                }
+            }
+            // Totals
+            builder.separator();
+            for total in &doc.totals {
+                let label = receipt_label(lang, &total.label);
+                let val = money_with_currency(total.amount, cur);
+                if total.emphasize {
+                    // Double separator before TOTAL
+                    let eq_line: String = "=".repeat(width);
+                    builder.text(&eq_line).lf();
+                    builder.bold(true);
+                    if style.modern && !style.compact_width {
+                        builder.double_height();
+                    }
+                    emit_pair(&mut builder, label, &val, width);
+                    if style.modern && !style.compact_width {
+                        builder.normal_size();
+                    }
+                    builder.bold(false);
+                    builder.text(&eq_line).lf();
+                } else {
+                    emit_pair(&mut builder, label, &val, width);
                 }
             }
         }
@@ -1968,6 +2484,10 @@ mod tests {
             .count()
     }
 
+    fn count_text(text: &str, needle: &str) -> usize {
+        text.match_indices(needle).count()
+    }
+
     #[test]
     fn renders_qr_when_enabled() {
         let cfg = LayoutConfig {
@@ -2092,6 +2612,7 @@ mod tests {
             order_type: "delivery".to_string(),
             status: "completed".to_string(),
             created_at: "2026-02-24".to_string(),
+            customer_phone: Some("6900000000".to_string()),
             delivery_address: Some("Main St 12".to_string()),
             delivery_city: Some("Athens".to_string()),
             delivery_postal_code: Some("10558".to_string()),
@@ -2110,6 +2631,10 @@ mod tests {
         assert!(text.contains("Athens"));
         assert!(text.contains("10558"));
         assert!(text.contains("Papadopoulos"));
+        assert!(text.contains("6900000000"));
+        let delivery_pos = text.find("DELIVERY").unwrap_or(usize::MAX);
+        let phone_pos = text.find("Phone").unwrap_or(usize::MAX);
+        assert!(delivery_pos < phone_pos);
     }
 
     #[test]
@@ -2145,5 +2670,98 @@ mod tests {
         let text = String::from_utf8_lossy(&out.bytes);
         assert!(!text.contains("DELIVERY"));
         assert!(!text.contains("Driver"));
+    }
+
+    #[test]
+    fn order_receipt_renders_customer_phone_when_present() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-80".to_string(),
+            order_type: "dine-in".to_string(),
+            status: "completed".to_string(),
+            created_at: "2026-02-24".to_string(),
+            customer_name: Some("John Doe".to_string()),
+            customer_phone: Some("+30 6900000000".to_string()),
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &LayoutConfig::default());
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("Phone"));
+        assert!(text.contains("+30 6900000000"));
+    }
+
+    #[test]
+    fn header_renders_brand_branch_address_phone_vat_and_tax_in_order() {
+        let cfg = LayoutConfig {
+            organization_name: "Brand Co".to_string(),
+            store_subtitle: Some("Downtown Branch".to_string()),
+            store_address: Some("Main St 10".to_string()),
+            store_phone: Some("2100000000".to_string()),
+            vat_number: Some("123456789".to_string()),
+            tax_office: Some("DOY ATHENS".to_string()),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-81".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        let brand_pos = text.find("Brand Co").unwrap_or(usize::MAX);
+        let branch_pos = text.find("Downtown Branch").unwrap_or(usize::MAX);
+        let address_pos = text.find("Main St 10").unwrap_or(usize::MAX);
+        let phone_pos = text.find("2100000000").unwrap_or(usize::MAX);
+        let vat_pos = text.find("VAT: 123456789").unwrap_or(usize::MAX);
+        let tax_pos = text.find("TAX_OFFICE: DOY ATHENS").unwrap_or(usize::MAX);
+
+        assert!(brand_pos < branch_pos);
+        assert!(branch_pos < address_pos);
+        assert!(address_pos < phone_pos);
+        assert!(phone_pos < vat_pos);
+        assert!(vat_pos < tax_pos);
+    }
+
+    #[test]
+    fn delivery_slip_header_dedupes_branch_when_same_as_brand() {
+        let cfg = LayoutConfig {
+            organization_name: "Same Name".to_string(),
+            store_subtitle: Some("Same Name".to_string()),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::DeliverySlip(OrderReceiptDoc {
+            order_number: "A-82".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert_eq!(count_text(&text, "Same Name"), 1);
+    }
+
+    #[test]
+    fn kitchen_modern_receipt_keeps_prominent_order_identifier() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            paper_width: PaperWidth::Mm80,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::KitchenTicket(KitchenTicketDoc {
+            order_number: "KT-19".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-02-24T12:30:00Z".to_string(),
+            ..KitchenTicketDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("KITCHEN TICKET"));
+        assert!(text.contains("Order #KT-19"));
+        assert!(text.contains("Type"));
+        assert!(text.contains("Date"));
     }
 }

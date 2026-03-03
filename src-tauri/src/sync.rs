@@ -583,7 +583,12 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     drop(conn);
 
-    if let Err(error) = print::enqueue_print_job(db, "order_receipt", &order_id, None) {
+    let auto_print_type = if order_type == "delivery" {
+        "delivery_slip"
+    } else {
+        "order_receipt"
+    };
+    if let Err(error) = print::enqueue_print_job(db, auto_print_type, &order_id, None) {
         warn!(
             order_id = %order_id,
             error = %error,
@@ -2328,7 +2333,11 @@ async fn reconcile_remote_orders(
         }
 
         for local_id in newly_materialized_order_ids {
+            let mut auto_print_type = "order_receipt";
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
+                if order_json.get("orderType").and_then(|v| v.as_str()) == Some("delivery") {
+                    auto_print_type = "delivery_slip";
+                }
                 let _ = app.emit("order_created", order_json.clone());
                 let _ = app.emit("order_realtime_update", order_json);
             } else {
@@ -2338,7 +2347,7 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if let Err(error) = print::enqueue_print_job(db, "order_receipt", &local_id, None) {
+            if let Err(error) = print::enqueue_print_job(db, auto_print_type, &local_id, None) {
                 warn!(
                     order_id = %local_id,
                     error = %error,

@@ -65,9 +65,10 @@ pub fn enqueue_print_job_with_payload(
         && entity_type != "kitchen_ticket"
         && entity_type != "z_report"
         && entity_type != "shift_checkout"
+        && entity_type != "delivery_slip"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, or z_report"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, or delivery_slip"
         ));
     }
 
@@ -545,10 +546,25 @@ fn resolve_layout_config(
         .or_else(|| setting_text(&conn, "restaurant", "name"))
         .or_else(|| setting_text(&conn, "terminal", "store_name"))
         .unwrap_or_else(|| "The Small".to_string());
+    let restaurant_name = setting_text(&conn, "restaurant", "name");
+    let store_subtitle = setting_text(&conn, "restaurant", "subtitle")
+        .or_else(|| {
+            restaurant_name.and_then(|name| {
+                if name.trim() != organization_name.trim() {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| setting_text(&conn, "organization", "subtitle"));
     let store_address = setting_text(&conn, "restaurant", "address")
         .or_else(|| setting_text(&conn, "terminal", "store_address"));
     let store_phone = setting_text(&conn, "restaurant", "phone")
         .or_else(|| setting_text(&conn, "terminal", "store_phone"));
+    let currency_symbol = setting_text(&conn, "receipt", "currency_symbol")
+        .or_else(|| setting_text(&conn, "organization", "currency_symbol"))
+        .unwrap_or_default();
     let vat_number = setting_text(&conn, "organization", "vat_number")
         .or_else(|| setting_text(&conn, "restaurant", "vat_number"));
     let tax_office = setting_text(&conn, "organization", "tax_office");
@@ -658,6 +674,8 @@ fn resolve_layout_config(
         escpos_code_page,
         detected_brand,
         language: app_language,
+        store_subtitle,
+        currency_symbol,
     })
 }
 
@@ -1235,9 +1253,9 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         .query_row(
             "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
-                    COALESCE(items, '[]'), COALESCE(total_amount, 0), COALESCE(subtotal, 0),
-                    COALESCE(tax_amount, 0), COALESCE(discount_amount, 0), COALESCE(delivery_fee, 0),
-                    COALESCE(tip_amount, 0), COALESCE(delivery_address, ''),
+                    COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0),
+                    COALESCE(subtotal, 0), COALESCE(tax_amount, 0), COALESCE(discount_amount, 0),
+                    COALESCE(delivery_fee, 0), COALESCE(tip_amount, 0), COALESCE(delivery_address, ''),
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
                     COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, '')
@@ -1252,13 +1270,13 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, f64>(7)?,
+                    row.get::<_, String>(7)?,
                     row.get::<_, f64>(8)?,
                     row.get::<_, f64>(9)?,
                     row.get::<_, f64>(10)?,
                     row.get::<_, f64>(11)?,
                     row.get::<_, f64>(12)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, f64>(13)?,
                     row.get::<_, String>(14)?,
                     row.get::<_, String>(15)?,
                     row.get::<_, String>(16)?,
@@ -1266,6 +1284,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
                     row.get::<_, String>(18)?,
                     row.get::<_, String>(19)?,
                     row.get::<_, String>(20)?,
+                    row.get::<_, String>(21)?,
                 ))
             },
         )
@@ -1277,6 +1296,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         created_at,
         table_number,
         customer_name,
+        customer_phone,
         items_json,
         total_amount,
         subtotal,
@@ -1464,6 +1484,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         created_at,
         table_number: non_empty_field(table_number),
         customer_name: non_empty_field(customer_name),
+        customer_phone: non_empty_field(customer_phone),
         delivery_address: non_empty_field(delivery_address),
         delivery_city: non_empty_field(delivery_city),
         delivery_postal_code: non_empty_field(delivery_postal_code),
@@ -1890,6 +1911,9 @@ fn build_document_for_job(
             }
             Ok(ReceiptDocument::ZReport(build_z_report_doc(db, entity_id)?))
         }
+        "delivery_slip" => Ok(ReceiptDocument::DeliverySlip(build_order_receipt_doc(
+            db, entity_id,
+        )?)),
         _ => Err(format!("Unknown entity_type: {entity_type}")),
     }
 }
@@ -2268,6 +2292,12 @@ fn dispatch_to_printer(
         escpos_code_page = ?layout.escpos_code_page,
         show_logo = layout.show_logo,
         template = ?layout.template,
+        organization_name = %layout.organization_name,
+        store_subtitle = ?layout.store_subtitle,
+        store_address = ?layout.store_address,
+        store_phone = ?layout.store_phone,
+        vat_number = ?layout.vat_number,
+        tax_office = ?layout.tax_office,
         "Dispatch: resolved layout config"
     );
     let mut rendered = receipt_renderer::render_escpos(document, &layout);
@@ -2330,6 +2360,7 @@ fn dispatch_to_printer(
                 "kitchen_ticket" => "POS Kitchen Ticket",
                 "shift_checkout" => "POS Shift Checkout",
                 "z_report" => "POS Z Report",
+                "delivery_slip" => "POS Delivery Slip",
                 _ => "POS Receipt",
             };
             let _dispatch =
@@ -2758,6 +2789,47 @@ mod tests {
 
         let doc = build_order_receipt_doc(&db, "ord-delivery-fallback").unwrap();
         assert_eq!(doc.driver_name.as_deref(), Some("Shift Driver"));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_uses_restaurant_name_as_branch_subtitle_fallback() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "organization", "name", "The Small Group").unwrap();
+            db::set_setting(&conn, "restaurant", "name", "Kifisia Branch").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "modern"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.organization_name, "The Small Group");
+        assert_eq!(layout.store_subtitle.as_deref(), Some("Kifisia Branch"));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_skips_duplicate_branch_name_and_uses_org_subtitle() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "organization", "name", "The Small Group").unwrap();
+            db::set_setting(&conn, "organization", "subtitle", "Head Office").unwrap();
+            db::set_setting(&conn, "restaurant", "name", "The Small Group").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "modern"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.organization_name, "The Small Group");
+        assert_eq!(layout.store_subtitle.as_deref(), Some("Head Office"));
     }
 
     #[test]

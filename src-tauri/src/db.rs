@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 23;
+const CURRENT_SCHEMA_VERSION: i32 = 24;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -170,6 +170,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 23 {
         migrate_v23(conn)?;
+    }
+    if current < 24 {
+        migrate_v24(conn)?;
     }
 
     Ok(())
@@ -1541,6 +1544,59 @@ fn migrate_v23(conn: &Connection) -> Result<(), String> {
     })?;
 
     info!("Applied migration v23 (printer_profiles.escpos_code_page)");
+    Ok(())
+}
+
+/// Migration v24: add 'delivery_slip' to print_jobs entity_type CHECK constraint.
+fn migrate_v24(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS print_jobs_v24;
+        CREATE TABLE print_jobs_v24 (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL
+                CHECK (entity_type IN ('order_receipt', 'kitchen_ticket', 'z_report', 'shift_checkout', 'delivery_slip')),
+            entity_id TEXT NOT NULL,
+            printer_profile_id TEXT,
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'printing', 'printed', 'failed')),
+            output_path TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            next_retry_at TEXT,
+            last_error TEXT,
+            warning_code TEXT,
+            warning_message TEXT,
+            last_attempt_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            entity_payload_json TEXT
+        );
+        INSERT OR IGNORE INTO print_jobs_v24
+            SELECT id, entity_type, entity_id, printer_profile_id, status,
+                   output_path, retry_count, max_retries, next_retry_at, last_error,
+                   warning_code, warning_message, last_attempt_at, created_at, updated_at,
+                   entity_payload_json
+            FROM print_jobs;
+        DROP TABLE print_jobs;
+        ALTER TABLE print_jobs_v24 RENAME TO print_jobs;
+
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_status
+            ON print_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_created_at
+            ON print_jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_entity
+            ON print_jobs(entity_type, entity_id);
+
+        INSERT INTO schema_version (version) VALUES (24);
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v24 failed: {e}");
+        format!("migration v24: {e}")
+    })?;
+
+    info!("Applied migration v24 (print_jobs entity_type includes delivery_slip)");
     Ok(())
 }
 

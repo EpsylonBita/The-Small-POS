@@ -683,7 +683,12 @@ pub async fn order_save_from_remote(
     }
 
     if !is_ghost {
-        if let Err(error) = print::enqueue_print_job(&db, "order_receipt", &local_id, None) {
+        let auto_print_type = if order_type == "delivery" {
+            "delivery_slip"
+        } else {
+            "order_receipt"
+        };
+        if let Err(error) = print::enqueue_print_job(&db, auto_print_type, &local_id, None) {
             tracing::warn!(
                 order_id = %local_id,
                 error = %error,
@@ -1007,11 +1012,11 @@ pub async fn order_assign_driver(
     .map_err(|e| format!("assign driver: {e}"))?;
     drop(conn);
 
-    if let Err(error) = print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None) {
+    if let Err(error) = print::enqueue_print_job(&db, "delivery_slip", &order_id, None) {
         tracing::warn!(
             order_id = %order_id,
             error = %error,
-            "Failed to enqueue assignment kitchen ticket print job"
+            "Failed to enqueue delivery slip print job"
         );
     }
 
