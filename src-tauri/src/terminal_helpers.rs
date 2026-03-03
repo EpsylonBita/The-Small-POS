@@ -194,12 +194,33 @@ pub(crate) fn cache_terminal_settings_snapshot(
         }
     }
 
+    if let Some(branch_name) =
+        nested_value_str(resp, &["/branch_info/name", "/branch_info/display_name"])
+    {
+        db::set_setting(&conn, "restaurant", "name", &branch_name)?;
+        updated.push("restaurant.name".to_string());
+
+        let branch_subtitle = nested_value_str(
+            resp,
+            &[
+                "/branch_info/subtitle",
+                "/branch_info/display_name",
+                "/settings/restaurant/subtitle",
+            ],
+        )
+        .unwrap_or_else(|| branch_name.clone());
+        db::set_setting(&conn, "restaurant", "subtitle", &branch_subtitle)?;
+        updated.push("restaurant.subtitle".to_string());
+    }
+
     // Persist explicit terminal fallbacks for printing paths.
     if let Some(store_name) = nested_value_str(
         resp,
         &[
             "/settings/restaurant/name",
             "/settings/terminal/store_name",
+            "/branch_info/name",
+            "/branch_info/display_name",
             "/organization_branding/name",
         ],
     ) {
@@ -472,4 +493,123 @@ pub(crate) fn mask_terminal_id(terminal_id: &str) -> String {
         .rev()
         .collect();
     format!("***{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn test_db() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
+        }
+    }
+
+    #[test]
+    fn cache_snapshot_persists_branch_identity_and_receipt_fallbacks() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "organization_branding": {
+                "name": "The Small Group",
+                "logo_url": "https://example.com/logo.png"
+            },
+            "branch_info": {
+                "name": "Kifisia Branch",
+                "address": "Main St 42",
+                "city": "Athens",
+                "phone": "2101234567",
+                "tax_id": "123456789",
+                "tax_office": "DOY ATHENS"
+            },
+            "settings": {
+                "terminal": {}
+            }
+        });
+
+        let updated = cache_terminal_settings_snapshot(&db, &payload).expect("cache snapshot");
+        assert!(updated.iter().any(|key| key == "restaurant.name"));
+        assert!(updated.iter().any(|key| key == "restaurant.subtitle"));
+
+        let conn = db.conn.lock().expect("lock db");
+        assert_eq!(
+            db::get_setting(&conn, "organization", "name").as_deref(),
+            Some("The Small Group")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "name").as_deref(),
+            Some("Kifisia Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "subtitle").as_deref(),
+            Some("Kifisia Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "store_name").as_deref(),
+            Some("Kifisia Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "address").as_deref(),
+            Some("Main St 42, Athens")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "store_address").as_deref(),
+            Some("Main St 42, Athens")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "phone").as_deref(),
+            Some("2101234567")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "organization", "vat_number").as_deref(),
+            Some("123456789")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "organization", "tax_office").as_deref(),
+            Some("DOY ATHENS")
+        );
+    }
+
+    #[test]
+    fn cache_snapshot_uses_display_name_when_branch_name_is_missing() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "branch_info": {
+                "display_name": "Downtown Branch",
+                "address": "Main St 42",
+                "city": "Athens",
+                "phone": "2101234567"
+            },
+            "settings": {
+                "terminal": {}
+            }
+        });
+
+        cache_terminal_settings_snapshot(&db, &payload).expect("cache snapshot");
+        let conn = db.conn.lock().expect("lock db");
+
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "name").as_deref(),
+            Some("Downtown Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "subtitle").as_deref(),
+            Some("Downtown Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "store_name").as_deref(),
+            Some("Downtown Branch")
+        );
+    }
 }
