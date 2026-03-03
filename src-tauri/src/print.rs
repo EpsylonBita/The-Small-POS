@@ -536,12 +536,24 @@ fn resolve_layout_config(
         .or_else(|| profile.get("paper_width_mm"))
         .and_then(Value::as_i64)
         .unwrap_or(80) as i32;
-    let template = ReceiptTemplate::from_value(
-        profile
-            .get("receiptTemplate")
-            .or_else(|| profile.get("receipt_template"))
-            .and_then(Value::as_str),
+    let requested_template = profile
+        .get("receiptTemplate")
+        .or_else(|| profile.get("receipt_template"))
+        .and_then(Value::as_str);
+    let mut template = ReceiptTemplate::from_value(requested_template);
+    let force_modern_default = matches!(
+        entity_type,
+        "order_receipt" | "delivery_slip" | "kitchen_ticket"
     );
+    let allow_classic_template = setting_bool(&conn, "receipt", "allow_classic_template");
+    if template == ReceiptTemplate::Classic && force_modern_default && !allow_classic_template {
+        info!(
+            entity_type = %entity_type,
+            requested_template = ?requested_template,
+            "Legacy classic template auto-promoted to modern"
+        );
+        template = ReceiptTemplate::Modern;
+    }
     let organization_name = setting_text(&conn, "organization", "name")
         .or_else(|| setting_text(&conn, "restaurant", "name"))
         .or_else(|| setting_text(&conn, "terminal", "store_name"))
@@ -2830,6 +2842,37 @@ mod tests {
 
         assert_eq!(layout.organization_name, "The Small Group");
         assert_eq!(layout.store_subtitle.as_deref(), Some("Head Office"));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_auto_promotes_legacy_classic_template() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Modern);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_honors_classic_opt_in_setting() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "receipt", "allow_classic_template", "true").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Classic);
     }
 
     #[test]

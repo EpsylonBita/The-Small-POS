@@ -10,6 +10,7 @@
 - `modern` is default for new `receipt` and `kitchen` profiles.
 - DB migration v20 rolls existing `receipt`/`kitchen` profiles from `NULL`/`classic` to `modern`.
 - Renderer keeps both templates active; `modern` changes section hierarchy/styling while preserving thermal safety.
+- Runtime compatibility guard: for `order_receipt`, `delivery_slip`, and `kitchen_ticket`, a legacy profile value of `classic` is auto-promoted to `modern` unless `receipt.allow_classic_template=true` exists in local settings.
 
 ## Queue Payload Snapshots
 - `print_jobs` includes `entity_payload_json` (migration v20).
