@@ -340,7 +340,12 @@ fn handle_menu_monitor_sync_error(
     emit_menu_version_checked_event(app, source, success, false, None, None, event_error);
 }
 
-pub fn start_menu_version_monitor(app: tauri::AppHandle, db: Arc<db::DbState>, interval_secs: u64) {
+pub fn start_menu_version_monitor(
+    app: tauri::AppHandle,
+    db: Arc<db::DbState>,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) {
     let cadence = Duration::from_secs(interval_secs.max(MENU_VERSION_MONITOR_MIN_INTERVAL_SECS));
 
     tauri::async_runtime::spawn(async move {
@@ -459,7 +464,13 @@ pub fn start_menu_version_monitor(app: tauri::AppHandle, db: Arc<db::DbState>, i
                 }
             }
 
-            tokio::time::sleep(cadence).await;
+            tokio::select! {
+                _ = tokio::time::sleep(cadence) => {}
+                _ = cancel.cancelled() => {
+                    info!("Menu version monitor cancelled");
+                    break;
+                }
+            }
         }
     });
 }

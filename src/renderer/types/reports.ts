@@ -90,6 +90,26 @@ export interface ZReportData {
     openingTotal?: number;
     driverCashGiven?: number;
     driverCashReturned?: number;
+    driverCashBreakdown?: Array<{
+      driverName: string;
+      driverShiftId: string;
+      roleType?: string;
+      startingAmount: number;
+      cashCollected: number;
+      cardAmount?: number;
+      cashToReturn: number;
+      expenses: number;
+    }>;
+    waiterCashBreakdown?: Array<{
+      driverName: string;
+      driverShiftId: string;
+      roleType?: string;
+      startingAmount: number;
+      cashCollected: number;
+      cardAmount?: number;
+      cashToReturn: number;
+      expenses: number;
+    }>;
   };
   /**
    * Expenses summary - excludes staff_payment type items to avoid double-counting.
@@ -197,5 +217,6 @@ export interface ZReportData {
     createdAt: string;
   }>;
   daySummary?: { cashTotal: number; cardTotal: number; total: number; totalOrders: number };
+  periodStart?: string;
 }
 

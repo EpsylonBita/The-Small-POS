@@ -34,6 +34,7 @@ mod escpos;
 mod hardware_manager;
 mod loyalty;
 mod menu;
+mod order_ownership;
 mod payments;
 mod print;
 mod printers;
@@ -458,20 +459,30 @@ pub fn run() {
             let sync_state = Arc::new(sync::SyncState::new());
             app.manage(sync_state.clone());
 
+            // Cancellation token for graceful shutdown of background tasks
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            app.manage(cancel_token.clone());
+
             // Second DB connection for the background sync loop
             let db_for_sync =
                 Arc::new(db::init(&app_data_dir).expect("Failed to init sync database"));
             let db_for_startup = db_for_sync.clone();
 
             // Start background sync loop (15s interval)
-            sync::start_sync_loop(app.handle().clone(), db_for_sync, sync_state.clone(), 15);
+            sync::start_sync_loop(
+                app.handle().clone(),
+                db_for_sync,
+                sync_state.clone(),
+                15,
+                cancel_token.clone(),
+            );
 
             // Third DB connection for the background print worker
             let db_for_print =
                 Arc::new(db::init(&app_data_dir).expect("Failed to init print database"));
 
             // Start background print worker (5s interval)
-            print::start_print_worker(db_for_print, app_data_dir.clone(), 5);
+            print::start_print_worker(db_for_print, app_data_dir.clone(), 5, cancel_token.clone());
 
             // Start background printer status monitor (15s interval)
             let db_for_printer_status =
@@ -480,6 +491,7 @@ pub fn run() {
                 app.handle().clone(),
                 db_for_printer_status,
                 15,
+                cancel_token.clone(),
             );
 
             // Start background system health monitor (30s interval)
@@ -490,6 +502,7 @@ pub fn run() {
                 db_for_system_health,
                 sync_state.clone(),
                 30,
+                cancel_token.clone(),
             );
 
             // Start background menu version monitor (30s interval)
@@ -499,6 +512,7 @@ pub fn run() {
                 app.handle().clone(),
                 db_for_menu_version,
                 30,
+                cancel_token.clone(),
             );
 
             // Fetch terminal config (branch_id etc.) from admin on startup
@@ -701,6 +715,7 @@ pub fn run() {
             commands::sync::sync_clear_old_orders,
             commands::sync::sync_get_financial_stats,
             commands::sync::sync_get_failed_financial_items,
+            commands::sync::sync_get_financial_queue_items,
             commands::sync::sync_retry_financial_item,
             commands::sync::sync_retry_all_failed_financial,
             commands::sync::sync_get_unsynced_financial_summary,
@@ -798,6 +813,7 @@ pub fn run() {
             commands::print::printer_test,
             commands::print::printer_test_greek_direct,
             commands::print::printer_get_auto_config,
+            commands::print::printer_recommend_profile,
             commands::print::printer_diagnostics,
             commands::print::printer_bluetooth_status,
             commands::print::printer_open_cash_drawer,
@@ -965,6 +981,16 @@ pub fn run() {
             commands::api_bridge::sync_test_parent_connection,
             commands::api_bridge::admin_sync_terminal_config,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running The Small POS");
+        .build(tauri::generate_context!())
+        .expect("error while building The Small POS")
+        .run(|app, event| {
+            use tauri::Manager;
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                // Signal all background tasks to stop gracefully
+                if let Some(token) = app.try_state::<tokio_util::sync::CancellationToken>() {
+                    info!("Exit requested — cancelling background tasks");
+                    token.cancel();
+                }
+            }
+        });
 }

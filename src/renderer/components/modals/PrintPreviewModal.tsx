@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import DOMPurify from 'dompurify';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Printer, ZoomIn, ZoomOut, Download, X } from 'lucide-react';
 import { LiquidGlassModal, POSGlassButton } from '../ui/pos-glass-components';
 import { useTranslation } from 'react-i18next';
@@ -26,9 +25,27 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
 }) => {
     const { t } = useTranslation();
     const [zoom, setZoom] = useState(1);
+    const iframeRef = useRef<HTMLIFrameElement>(null);
 
     const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.25, 2));
     const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.25, 0.5));
+
+    // Auto-resize iframe to match content height
+    const handleIframeLoad = useCallback(() => {
+        const iframe = iframeRef.current;
+        if (!iframe?.contentDocument?.body) return;
+        // Let the content determine its natural height
+        const contentHeight = iframe.contentDocument.body.scrollHeight;
+        iframe.style.height = `${contentHeight + 16}px`;
+    }, []);
+
+    // Re-trigger resize when zoom changes
+    useEffect(() => {
+        const iframe = iframeRef.current;
+        if (!iframe?.contentDocument?.body) return;
+        const contentHeight = iframe.contentDocument.body.scrollHeight;
+        iframe.style.height = `${contentHeight + 16}px`;
+    }, [zoom]);
 
     return (
         <LiquidGlassModal
@@ -78,26 +95,28 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                 {/* Preview Area - Simulated 80mm Receipt */}
                 <div className="flex-1 overflow-auto scrollbar-hide bg-black/40 rounded-lg p-8 flex justify-center border border-white/5 relative">
                     <div
-                        className="bg-white text-black shadow-xl transition-transform origin-top duration-200 ease-out"
+                        className="transition-transform origin-top duration-200 ease-out"
                         style={{
-                            width: '80mm', // Standard thermal receipt width
-                            minHeight: '100mm',
                             transform: `scale(${zoom})`,
-                            padding: '10px' // minimal padding for thermal simulation
                         }}
                     >
                         {previewHtml ? (
-                            <div
-                                dangerouslySetInnerHTML={{
-                                    __html: DOMPurify.sanitize(previewHtml, {
-                                        ALLOWED_TAGS: ['div', 'span', 'p', 'br', 'strong', 'em', 'b', 'i', 'table', 'tr', 'td', 'th', 'hr'],
-                                        ALLOWED_ATTR: ['class', 'style']
-                                    })
+                            <iframe
+                                ref={iframeRef}
+                                srcDoc={previewHtml}
+                                sandbox="allow-same-origin"
+                                onLoad={handleIframeLoad}
+                                style={{
+                                    width: '340px',
+                                    minHeight: '400px',
+                                    border: 'none',
+                                    background: 'white',
+                                    display: 'block',
                                 }}
-                                className="receipt-preview-content font-mono text-[10px] leading-tight"
+                                title="Receipt Preview"
                             />
                         ) : (
-                            <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400">
+                            <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400" style={{ width: '340px', minHeight: '400px', background: 'white' }}>
                                 <Printer className="w-8 h-8 opacity-20" />
                                 <span className="text-xs">Preview unavailable</span>
                             </div>

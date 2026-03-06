@@ -100,6 +100,26 @@ npm run pos:tauri:dev
 3. Validate pending queue and sync errors.
 4. Export diagnostics for reconciliation analysis.
 
+### Database WAL recovery
+
+The POS database uses SQLite WAL (Write-Ahead Logging) mode for concurrent read/write performance. WAL stores pending writes in a separate `-wal` file before they are checkpointed into the main `pos.db`.
+
+**Symptoms after a crash or power loss:**
+
+- Data from the last few seconds before the crash appears missing.
+- The database directory contains `pos.db-wal` and/or `pos.db-shm` files alongside `pos.db`.
+
+**Recovery steps:**
+
+1. **Do NOT delete** the `pos.db-wal` or `pos.db-shm` files. They contain committed transactions that have not yet been checkpointed into the main database.
+2. Simply re-launch the application. SQLite automatically replays the WAL file on the next connection, recovering all committed writes.
+3. After successful startup, verify data integrity via System Health and a diagnostics export.
+4. If the app fails to start after a crash, the WAL file may be corrupted. In that case, back up all three files (`pos.db`, `pos.db-wal`, `pos.db-shm`) before attempting any manual recovery.
+
+**Prevention:**
+
+The database is configured with `PRAGMA synchronous = NORMAL` (WAL mode default), which ensures durability against application crashes. Full protection against OS-level crashes or power loss would require `PRAGMA synchronous = FULL`, at a performance cost. The current setting provides a good balance for POS workloads where unsynced orders can be re-derived from the sync queue on restart.
+
 ## Data Locations
 
 | Data | Location |

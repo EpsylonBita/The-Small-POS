@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, print, value_str, zreport};
+use crate::{db, order_ownership, print, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,8 +280,6 @@ pub async fn driver_record_earning(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let id = crate::value_str(&payload, &["id"])
-        .unwrap_or_else(|| format!("de-{}", uuid::Uuid::new_v4()));
     let driver_id =
         crate::value_str(&payload, &["driverId", "driver_id"]).ok_or("Missing driverId")?;
     let shift_id = crate::value_str(
@@ -289,131 +287,43 @@ pub async fn driver_record_earning(
         &["shiftId", "shift_id", "staffShiftId", "staff_shift_id"],
     );
     let order_id = crate::value_str(&payload, &["orderId", "order_id"]).ok_or("Missing orderId")?;
-    let delivery_fee = crate::value_f64(&payload, &["deliveryFee", "delivery_fee"]).unwrap_or(0.0);
-    let tip_amount = crate::value_f64(&payload, &["tipAmount", "tip_amount"]).unwrap_or(0.0);
-    let payment_method = crate::value_str(&payload, &["paymentMethod", "payment_method"])
-        .unwrap_or_else(|| "cash".to_string());
-    let cash_collected =
-        crate::value_f64(&payload, &["cashCollected", "cash_collected"]).unwrap_or(0.0);
-    let card_amount = crate::value_f64(&payload, &["cardAmount", "card_amount"]).unwrap_or(0.0);
-
-    let total_earning = delivery_fee + tip_amount;
-    let cash_to_return = cash_collected - card_amount;
     let now = Utc::now().to_rfc3339();
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
-    // Validate shift exists and is active (if provided)
-    if let Some(ref sid) = shift_id {
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM staff_shifts WHERE id = ?1",
-                params![sid],
-                |row| row.get(0),
-            )
-            .ok();
-        match status.as_deref() {
-            None => return Err("Shift not found".to_string()),
-            Some(s) if s != "active" => {
-                return Err("Cannot record earnings on inactive shift".to_string())
-            }
-            _ => {}
-        }
-    }
+    let resolved_shift_id =
+        order_ownership::resolve_driver_shift_id(&conn, &driver_id, shift_id.as_deref())?
+            .ok_or("No active driver shift found")?;
 
-    // Check for duplicate order_id
-    let existing: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM driver_earnings WHERE order_id = ?1",
-            params![order_id],
-            |row| row.get::<_, i32>(0),
-        )
-        .unwrap_or(0)
-        > 0;
-    if existing {
-        return Err("Earning already recorded for this order".to_string());
-    }
+    let assignment = order_ownership::assign_order_to_driver_shift(
+        &conn,
+        &order_id,
+        &driver_id,
+        None,
+        &resolved_shift_id,
+        &now,
+    )?;
 
-    // Resolve branch_id from shift if not provided
-    let branch_id = crate::value_str(&payload, &["branchId", "branch_id"]).unwrap_or_else(|| {
-        shift_id
-            .as_ref()
-            .and_then(|sid| {
-                conn.query_row(
-                    "SELECT branch_id FROM staff_shifts WHERE id = ?1",
-                    params![sid],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-            })
-            .unwrap_or_default()
-    });
+    let earning_id =
+        order_ownership::upsert_driver_earning(&conn, &order_id, &driver_id, &assignment, &now)?;
 
-    // Fetch order details for the JSON column
-    let order_details: Option<String> = conn
-        .query_row(
-            "SELECT order_number, delivery_address, table_number, total_amount, payment_method, status FROM orders WHERE id = ?1",
-            params![order_id],
-            |row| {
-                let detail = serde_json::json!({
-                    "order_number": row.get::<_, Option<String>>(0).unwrap_or(None),
-                    "address": row.get::<_, Option<String>>(1).unwrap_or(None)
-                        .or_else(|| row.get::<_, Option<String>>(2).unwrap_or(None))
-                        .unwrap_or_else(|| "N/A".to_string()),
-                    "price": row.get::<_, f64>(3).unwrap_or(0.0),
-                    "payment_type": row.get::<_, Option<String>>(4).unwrap_or(None),
-                    "status": row.get::<_, Option<String>>(5).unwrap_or(None),
-                });
-                Ok(detail.to_string())
-            },
-        )
-        .ok();
-
-    conn.execute(
-        "INSERT INTO driver_earnings (
-            id, driver_id, staff_shift_id, order_id, branch_id,
-            delivery_fee, tip_amount, total_earning,
-            payment_method, cash_collected, card_amount, cash_to_return,
-            order_details, settled, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15)",
-        params![
-            id,
-            driver_id,
-            shift_id,
-            order_id,
-            branch_id,
-            delivery_fee,
-            tip_amount,
-            total_earning,
-            payment_method,
-            cash_collected,
-            card_amount,
-            cash_to_return,
-            order_details,
-            now,
-            now
-        ],
-    )
-    .map_err(|e| format!("driver_record_earning insert: {e}"))?;
-
-    info!("Recorded driver earning {id} for order {order_id}");
+    info!("Recorded driver earning {earning_id} for order {order_id}");
 
     Ok(serde_json::json!({
         "success": true,
         "data": {
-            "id": id,
+            "id": earning_id,
             "driverId": driver_id,
-            "shiftId": shift_id,
+            "shiftId": resolved_shift_id,
             "orderId": order_id,
-            "branchId": branch_id,
-            "deliveryFee": delivery_fee,
-            "tipAmount": tip_amount,
-            "totalEarning": total_earning,
-            "paymentMethod": payment_method,
-            "cashCollected": cash_collected,
-            "cardAmount": card_amount,
-            "cashToReturn": cash_to_return,
+            "branchId": assignment.branch_id,
+            "deliveryFee": assignment.delivery_fee,
+            "tipAmount": assignment.tip_amount,
+            "totalEarning": assignment.delivery_fee + assignment.tip_amount,
+            "paymentMethod": assignment.payment_method,
+            "cashCollected": assignment.cash_collected,
+            "cardAmount": assignment.card_amount,
+            "cashToReturn": assignment.cash_collected,
             "settled": false,
             "createdAt": now,
             "updatedAt": now

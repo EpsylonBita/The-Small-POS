@@ -2,25 +2,163 @@
 //!
 //! Manages order creation (local insert + sync queue entry) and a background
 //! loop that batches pending sync operations and POSTs them to the admin
-//! dashboard. Orders go to `/api/pos/orders/sync`; shift and expense events
-//! go to `/api/pos/shifts/sync`. Each entity type is synced independently
-//! so a failure in one category does not block the other.
+//! dashboard. Each entity type is synced independently so a failure in one
+//! category does not block the others.
+//!
+//! # Partition Strategy
+//!
+//! Sync queue rows are partitioned by `entity_type` into seven categories,
+//! each routed to a dedicated endpoint:
+//!
+//! | Category     | Entity types                                             | Endpoint                        |
+//! |--------------|----------------------------------------------------------|---------------------------------|
+//! | **Order**    | `order` (and any unrecognized type — catch-all)          | `POST /api/pos/orders` (direct) |
+//! | **Shift**    | `shift`                                                  | `POST /api/pos/shifts/sync`     |
+//! | **Financial**| `shift_expense`, `staff_payment`, `driver_earning(s)`    | `POST /api/pos/financial/sync`  |
+//! | **Payment**  | `payment`                                                | `POST /api/pos/financial/sync`  |
+//! | **Adjustment**| `payment_adjustment`                                    | `POST /api/pos/financial/sync`  |
+//! | **ZReport**  | `z_report`                                               | `POST /api/pos/z-report/submit` |
+//! | **Loyalty**  | `loyalty_transaction`                                    | `POST /api/pos/loyalty/sync`    |
+//!
+//! # State Machine
+//!
+//! Each `sync_queue` row transitions through:
+//!
+//! ```text
+//! pending → in_progress → applied   (success)
+//!                        → pending   (transient failure, retry scheduled)
+//!                        → failed    (max retries exhausted)
+//! deferred → pending                 (reconciliation promotes once parent synced)
+//! waiting_parent → pending           (parent entity reached 'applied')
+//! ```
+//!
+//! # Retry Strategy
+//!
+//! - Base delay: 5 seconds (`DEFAULT_RETRY_DELAY_MS`)
+//! - Multiplier: 2× exponential backoff per retry
+//! - Max delay: 5 minutes (`MAX_RETRY_DELAY_MS`)
+//! - Max retries: 5 (default, per-row configurable)
+//! - Backpressure (HTTP 429): delay extended, does not count as a failure
+//!
+//! # Background Loop
+//!
+//! [`start_sync_loop`] spawns a tokio task that runs every N seconds:
+//!
+//! 1. Check network connectivity
+//! 2. Reconcile deferred payments and adjustments (promote to pending)
+//! 3. Fetch up to 10 pending queue rows, mark as `in_progress`
+//! 4. Partition by entity type and dispatch to batch sync functions
+//! 5. Mark rows as `applied` or schedule retry on failure
+//! 6. Emit `sync_status` event to the frontend
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use serde::Deserialize;
+
 use crate::api;
 use crate::db::DbState;
+use crate::order_ownership;
 use crate::print;
 use crate::storage;
+
+// ---------------------------------------------------------------------------
+// Typed sync response schemas
+// ---------------------------------------------------------------------------
+
+/// Response from `POST /api/pos/orders/sync` (batch queue endpoint).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct OrderBatchSyncResponse {
+    #[serde(default)]
+    pub receipt_id: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Response from `POST /api/pos/orders` (direct single-order endpoint).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct OrderDirectSyncResponse {
+    #[serde(default, alias = "id")]
+    pub order_id: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Individual result item in a financial batch sync response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct FinancialSyncResultItem {
+    #[serde(default)]
+    pub entity_type: Option<String>,
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default)]
+    pub retryable: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub server_id: Option<String>,
+    #[serde(default)]
+    pub supabase_id: Option<String>,
+}
+
+/// Response from `POST /api/pos/financial/sync` (batch financial endpoint).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct FinancialBatchSyncResponse {
+    #[serde(default)]
+    pub results: Vec<FinancialSyncResultItem>,
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Response from `POST /api/pos/payments` (single payment sync).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct PaymentSyncResponse {
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default, alias = "id")]
+    pub payment_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Response from `POST /api/pos/z-report/submit`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct ZReportSyncResponse {
+    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default, alias = "id")]
+    pub report_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Auth failure detection
@@ -92,6 +230,66 @@ const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
 #[allow(dead_code)]
 const ORDER_DIRECT_FALLBACK_QUEUE_AGE_SEC: i64 = 600;
+const SYNC_LOG_DEDUPE_COOLDOWN_SECS: i64 = 120;
+
+#[derive(Debug, Clone)]
+struct QueueFailureSnapshot {
+    queue_id: i64,
+    entity_type: String,
+    entity_id: String,
+    operation: String,
+    status: String,
+    retry_count: i64,
+    max_retries: i64,
+    next_retry_at: Option<String>,
+    last_error: String,
+    classification: String,
+}
+
+impl QueueFailureSnapshot {
+    fn fingerprint(&self) -> String {
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            self.entity_type,
+            self.entity_id,
+            self.last_error,
+            self.retry_count,
+            self.max_retries,
+            self.status
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "queueId": self.queue_id,
+            "entityType": self.entity_type,
+            "entityId": self.entity_id,
+            "operation": self.operation,
+            "status": self.status,
+            "retryCount": self.retry_count,
+            "maxRetries": self.max_retries,
+            "nextRetryAt": self.next_retry_at,
+            "lastError": self.last_error,
+            "classification": self.classification,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct WarnLogDedupeState {
+    last_fingerprint: Option<String>,
+    last_warned_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReconcileSkipLogState {
+    last_logged_at: Option<DateTime<Utc>>,
+    suppressed_count: u32,
+}
+
+static SYNC_WARN_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
+static RECONCILE_SKIP_LOG_STATE: OnceLock<Mutex<HashMap<String, ReconcileSkipLogState>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone, Default)]
 struct FinancialSyncStats {
@@ -161,6 +359,11 @@ impl FinancialSyncStats {
     }
 }
 
+/// Count rows in sync_queue matching the given WHERE clause.
+///
+/// SAFETY: `where_clause` is always a hardcoded string literal from
+/// `collect_financial_sync_stats` — never user input. The callers pass
+/// compile-time constant expressions containing entity_type/status filters.
 fn count_sync_queue_rows(conn: &rusqlite::Connection, where_clause: &str) -> i64 {
     let query = format!("SELECT COUNT(*) FROM sync_queue WHERE {where_clause}");
     conn.query_row(&query, [], |row| row.get(0)).unwrap_or(0)
@@ -259,6 +462,19 @@ fn next_order_number(conn: &rusqlite::Connection) -> String {
     );
 
     format!("ORD-{}-{:05}", date_display, next)
+}
+
+// ---------------------------------------------------------------------------
+// Input validation helpers
+// ---------------------------------------------------------------------------
+
+fn validate_string_length(field: &str, value: &str, max: usize) -> Result<(), String> {
+    if value.len() > max {
+        return Err(format!(
+            "{field} exceeds maximum length of {max} characters"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +581,18 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         str_field(payload, "customerPhone").or_else(|| str_field(payload, "customer_phone"));
     let customer_email =
         str_field(payload, "customerEmail").or_else(|| str_field(payload, "customer_email"));
+
+    // Validate user-facing string field lengths
+    if let Some(ref v) = customer_name {
+        validate_string_length("customer_name", v, 200)?;
+    }
+    if let Some(ref v) = customer_phone {
+        validate_string_length("customer_phone", v, 50)?;
+    }
+    if let Some(ref v) = customer_email {
+        validate_string_length("customer_email", v, 254)?;
+    }
+
     let items = payload
         .get("items")
         .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
@@ -396,6 +624,15 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         str_field(payload, "nameOnRinger").or_else(|| str_field(payload, "name_on_ringer"));
     let special_instructions = str_field(payload, "specialInstructions")
         .or_else(|| str_field(payload, "special_instructions"));
+    if let Some(ref v) = delivery_notes {
+        validate_string_length("delivery_notes", v, 2000)?;
+    }
+    if let Some(ref v) = special_instructions {
+        validate_string_length("special_instructions", v, 2000)?;
+    }
+    if let Some(ref v) = delivery_address {
+        validate_string_length("delivery_address", v, 500)?;
+    }
     let estimated_time = payload
         .get("estimatedTime")
         .or_else(|| payload.get("estimated_time"))
@@ -405,13 +642,21 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| "pending".to_string());
     let payment_method =
         str_field(payload, "paymentMethod").or_else(|| str_field(payload, "payment_method"));
-    let staff_id = str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
-    let driver_id = str_field(payload, "driverId")
-        .or_else(|| str_field(payload, "driver_id"))
-        .or_else(|| staff_id.clone());
-    let driver_name =
-        str_field(payload, "driverName").or_else(|| str_field(payload, "driver_name"));
-    let staff_shift_id =
+    let requested_staff_id =
+        str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let requested_driver_id =
+        str_field(payload, "driverId").or_else(|| str_field(payload, "driver_id"));
+    let driver_id = if order_type.eq_ignore_ascii_case("delivery") {
+        requested_driver_id
+    } else {
+        None
+    };
+    let driver_name = if order_type.eq_ignore_ascii_case("delivery") {
+        str_field(payload, "driverName").or_else(|| str_field(payload, "driver_name"))
+    } else {
+        None
+    };
+    let requested_staff_shift_id =
         str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
     let discount_percentage = num_field(payload, "discountPercentage")
         .or_else(|| num_field(payload, "discount_percentage"))
@@ -476,6 +721,16 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             Some(value.to_string())
         });
 
+    let (resolved_staff_shift_id, resolved_staff_id) = order_ownership::resolve_order_owner(
+        &conn,
+        &order_type,
+        &branch_id,
+        &terminal_id,
+        driver_id.as_deref(),
+        requested_staff_shift_id.as_deref(),
+        requested_staff_id.as_deref(),
+    )?;
+
     conn.execute(
         "INSERT INTO orders (
             id, order_number, customer_name, customer_phone, customer_email,
@@ -521,8 +776,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &estimated_time,
             &payment_status,
             &payment_method,
-            &staff_shift_id,
-            &staff_id,
+            &resolved_staff_shift_id,
+            &resolved_staff_id,
             &driver_id,
             &driver_name,
             &discount_percentage,
@@ -1031,6 +1286,7 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         .flatten();
 
     let financial_stats = collect_financial_sync_stats(&conn);
+    let last_queue_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
 
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
@@ -1052,6 +1308,7 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
+        "lastQueueFailure": last_queue_failure,
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
@@ -1109,6 +1366,7 @@ pub fn start_sync_loop(
     db: Arc<DbState>,
     sync_state: Arc<SyncState>,
     interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let is_running = sync_state.is_running.clone();
     let last_sync = sync_state.last_sync.clone();
@@ -1121,14 +1379,20 @@ pub fn start_sync_loop(
         let mut previous_network_online: Option<bool> = None;
 
         loop {
-            if !is_running.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() || !is_running.load(Ordering::SeqCst) {
                 info!("Sync loop stopped");
                 break;
             }
 
-            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
+                _ = cancel.cancelled() => {
+                    info!("Sync loop cancelled");
+                    break;
+                }
+            }
 
-            if !is_running.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() || !is_running.load(Ordering::SeqCst) {
                 break;
             }
 
@@ -1196,7 +1460,7 @@ pub fn start_sync_loop(
                         info!("Sync loop stopped — terminal deleted");
                         break;
                     }
-                    warn!("Sync cycle failed: {e}");
+                    log_sync_cycle_failure_with_context(&db, &e);
                 }
             }
 
@@ -1321,6 +1585,37 @@ impl DirectOrderFallbackOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncItemCategory {
+    Order,
+    Shift,
+    Financial,
+    Payment,
+    Adjustment,
+    ZReport,
+    Loyalty,
+}
+
+fn categorize_sync_item(entity_type: &str) -> SyncItemCategory {
+    match entity_type {
+        "shift" => SyncItemCategory::Shift,
+        "shift_expense" | "staff_payment" | "driver_earning" | "driver_earnings" => {
+            SyncItemCategory::Financial
+        }
+        "payment" => SyncItemCategory::Payment,
+        "payment_adjustment" => SyncItemCategory::Adjustment,
+        "z_report" => SyncItemCategory::ZReport,
+        "loyalty_transaction" => SyncItemCategory::Loyalty,
+        _ => SyncItemCategory::Order,
+    }
+}
+
+#[derive(Debug, Default)]
+struct FinancialBatchOutcome {
+    synced: usize,
+    had_non_backpressure_failure: bool,
+}
+
 fn percent_encode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len());
     for b in input.bytes() {
@@ -1411,6 +1706,186 @@ fn is_transient_receipt_poll_error(error: &str) -> bool {
         || lower.contains("cannot reach admin dashboard")
         || lower.contains("connection refused")
         || lower.contains("connection reset")
+}
+
+fn classify_queue_failure(entity_type: &str, last_error: &str) -> &'static str {
+    if is_backpressure_error(last_error) {
+        return "backpressure";
+    }
+
+    if entity_type == "order" {
+        if is_permanent_order_sync_error(last_error) {
+            return "permanent";
+        }
+        if is_transient_order_sync_error(last_error) {
+            return "transient";
+        }
+    }
+
+    "unknown"
+}
+
+fn extract_last_queue_failure_snapshot(
+    conn: &rusqlite::Connection,
+) -> Option<QueueFailureSnapshot> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, entity_id, operation, status, retry_count, max_retries,
+                    next_retry_at, last_error
+             FROM sync_queue
+             WHERE last_error IS NOT NULL
+               AND trim(last_error) != ''
+               AND (
+                    status IN ('in_progress', 'pending')
+                    OR status = 'failed'
+               )
+             ORDER BY
+               CASE
+                 WHEN status = 'in_progress' THEN 0
+                 WHEN status = 'pending' THEN 1
+                 ELSE 2
+               END,
+               COALESCE(updated_at, created_at) DESC,
+               id DESC
+             LIMIT 1",
+        )
+        .ok()?;
+
+    stmt.query_row([], |row| {
+        let entity_type: String = row.get(1)?;
+        let last_error: String = row.get(8)?;
+        Ok(QueueFailureSnapshot {
+            queue_id: row.get(0)?,
+            entity_type: entity_type.clone(),
+            entity_id: row.get(2)?,
+            operation: row.get(3)?,
+            status: row.get(4)?,
+            retry_count: row.get(5)?,
+            max_retries: row.get(6)?,
+            next_retry_at: row.get(7)?,
+            classification: classify_queue_failure(&entity_type, &last_error).to_string(),
+            last_error,
+        })
+    })
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn should_emit_deduped_warn(fingerprint: &str, now: DateTime<Utc>) -> bool {
+    let state =
+        SYNC_WARN_LOG_DEDUPE_STATE.get_or_init(|| Mutex::new(WarnLogDedupeState::default()));
+    let mut guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return true,
+    };
+
+    let should_emit = match (&guard.last_fingerprint, guard.last_warned_at) {
+        (Some(last), Some(last_at))
+            if last == fingerprint
+                && (now - last_at) < ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS) =>
+        {
+            false
+        }
+        _ => true,
+    };
+
+    if should_emit {
+        guard.last_fingerprint = Some(fingerprint.to_string());
+        guard.last_warned_at = Some(now);
+    }
+
+    should_emit
+}
+
+fn log_sync_cycle_failure_with_context(db: &DbState, error: &str) {
+    let snapshot = match db.conn.lock() {
+        Ok(conn) => extract_last_queue_failure_snapshot(&conn),
+        Err(_) => None,
+    };
+
+    let now = Utc::now();
+    let fingerprint = match &snapshot {
+        Some(snapshot) => format!("{error}|{}", snapshot.fingerprint()),
+        None => error.to_string(),
+    };
+
+    if should_emit_deduped_warn(&fingerprint, now) {
+        if let Some(snapshot) = snapshot {
+            warn!(
+                error = %error,
+                queue_id = snapshot.queue_id,
+                entity_type = %snapshot.entity_type,
+                entity_id = %snapshot.entity_id,
+                operation = %snapshot.operation,
+                queue_status = %snapshot.status,
+                retry_count = snapshot.retry_count,
+                max_retries = snapshot.max_retries,
+                next_retry_at = ?snapshot.next_retry_at,
+                classification = %snapshot.classification,
+                last_error = %snapshot.last_error,
+                "Sync cycle failed"
+            );
+        } else {
+            warn!("Sync cycle failed: {error}");
+        }
+    } else if let Some(snapshot) = snapshot {
+        debug!(
+            error = %error,
+            queue_id = snapshot.queue_id,
+            entity_type = %snapshot.entity_type,
+            entity_id = %snapshot.entity_id,
+            queue_status = %snapshot.status,
+            retry_count = snapshot.retry_count,
+            max_retries = snapshot.max_retries,
+            next_retry_at = ?snapshot.next_retry_at,
+            classification = %snapshot.classification,
+            "Sync cycle failed (deduped)"
+        );
+    } else {
+        debug!("Sync cycle failed (deduped): {error}");
+    }
+}
+
+fn log_reconcile_skip_throttled(local_id: &str) {
+    let state = RECONCILE_SKIP_LOG_STATE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            debug!(
+                local_id = %local_id,
+                "Skipped reconcile — order has pending sync queue entries"
+            );
+            return;
+        }
+    };
+
+    let now = Utc::now();
+    let entry = guard.entry(local_id.to_string()).or_default();
+    let cooldown = ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS);
+    let should_log_now = match entry.last_logged_at {
+        Some(last) => (now - last) >= cooldown,
+        None => true,
+    };
+
+    if should_log_now {
+        if entry.suppressed_count > 0 {
+            debug!(
+                local_id = %local_id,
+                suppressed = entry.suppressed_count,
+                "Skipped reconcile — order has pending sync queue entries (repeated)"
+            );
+            entry.suppressed_count = 0;
+        } else {
+            debug!(
+                local_id = %local_id,
+                "Skipped reconcile — order has pending sync queue entries"
+            );
+        }
+        entry.last_logged_at = Some(now);
+    } else {
+        entry.suppressed_count = entry.suppressed_count.saturating_add(1);
+    }
 }
 
 fn extract_first_numeric_after(haystack: &str, key: &str) -> Option<i64> {
@@ -2063,6 +2538,34 @@ fn materialize_remote_order(
     Ok(Some(local_id))
 }
 
+fn remote_order_changed_at(remote_order: &Value) -> String {
+    remote_order
+        .get("updated_at")
+        .or_else(|| remote_order.get("updatedAt"))
+        .or_else(|| remote_order.get("created_at"))
+        .or_else(|| remote_order.get("createdAt"))
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+        .unwrap_or_default()
+}
+
+fn has_outstanding_local_order_queue(conn: &Connection, local_id: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sync_queue
+         WHERE entity_type = 'order'
+           AND entity_id = ?1
+           AND status IN ('pending', 'in_progress', 'queued_remote')",
+        params![local_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(false)
+}
+
+fn should_preserve_local_cancelled(previous_status: Option<&str>, incoming_status: &str) -> bool {
+    matches!(previous_status, Some("cancelled" | "canceled"))
+        && !matches!(incoming_status, "cancelled" | "canceled")
+}
+
 async fn reconcile_remote_orders(
     db: &DbState,
     admin_url: &str,
@@ -2161,6 +2664,12 @@ async fn reconcile_remote_orders(
 
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+            // Orders created at or before the last Z-report were already counted
+            // and cleared by finalize_end_of_day — do not re-materialize them.
+            let eod_cutoff: Option<String> =
+                crate::db::get_setting(&conn, "system", "last_z_report_timestamp");
+
             for remote_order in orders {
                 let remote_id = match remote_order.get("id").and_then(Value::as_str) {
                     Some(v) if !v.trim().is_empty() => v.to_string(),
@@ -2168,34 +2677,49 @@ async fn reconcile_remote_orders(
                 };
                 let local_id = match resolve_local_order_id(&conn, &remote_order) {
                     Some(v) => v,
-                    None => match materialize_remote_order(&conn, &remote_order) {
-                        Ok(Some(inserted_id)) => {
-                            info!(
-                                local_id = %inserted_id,
-                                remote_id = %remote_id,
-                                "Materialized missing remote order into local cache"
-                            );
-                            newly_materialized_order_ids.push(inserted_id.clone());
-                            reconciled += 1;
-                            inserted_id
+                    None => {
+                        // Skip materialization of orders that predate the last Z-report
+                        if let Some(ref cutoff) = eod_cutoff {
+                            let order_created = remote_order
+                                .get("created_at")
+                                .or_else(|| remote_order.get("createdAt"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            if !order_created.is_empty() && order_created <= cutoff.as_str() {
+                                debug!(
+                                    remote_id = %remote_id,
+                                    created_at = %order_created,
+                                    cutoff = %cutoff,
+                                    "Skipping materialization of pre-Z-report order"
+                                );
+                                continue;
+                            }
                         }
-                        Ok(None) => continue,
-                        Err(error) => {
-                            warn!(
-                                remote_id = %remote_id,
-                                error = %error,
-                                "Failed to materialize remote order"
-                            );
-                            continue;
+                        match materialize_remote_order(&conn, &remote_order) {
+                            Ok(Some(inserted_id)) => {
+                                info!(
+                                    local_id = %inserted_id,
+                                    remote_id = %remote_id,
+                                    "Materialized missing remote order into local cache"
+                                );
+                                newly_materialized_order_ids.push(inserted_id.clone());
+                                reconciled += 1;
+                                inserted_id
+                            }
+                            Ok(None) => continue,
+                            Err(error) => {
+                                warn!(
+                                    remote_id = %remote_id,
+                                    error = %error,
+                                    "Failed to materialize remote order"
+                                );
+                                continue;
+                            }
                         }
-                    },
+                    }
                 };
 
-                let updated_at = remote_order
-                    .get("updated_at")
-                    .and_then(Value::as_str)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| Utc::now().to_rfc3339());
+                let updated_at = remote_order_changed_at(&remote_order);
                 if newest_updated_at
                     .as_ref()
                     .map(|cur| updated_at > *cur)
@@ -2215,16 +2739,7 @@ async fn reconcile_remote_orders(
 
                 // Check if order has genuinely unsynced queue entries rather than
                 // relying on orders.sync_status which can be reset by concurrent edits.
-                let has_pending_queue: bool = conn
-                    .query_row(
-                        "SELECT COUNT(*) > 0 FROM sync_queue
-                         WHERE entity_type = 'order'
-                           AND entity_id = ?1
-                           AND status IN ('pending', 'in_progress')",
-                        params![local_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(false);
+                let has_pending_queue = has_outstanding_local_order_queue(&conn, &local_id);
 
                 if has_pending_queue {
                     // Still set supabase_id (needed for resolution)
@@ -2232,10 +2747,7 @@ async fn reconcile_remote_orders(
                         "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
                         params![remote_id, local_id],
                     );
-                    debug!(
-                        local_id = %local_id,
-                        "Skipped reconcile — order has pending sync queue entries"
-                    );
+                    log_reconcile_skip_throttled(&local_id);
                 } else {
                     // Only apply remote changes if they're at least as new as local
                     let previous_status: Option<String> = conn
@@ -2256,12 +2768,31 @@ async fn reconcile_remote_orders(
                         .ok()
                         .flatten();
 
-                    let should_update = local_updated_at
-                        .as_ref()
-                        .map(|local| updated_at >= *local)
-                        .unwrap_or(true);
+                    let should_update = if updated_at.is_empty() {
+                        local_updated_at.is_none()
+                    } else {
+                        local_updated_at
+                            .as_ref()
+                            .map(|local| updated_at >= *local)
+                            .unwrap_or(true)
+                    };
 
                     if should_update {
+                        if should_preserve_local_cancelled(previous_status.as_deref(), status) {
+                            let _ = conn.execute(
+                                "UPDATE orders
+                                 SET supabase_id = COALESCE(?1, supabase_id),
+                                     sync_status = CASE
+                                         WHEN COALESCE(sync_status, '') = 'pending' THEN sync_status
+                                         ELSE 'synced'
+                                     END,
+                                     last_synced_at = datetime('now')
+                                 WHERE id = ?2",
+                                params![remote_id, local_id],
+                            );
+                            continue;
+                        }
+
                         let updated = conn
                             .execute(
                                 "UPDATE orders
@@ -2357,9 +2888,20 @@ async fn reconcile_remote_orders(
         }
 
         let next_cursor = sanitize_orders_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
-        if next_cursor != since_cursor {
-            since_cursor = next_cursor.clone();
-            local_setting_set(db, "sync", "orders_since", &next_cursor)?;
+        // Only advance cursor forward — never regress.  This protects against
+        // a Z-report updating the cursor to "now" while we hold a stale
+        // response whose newest_updated_at predates the cleanup.
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let current_stored =
+                sanitize_orders_since_cursor(crate::db::get_setting(&conn, "sync", "orders_since"));
+            if next_cursor > current_stored {
+                since_cursor = next_cursor.clone();
+                crate::db::set_setting(&conn, "sync", "orders_since", &next_cursor)?;
+            } else if since_cursor != current_stored {
+                // Another path (e.g. Z-report) advanced the cursor past us — adopt it
+                since_cursor = current_stored;
+            }
         }
 
         if !has_more {
@@ -2470,18 +3012,20 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     // Partition by entity_type
     let mut order_items: Vec<&SyncItem> = Vec::new();
     let mut shift_items: Vec<&SyncItem> = Vec::new();
+    let mut financial_items: Vec<&SyncItem> = Vec::new();
     let mut payment_items: Vec<&SyncItem> = Vec::new();
     let mut adjustment_items: Vec<&SyncItem> = Vec::new();
     let mut zreport_items: Vec<&SyncItem> = Vec::new();
     let mut loyalty_items: Vec<&SyncItem> = Vec::new();
     for item in &pending_items {
-        match item.1.as_str() {
-            "shift" | "shift_expense" => shift_items.push(item),
-            "payment" => payment_items.push(item),
-            "payment_adjustment" => adjustment_items.push(item),
-            "z_report" => zreport_items.push(item),
-            "loyalty_transaction" => loyalty_items.push(item),
-            _ => order_items.push(item),
+        match categorize_sync_item(item.1.as_str()) {
+            SyncItemCategory::Order => order_items.push(item),
+            SyncItemCategory::Shift => shift_items.push(item),
+            SyncItemCategory::Financial => financial_items.push(item),
+            SyncItemCategory::Payment => payment_items.push(item),
+            SyncItemCategory::Adjustment => adjustment_items.push(item),
+            SyncItemCategory::ZReport => zreport_items.push(item),
+            SyncItemCategory::Loyalty => loyalty_items.push(item),
         }
     }
 
@@ -2648,6 +3192,33 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
             Err(e) => {
                 warn!("Shift sync failed: {e}");
                 let outcome = mark_batch_failed(db, &shift_items, &e)?;
+                if !outcome.backpressure_deferred {
+                    had_non_backpressure_failure = true;
+                }
+            }
+        }
+    }
+
+    if !financial_items.is_empty() {
+        match sync_financial_batch(
+            &admin_url,
+            &api_key,
+            &terminal_id,
+            &branch_id,
+            db,
+            &financial_items,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                total_progress += outcome.synced;
+                if outcome.had_non_backpressure_failure {
+                    had_non_backpressure_failure = true;
+                }
+            }
+            Err(e) => {
+                warn!("Financial sync failed: {e}");
+                let outcome = mark_batch_failed(db, &financial_items, &e)?;
                 if !outcome.backpressure_deferred {
                     had_non_backpressure_failure = true;
                 }
@@ -3536,8 +4107,13 @@ async fn sync_shift_batch(
     for item in items {
         let (_id, etype, entity_id, operation, payload, idem_key, _ret, _max, _, _, _) = item;
         let data: Value = serde_json::from_str(payload).unwrap_or(serde_json::json!({}));
+        let is_transfer_update = data.get("isTransferPending").is_some()
+            || data.get("is_transfer_pending").is_some()
+            || data.get("transferredToCashierShiftId").is_some()
+            || data.get("transferred_to_cashier_shift_id").is_some();
         let event_type = match (etype.as_str(), operation.as_str()) {
             ("shift", "insert") => "shift_open",
+            ("shift", "update") if is_transfer_update => "shift_transfer",
             ("shift", "update") => "shift_close",
             ("shift_expense", "insert") => "expense_record",
             other => {
@@ -3568,6 +4144,236 @@ async fn sync_shift_batch(
     )
     .await
     .map(|_| ())
+}
+
+fn extract_financial_result_message(result: &Value) -> Option<String> {
+    result
+        .get("message")
+        .or_else(|| result.get("error"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn mark_financial_item_synced(
+    db: &DbState,
+    item: &SyncItem,
+    server_id: Option<&str>,
+) -> Result<(), String> {
+    let (queue_id, entity_type, entity_id, _, _, _, _, _, _, _, _) = item;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let _ = conn.execute(
+        "UPDATE sync_queue
+         SET status = 'synced',
+             synced_at = ?1,
+             last_error = NULL,
+             next_retry_at = NULL,
+             updated_at = ?1
+         WHERE id = ?2",
+        params![now, queue_id],
+    );
+
+    match entity_type.as_str() {
+        "shift_expense" => {
+            let _ = conn.execute(
+                "UPDATE shift_expenses
+                 SET sync_status = 'synced',
+                     updated_at = ?1
+                 WHERE id = ?2",
+                params![now, entity_id],
+            );
+        }
+        "driver_earning" | "driver_earnings" => {
+            if let Some(remote_id) = server_id
+                .filter(|value| !value.trim().is_empty())
+                .or(Some(entity_id.as_str()))
+            {
+                let _ = conn.execute(
+                    "UPDATE driver_earnings
+                     SET supabase_id = ?1,
+                         updated_at = ?2
+                     WHERE id = ?3",
+                    params![remote_id, now, entity_id],
+                );
+            } else {
+                let _ = conn.execute(
+                    "UPDATE driver_earnings SET updated_at = ?1 WHERE id = ?2",
+                    params![now, entity_id],
+                );
+            }
+        }
+        "staff_payment" => {}
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn mark_financial_item_failed(db: &DbState, item: &SyncItem, error: &str) -> Result<(), String> {
+    let (queue_id, entity_type, entity_id, _, _, _, _, max_retries, _, _, _) = item;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let _ = conn.execute(
+        "UPDATE sync_queue
+         SET status = 'failed',
+             retry_count = ?1,
+             next_retry_at = NULL,
+             last_error = ?2,
+             updated_at = ?3
+         WHERE id = ?4",
+        params![max_retries, error, now, queue_id],
+    );
+
+    if entity_type == "shift_expense" {
+        let _ = conn.execute(
+            "UPDATE shift_expenses
+             SET sync_status = 'failed',
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, entity_id],
+        );
+    }
+
+    Ok(())
+}
+
+async fn sync_financial_batch(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    branch_id: &str,
+    db: &DbState,
+    items: &[&SyncItem],
+) -> Result<FinancialBatchOutcome, String> {
+    let mut payload_items = Vec::with_capacity(items.len());
+    for item in items {
+        let (_, entity_type, entity_id, operation, payload, idem_key, _, _, _, _, _) = item;
+        let payload_data: Value =
+            serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}));
+        payload_items.push(serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "operation": operation,
+            "idempotency_key": idem_key,
+            "payload": payload_data,
+        }));
+    }
+
+    let body = serde_json::json!({
+        "terminal_id": terminal_id,
+        "branch_id": branch_id,
+        "items": payload_items,
+    });
+
+    let response = api::fetch_from_admin(
+        admin_url,
+        api_key,
+        "/api/pos/financial/sync",
+        "POST",
+        Some(body),
+    )
+    .await?;
+
+    // Deserialize into typed struct; fall back to extracting from Value if
+    // the shape doesn't match (backwards-compatible with older admin versions).
+    let typed: Option<FinancialBatchSyncResponse> = serde_json::from_value(response.clone()).ok();
+    let results = typed
+        .as_ref()
+        .map(|t| &t.results[..])
+        .map(|_| {
+            response
+                .get("results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .unwrap_or_else(|| {
+            warn!("Financial sync response did not match FinancialBatchSyncResponse schema");
+            response
+                .get("results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        });
+
+    let mut outcome = FinancialBatchOutcome::default();
+
+    for item in items {
+        let (_, entity_type, entity_id, _, _, idem_key, _, _, _, _, _) = item;
+        let matched = results.iter().find(|result| {
+            result
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(|value| value == idem_key)
+                .unwrap_or(false)
+                || (result
+                    .get("entity_type")
+                    .and_then(Value::as_str)
+                    .map(|value| value == entity_type)
+                    .unwrap_or(false)
+                    && result
+                        .get("entity_id")
+                        .and_then(Value::as_str)
+                        .map(|value| value == entity_id)
+                        .unwrap_or(false))
+        });
+
+        let Some(result) = matched else {
+            let single = [*item];
+            let failure = mark_batch_failed(
+                db,
+                &single,
+                "Missing result in /api/pos/financial/sync response",
+            )?;
+            if !failure.backpressure_deferred {
+                outcome.had_non_backpressure_failure = true;
+            }
+            continue;
+        };
+
+        let result_status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        let result_success = result
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(matches!(
+                result_status,
+                "ok" | "skipped" | "synced" | "deleted"
+            ));
+        let retryable = result
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        if result_success || matches!(result_status, "ok" | "skipped" | "synced" | "deleted") {
+            let server_id = result
+                .get("server_id")
+                .or_else(|| result.get("supabase_id"))
+                .and_then(Value::as_str);
+            mark_financial_item_synced(db, item, server_id)?;
+            outcome.synced += 1;
+        } else {
+            let single = [*item];
+            let error = extract_financial_result_message(result)
+                .unwrap_or_else(|| "Financial sync failed".to_string());
+            if retryable {
+                let failure = mark_batch_failed(db, &single, &error)?;
+                if !failure.backpressure_deferred {
+                    outcome.had_non_backpressure_failure = true;
+                }
+            } else {
+                mark_financial_item_failed(db, item, &error)?;
+                outcome.had_non_backpressure_failure = true;
+            }
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Sync payment items individually to `/api/pos/payments`.
@@ -4232,6 +5038,7 @@ fn get_sync_status_for_event(
         backpressure_deferred,
         oldest_next_retry_at,
         financial_stats,
+        last_queue_failure,
     ) = match db.conn.lock() {
         Ok(conn) => {
             let p: i64 = conn
@@ -4291,9 +5098,10 @@ fn get_sync_status_for_event(
                 .ok()
                 .flatten();
             let financial = collect_financial_sync_stats(&conn);
-            (p, q, e, ip, b, oldest, financial)
+            let last_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
+            (p, q, e, ip, b, oldest, financial, last_failure)
         }
-        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default()),
+        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default(), None),
     };
 
     let last = last_sync.lock().ok().and_then(|g| g.clone());
@@ -4315,6 +5123,7 @@ fn get_sync_status_for_event(
         "queuedRemote": queued_remote,
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
+        "lastQueueFailure": last_queue_failure,
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
@@ -4575,6 +5384,28 @@ mod tests {
     }
 
     #[test]
+    fn test_categorize_sync_item_routes_financial_rows_out_of_order_path() {
+        assert_eq!(categorize_sync_item("order"), SyncItemCategory::Order);
+        assert_eq!(categorize_sync_item("shift"), SyncItemCategory::Shift);
+        assert_eq!(
+            categorize_sync_item("shift_expense"),
+            SyncItemCategory::Financial
+        );
+        assert_eq!(
+            categorize_sync_item("staff_payment"),
+            SyncItemCategory::Financial
+        );
+        assert_eq!(
+            categorize_sync_item("driver_earning"),
+            SyncItemCategory::Financial
+        );
+        assert_eq!(
+            categorize_sync_item("driver_earnings"),
+            SyncItemCategory::Financial
+        );
+    }
+
+    #[test]
     fn test_create_order_enqueues_order_receipt_print_job() {
         let db = test_db();
         let payload = serde_json::json!({
@@ -4661,6 +5492,108 @@ mod tests {
 
         assert!(!is_permanent_order_sync_error(transient));
         assert!(is_transient_order_sync_error(transient));
+    }
+
+    #[test]
+    fn test_extract_last_queue_failure_snapshot_prioritizes_pending_over_failed() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue
+             (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('order', 'ord-failed', 'insert', '{}', 'idem-failed', 'failed', 3, 3, 'validation failed')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue
+             (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('order', 'ord-pending', 'insert', '{}', 'idem-pending', 'pending', 1, 3, 'Admin dashboard server error (HTTP 503)')",
+            [],
+        )
+        .unwrap();
+
+        let snapshot = extract_last_queue_failure_snapshot(&conn).expect("snapshot");
+        assert_eq!(snapshot.entity_id, "ord-pending");
+        assert_eq!(snapshot.status, "pending");
+        assert_eq!(snapshot.classification, "transient");
+    }
+
+    #[test]
+    fn test_queue_failure_classification_variants() {
+        assert_eq!(
+            classify_queue_failure(
+                "order",
+                "Queue is backed up. Please retry later. (HTTP 429)"
+            ),
+            "backpressure"
+        );
+        assert_eq!(
+            classify_queue_failure("order", "Invalid menu items: stale-item"),
+            "permanent"
+        );
+        assert_eq!(
+            classify_queue_failure("order", "Admin dashboard server error (HTTP 503)"),
+            "transient"
+        );
+        assert_eq!(
+            classify_queue_failure("payment", "Some unexpected validation branch"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn test_should_emit_deduped_warn_respects_fingerprint_and_cooldown() {
+        if let Some(state) = SYNC_WARN_LOG_DEDUPE_STATE.get() {
+            let mut guard = state.lock().unwrap();
+            guard.last_fingerprint = None;
+            guard.last_warned_at = None;
+        }
+
+        let now = Utc::now();
+        assert!(should_emit_deduped_warn("order|a", now));
+        assert!(!should_emit_deduped_warn(
+            "order|a",
+            now + ChronoDuration::seconds(10)
+        ));
+        assert!(should_emit_deduped_warn(
+            "order|b",
+            now + ChronoDuration::seconds(20)
+        ));
+        assert!(should_emit_deduped_warn(
+            "order|b",
+            now + ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS + 30)
+        ));
+    }
+
+    #[test]
+    fn test_get_sync_status_includes_last_queue_failure() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue
+             (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('order', 'ord-last-failure', 'insert', '{}', 'idem-last-failure', 'pending', 1, 3, 'Admin dashboard server error (HTTP 503)')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sync_state = SyncState::new();
+        let status = get_sync_status(&db, &sync_state).expect("status");
+        let failure = status
+            .get("lastQueueFailure")
+            .and_then(Value::as_object)
+            .expect("lastQueueFailure object");
+        assert_eq!(
+            failure.get("entityId").and_then(Value::as_str),
+            Some("ord-last-failure")
+        );
+        assert_eq!(
+            failure.get("classification").and_then(Value::as_str),
+            Some("transient")
+        );
     }
 
     #[test]
@@ -5064,5 +5997,57 @@ mod tests {
             .unwrap();
         assert_eq!(sq1, "pending");
         assert_eq!(sq2, "pending");
+    }
+
+    #[test]
+    fn test_has_outstanding_local_order_queue_treats_queued_remote_as_pending() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('order', 'ord-queued', 'update', '{}', 'order:queued', 'queued_remote')",
+            [],
+        )
+        .unwrap();
+
+        assert!(has_outstanding_local_order_queue(&conn, "ord-queued"));
+        assert!(!has_outstanding_local_order_queue(&conn, "ord-missing"));
+    }
+
+    #[test]
+    fn test_remote_order_changed_at_falls_back_to_created_at() {
+        let remote_order = serde_json::json!({
+            "id": "remote-1",
+            "created_at": "2026-03-05T10:00:00Z"
+        });
+
+        assert_eq!(
+            remote_order_changed_at(&remote_order),
+            "2026-03-05T10:00:00Z"
+        );
+        assert_eq!(
+            remote_order_changed_at(&serde_json::json!({ "id": "remote-2" })),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_should_preserve_local_cancelled_blocks_non_cancelled_remote_status() {
+        assert!(should_preserve_local_cancelled(
+            Some("cancelled"),
+            "completed"
+        ));
+        assert!(should_preserve_local_cancelled(
+            Some("canceled"),
+            "delivered"
+        ));
+        assert!(!should_preserve_local_cancelled(
+            Some("cancelled"),
+            "cancelled"
+        ));
+        assert!(!should_preserve_local_cancelled(
+            Some("completed"),
+            "cancelled"
+        ));
     }
 }

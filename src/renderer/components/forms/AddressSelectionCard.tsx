@@ -40,7 +40,7 @@ export const AddressSelectionCard: React.FC<AddressSelectionCardProps> = ({
   address,
   customer,
   orderType = 'delivery',
-  deliveryFee = 2.50,
+  deliveryFee = 0,
   onEdit,
   onDelete,
   validationResult,

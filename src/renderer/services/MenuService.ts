@@ -1117,7 +1117,7 @@ class MenuService {
       return {
         tax_rate: 0.24, // Default Greek VAT
         service_fee: 0,
-        delivery_fee: 2.50,
+        delivery_fee: 0,
         currency: 'EUR',
         timezone: 'Europe/Athens'
       };

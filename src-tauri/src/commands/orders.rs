@@ -3,8 +3,8 @@ use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
-    db, fetch_supabase_rows, normalize_status_for_storage, payload_arg0_as_string, print,
-    read_local_json_array, resolve_order_id, storage, sync, value_f64, value_i64, value_str,
+    db, fetch_supabase_rows, normalize_status_for_storage, order_ownership, payload_arg0_as_string,
+    print, read_local_json_array, resolve_order_id, storage, sync, value_f64, value_i64, value_str,
     write_local_json,
 };
 
@@ -295,6 +295,22 @@ pub async fn order_update_status(
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let previous_status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id = ?1",
+                rusqlite::params![actual_order_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let previous_status = previous_status.unwrap_or_default();
+        let was_cancelled = matches!(previous_status.as_str(), "cancelled" | "canceled");
+        let next_is_cancelled = matches!(status.as_str(), "cancelled" | "canceled");
+
+        if was_cancelled && !next_is_cancelled {
+            return Err(format!("Cancelled order cannot transition to {status}"));
+        }
+
         conn.execute(
             "UPDATE orders
              SET status = ?1, sync_status = 'pending', updated_at = ?2
@@ -537,7 +553,14 @@ pub async fn order_save_from_remote(
     );
     let staff_shift_id = value_str(&order_data, &["staff_shift_id", "staffShiftId"]);
     let staff_id = value_str(&order_data, &["staff_id", "staffId"]);
-    let driver_id = value_str(&order_data, &["driver_id", "driverId"]).or_else(|| staff_id.clone());
+    let driver_id = value_str(&order_data, &["driver_id", "driverId"]).or_else(|| {
+        // Only fall back to staff_id for delivery orders — pickup/dine-in orders don't have drivers
+        if order_type == "delivery" {
+            staff_id.clone()
+        } else {
+            None
+        }
+    });
     let driver_name = value_str(&order_data, &["driver_name", "driverName"]);
     let discount_pct =
         value_f64(&order_data, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
@@ -998,21 +1021,114 @@ pub async fn order_assign_driver(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     let driver_name = resolve_driver_display_name(&conn, &driver_id);
-    conn.execute(
-        "UPDATE orders
-         SET staff_id = ?1,
-             driver_id = ?1,
-             driver_name = ?2,
-             delivery_notes = COALESCE(?3, delivery_notes),
-             sync_status = 'pending',
-             updated_at = ?4
-         WHERE id = ?5",
-        rusqlite::params![driver_id, driver_name, notes, now, order_id],
-    )
-    .map_err(|e| format!("assign driver: {e}"))?;
+    let mut earning_created = false;
+    let current_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order status: {e}"))?;
+
+    if matches!(current_status.as_str(), "cancelled" | "canceled") {
+        return Err("Cannot assign a driver to a cancelled order".into());
+    }
+
+    // Only create driver_earnings for delivery orders
+    let is_delivery: bool = conn
+        .query_row(
+            "SELECT COALESCE(order_type, '') = 'delivery' FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    let driver_shift_id = if is_delivery {
+        order_ownership::resolve_driver_shift_id(&conn, &driver_id, None)?
+    } else {
+        None
+    };
+
+    if let Some(ref shift_id) = driver_shift_id {
+        let assignment = order_ownership::assign_order_to_driver_shift(
+            &conn,
+            &order_id,
+            &driver_id,
+            driver_name.as_deref(),
+            shift_id,
+            &now,
+        )?;
+
+        let earning_id = order_ownership::upsert_driver_earning(
+            &conn,
+            &order_id,
+            &driver_id,
+            &assignment,
+            &now,
+        )?;
+        earning_created = true;
+
+        let _ = conn.execute(
+            "UPDATE orders
+             SET delivery_notes = COALESCE(?1, delivery_notes),
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?3",
+            rusqlite::params![notes, now, order_id],
+        );
+
+        let _ = conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+             VALUES ('driver_earning', ?1, 'create', ?2, ?3)",
+            rusqlite::params![
+                earning_id,
+                serde_json::json!({
+                    "id": earning_id,
+                    "driver_id": driver_id,
+                    "staff_shift_id": shift_id,
+                    "order_id": order_id,
+                    "branch_id": assignment.branch_id,
+                    "delivery_fee": assignment.delivery_fee,
+                    "tip_amount": assignment.tip_amount,
+                    "total_earning": assignment.delivery_fee + assignment.tip_amount,
+                    "payment_method": assignment.payment_method,
+                    "cash_collected": assignment.cash_collected,
+                    "card_amount": assignment.card_amount,
+                    "cash_to_return": assignment.cash_collected,
+                })
+                .to_string(),
+                format!("driver_earning:{earning_id}")
+            ],
+        );
+    } else {
+        conn.execute(
+            "UPDATE orders
+             SET staff_id = ?1,
+                 driver_id = ?1,
+                 driver_name = ?2,
+                 delivery_notes = COALESCE(?3, delivery_notes),
+                 sync_status = 'pending',
+                 updated_at = ?4
+             WHERE id = ?5",
+            rusqlite::params![driver_id, driver_name, notes, now, order_id],
+        )
+        .map_err(|e| format!("assign driver: {e}"))?;
+    }
+
     drop(conn);
 
-    if let Err(error) = print::enqueue_print_job(&db, "delivery_slip", &order_id, None) {
+    let assign_slip_payload = serde_json::json!({
+        "slip_mode": "assign_driver",
+        "driverId": driver_id,
+        "driverName": driver_name,
+    });
+    if let Err(error) = print::enqueue_print_job_with_payload(
+        &db,
+        "delivery_slip",
+        &order_id,
+        None,
+        Some(&assign_slip_payload),
+    ) {
         tracing::warn!(
             order_id = %order_id,
             error = %error,
@@ -1024,7 +1140,8 @@ pub async fn order_assign_driver(
         "orderId": order_id_raw,
         "driverId": driver_id,
         "driverName": driver_name,
-        "notes": notes
+        "notes": notes,
+        "earningCreated": earning_created
     });
     let _ = app.emit("order_realtime_update", payload.clone());
     Ok(serde_json::json!({ "success": true, "data": payload }))

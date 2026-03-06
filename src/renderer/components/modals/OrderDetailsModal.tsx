@@ -101,27 +101,74 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
   // Build delivery address object from various field patterns
   // Rust backend returns camelCase (deliveryCity), props may use snake_case (delivery_city)
+  const normalizeText = (value: any): string => typeof value === 'string' ? value.trim() : '';
+  const parsePackedDeliveryAddress = (value: string) => {
+    const segments = value
+      .split(/[\n|,]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    const firstLine = segments[0] || '';
+    let city = '';
+    let postalCode = '';
+    let floor = '';
+
+    const extractPostal = (segment: string): string => {
+      const compact = segment.replace(/\s+/g, '');
+      const fullMatch = compact.match(/\b\d{5}\b/);
+      if (fullMatch) return fullMatch[0];
+      const splitMatch = segment.match(/\b(\d{3})\s*(\d{2})\b/);
+      return splitMatch ? `${splitMatch[1]}${splitMatch[2]}` : '';
+    };
+    const extractFloor = (segment: string): string => {
+      const floorMatch = segment.match(/(?:floor|όροφος|οροφος|όρ\.?)\s*:?\s*(\d+)/i);
+      return floorMatch?.[1] || '';
+    };
+    const extractCity = (segment: string): string => {
+      if (/(?:floor|όροφος|οροφος|όρ\.?)/i.test(segment)) return '';
+      return segment
+        .replace(/\d+/g, ' ')
+        .replace(/[,:;|_-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    for (const segment of segments.slice(1)) {
+      if (!postalCode) postalCode = extractPostal(segment);
+      if (!floor) floor = extractFloor(segment);
+      if (!city) city = extractCity(segment);
+    }
+
+    return { firstLine, city, postalCode, floor };
+  };
+
   const rawAddress = displayOrder.delivery_address || displayOrder.deliveryAddress;
   const rawCity = displayOrder.delivery_city || displayOrder.deliveryCity || '';
   const rawPostalCode = displayOrder.delivery_postal_code || displayOrder.deliveryPostalCode || '';
   const rawFloor = displayOrder.delivery_floor || displayOrder.deliveryFloor || '';
   const rawNotes = displayOrder.delivery_notes || displayOrder.deliveryNotes || '';
   const rawRinger = displayOrder.name_on_ringer || displayOrder.nameOnRinger || '';
+  const rawAddressText = normalizeText(
+    typeof rawAddress === 'string'
+      ? rawAddress
+      : (rawAddress?.address || rawAddress?.street_address || rawAddress?.street || '')
+  );
+  const parsedPackedAddress = rawAddressText ? parsePackedDeliveryAddress(rawAddressText) : null;
 
   const hasDeliveryAddress = rawAddress || rawCity || rawPostalCode || rawFloor || rawNotes || rawRinger;
 
   const deliveryAddress = hasDeliveryAddress ? {
-    address: typeof rawAddress === 'string' ? rawAddress : (rawAddress?.address || ''),
-    city: rawCity || rawAddress?.city || '',
-    postal_code: rawPostalCode || rawAddress?.postal_code || '',
-    floor: rawFloor || rawAddress?.floor || '',
-    notes: rawNotes || rawAddress?.notes || '',
-    name_on_ringer: rawRinger || rawAddress?.name_on_ringer || '',
+    address: normalizeText(parsedPackedAddress?.firstLine || rawAddressText || ''),
+    city: normalizeText(rawCity || rawAddress?.city || parsedPackedAddress?.city || ''),
+    postal_code: normalizeText(rawPostalCode || rawAddress?.postal_code || parsedPackedAddress?.postalCode || ''),
+    floor: normalizeText(rawFloor || rawAddress?.floor || rawAddress?.floor_number || parsedPackedAddress?.floor || ''),
+    notes: normalizeText(rawNotes || rawAddress?.notes || ''),
+    name_on_ringer: normalizeText(rawRinger || rawAddress?.name_on_ringer || ''),
   } : {};
 
   const subtotal = displayOrder.subtotal || 0;
   const tax = displayOrder.tax || displayOrder.tax_amount || displayOrder.taxAmount || 0;
-  const deliveryFee = displayOrder.delivery_fee || displayOrder.deliveryFee || 0;
+  const deliveryFee = displayOrder.delivery_fee ?? displayOrder.deliveryFee ?? 0;
   const discountAmount = displayOrder.discount_amount || displayOrder.discountAmount || 0;
   const discountPercentage = displayOrder.discount_percentage || displayOrder.discountPercentage || 0;
   const total = displayOrder.total || displayOrder.total_amount || displayOrder.totalAmount || 0;
@@ -143,7 +190,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // Edge Case Handling (Requirements 5.3, 5.5):
   // - Returns empty array when customizations is null/undefined
   // - Handles malformed JSON strings gracefully without crashing
-  const parseCustomizations = (customizations: any): { name: string; price: number; isWithout?: boolean }[] => {
+  const parseCustomizations = (customizations: any): { name: string; price: number; isWithout?: boolean; isLittle?: boolean }[] => {
     // Handle null/undefined - return empty array (Requirement 5.3)
     if (customizations === null || customizations === undefined) return [];
 
@@ -197,6 +244,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     const isWithoutItem = (c: any): boolean => {
       return c.isWithout === true || c.is_without === true || c.without === true;
     };
+    const isLittleItem = (c: any): boolean => {
+      return c.isLittle === true || c.is_little === true || c.little === true;
+    };
 
     // Handle JSON string format - parse it first (Requirement 5.5)
     let parsedCustomizations = customizations;
@@ -217,7 +267,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         .map((c: any) => ({
           name: extractName(c),
           price: isWithoutItem(c) ? 0 : extractPrice(c),
-          isWithout: isWithoutItem(c)
+          isWithout: isWithoutItem(c),
+          isLittle: isLittleItem(c)
         }));
     }
     if (typeof parsedCustomizations === 'object' && parsedCustomizations !== null) {
@@ -226,10 +277,58 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         .map((c: any) => ({
           name: extractName(c),
           price: isWithoutItem(c) ? 0 : extractPrice(c),
-          isWithout: isWithoutItem(c)
+          isWithout: isWithoutItem(c),
+          isLittle: isLittleItem(c)
         }));
     }
     return [];
+  };
+
+  const resolveCategoryPath = (item: any): string => {
+    const explicitPath =
+      (typeof item?.category_path === 'string' && item.category_path.trim()) ||
+      (typeof item?.categoryPath === 'string' && item.categoryPath.trim()) ||
+      '';
+    if (explicitPath) {
+      const [primary] = explicitPath.split('>');
+      const normalizedPrimary = typeof primary === 'string' ? primary.trim() : '';
+      if (normalizedPrimary) return normalizedPrimary;
+      return explicitPath;
+    }
+
+    const category =
+      item?.categoryName ||
+      item?.category_name ||
+      item?.category?.name ||
+      item?.menu_item?.category_name ||
+      item?.menu_item?.categoryName ||
+      '';
+    const normalizedCategory = typeof category === 'string' ? category.trim() : '';
+    if (normalizedCategory) return normalizedCategory;
+
+    const fallbackSubcategory =
+      item?.subcategory_name ||
+      item?.subcategoryName ||
+      item?.sub_category_name ||
+      item?.subCategoryName ||
+      '';
+    return typeof fallbackSubcategory === 'string' ? fallbackSubcategory.trim() : '';
+  };
+
+  const resolveItemNotes = (item: any): string => {
+    const notes = [
+      item?.notes,
+      item?.special_instructions,
+      item?.specialInstructions,
+      item?.instructions
+    ]
+      .map(value => (typeof value === 'string' ? value.trim() : ''))
+      .filter(value => Boolean(value));
+    const deduped = notes.filter(
+      (value, index, array) =>
+        array.findIndex(existing => existing.toLowerCase() === value.toLowerCase()) === index
+    );
+    return deduped.join(' | ');
   };
 
   const modalHeader = (
@@ -395,36 +494,40 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       {t('modals.orderDetails.deliveryAddress') || 'Delivery Address'}
                     </h4>
                     <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-2">
-                      {/* Main Address */}
-                      <p className="font-medium liquid-glass-modal-text">
-                        {deliveryAddress.address || t('modals.orderDetails.noAddress') || 'No address'}
-                      </p>
-
-                      {/* City & Postal Code */}
-                      {(deliveryAddress.city || deliveryAddress.postal_code) && (
+                      <div className="space-y-2">
+                        <div>
+                          <div className="text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
+                            {t('modals.orderDetails.streetAddress', { defaultValue: 'Address' })}
+                          </div>
+                          <p className="font-medium liquid-glass-modal-text">
+                            {deliveryAddress.address || '-'}
+                          </p>
+                        </div>
                         <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
                           <Building className="w-3 h-3" />
                           <span>
-                            {[deliveryAddress.city, deliveryAddress.postal_code].filter(Boolean).join(', ')}
+                            {t('modals.orderDetails.city', { defaultValue: 'City' })}: {deliveryAddress.city || '-'}
                           </span>
                         </div>
-                      )}
-
-                      {/* Floor */}
-                      {deliveryAddress.floor && (
+                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
+                          <MapPin className="w-3 h-3" />
+                          <span>
+                            {t('modals.orderDetails.postalCode', { defaultValue: 'Postal' })}: {deliveryAddress.postal_code || '-'}
+                          </span>
+                        </div>
                         <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
                           <Layers className="w-3 h-3" />
-                          <span>{t('modals.orderDetails.floor') || 'Floor'}: {deliveryAddress.floor}</span>
+                          <span>
+                            {t('modals.orderDetails.floor', { defaultValue: 'Floor' })}: {deliveryAddress.floor || '-'}
+                          </span>
                         </div>
-                      )}
-
-                      {/* Name on Ringer */}
-                      {deliveryAddress.name_on_ringer && (
                         <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
                           <Bell className="w-3 h-3" />
-                          <span>{t('modals.orderDetails.nameOnRinger') || 'Bell'}: {deliveryAddress.name_on_ringer}</span>
+                          <span>
+                            {t('modals.orderDetails.nameOnRinger', { defaultValue: 'Bell' })}: {deliveryAddress.name_on_ringer || '-'}
+                          </span>
                         </div>
-                      )}
+                      </div>
 
                       {/* Delivery Notes */}
                       {deliveryAddress.notes && (
@@ -481,8 +584,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     {items.length > 0 ? (
                       items.map((item: any, index: number) => {
                         const customizations = parseCustomizations(item.customizations);
-                        // Category name (e.g., "ΚΡΕΠΕΣ ΓΛΥΚΕΣ") - shown above item name
-                        const categoryName = item.categoryName || item.category_name || '';
+                        const categoryPath = resolveCategoryPath(item);
+                        const itemNotes = resolveItemNotes(item);
+                        const withoutLabel = t('menu.itemModal.without', { defaultValue: 'Without' });
+                        const littleLabel = t('menu.itemModal.little', { defaultValue: 'Little' });
 
                         return (
                           <div
@@ -497,9 +602,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 </div>
                                 <div className="flex-1">
                                   {/* Category name above item */}
-                                  {categoryName && (
+                                  {categoryPath && (
                                     <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
-                                      {categoryName}
+                                      {categoryPath}
                                     </div>
                                   )}
                                   {/* Item name (subcategory) */}
@@ -527,7 +632,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                     {customizations.filter(c => !c.isWithout).map((c, idx) => (
                                       <div key={`add-${idx}`} className="flex justify-between text-xs">
                                         <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
-                                          <span className="text-green-400">+</span> {c.name}
+                                          <span className="text-green-400">+</span> {c.name}{c.isLittle ? ` (${littleLabel})` : ''}
                                         </span>
                                         {c.price > 0 && (
                                           <span className="text-green-400 font-medium">+{formatCurrency(c.price)}</span>
@@ -539,6 +644,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 {/* Without ingredients */}
                                 {customizations.filter(c => c.isWithout).length > 0 && (
                                   <div className="border-l-2 border-red-500/30 pl-3 space-y-1 mt-1">
+                                    <div className="text-[11px] text-red-300">{withoutLabel}</div>
                                     {customizations.filter(c => c.isWithout).map((c, idx) => (
                                       <div key={`without-${idx}`} className="flex justify-between text-xs text-red-400">
                                         <span className="line-through">- {c.name}</span>
@@ -550,10 +656,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                             )}
 
                             {/* Item Notes */}
-                            {item.notes && (
+                            {itemNotes && (
                               <div className="ml-11 mt-2 text-xs liquid-glass-modal-text-muted italic flex items-center gap-1">
                                 <FileText className="w-3 h-3" />
-                                <span>{item.notes}</span>
+                                <span>{itemNotes}</span>
                               </div>
                             )}
                           </div>

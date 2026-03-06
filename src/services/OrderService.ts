@@ -396,6 +396,103 @@ export class OrderService {
         )
       }
 
+      const orderDataAny = orderData as any;
+      const normalizeText = (value: unknown): string | null => {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+      };
+      const splitPackedDeliveryAddress = (raw: string | null): {
+        street: string | null;
+        city: string | null;
+        postalCode: string | null;
+        floor: string | null;
+      } => {
+        if (!raw) {
+          return { street: null, city: null, postalCode: null, floor: null };
+        }
+
+        const segments = raw
+          .split(/[\n|,]+/)
+          .map((entry) => entry.trim())
+          .filter(Boolean);
+        const street = segments[0] || raw.trim() || null;
+        let city: string | null = null;
+        let postalCode: string | null = null;
+        let floor: string | null = null;
+
+        const inferPostal = (value: string): string | null => {
+          const compact = value.replace(/\s+/g, '');
+          const full = compact.match(/\b\d{5}\b/);
+          if (full) return full[0];
+          const split = value.match(/\b(\d{3})\s*(\d{2})\b/);
+          return split ? `${split[1]}${split[2]}` : null;
+        };
+        const inferFloor = (value: string): string | null => {
+          const match = value.match(/(?:floor|όροφος|οροφος|όρ\.?)\s*:?\s*(\d+)/i);
+          return match?.[1] || null;
+        };
+        const inferCity = (value: string): string | null => {
+          if (/(?:floor|όροφος|οροφος|όρ\.?)/i.test(value)) return null;
+          const cleaned = value
+            .replace(/\d+/g, ' ')
+            .replace(/[,:;|_-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          return cleaned.length > 0 ? cleaned : null;
+        };
+
+        for (const segment of segments.slice(1)) {
+          if (!postalCode) postalCode = inferPostal(segment);
+          if (!floor) floor = inferFloor(segment);
+          if (!city) city = inferCity(segment);
+        }
+
+        return { street, city, postalCode, floor };
+      };
+
+      const rawDeliveryAddress =
+        normalizeText(orderDataAny.delivery_address) ||
+        normalizeText(orderDataAny.deliveryAddress) ||
+        (typeof orderDataAny.address === 'string'
+          ? normalizeText(orderDataAny.address)
+          : normalizeText(
+            orderDataAny.address?.street_address ||
+            orderDataAny.address?.street ||
+            orderDataAny.address?.address
+          ));
+      const packedDelivery = splitPackedDeliveryAddress(rawDeliveryAddress);
+      const normalizedDeliveryAddress = packedDelivery.street;
+      const normalizedDeliveryCity =
+        normalizeText(orderDataAny.delivery_city) ||
+        normalizeText(orderDataAny.deliveryCity) ||
+        normalizeText(orderDataAny.address?.city) ||
+        packedDelivery.city;
+      const normalizedDeliveryPostalCode =
+        normalizeText(orderDataAny.delivery_postal_code) ||
+        normalizeText(orderDataAny.deliveryPostalCode) ||
+        normalizeText(orderDataAny.address?.postal_code) ||
+        normalizeText(orderDataAny.address?.postalCode) ||
+        packedDelivery.postalCode;
+      const normalizedDeliveryFloor =
+        normalizeText(orderDataAny.delivery_floor) ||
+        normalizeText(orderDataAny.deliveryFloor) ||
+        normalizeText(orderDataAny.address?.floor_number) ||
+        normalizeText(orderDataAny.address?.floor) ||
+        packedDelivery.floor;
+      const normalizedDeliveryNotes =
+        normalizeText(orderDataAny.delivery_notes) ||
+        normalizeText(orderDataAny.deliveryNotes) ||
+        normalizeText(orderDataAny.address?.delivery_notes) ||
+        normalizeText(orderDataAny.address?.notes) ||
+        null;
+      const normalizedNameOnRinger =
+        normalizeText(orderDataAny.name_on_ringer) ||
+        normalizeText(orderDataAny.nameOnRinger) ||
+        normalizeText(orderDataAny.address?.name_on_ringer) ||
+        normalizeText(orderDataAny.address?.nameOnRinger) ||
+        null;
+
       // Normalize incoming orderData for main process expectations
       // NOTE: For delivery orders, if deliveryAddress is missing, the backend will attempt
       // to resolve the address from the customer record using customerId. Ensure that:
@@ -429,9 +526,12 @@ export class OrderService {
         status: orderData.status,
         orderType: (orderData.orderType ?? orderData.order_type) as any,
         tableNumber: orderData.tableNumber ?? orderData.table_number,
-        deliveryAddress: (orderData as any).address ?? orderData.delivery_address,
-        delivery_notes: orderData.delivery_notes ?? (orderData as any).deliveryNotes ?? null,
-        name_on_ringer: orderData.name_on_ringer ?? (orderData as any).nameOnRinger ?? null,
+        deliveryAddress: normalizedDeliveryAddress,
+        deliveryCity: normalizedDeliveryCity,
+        deliveryPostalCode: normalizedDeliveryPostalCode,
+        deliveryFloor: normalizedDeliveryFloor,
+        delivery_notes: normalizedDeliveryNotes,
+        name_on_ringer: normalizedNameOnRinger,
         notes: orderData.notes ?? orderData.special_instructions,
         estimatedTime: orderData.estimatedTime ?? orderData.estimated_time,
         paymentStatus: orderData.paymentStatus ?? orderData.payment_status,
@@ -496,7 +596,6 @@ export class OrderService {
       const latestCreds = await refreshTerminalCredentialCache();
       const branchId = latestCreds.branchId || getCachedTerminalCredentials().branchId || null;
       const organizationId = await this.getOrganizationId();
-      const orderDataAny = orderData as any;
 
       // Map order_type: 'takeaway' -> 'pickup', 'dine-in' -> 'dine-in', 'delivery' -> 'delivery'
       let orderType = orderData.order_type || orderDataAny.orderType || 'pickup';
@@ -548,46 +647,96 @@ export class OrderService {
         // Required fields
         branch_id: branchId || orderDataAny.branch_id,
         organization_id: organizationId || orderDataAny.organization_id,
-        items: (orderData.items || []).map((item: any) => ({
-          menu_item_id: item.menu_item_id || item.menuItemId || item.id,
-          quantity: item.quantity || 1,
-          unit_price: item.unitPrice || item.unit_price || item.price || 0,
-          total_price:
-            item.totalPrice ||
-            item.total_price ||
-            ((item.unitPrice || item.unit_price || item.price || 0) * (item.quantity || 1)),
-          original_unit_price:
-            item.originalUnitPrice ||
-            item.original_unit_price ||
-            item.unitPrice ||
-            item.unit_price ||
-            item.price ||
-            0,
-          is_price_overridden:
-            item.isPriceOverridden === true ||
-            item.is_price_overridden === true ||
-            Math.abs(
-              (item.unitPrice || item.unit_price || item.price || 0) -
-              (item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.unit_price || item.price || 0)
-            ) > 0.0001,
-          customizations: Array.isArray(item.customizations)
-            ? item.customizations.reduce((acc: any, c: any, idx: number) => {
-              // Generate a unique key for each customization
-              // Priority: customizationId > optionId > name > ingredient.id > ingredient.name > fallback
-              // IMPORTANT: Check customizationId/optionId/name FIRST since MenuPage format doesn't have ingredient object
-              let key: string;
-              if (c.customizationId && typeof c.customizationId === 'string') key = c.customizationId;
-              else if (c.optionId && typeof c.optionId === 'string') key = c.optionId;
-              else if (c.name && typeof c.name === 'string') key = c.name;
-              else if (c.ingredient?.id && typeof c.ingredient.id === 'string') key = c.ingredient.id;
-              else if (c.ingredient?.name && typeof c.ingredient.name === 'string') key = c.ingredient.name;
-              else key = `item-${idx}`;
-              acc[key] = c;
-              return acc;
-            }, {})
-            : (item.customizations || null),
-          notes: item.notes || null
-        })),
+        items: (orderData.items || []).map((item: any) => {
+          const categoryName =
+            item.category_name ||
+            item.categoryName ||
+            item.category?.name ||
+            item.menu_item?.category_name ||
+            item.menu_item?.categoryName ||
+            null;
+          const subcategoryName =
+            item.subcategory_name ||
+            item.subcategoryName ||
+            item.sub_category_name ||
+            item.subCategoryName ||
+            item.menu_item_name ||
+            item.menuItemName ||
+            item.name ||
+            null;
+          const explicitCategoryPath =
+            typeof item.category_path === 'string'
+              ? item.category_path.trim()
+              : typeof item.categoryPath === 'string'
+                ? item.categoryPath.trim()
+                : '';
+          const normalizedCategory = typeof categoryName === 'string' ? categoryName.trim() : '';
+          const normalizedSubcategory = typeof subcategoryName === 'string' ? subcategoryName.trim() : '';
+          const categoryPath =
+            explicitCategoryPath ||
+            (
+              normalizedCategory && normalizedSubcategory
+                ? (
+                    normalizedCategory.toLowerCase() === normalizedSubcategory.toLowerCase()
+                      ? normalizedCategory
+                      : `${normalizedCategory} > ${normalizedSubcategory}`
+                  )
+                : (normalizedCategory || normalizedSubcategory || null)
+            );
+
+          return {
+            menu_item_id: item.menu_item_id || item.menuItemId || item.id,
+            quantity: item.quantity || 1,
+            unit_price: item.unitPrice || item.unit_price || item.price || 0,
+            total_price:
+              item.totalPrice ||
+              item.total_price ||
+              ((item.unitPrice || item.unit_price || item.price || 0) * (item.quantity || 1)),
+            original_unit_price:
+              item.originalUnitPrice ||
+              item.original_unit_price ||
+              item.unitPrice ||
+              item.unit_price ||
+              item.price ||
+              0,
+            is_price_overridden:
+              item.isPriceOverridden === true ||
+              item.is_price_overridden === true ||
+              Math.abs(
+                (item.unitPrice || item.unit_price || item.price || 0) -
+                (item.originalUnitPrice || item.original_unit_price || item.unitPrice || item.unit_price || item.price || 0)
+              ) > 0.0001,
+            customizations: Array.isArray(item.customizations)
+              ? item.customizations.reduce((acc: any, c: any, idx: number) => {
+                // Generate a unique key for each customization
+                // Priority: customizationId > optionId > name > ingredient.id > ingredient.name > fallback
+                // IMPORTANT: Check customizationId/optionId/name FIRST since MenuPage format doesn't have ingredient object
+                let key: string;
+                if (c.customizationId && typeof c.customizationId === 'string') key = c.customizationId;
+                else if (c.optionId && typeof c.optionId === 'string') key = c.optionId;
+                else if (c.name && typeof c.name === 'string') key = c.name;
+                else if (c.ingredient?.id && typeof c.ingredient.id === 'string') key = c.ingredient.id;
+                else if (c.ingredient?.name && typeof c.ingredient.name === 'string') key = c.ingredient.name;
+                else key = `item-${idx}`;
+                acc[key] = c;
+                return acc;
+              }, {})
+              : (item.customizations || null),
+            category_name: normalizedCategory || null,
+            subcategory_name: normalizedSubcategory || null,
+            category_path: typeof categoryPath === 'string' ? categoryPath : null,
+            notes:
+              (typeof item.notes === 'string' && item.notes.trim()) ||
+              null,
+            special_instructions:
+              (typeof item.special_instructions === 'string' && item.special_instructions.trim()) ||
+              (typeof item.specialInstructions === 'string' && item.specialInstructions.trim()) ||
+              null,
+            instructions:
+              (typeof item.instructions === 'string' && item.instructions.trim()) ||
+              null
+          };
+        }),
         order_type: orderType,
         payment_method: orderData.payment_method || orderDataAny.paymentMethod || 'cash',
         payment_status: paymentStatus,
@@ -611,7 +760,12 @@ export class OrderService {
         is_ghost: normalizedIsGhost,
         ghost_source: normalizedGhostSource,
         ghost_metadata: normalizedGhostMetadata,
-        delivery_address: orderData.delivery_address || orderDataAny.deliveryAddress || null,
+        delivery_address: normalizedDeliveryAddress,
+        delivery_city: normalizedDeliveryCity,
+        delivery_postal_code: normalizedDeliveryPostalCode,
+        delivery_floor: normalizedDeliveryFloor,
+        delivery_notes: normalizedDeliveryNotes,
+        name_on_ringer: normalizedNameOnRinger,
         notes: orderData.notes || orderData.special_instructions || null,
         staff_shift_id: activeCashierShiftId || null
       };

@@ -26,6 +26,8 @@ import type {
   SettingsGetRequest,
   SettingsSetRequest,
   SettingsUpdateLocalRequest,
+  SyncFinancialQueueItem,
+  SyncFinancialQueueItemsResponse,
   SyncRemoveInvalidOrdersResponse,
   SyncValidatePendingOrdersResponse,
   TerminalConfigGetSettingRequest,
@@ -197,6 +199,105 @@ function buildDiagnosticsExportArgs(options?: DiagnosticsExportOptions): unknown
   return Object.keys(payload).length ? [payload] : [];
 }
 
+function toSyncFinancialQueueId(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function toSyncFinancialString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function toSyncFinancialRetryCount(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function toSyncFinancialPayload(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  try {
+    return JSON.stringify(value ?? {});
+  } catch {
+    return '{}';
+  }
+}
+
+function normalizeFinancialQueueItem(raw: unknown): SyncFinancialQueueItem | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+
+  const item = raw as Record<string, unknown>;
+  const queueId = toSyncFinancialQueueId(item.queueId ?? item.id);
+  const entityType = toSyncFinancialString(item.entityType ?? item.table_name);
+  const entityId = toSyncFinancialString(item.entityId ?? item.record_id);
+  const operation = toSyncFinancialString(item.operation, 'insert');
+  const status = toSyncFinancialString(item.status, 'failed');
+  const retryCount = toSyncFinancialRetryCount(item.retryCount ?? item.attempts);
+  const lastErrorValue = item.lastError ?? item.error_message;
+  const lastError =
+    typeof lastErrorValue === 'string'
+      ? lastErrorValue
+      : lastErrorValue == null
+        ? null
+        : String(lastErrorValue);
+  const createdAt = toSyncFinancialString(
+    item.createdAt ?? item.created_at,
+    new Date().toISOString(),
+  );
+  const payload = toSyncFinancialPayload(item.payload ?? item.data);
+
+  if (!queueId || !entityType || !entityId) {
+    return null;
+  }
+
+  return {
+    queueId,
+    entityType,
+    entityId,
+    operation,
+    status,
+    retryCount,
+    lastError,
+    createdAt,
+    payload,
+  };
+}
+
+function normalizeFinancialQueueItems(
+  raw: unknown,
+): SyncFinancialQueueItemsResponse['items'] {
+  const source = Array.isArray(raw)
+    ? raw
+    : raw &&
+        typeof raw === 'object' &&
+        Array.isArray((raw as SyncFinancialQueueItemsResponse).items)
+      ? (raw as SyncFinancialQueueItemsResponse).items
+      : [];
+
+  return source
+    .map(normalizeFinancialQueueItem)
+    .filter((item): item is SyncFinancialQueueItem => item !== null);
+}
+
 // -- Orders ------------------------------------------------------------------
 
 export interface OrderItem {
@@ -255,6 +356,18 @@ export interface SyncStatus {
   lastSyncAt: string | null;
   pendingChanges: number;
   syncErrors: number;
+  lastQueueFailure?: {
+    queueId: number;
+    entityType: string;
+    entityId: string;
+    operation: string;
+    status: string;
+    retryCount: number;
+    maxRetries: number;
+    nextRetryAt?: string | null;
+    lastError: string;
+    classification: 'backpressure' | 'transient' | 'permanent' | 'unknown';
+  } | null;
 }
 
 export interface NetworkStatus {
@@ -306,7 +419,7 @@ export interface RecordPaymentParams {
 export interface OpenShiftParams {
   staffId: string;
   staffName?: string;
-  openingCash: number;
+  openingCash?: number;
   branchId: string;
   terminalId: string;
   roleType?: string;
@@ -411,6 +524,10 @@ export interface PrinterConfig {
   connectionType: string;
   address?: string;
   port?: number;
+  receiptTemplate?: 'classic' | 'modern';
+  fontType?: 'a' | 'b';
+  layoutDensity?: 'compact' | 'balanced' | 'spacious';
+  headerEmphasis?: 'normal' | 'strong';
   isDefault?: boolean;
   roles?: string[];
 }
@@ -515,8 +632,8 @@ export interface PlatformBridge {
     clearAllOrders(): Promise<IpcResult>;
     cleanupDeletedOrders(): Promise<IpcResult>;
     getFinancialStats(): Promise<any>;
-    getFailedFinancialItems(limit?: number): Promise<any[]>;
-    retryFinancialItem(syncId: string): Promise<IpcResult>;
+    getFailedFinancialItems(limit?: number): Promise<SyncFinancialQueueItem[]>;
+    retryFinancialItem(syncId: number | string): Promise<IpcResult>;
     retryAllFailedFinancial(): Promise<IpcResult>;
     getUnsyncedFinancialSummary(): Promise<any>;
     validateFinancialIntegrity(): Promise<IpcResult>;
@@ -679,6 +796,12 @@ export interface PlatformBridge {
     test(printerId: string): Promise<IpcResult>;
     testGreekDirect(printerId: string): Promise<IpcResult>;
     getAutoConfig(printerId: string): Promise<any>;
+    recommendProfile(payload: {
+      name: string;
+      type?: string;
+      address?: string;
+      paperSizeHint?: string;
+    }): Promise<any>;
     diagnostics(printerId: string): Promise<any>;
     bluetoothStatus(): Promise<{ available: boolean; error?: string }>;
     openCashDrawer(printerId?: string, drawerNumber?: 1 | 2): Promise<IpcResult>;
@@ -1093,6 +1216,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'printer:test': 'printer.test',
   'printer:test-greek-direct': 'printer.testGreekDirect',
   'printer:get-auto-config': 'printer.getAutoConfig',
+  'printer:recommend-profile': 'printer.recommendProfile',
   'printer:diagnostics': 'printer.diagnostics',
   'printer:bluetooth-status': 'printer.bluetoothStatus',
   'printer:open-cash-drawer': 'printer.openCashDrawer',
@@ -1361,13 +1485,12 @@ export class TauriBridge implements PlatformBridge {
     clearAllOrders: () => this.inv('sync:clear-all-orders'),
     cleanupDeletedOrders: () => this.inv('sync:cleanup-deleted-orders'),
     getFinancialStats: () => this.inv('sync:get-financial-stats'),
-    getFailedFinancialItems: async (limit?: number) => {
-      const result = await this.inv('sync:get-failed-financial-items', limit);
-      if (Array.isArray(result)) return result;
-      if (result && Array.isArray((result as any).items)) return (result as any).items;
-      return [];
-    },
-    retryFinancialItem: (id: string) => this.inv('sync:retry-financial-item', id),
+    getFailedFinancialItems: async (limit?: number) =>
+      normalizeFinancialQueueItems(
+        await this.inv('sync:get-failed-financial-items', limit),
+      ),
+    retryFinancialItem: (id: number | string) =>
+      this.inv('sync:retry-financial-item', id),
     retryAllFailedFinancial: () => this.inv('sync:retry-all-failed-financial'),
     getUnsyncedFinancialSummary: () => this.inv('sync:get-unsynced-financial-summary'),
     validateFinancialIntegrity: () => this.inv('sync:validate-financial-integrity'),
@@ -1530,6 +1653,8 @@ export class TauriBridge implements PlatformBridge {
     test: (id: string) => this.inv('printer:test', id),
     testGreekDirect: (id: string) => this.inv('printer:test-greek-direct', id),
     getAutoConfig: (id: string) => this.inv('printer:get-auto-config', id),
+    recommendProfile: (payload: { name: string; type?: string; address?: string; paperSizeHint?: string }) =>
+      this.inv('printer:recommend-profile', payload),
     diagnostics: (id: string) => this.inv('printer:diagnostics', id),
     bluetoothStatus: () => this.inv('printer:bluetooth-status'),
     openCashDrawer: (id?: string, drawer?: 1 | 2) => this.inv('printer:open-cash-drawer', id, drawer),

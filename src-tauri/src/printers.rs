@@ -707,6 +707,27 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         .or_else(|| profile.get("escpos_code_page"))
         .and_then(|v| v.as_i64())
         .map(|v| v as i32);
+    let font_type = profile
+        .get("fontType")
+        .or_else(|| profile.get("font_type"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("a");
+    let layout_density = profile
+        .get("layoutDensity")
+        .or_else(|| profile.get("layout_density"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("compact");
+    let header_emphasis = profile
+        .get("headerEmphasis")
+        .or_else(|| profile.get("header_emphasis"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("strong");
 
     if driver_type != "windows" && driver_type != "escpos" {
         return Err(format!(
@@ -723,6 +744,21 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
             "Invalid drawer_mode: {drawer_mode}. Must be 'none' or 'escpos_tcp'"
         ));
     }
+    if font_type != "a" && font_type != "b" {
+        return Err(format!(
+            "Invalid font_type: {font_type}. Must be 'a' or 'b'"
+        ));
+    }
+    if layout_density != "compact" && layout_density != "balanced" && layout_density != "spacious" {
+        return Err(format!(
+            "Invalid layout_density: {layout_density}. Must be 'compact', 'balanced', or 'spacious'"
+        ));
+    }
+    if header_emphasis != "normal" && header_emphasis != "strong" {
+        return Err(format!(
+            "Invalid header_emphasis: {header_emphasis}. Must be 'normal' or 'strong'"
+        ));
+    }
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -736,9 +772,10 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
                                        character_set, greek_render_mode, receipt_template,
                                        fallback_printer_id, connection_json,
                                        escpos_code_page,
+                                       font_type, layout_density, header_emphasis,
                                        created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23)",
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?26)",
         params![
             id,
             &name,
@@ -762,6 +799,9 @@ pub fn create_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
             fallback_printer_id,
             connection_json,
             escpos_code_page,
+            font_type,
+            layout_density,
+            header_emphasis,
             now,
         ],
     )
@@ -941,6 +981,43 @@ pub fn update_printer_profile(db: &DbState, profile: &Value) -> Result<Value, St
         vals.push(Box::new(v.to_string()));
     }
     if let Some(v) = profile
+        .get("fontType")
+        .or_else(|| profile.get("font_type"))
+        .and_then(|v| v.as_str())
+    {
+        if v != "a" && v != "b" {
+            return Err(format!("Invalid font_type: {v}. Must be 'a' or 'b'"));
+        }
+        sets.push("font_type = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("layoutDensity")
+        .or_else(|| profile.get("layout_density"))
+        .and_then(|v| v.as_str())
+    {
+        if v != "compact" && v != "balanced" && v != "spacious" {
+            return Err(format!(
+                "Invalid layout_density: {v}. Must be 'compact', 'balanced', or 'spacious'"
+            ));
+        }
+        sets.push("layout_density = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
+        .get("headerEmphasis")
+        .or_else(|| profile.get("header_emphasis"))
+        .and_then(|v| v.as_str())
+    {
+        if v != "normal" && v != "strong" {
+            return Err(format!(
+                "Invalid header_emphasis: {v}. Must be 'normal' or 'strong'"
+            ));
+        }
+        sets.push("header_emphasis = ?");
+        vals.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = profile
         .get("fallbackPrinterId")
         .or_else(|| profile.get("fallback_printer_id"))
         .and_then(|v| v.as_str())
@@ -1055,7 +1132,8 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
                     printer_type, role, is_default, enabled,
                     character_set, greek_render_mode, receipt_template,
                     fallback_printer_id, connection_json,
-                    escpos_code_page
+                    escpos_code_page,
+                    font_type, layout_density, header_emphasis
              FROM printer_profiles ORDER BY created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -1087,6 +1165,9 @@ pub fn list_printer_profiles(db: &DbState) -> Result<Value, String> {
                 "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
                 "connectionJson": row.get::<_, Option<String>>(22)?,
                 "escposCodePage": row.get::<_, Option<i32>>(23)?,
+                "fontType": row.get::<_, String>(24)?,
+                "layoutDensity": row.get::<_, String>(25)?,
+                "headerEmphasis": row.get::<_, String>(26)?,
             }))
         })
         .map_err(|e| e.to_string())?
@@ -1108,7 +1189,8 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
                 printer_type, role, is_default, enabled,
                 character_set, greek_render_mode, receipt_template,
                 fallback_printer_id, connection_json,
-                escpos_code_page
+                escpos_code_page,
+                font_type, layout_density, header_emphasis
          FROM printer_profiles WHERE id = ?1",
         params![profile_id],
         |row| {
@@ -1137,6 +1219,9 @@ pub fn get_printer_profile(db: &DbState, profile_id: &str) -> Result<Value, Stri
                 "fallbackPrinterId": row.get::<_, Option<String>>(21)?,
                 "connectionJson": row.get::<_, Option<String>>(22)?,
                 "escposCodePage": row.get::<_, Option<i32>>(23)?,
+                "fontType": row.get::<_, String>(24)?,
+                "layoutDensity": row.get::<_, String>(25)?,
+                "headerEmphasis": row.get::<_, String>(26)?,
             }))
         },
     )
@@ -1714,6 +1799,67 @@ mod tests {
             }),
         );
         assert!(update_err.is_err());
+    }
+
+    #[test]
+    fn test_printer_typography_defaults_are_applied() {
+        let db = test_db();
+        let created = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Typography Defaults",
+                "printerName": "TypoPrinter",
+            }),
+        )
+        .unwrap();
+        let id = created["profileId"].as_str().unwrap();
+        let profile = get_printer_profile(&db, id).unwrap();
+
+        assert_eq!(profile["fontType"], "a");
+        assert_eq!(profile["layoutDensity"], "compact");
+        assert_eq!(profile["headerEmphasis"], "strong");
+    }
+
+    #[test]
+    fn test_invalid_typography_controls_rejected() {
+        let db = test_db();
+        let create_err = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Bad Typography",
+                "printerName": "BadTypoPrinter",
+                "fontType": "c",
+            }),
+        );
+        assert!(create_err.is_err());
+
+        let created = create_printer_profile(
+            &db,
+            &serde_json::json!({
+                "name": "Good Typography",
+                "printerName": "GoodTypoPrinter",
+            }),
+        )
+        .unwrap();
+        let id = created["profileId"].as_str().unwrap();
+
+        let bad_density = update_printer_profile(
+            &db,
+            &serde_json::json!({
+                "id": id,
+                "layoutDensity": "dense",
+            }),
+        );
+        assert!(bad_density.is_err());
+
+        let bad_emphasis = update_printer_profile(
+            &db,
+            &serde_json::json!({
+                "id": id,
+                "headerEmphasis": "loud",
+            }),
+        );
+        assert!(bad_emphasis.is_err());
     }
 
     #[test]

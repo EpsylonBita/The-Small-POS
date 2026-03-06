@@ -73,6 +73,20 @@ When `pos-tauri/**` changes on release branch policy:
 7. Create or replace release tag `v<version>`.
 8. Upload `.exe`, `.sig`, and `latest.json` as latest release artifacts.
 
+## Pre-Release Checklist
+
+Before cutting a release, run:
+
+```bash
+cd src-tauri
+cargo audit          # Check for known vulnerabilities in dependencies
+cargo fmt --check    # Verify formatting
+cargo clippy --all-targets  # Lint check
+cargo test           # Run all Rust tests
+```
+
+Install `cargo-audit` if not present: `cargo install cargo-audit`
+
 ## Local Release Verification
 
 From `pos-tauri/`:

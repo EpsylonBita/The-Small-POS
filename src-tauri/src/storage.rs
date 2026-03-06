@@ -223,7 +223,7 @@ pub fn update_terminal_credentials(payload: &Value) -> Result<Value, String> {
         }
     }
 
-    info!(terminal_id = %terminal_id, "terminal credentials updated");
+    info!(terminal_id = %crate::api::redact(&terminal_id), "terminal credentials updated");
     Ok(serde_json::json!({ "success": true }))
 }
 

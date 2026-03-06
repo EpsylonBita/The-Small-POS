@@ -8,7 +8,7 @@ import { sectionTitle, sectionSubtle, inputBase, liquidGlassModalCard, liquidGla
 import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
-import { formatTime } from '../../utils/format';
+import { formatTime, formatCurrency } from '../../utils/format';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
@@ -115,6 +115,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   // Check-out state
   const [closingCash, setClosingCash] = useState('');
+  const [driverActualCash, setDriverActualCash] = useState('');
   const [staffPayment, setStaffPayment] = useState('');
 
 
@@ -125,6 +126,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [lastShiftResult, setLastShiftResult] = useState<{
     variance: number;
     breakdown?: {
+      calculationVersion: number;
       opening: number;
       sales: number;
       cashRefunds: number;
@@ -133,7 +135,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       driverGiven: number;
       driverReturned: number;
       inheritedDriverExpectedReturns: number;
-      staffPayments: number; // Informational only, not deducted from expected
+      recordedStaffPayments: number;
+      cashierPayout: number;
       expected: number;
       actual: number;
     };
@@ -212,6 +215,126 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const closeConfirm = () => setConfirmDialog(prev => ({ ...prev, isOpen: false }));
 
+  const getInheritedStaffExpectedReturns = (summary: any) => {
+    const inheritedDrivers = Array.isArray(summary?.transferredDrivers) ? summary.transferredDrivers : [];
+    const inheritedWaiters = Array.isArray(summary?.transferredWaiters) ? summary.transferredWaiters : [];
+
+    const totalDrivers = inheritedDrivers.reduce((sum: number, item: any) => sum + Number(item?.net_cash_amount || 0), 0);
+    const totalWaiters = inheritedWaiters.reduce((sum: number, item: any) => sum + Number(item?.net_cash_amount || 0), 0);
+
+    return totalDrivers + totalWaiters;
+  };
+
+  const getEffectiveOpeningAmount = (shift: any, summary?: any) =>
+    Number(shift?.opening_cash_amount ?? summary?.shift?.opening_cash_amount ?? 0);
+
+  const parseOptionalAmount = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return 0;
+    }
+
+    return parseFloat(trimmed);
+  };
+
+  const getCurrentCashierIssuedFloat = (summary: any) => {
+    const recordedGiven = Number(summary?.cashDrawer?.driver_cash_given || 0);
+    if (recordedGiven > 0) return recordedGiven;
+
+    const checkoutRows = Array.isArray(summary?.driverDeliveries) ? summary.driverDeliveries : [];
+    const inheritedDrivers = Array.isArray(summary?.transferredDrivers) ? summary.transferredDrivers : [];
+    const inheritedWaiters = Array.isArray(summary?.transferredWaiters) ? summary.transferredWaiters : [];
+
+    const allStartingAmounts = checkoutRows.reduce(
+      (sum: number, row: any) => sum + Number(row?.starting_amount || 0),
+      0
+    );
+    const inheritedStartingAmounts =
+      inheritedDrivers.reduce((sum: number, row: any) => sum + Number(row?.starting_amount || 0), 0) +
+      inheritedWaiters.reduce((sum: number, row: any) => sum + Number(row?.starting_amount || 0), 0);
+
+    return Math.max(0, allStartingAmounts - inheritedStartingAmounts);
+  };
+
+  const getCashierExpectedBreakdown = (
+    summary: any,
+    shift: any,
+    opening: number,
+    expensesTotal?: number,
+    cashierPayout = 0
+  ) => {
+    const calculationVersion = Number(shift?.calculation_version ?? 1);
+    const sales = Number(summary?.breakdown?.instore?.cashTotal || 0);
+    const cashRefunds = Number(summary?.cashRefunds || 0);
+    const expenses = expensesTotal ?? Number(summary?.totalExpenses || 0);
+    const cashDrops = Number(summary?.cashDrawer?.cash_drops || 0);
+    const driverGiven = getCurrentCashierIssuedFloat(summary);
+    const driverReturned = Number(summary?.cashDrawer?.driver_cash_returned || 0);
+    const inheritedDriverExpectedReturns = getInheritedStaffExpectedReturns(summary);
+    const recordedStaffPayments = Number(summary?.cashDrawer?.total_staff_payments || 0);
+    const deductedStaffPayments = calculationVersion < 2 ? recordedStaffPayments : 0;
+    const expected =
+      opening +
+      sales -
+      cashRefunds -
+      expenses -
+      deductedStaffPayments -
+      cashDrops -
+      driverGiven +
+      driverReturned +
+      inheritedDriverExpectedReturns -
+      cashierPayout;
+
+    return {
+      calculationVersion,
+      opening,
+      sales,
+      cashRefunds,
+      expenses,
+      cashDrops,
+      driverGiven,
+      driverReturned,
+      inheritedDriverExpectedReturns,
+      recordedStaffPayments,
+      deductedStaffPayments,
+      cashierPayout,
+      expected,
+    };
+  };
+
+  const getShiftHeaderMetrics = (summary: any, shift: any) => {
+    const fallback = {
+      totalAmount: Number(summary?.breakdown?.overall?.totalAmount ?? shift?.total_sales_amount ?? 0),
+      totalCount: Number(summary?.breakdown?.overall?.totalCount ?? shift?.total_orders_count ?? 0),
+    };
+
+    if (!shift) {
+      return fallback;
+    }
+
+    if (shift.role_type === 'driver') {
+      const deliveries = Array.isArray(summary?.driverDeliveries) ? summary.driverDeliveries : [];
+      const completedDeliveries = deliveries.filter((delivery: any) => {
+        const status = String(delivery?.status || delivery?.order_status || '').toLowerCase();
+        return status !== 'cancelled' && status !== 'canceled' && status !== 'refunded';
+      });
+
+      return {
+        totalAmount: completedDeliveries.reduce((sum: number, delivery: any) => sum + Number(delivery?.total_amount || 0), 0),
+        totalCount: completedDeliveries.length,
+      };
+    }
+
+    if (shift.role_type === 'server') {
+      const tables = Array.isArray(summary?.waiterTables) ? summary.waiterTables : [];
+      return {
+        totalAmount: tables.reduce((sum: number, table: any) => sum + Number(table?.total_amount || 0), 0),
+        totalCount: tables.reduce((sum: number, table: any) => sum + Number(table?.order_count || 0), 0),
+      };
+    }
+
+    return fallback;
+  };
 
   // UI state
   const [loading, setLoading] = useState(false);
@@ -222,6 +345,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const effectiveShift = (checkoutShift ?? activeShift);
   const isKitchenRole = effectiveShift?.role_type === 'kitchen';
   const isDriverRole = effectiveShift?.role_type === 'driver';
+  const isModalCloseBlocked = loading || showPaymentConfirm || confirmDialog.isOpen;
+  const handleModalClose = () => {
+    if (isModalCloseBlocked) {
+      return;
+    }
+    onClose();
+  };
 
   // Progress Steps
   const progressSteps: Step[] = [
@@ -236,7 +366,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       status: (checkInStep === 'enter-pin' ? 'active' : (selectedStaff && checkInStep !== 'select-staff') ? 'complete' : 'pending') as StepStatus
     },
     // Optional role step
-    ...(checkInStep === 'select-role' || (selectedStaff && checkInStep === 'enter-cash' && effectiveMode === 'checkin') ? [{ id: 'role', label: 'Role', status: (checkInStep === 'select-role' ? 'active' : 'complete') as StepStatus }] : []),
+    ...(checkInStep === 'select-role' || (selectedStaff && checkInStep === 'enter-cash' && effectiveMode === 'checkin')
+      ? [{
+        id: 'role',
+        label: t('modals.staffShift.roleStepLabel', 'Role'),
+        status: (checkInStep === 'select-role' ? 'active' : 'complete') as StepStatus
+      }]
+      : []),
     {
       id: 'action',
       label: effectiveMode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut'),
@@ -948,8 +1084,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const handleRoleSelect = async (role: 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server') => {
     setRoleType(role);
 
-    // For driver role, pre-check if there's an active cashier
-    if (role === 'driver') {
+    // For staff that return cash, pre-check if there's an active cashier.
+    if (role === 'driver' || role === 'server') {
       try {
         const branchId = getSetting?.('terminal', 'branch_id') as string | undefined;
         const terminalId = getSetting?.('terminal', 'terminal_id') as string | undefined;
@@ -963,7 +1099,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
     }
 
-    if (role === 'cashier' || role === 'driver') {
+    if (role === 'cashier' || role === 'driver' || role === 'server') {
       setCheckInStep('enter-cash');
     } else {
       // For other roles, proceed directly to check-in
@@ -1034,8 +1170,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
       }
 
-      // For drivers, validate starting amount if provided (optional, can be 0 or empty)
-      if (roleType === 'driver') {
+      // For staff that return cash, validate starting amount if provided (optional, can be 0 or empty)
+      if (roleType === 'driver' || roleType === 'server') {
         const trimmedStarting = driverStartingAmount.trim();
         if (trimmedStarting !== '') {
           const parsedStarting = parseFloat(trimmedStarting);
@@ -1056,7 +1192,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       if (roleType === 'cashier') {
         usedOpeningCash = parseFloat(openingCash) || 0;
-      } else if (roleType === 'driver') {
+      } else if (roleType === 'driver' || roleType === 'server') {
         // Use dedicated startingAmount field for drivers
         usedStartingAmount = parseFloat(driverStartingAmount) || 0;
       }
@@ -1068,8 +1204,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         branchId: resolvedBranchId,
         terminalId: resolvedTerminalId,
         roleType,
-        openingCash: usedOpeningCash,
-        startingAmount: usedStartingAmount
+        // Send only the relevant cash field per role so the Rust or_else
+        // chain doesn't short-circuit on openingCash:0 for drivers.
+        ...(roleType === 'driver' || roleType === 'server'
+          ? { startingAmount: usedStartingAmount }
+          : { openingCash: usedOpeningCash }),
       }) as any;
 
       if (result.success) {
@@ -1141,6 +1280,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return;
     }
 
+    const cashierPayout = parseOptionalAmount(staffPayment);
     let closingAmount = 0;
 
     // For drivers: use calculated amount to return
@@ -1165,7 +1305,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Calculate cash to return using the specified formula:
       // cashToReturn = openingCash + totalCashCollected - totalExpenses - driverPayment
       // Filter out canceled orders before calculating
-      const openingCash = effectiveShift.opening_cash_amount || 0;
+      const openingCash = getEffectiveOpeningAmount(effectiveShift, freshSummary);
       const deliveries = freshSummary?.driverDeliveries || [];
       const completedDeliveries = deliveries.filter((d: any) => {
         const status = (d.status || d.order_status || '').toLowerCase();
@@ -1173,8 +1313,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
       const totalCashCollected = completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
-      closingAmount = openingCash + totalCashCollected - totalExpenses - driverPayment;
-      console.log('Driver closingAmount (formula: openingCash + totalCashCollected - totalExpenses - driverPayment):', {
+      const expectedReturn = openingCash + totalCashCollected - totalExpenses - driverPayment;
+
+      // Use actual cash returned if entered, otherwise fall back to calculated expected
+      if (driverActualCash.trim() !== '') {
+        const actual = parseFloat(driverActualCash);
+        if (isNaN(actual) || actual < 0) {
+          setError(t('modals.staffShift.invalidClosingCash'));
+          return;
+        }
+        closingAmount = actual;
+      } else {
+        closingAmount = expectedReturn;
+      }
+
+      console.log('Driver closingAmount:', {
         totalDeliveries: deliveries.length,
         completedDeliveries: completedDeliveries.length,
         canceledDeliveries: deliveries.length - completedDeliveries.length,
@@ -1182,14 +1335,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         totalCashCollected,
         totalExpenses,
         driverPayment,
-        closingAmount
+        expectedReturn,
+        actualEntered: driverActualCash,
+        closingAmount,
+        variance: closingAmount - expectedReturn,
       });
     }
     // For kitchen roles and cashiers
     else if (isKitchenRole || effectiveShift?.role_type === 'cashier') {
-      const payout = staffPayment?.toString().trim() === '' ? 0 : parseFloat(staffPayment as string);
-      console.log('staffPayment:', payout);
-      if (isNaN(payout) || payout < 0) {
+      console.log('staffPayment:', cashierPayout);
+      if (isNaN(cashierPayout) || cashierPayout < 0) {
         console.log('❌ Invalid staff payment amount');
         setError(t('modals.staffShift.invalidStaffPayment'));
         return;
@@ -1197,20 +1352,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       if (effectiveShift?.role_type === 'cashier') {
         // Cashier: Calculate Expected but use Actual from input
-        const openingCash = effectiveShift.opening_cash_amount || 0;
-        // Use instore only (pickup/dine-in) - delivery cash is tracked via driver returns
-        const totalCashOrders = shiftSummary?.breakdown?.instore?.cashTotal || 0;
-        const cashRefunds = shiftSummary?.cashRefunds || 0;
-        const totalExpenses = shiftSummary?.totalExpenses || 0;
-        const cashDrops = shiftSummary?.cashDrawer?.cash_drops || 0;
-        const driverGiven = shiftSummary?.cashDrawer?.driver_cash_given || 0;
-        const driverReturned = shiftSummary?.cashDrawer?.driver_cash_returned || 0;
-        // Get inherited driver expected returns (drivers transferred TO this cashier)
-        const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-        const inheritedDriverExpectedReturns = inheritedDrivers.reduce((sum: number, d: any) => sum + (d.net_cash_amount || 0), 0);
-        // V2 Formula: opening + cashSales - cashRefunds - expenses - cashDrops - driverGiven + driverReturned + inheritedDrivers
-        // Note: Staff payments are informational only and NOT deducted from expected amount
-        const expectedAmount = openingCash + totalCashOrders - cashRefunds - totalExpenses - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns;
+        const openingCash = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+        const expectedAmount = getCashierExpectedBreakdown(
+          shiftSummary,
+          effectiveShift,
+          openingCash,
+          shiftSummary?.totalExpenses || 0,
+          cashierPayout
+        ).expected;
 
         // Use manually entered closing cash for actual
         const actualAmount = closingCash === '' ? expectedAmount : parseFloat(closingCash);
@@ -1221,7 +1370,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
 
         closingAmount = actualAmount;
-        console.log('Cashier Checkout (v2):', { openingCash, totalCashOrders, cashRefunds, totalExpenses, cashDrops, driverGiven, driverReturned, inheritedDriverExpectedReturns, expected: expectedAmount, actual: closingAmount, variance: closingAmount - expectedAmount });
+        console.log('Cashier Checkout:', { expected: expectedAmount, actual: closingAmount, variance: closingAmount - expectedAmount });
       } else {
         // Kitchen roles: no cash drawer, just record staff payment and close with 0
         closingAmount = 0;
@@ -1246,7 +1395,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         }
       } catch (e) { console.warn('Refresh failed', e); }
 
-      const openingCash = effectiveShift.opening_cash_amount || 0;
+      const openingCash = getEffectiveOpeningAmount(effectiveShift, freshSummary);
       const waiterTables = freshSummary?.waiterTables || [];
       const cashCollected = waiterTables.reduce((sum: number, t: any) => sum + (t.cash_amount || 0), 0);
       const totalExpenses = freshSummary?.totalExpenses || 0;
@@ -1286,7 +1435,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     // This uses the dedicated staff_payments table instead of shift_expenses
     if (isKitchenRole || effectiveShift?.role_type === 'cashier') {
       try {
-        const payoutForRecord = staffPayment?.toString().trim() === '' ? 0 : parseFloat(staffPayment as string);
+        const payoutForRecord = cashierPayout;
         console.log('[Checkout] Staff payment to record:', { staffPayment, payoutForRecord, isKitchenRole, roleType: effectiveShift?.role_type });
         if (!isNaN(payoutForRecord) && payoutForRecord > 0) {
           // Get the active cashier's shift ID (for kitchen staff, we need to find it)
@@ -1316,11 +1465,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             notes: t('expense.messages.staffPayoutDescription'),
           });
           console.log('[Checkout] Staff payment result:', paymentResult);
+          if (!paymentResult?.success) {
+            throw new Error(
+              paymentResult?.error || t('modals.staffShift.paymentFailed', 'Failed to record payment')
+            );
+          }
         } else {
           console.log('[Checkout] Skipping staff payment record (no valid amount)');
         }
       } catch (err) {
         console.error('[Checkout] Failed to record staff payment:', err);
+        if (effectiveShift?.role_type === 'cashier') {
+          setError(err instanceof Error ? err.message : t('modals.staffShift.paymentFailed', 'Failed to record payment'));
+          return;
+        }
       }
     }
 
@@ -1328,56 +1486,49 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // For drivers, include the payment amount in the closeShift call
       const isDriver = effectiveShift.role_type === 'driver';
       const driverPaymentAmount = isDriver ? parseFloat(staffPayment || '0') : undefined;
+      const cashierPaymentAmount = effectiveShift.role_type === 'cashier' ? cashierPayout : undefined;
 
       const result = await bridge.shifts.close({
         shiftId: effectiveShift.id,
         closingCash: closingAmount,
         closedBy: staff.staffId,
-        paymentAmount: driverPaymentAmount
+        paymentAmount: isDriver ? driverPaymentAmount : cashierPaymentAmount
       }) as any;
       console.log('closeShift result:', result);
 
       if (result.success) {
         const variance = result?.variance ?? result?.data?.variance ?? 0;
         const varianceText = variance >= 0
-          ? `Overage: $${variance.toFixed(2)}`
-          : `Shortage: $${Math.abs(variance).toFixed(2)}`;
+          ? `Overage: €${variance.toFixed(2)}`
+          : `Shortage: €${Math.abs(variance).toFixed(2)}`;
         // Check for cashier logic to populate items
         const isCashier = effectiveShift.role_type === 'cashier';
         if (isCashier) {
-          // Use backend variance directly - backend closeShift() returns correct v2 variance
-          // V2 Formula: expected = opening + cashSales - cashRefunds - expenses - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns
-          // Staff payments are informational only and NOT deducted from expected
-          const opening = effectiveShift.opening_cash_amount || 0;
-          // Use instore only (pickup/dine-in) - delivery cash is tracked via driver returns
-          const sales = shiftSummary?.breakdown?.instore?.cashTotal || 0;
-          const cashRefunds = shiftSummary?.cashRefunds || 0;
-          const expenses = shiftSummary?.totalExpenses || 0;
-          const cashDrops = shiftSummary?.cashDrawer?.cash_drops || 0;
-          const driverGiven = shiftSummary?.cashDrawer?.driver_cash_given || 0;
-          const driverReturned = shiftSummary?.cashDrawer?.driver_cash_returned || 0;
-          const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-          const inheritedDriverExpectedReturns = inheritedDrivers.reduce((sum: number, d: any) => sum + (d.net_cash_amount || 0), 0);
-          // Staff payments are informational only (not deducted from expected)
-          const staffPayments = (shiftSummary?.cashDrawer?.total_staff_payments || 0) +
-            (staffPayment ? parseFloat(staffPayment) : 0);
-          // V2 expected matches backend formula
-          const expected = opening + sales - cashRefunds - expenses - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns;
+          const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+          const breakdown = getCashierExpectedBreakdown(
+            shiftSummary,
+            effectiveShift,
+            opening,
+            shiftSummary?.totalExpenses || 0,
+            cashierPayout
+          );
           const actual = closingAmount;
 
           setLastShiftResult({
             variance, // Use backend variance directly
             breakdown: {
-              opening,
-              sales,
-              cashRefunds,
-              expenses,
-              cashDrops,
-              driverGiven,
-              driverReturned,
-              inheritedDriverExpectedReturns,
-              staffPayments, // Informational only
-              expected,
+              calculationVersion: breakdown.calculationVersion,
+              opening: breakdown.opening,
+              sales: breakdown.sales,
+              cashRefunds: breakdown.cashRefunds,
+              expenses: breakdown.expenses,
+              cashDrops: breakdown.cashDrops,
+              driverGiven: breakdown.driverGiven,
+              driverReturned: breakdown.driverReturned,
+              inheritedDriverExpectedReturns: breakdown.inheritedDriverExpectedReturns,
+              recordedStaffPayments: breakdown.recordedStaffPayments,
+              cashierPayout: breakdown.cashierPayout,
+              expected: breakdown.expected,
               actual
             }
           });
@@ -1532,17 +1683,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     <>
       <LiquidGlassModal
         isOpen={isOpen}
-        onClose={onClose}
-        title={mode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}
+        onClose={handleModalClose}
+        title={effectiveMode === 'checkin' ? t('modals.staffShift.checkIn') : t('modals.staffShift.checkOut')}
         size="md"
         className="!max-w-lg"
         closeOnBackdrop={false}
-        closeOnEscape={true}
+        closeOnEscape={!isModalCloseBlocked}
       >
         {/* Content with Scroll - max height to ensure scrollability */}
         <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar">
           {/* Progress Stepper used during Check In/Out */}
-          {(effectiveMode === 'checkin' || effectiveMode === 'checkout') && (
+          {effectiveMode === 'checkin' && (
             <div className="mb-4">
               <ProgressStepper steps={progressSteps} />
             </div>
@@ -1615,22 +1766,30 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <span className="font-medium text-green-300">+{(lastShiftResult.breakdown.inheritedDriverExpectedReturns || 0).toFixed(2)}</span>
                     </div>
                   )}
+                  {(lastShiftResult.breakdown.cashierPayout || 0) > 0 && (
+                    <div className="flex justify-between items-center p-2 rounded hover:bg-white/5">
+                      <span className="text-gray-400">{t('modals.staffShift.cashierPaymentLabel')}</span>
+                      <span className="font-medium text-red-300">-{formatCurrency(lastShiftResult.breakdown.cashierPayout || 0)}</span>
+                    </div>
+                  )}
                   <div className="h-px bg-white/10 my-1"></div>
                   <div className="flex justify-between items-center p-2 bg-white/5 rounded font-medium">
                     <span className="text-gray-300">{t('modals.staffShift.expectedAmountLabel')}</span>
-                    <span className="text-blue-300">${(lastShiftResult.breakdown.expected || 0).toFixed(2)}</span>
+                    <span className="text-blue-300">{formatCurrency(lastShiftResult.breakdown.expected || 0)}</span>
                   </div>
                   <div className="flex justify-between items-center p-2 bg-white/5 rounded font-bold">
-                    <span className="text-white">{t('modals.staffShift.closingCashLabel')} (Actual)</span>
-                    <span className="text-white">${(lastShiftResult.breakdown.actual || 0).toFixed(2)}</span>
+                    <span className="text-white">
+                      {t('modals.staffShift.closingCashLabel')} ({t('modals.staffShift.actualLabel', 'Actual')})
+                    </span>
+                    <span className="text-white">{formatCurrency(lastShiftResult.breakdown.actual || 0)}</span>
                   </div>
                   {/* Staff Payments - Informational only, NOT deducted from expected */}
-                  {(lastShiftResult.breakdown.staffPayments || 0) > 0 && (
+                  {(lastShiftResult.breakdown.recordedStaffPayments || 0) > 0 && (
                     <>
                       <div className="h-px bg-white/10 my-1"></div>
                       <div className="flex justify-between items-center p-2 rounded hover:bg-white/5">
-                        <span className="text-gray-400">{t('modals.staffShift.staffPaymentsLabel')}</span>
-                        <span className="font-medium text-yellow-300">${(lastShiftResult.breakdown.staffPayments || 0).toFixed(2)}</span>
+                        <span className="text-gray-400">{t('modals.staffShift.staffPaymentsMade')}</span>
+                        <span className="font-medium text-yellow-300">{formatCurrency(lastShiftResult.breakdown.recordedStaffPayments || 0)}</span>
                       </div>
                     </>
                   )}
@@ -1848,7 +2007,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {loading ? (
                       <div className="flex items-center justify-center gap-2">
                         <div className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"></div>
-                        <span>Authenticating...</span>
+                        <span>{t('modals.staffShift.authenticating')}</span>
                       </div>
                     ) : (
                       t('modals.staffShift.continue')
@@ -1968,19 +2127,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   {/* Dynamic heading and helper text based on role */}
                   <div className="text-center">
                     <h3 className="text-xl font-bold liquid-glass-modal-text">
-                      {roleType === 'driver'
+                      {(roleType === 'driver' || roleType === 'server')
                         ? t('modals.staffShift.startingCashOptional', 'Starting Cash (Optional)')
                         : t('modals.staffShift.openingCashAmount')}
                     </h3>
                     <p className="text-sm liquid-glass-modal-text-muted mt-1">
-                      {roleType === 'driver'
+                      {(roleType === 'driver' || roleType === 'server')
                         ? t('modals.staffShift.driverCashHelper', 'Optional: Amount from cashier drawer. Enter 0 to skip.')
                         : t('modals.staffShift.cashierCashHelper', 'Enter amount in drawer')}
                     </p>
                   </div>
 
-                  {/* Warning banner for driver without active cashier */}
-                  {roleType === 'driver' && !activeCashierExists && (
+                  {/* Warning banner for driver/waiter without active cashier */}
+                  {(roleType === 'driver' || roleType === 'server') && !activeCashierExists && (
                     <div className="p-3 bg-yellow-500/20 border border-yellow-500/50 rounded-lg text-yellow-100 text-sm flex items-start gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-yellow-400" />
                       <span>{t('modals.staffShift.noCashierWarning', 'No active cashier. Can only proceed with $0.')}</span>
@@ -1996,21 +2155,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <input
                         type="text"
                         inputMode="decimal"
-                        value={roleType === 'driver'
+                        value={(roleType === 'driver' || roleType === 'server')
                           ? (!activeCashierExists ? '0' : driverStartingAmount)
                           : openingCash}
                         onChange={(e) => {
                           const val = e.target.value.replace(/[^0-9.]/g, '');
-                          if (roleType === 'driver') {
+                          if (roleType === 'driver' || roleType === 'server') {
                             setDriverStartingAmount(val);
                           } else {
                             setOpeningCash(val);
                           }
                         }}
                         onFocus={(e) => e.target.select()}
-                        placeholder={roleType === 'driver' ? '0.00 (optional)' : t('forms.placeholders.amount')}
+                        placeholder={(roleType === 'driver' || roleType === 'server') ? '0.00 (optional)' : t('forms.placeholders.amount')}
                         className="liquid-glass-modal-input flex-1 text-3xl font-bold text-center"
-                        readOnly={roleType === 'driver' && !activeCashierExists}
+                        readOnly={(roleType === 'driver' || roleType === 'server') && !activeCashierExists}
                         autoFocus
                       />
                     </div>
@@ -2018,8 +2177,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                   {/* Action Buttons */}
                   <div className="flex gap-3">
-                    {/* Skip Button - Only for drivers */}
-                    {roleType === 'driver' && (
+                    {/* Skip Button - Only for cash-return staff */}
+                    {(roleType === 'driver' || roleType === 'server') && (
                       <button
                         onClick={() => {
                           setDriverStartingAmount('0');
@@ -2041,9 +2200,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       }}
                       disabled={
                         loading ||
-                        (roleType === 'driver' && !activeCashierExists && parseFloat(driverStartingAmount || '0') > 0)
+                        ((roleType === 'driver' || roleType === 'server') && !activeCashierExists && parseFloat(driverStartingAmount || '0') > 0)
                       }
-                      className={`${roleType === 'driver' ? 'flex-1' : 'w-full'} px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-semibold shadow-[0_4px_16px_0_rgba(16,185,129,0.5)] hover:shadow-[0_6px_20px_0_rgba(16,185,129,0.6)] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-300`}
+                      className={`${(roleType === 'driver' || roleType === 'server') ? 'flex-1' : 'w-full'} px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-xl font-semibold shadow-[0_4px_16px_0_rgba(16,185,129,0.5)] hover:shadow-[0_6px_20px_0_rgba(16,185,129,0.6)] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-300`}
                     >
                       {loading ? (
                         <div className="flex items-center justify-center gap-3">
@@ -2133,27 +2292,56 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
               {/* SIMPLIFIED SHIFT HEADER */}
               {effectiveShift && (
-                <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 rounded-xl p-4 border border-blue-500/20">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="font-bold liquid-glass-modal-text text-lg">
-                        {effectiveShift.staff_name || <span className="capitalize">{effectiveShift.role_type}</span>}
-                      </h3>
-                      <p className="text-xs text-gray-400 mt-1">
-                        <span className="capitalize">{effectiveShift.role_type}</span> · Total Sales: <span className="text-green-400 font-semibold">${(shiftSummary?.breakdown?.overall?.totalAmount ?? effectiveShift.total_sales_amount ?? 0).toFixed(2)}</span>
-                      </p>
+                (() => {
+                  const headerMetrics = getShiftHeaderMetrics(shiftSummary, effectiveShift);
+                  const openingAmount = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+                  const openingLabel = effectiveShift.role_type === 'cashier'
+                    ? t('modals.staffShift.openingCashLabel')
+                    : t('modals.staffShift.startingAmount', 'Starting Amount');
+                  return (
+                    <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 rounded-xl p-4 border border-blue-500/20">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h3 className="font-bold liquid-glass-modal-text text-lg">
+                            {effectiveShift.staff_name || <span className="capitalize">{translateRoleName(effectiveShift.role_type)}</span>}
+                          </h3>
+                          <p className="text-xs text-gray-400 mt-1">
+                            <span className="capitalize">{translateRoleName(effectiveShift.role_type)}</span>
+                            {' · '}
+                            {t('modals.staffShift.totalSalesLabel', 'Total Sales')}:{' '}
+                            <span className="text-green-400 font-semibold">{formatCurrency(headerMetrics.totalAmount)}</span>
+                          </p>
+                          {(effectiveShift.role_type === 'cashier' || effectiveShift.role_type === 'driver' || effectiveShift.role_type === 'server') && (
+                            <p className="text-xs text-blue-300 mt-1">
+                              {openingLabel}: <span className="font-semibold">{formatCurrency(openingAmount)}</span>
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <div className="text-2xl font-bold text-blue-300">{headerMetrics.totalCount}</div>
+                          <p className="text-xs text-gray-400">{t('modals.staffShift.ordersCount')}</p>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <div className="text-2xl font-bold text-blue-300">{shiftSummary?.breakdown?.overall?.totalCount ?? effectiveShift.total_orders_count ?? 0}</div>
-                      <p className="text-xs text-gray-400">Orders</p>
-                    </div>
-                  </div>
-                </div>
+                  );
+                })()
               )}
 
               {/* CASH RECONCILIATION - Only for Cashier */}
               {shiftSummary && effectiveShift?.role_type === 'cashier' && (
-                <div className="space-y-3">
+                (() => {
+                  const openingAmount = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+                  const currentCashierPayout = parseOptionalAmount(staffPayment);
+                  const cashierBreakdown = getCashierExpectedBreakdown(
+                    shiftSummary,
+                    effectiveShift,
+                    openingAmount,
+                    shiftSummary.totalExpenses || 0,
+                    Number.isNaN(currentCashierPayout) ? 0 : currentCashierPayout
+                  );
+
+                  return (
+                  <div className="space-y-3">
                   {/* Header */}
                   <div className="bg-gradient-to-r from-yellow-500/20 to-amber-500/20 rounded-xl p-4 border border-yellow-500/30">
                     <h3 className="text-lg font-bold text-yellow-300 mb-1">{t('modals.staffShift.cashReconciliation')}</h3>
@@ -2165,20 +2353,20 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Opening */}
                     <div className="flex justify-between items-center p-3 bg-blue-900/30 rounded-lg border border-blue-600/40">
                       <span className="text-sm text-blue-200">{t('modals.staffShift.openingCashLabel')}</span>
-                      <span className="font-bold text-blue-300">${(effectiveShift.opening_cash_amount || 0).toFixed(2)}</span>
+                      <span className="font-bold text-blue-300">{formatCurrency(openingAmount)}</span>
                     </div>
 
                     {/* Plus Cash Orders */}
                     <div className="flex justify-between items-center p-3 bg-green-900/30 rounded-lg border border-green-600/40">
                       <span className="text-sm text-green-200">{t('modals.staffShift.cashOrdersLabel')}</span>
-                      <span className="font-bold text-green-300">${(shiftSummary.breakdown?.overall?.cashTotal || 0).toFixed(2)}</span>
+                      <span className="font-bold text-green-300">{formatCurrency(cashierBreakdown.sales)}</span>
                     </div>
 
                     {/* Minus Canceled */}
                     {shiftSummary.canceledOrders?.cashTotal > 0 && (
                       <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
                         <span className="text-sm text-red-200">{t('modals.staffShift.canceledOrdersLabel')}</span>
-                        <span className="font-bold text-red-300">${(shiftSummary.canceledOrders?.cashTotal || 0).toFixed(2)}</span>
+                        <span className="font-bold text-red-300">{formatCurrency(shiftSummary.canceledOrders?.cashTotal || 0)}</span>
                       </div>
                     )}
 
@@ -2186,7 +2374,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {shiftSummary.totalExpenses > 0 && (
                       <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
                         <span className="text-sm text-red-200">{t('modals.staffShift.expensesLabel')}</span>
-                        <span className="font-bold text-red-300">${(shiftSummary.totalExpenses || 0).toFixed(2)}</span>
+                        <span className="font-bold text-red-300">{formatCurrency(shiftSummary.totalExpenses || 0)}</span>
                       </div>
                     )}
 
@@ -2194,7 +2382,38 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {(shiftSummary.cashDrawer?.cash_drops || 0) > 0 && (
                       <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
                         <span className="text-sm text-red-200">{t('modals.staffShift.cashDropsLabel')}</span>
-                        <span className="font-bold text-red-300">-${(shiftSummary.cashDrawer?.cash_drops || 0).toFixed(2)}</span>
+                        <span className="font-bold text-red-300">-{formatCurrency(shiftSummary.cashDrawer?.cash_drops || 0)}</span>
+                      </div>
+                    )}
+
+                    {/* Minus Cash Refunds */}
+                    {(shiftSummary.cashRefunds || 0) > 0 && (
+                      <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
+                        <span className="text-sm text-red-200">{t('modals.staffShift.cashRefundsLabel')}</span>
+                        <span className="font-bold text-red-300">-{formatCurrency(shiftSummary.cashRefunds || 0)}</span>
+                      </div>
+                    )}
+
+                    {/* Minus Driver Cash Given */}
+                    {(cashierBreakdown.driverGiven || 0) > 0 && (
+                      <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
+                        <span className="text-sm text-red-200">{t('modals.staffShift.driverCashGivenLabel', 'Starting Cash Given To Drivers/Waiters')}</span>
+                        <span className="font-bold text-red-300">-{formatCurrency(cashierBreakdown.driverGiven || 0)}</span>
+                      </div>
+                    )}
+
+                    {/* Plus Driver Cash Returned */}
+                    {(shiftSummary.cashDrawer?.driver_cash_returned || 0) > 0 && (
+                      <div className="flex justify-between items-center p-3 bg-green-900/30 rounded-lg border border-green-600/40">
+                        <span className="text-sm text-green-200">{t('modals.staffShift.driverCashReturnedLabel')}</span>
+                        <span className="font-bold text-green-300">+{formatCurrency(shiftSummary.cashDrawer?.driver_cash_returned || 0)}</span>
+                      </div>
+                    )}
+
+                    {(cashierBreakdown.cashierPayout || 0) > 0 && (
+                      <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
+                        <span className="text-sm text-red-200">{t('modals.staffShift.cashierPaymentLabel')}</span>
+                        <span className="font-bold text-red-300">-{formatCurrency(cashierBreakdown.cashierPayout || 0)}</span>
                       </div>
                     )}
 
@@ -2264,40 +2483,39 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Plus Inherited Driver Returns */}
                     {(() => {
                       const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-                      const inheritedDriverExpectedReturns = inheritedDrivers.reduce((sum: number, d: any) => sum + (d.net_cash_amount || 0), 0);
+                      const inheritedWaiters = shiftSummary?.transferredWaiters || [];
+                      const inheritedDriverExpectedReturns = getInheritedStaffExpectedReturns(shiftSummary);
                       if (inheritedDriverExpectedReturns <= 0) return null;
                       return (
                         <div className="flex justify-between items-center p-3 bg-purple-900/30 rounded-lg border border-purple-600/40">
                           <div className="flex flex-col">
-                            <span className="text-sm text-purple-200">{t('modals.staffShift.inheritedDriverReturnsLabel')}</span>
-                            <span className="text-xs text-purple-300/70">{inheritedDrivers.length} {t('modals.staffShift.transferredDriversCount', 'drivers transferred')}</span>
+                            <span className="text-sm text-purple-200">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Inherited staff returns')}</span>
+                            <span className="text-xs text-purple-300/70">
+                              {inheritedDrivers.length + inheritedWaiters.length} {t('modals.staffShift.transferredDriversCount', 'staff transferred')}
+                            </span>
                           </div>
-                          <span className="font-bold text-purple-300">+${inheritedDriverExpectedReturns.toFixed(2)}</span>
+                          <span className="font-bold text-purple-300">+{formatCurrency(inheritedDriverExpectedReturns)}</span>
                         </div>
                       );
                     })()}
 
                     {/* Expected Amount */}
                     {(() => {
-                      const opening = effectiveShift.opening_cash_amount || 0;
-                      // Use instore only (pickup/dine-in) - delivery cash is tracked via driver returns
-                      const cashTotal = shiftSummary.breakdown?.instore?.cashTotal || 0;
-                      const cashRefunds = shiftSummary.cashRefunds || 0;
-                      const expensesTotal = shiftSummary.totalExpenses || 0;
-                      const cashDrops = shiftSummary.cashDrawer?.cash_drops || 0;
-                      const driverGiven = shiftSummary.cashDrawer?.driver_cash_given || 0;
-                      const driverReturned = shiftSummary.cashDrawer?.driver_cash_returned || 0;
-                      // Get inherited driver expected returns (drivers transferred TO this cashier)
-                      const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-                      const inheritedDriverExpectedReturns = inheritedDrivers.reduce((sum: number, d: any) => sum + (d.net_cash_amount || 0), 0);
-                      // V2 Formula: opening + cashSales - cashRefunds - expenses - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns
-                      // Note: staffPayments is informational only and NOT deducted from expected amount
-                      const expected = opening + cashTotal - cashRefunds - expensesTotal - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns;
+                      const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
+                      const cashierPayout = parseOptionalAmount(staffPayment);
+                      const breakdown = getCashierExpectedBreakdown(
+                        shiftSummary,
+                        effectiveShift,
+                        opening,
+                        shiftSummary.totalExpenses || 0,
+                        Number.isNaN(cashierPayout) ? 0 : cashierPayout
+                      );
+                      const expected = breakdown.expected;
                       return (
                         <>
                           <div className="flex justify-between items-center p-3 bg-cyan-900/30 rounded-lg border-2 border-cyan-500/50 font-semibold">
                             <span className="text-sm text-cyan-200">{t('modals.staffShift.expectedAmountLabel')}</span>
-                            <span className="text-lg text-cyan-300">${expected.toFixed(2)}</span>
+                            <span className="text-lg text-cyan-300">{formatCurrency(expected)}</span>
                           </div>
                           {/* Formula Explanation */}
                           <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-600/30 mt-2">
@@ -2314,6 +2532,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     })()}
                   </div>
                 </div>
+                  );
+                })()
               )}
 
               {/* Expenses Section */}
@@ -2392,7 +2612,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <div className="liquid-glass-modal-text-muted capitalize text-xs">{expense.expense_type}</div>
                           </div>
                           <div className="text-right">
-                            <div className="font-semibold liquid-glass-modal-text">${expense.amount.toFixed(2)}</div>
+                            <div className="font-semibold liquid-glass-modal-text">{formatCurrency(expense.amount)}</div>
                             <div className={`text-xs ${expense.status === 'approved' ? 'text-green-400' :
                               expense.status === 'rejected' ? 'text-red-400' :
                                 'text-yellow-400'
@@ -2404,7 +2624,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       ))}
                       <div className="flex justify-between items-center pt-3 border-t liquid-glass-modal-border">
                         <span className="font-semibold liquid-glass-modal-text">{t('modals.staffShift.totalExpenses')}:</span>
-                        <span className="font-bold text-red-400 text-lg">${totalExpenses.toFixed(2)}</span>
+                        <span className="font-bold text-red-400 text-lg">{formatCurrency(totalExpenses)}</span>
                       </div>
                     </div>
                   ) : (
@@ -2458,7 +2678,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           </div>
                           <div className="text-right">
                             <Banknote className="w-5 h-5 text-green-300 ml-auto" />
-                            <div className="font-bold text-green-300">${cashTotal.toFixed(2)}</div>
+                            <div className="font-bold text-green-300">{formatCurrency(cashTotal)}</div>
                           </div>
                         </div>
                         <div className="bg-blue-900/20 border border-blue-600/30 rounded-xl p-3 flex justify-between items-center">
@@ -2468,7 +2688,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           </div>
                           <div className="text-right">
                             <CreditCard className="w-5 h-5 text-blue-300 ml-auto" />
-                            <div className="font-bold text-blue-300">${cardTotal.toFixed(2)}</div>
+                            <div className="font-bold text-blue-300">{formatCurrency(cardTotal)}</div>
                           </div>
                         </div>
                       </div>
@@ -2507,7 +2727,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                     <td className="px-3 py-2 text-gray-300 truncate max-w-[150px]" title={delivery.delivery_address} role="cell">
                                       {delivery.delivery_address ? (delivery.delivery_address.length > 25 ? delivery.delivery_address.substring(0, 25) + '...' : delivery.delivery_address) : '-'}
                                     </td>
-                                    <td className="px-3 py-2 text-right font-medium text-gray-200" role="cell">${delivery.total_amount.toFixed(2)}</td>
+                                    <td className="px-3 py-2 text-right font-medium text-gray-200" role="cell">{formatCurrency(delivery.total_amount)}</td>
                                     <td className="px-3 py-2 text-center" role="cell">
                                       <span className="inline-flex gap-1 items-center justify-center bg-black/20 px-1.5 py-0.5 rounded text-xs">
                                         <span>{getStatusSymbol(delivery)}</span>
@@ -2548,7 +2768,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               <div className="flex justify-between items-start mb-3">
                                 <div>
                                   <div className="font-semibold liquid-glass-modal-text">Order #{delivery.order_number}</div>
-                                  <div className="liquid-glass-modal-text-muted text-sm">${delivery.total_amount.toFixed(2)}</div>
+                                  <div className="liquid-glass-modal-text-muted text-sm">{formatCurrency(delivery.total_amount)}</div>
                                 </div>
                                 <div className={`text-xs px-2 py-1 rounded ${delivery.payment_method === 'cash' ? 'bg-green-900/50 text-green-400' :
                                   delivery.payment_method === 'card' ? 'bg-blue-900/50 text-blue-400' :
@@ -2590,19 +2810,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               <div className="grid grid-cols-2 gap-2 text-xs">
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Delivery Fee</div>
-                                  <div className="font-semibold text-green-400">${delivery.delivery_fee.toFixed(2)}</div>
+                                  <div className="font-semibold text-green-400">{formatCurrency(delivery.delivery_fee)}</div>
                                 </div>
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Tip</div>
-                                  <div className="font-semibold text-green-400">${delivery.tip_amount.toFixed(2)}</div>
+                                  <div className="font-semibold text-green-400">{formatCurrency(delivery.tip_amount)}</div>
                                 </div>
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Cash Collected</div>
-                                  <div className="font-semibold liquid-glass-modal-text">${delivery.cash_collected.toFixed(2)}</div>
+                                  <div className="font-semibold liquid-glass-modal-text">{formatCurrency(delivery.cash_collected)}</div>
                                 </div>
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Cash to Return</div>
-                                  <div className="font-semibold text-yellow-400">${delivery.cash_to_return.toFixed(2)}</div>
+                                  <div className="font-semibold text-yellow-400">{formatCurrency(delivery.cash_to_return)}</div>
                                 </div>
                               </div>
                             </div>
@@ -2660,7 +2880,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           </div>
                           <div className="text-right">
                             <Banknote className="w-5 h-5 text-green-300 ml-auto" />
-                            <div className="font-bold text-green-300">${cashTotal.toFixed(2)}</div>
+                            <div className="font-bold text-green-300">{formatCurrency(cashTotal)}</div>
                           </div>
                         </div>
                         <div className="bg-blue-900/20 border border-blue-600/30 rounded-xl p-3 flex justify-between items-center">
@@ -2670,7 +2890,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           </div>
                           <div className="text-right">
                             <CreditCard className="w-5 h-5 text-blue-300 ml-auto" />
-                            <div className="font-bold text-blue-300">${cardTotal.toFixed(2)}</div>
+                            <div className="font-bold text-blue-300">{formatCurrency(cardTotal)}</div>
                           </div>
                         </div>
                       </div>
@@ -2713,7 +2933,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                   <tr key={table.table_number} className="hover:bg-white/5 transition-colors" role="row">
                                     <td className="px-3 py-2 font-medium liquid-glass-modal-text" role="cell">{table.table_number}</td>
                                     <td className="px-3 py-2 text-gray-300" role="cell">{table.order_count}</td>
-                                    <td className="px-3 py-2 text-right font-medium text-gray-200" role="cell">${table.total_amount.toFixed(2)}</td>
+                                    <td className="px-3 py-2 text-right font-medium text-gray-200" role="cell">{formatCurrency(table.total_amount)}</td>
                                     <td className="px-3 py-2 text-center" role="cell">
                                       <span className="inline-flex gap-1 items-center justify-center bg-black/20 px-1.5 py-0.5 rounded text-xs">
                                         {hasActive ? (
@@ -2757,11 +2977,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               {/* Table Header */}
                               <div className="flex justify-between items-start mb-3">
                                 <div>
-                                  <div className="font-semibold liquid-glass-modal-text">Table {table.table_number}</div>
-                                  <div className="liquid-glass-modal-text-muted text-sm">{table.order_count} Orders</div>
+                                  <div className="font-semibold liquid-glass-modal-text">
+                                    {t('modals.staffShift.tableNumber')} {table.table_number}
+                                  </div>
+                                  <div className="liquid-glass-modal-text-muted text-sm">
+                                    {t('modals.staffShift.ordersCountValue', { count: table.order_count })}
+                                  </div>
                                 </div>
                                 <div className="text-right">
-                                  <div className="font-bold text-green-400">${table.total_amount.toFixed(2)}</div>
+                                  <div className="font-bold text-green-400">{formatCurrency(table.total_amount)}</div>
                                   <div className={`text-xs px-2 py-1 rounded inline-block mt-1 ${table.payment_method === 'cash' ? 'bg-green-900/50 text-green-400' :
                                     table.payment_method === 'card' ? 'bg-blue-900/50 text-blue-400' :
                                       'bg-purple-900/50 text-purple-400'
@@ -2776,7 +3000,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 {table.orders && Array.isArray(table.orders) ? table.orders.map((order: any) => (
                                   <div key={order.order_id} className="flex justify-between text-xs">
                                     <span className="liquid-glass-modal-text-muted">#{order.order_number}</span>
-                                    <span className="liquid-glass-modal-text">${order.total_amount.toFixed(2)} ({order.payment_method})</span>
+                                    <span className="liquid-glass-modal-text">{formatCurrency(order.total_amount)} ({order.payment_method})</span>
                                   </div>
                                 )) : null}
                               </div>
@@ -2785,11 +3009,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               <div className="grid grid-cols-2 gap-2 text-xs">
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Cash</div>
-                                  <div className="font-semibold text-green-400">${table.cash_amount.toFixed(2)}</div>
+                                  <div className="font-semibold text-green-400">{formatCurrency(table.cash_amount)}</div>
                                 </div>
                                 <div className="bg-white/10 dark:bg-gray-800/20 rounded p-2 border liquid-glass-modal-border">
                                   <div className="liquid-glass-modal-text-muted">Card</div>
-                                  <div className="font-semibold text-blue-400">${table.card_amount.toFixed(2)}</div>
+                                  <div className="font-semibold text-blue-400">{formatCurrency(table.card_amount)}</div>
                                 </div>
                               </div>
                             </div>
@@ -2800,7 +3024,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Comment 2: UI indication of cash to return */}
                     {
                       (() => {
-                        const opening = effectiveShift.opening_cash_amount || 0;
+                        const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
                         const expensesTotal = shiftSummary.totalExpenses || 0;
                         // Calculate totals from waiterTables array
                         const cashFromTables = waiterTables.reduce((sum: number, t: any) => sum + (t.cash_amount || 0), 0);
@@ -2825,21 +3049,21 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <div className="space-y-2 text-sm">
                               <div className="flex justify-between">
                                 <span className="text-gray-400">{t('modals.staffShift.startingAmount', 'Starting Amount')}</span>
-                                <span className="text-green-400">+${opening.toFixed(2)}</span>
+                                <span className="text-green-400">+{formatCurrency(opening)}</span>
                               </div>
                               <div className="flex justify-between">
                                 <span className="text-gray-400">{t('modals.staffShift.cashCollected', 'Cash Collected')}</span>
-                                <span className="text-green-400">+${cashFromTables.toFixed(2)}</span>
+                                <span className="text-green-400">+{formatCurrency(cashFromTables)}</span>
                               </div>
                               <div className={`flex justify-between ${calculationVersion >= 2 ? 'border-b liquid-glass-modal-border pb-2' : ''}`}>
                                 <span className="text-gray-400">{t('modals.staffShift.expenses', 'Expenses')}</span>
-                                <span className="text-red-400">-${expensesTotal.toFixed(2)}</span>
+                                <span className="text-red-400">-{formatCurrency(expensesTotal)}</span>
                               </div>
                               {/* v1: Show payment as deduction in the breakdown */}
                               {calculationVersion < 2 && paymentAmount > 0 && (
                                 <div className="flex justify-between border-b liquid-glass-modal-border pb-2">
                                   <span className="text-gray-400">{t('modals.staffShift.payment', 'Payment')}</span>
-                                  <span className="text-red-400">-${paymentAmount.toFixed(2)}</span>
+                                  <span className="text-red-400">-{formatCurrency(paymentAmount)}</span>
                                 </div>
                               )}
                               {/* v1: Add border after expenses if no payment */}
@@ -2848,7 +3072,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               )}
                               <div className="flex justify-between pt-1 font-bold text-lg">
                                 <span className="text-gray-200">{label}</span>
-                                <span className={colorClass}>${Math.abs(cashToReturn).toFixed(2)}</span>
+                                <span className={colorClass}>{formatCurrency(Math.abs(cashToReturn))}</span>
                               </div>
                               {/* Formula Explanation */}
                               <div className="mt-3 pt-2 border-t liquid-glass-modal-border">
@@ -2905,7 +3129,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalSales')}</div>
-                        <div className="text-xl font-bold text-green-500">${overall.totalAmount.toFixed(2)}</div>
+                        <div className="text-xl font-bold text-green-500">{formatCurrency(overall.totalAmount)}</div>
                       </div>
                     </div>
 
@@ -2914,29 +3138,29 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.pickupCash')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200">{instore.cashCount} orders</span>
-                          <span className="font-bold text-green-500">${instore.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{t('modals.staffShift.ordersCountValue', { count: instore.cashCount })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(instore.cashTotal)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.pickupCard')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200">{instore.cardCount} orders</span>
-                          <span className="font-bold text-slate-800 dark:text-white">${instore.cardTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{t('modals.staffShift.ordersCountValue', { count: instore.cardCount })}</span>
+                          <span className="font-bold text-slate-800 dark:text-white">{formatCurrency(instore.cardTotal)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.deliveryCash')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200">{delivery.cashCount} orders</span>
-                          <span className="font-bold text-green-500">${delivery.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{t('modals.staffShift.ordersCountValue', { count: delivery.cashCount })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(delivery.cashTotal)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.deliveryCard')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200">{delivery.cardCount} orders</span>
-                          <span className="font-bold text-slate-800 dark:text-white">${delivery.cardTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200">{t('modals.staffShift.ordersCountValue', { count: delivery.cardCount })}</span>
+                          <span className="font-bold text-slate-800 dark:text-white">{formatCurrency(delivery.cardTotal)}</span>
                         </div>
                       </div>
                     </div>
@@ -2946,22 +3170,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalPickupOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalPickupOrders} orders</span>
-                          <span className="font-bold text-green-500">${(instore.cashTotal + instore.cardTotal).toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{t('modals.staffShift.ordersCountValue', { count: totalPickupOrders })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(instore.cashTotal + instore.cardTotal)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalDeliveryOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalDeliveryOrders} orders</span>
-                          <span className="font-bold text-green-500">${(delivery.cashTotal + delivery.cardTotal).toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{t('modals.staffShift.ordersCountValue', { count: totalDeliveryOrders })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(delivery.cashTotal + delivery.cardTotal)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
                         <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">{t('modals.staffShift.totalOrders')}</div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{overall.totalCount} orders</span>
-                          <span className="font-bold text-green-500">${overall.totalAmount.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{t('modals.staffShift.ordersCountValue', { count: overall.totalCount })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(overall.totalAmount)}</span>
                         </div>
                       </div>
                       <div className="bg-white/10 dark:bg-gray-800/20 rounded-xl p-3 border liquid-glass-modal-border">
@@ -2969,8 +3193,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
 
                         <div className="flex justify-between text-sm">
-                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{totalCashOrdersCount} orders</span>
-                          <span className="font-bold text-green-500">${overall.cashTotal.toFixed(2)}</span>
+                          <span className="text-slate-700 dark:text-slate-200 font-semibold">{t('modals.staffShift.ordersCountValue', { count: totalCashOrdersCount })}</span>
+                          <span className="font-bold text-green-500">{formatCurrency(overall.cashTotal)}</span>
                         </div>
                       </div>
                     </div>
@@ -2984,19 +3208,22 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                 return (
                   <div className={liquidGlassModalCard() + ' space-y-3'}>
-                    <h3 className="text-xl font-bold liquid-glass-modal-text mb-3">{t('modals.staffShift.driversCheckout')}</h3>
+                    <h3 className="text-xl font-bold liquid-glass-modal-text mb-3">
+                      {t('modals.staffShift.driversCheckout', 'Staff Cash Returns')}
+                    </h3>
                     <div className="space-y-2">
                       {drivers.map((driver: any) => {
                         const startingAmount = driver.starting_amount || 0;
-                        const earnings = driver.cash_collected || driver.driver_payment || 0;
+                        const earnings = driver.cash_collected || 0;
                         const expenses = driver.expenses || 0;
-                        // Calculate what driver returns to drawer
-                        const returns = startingAmount + earnings - expenses;
+                        const returns = driver.amount_to_return ?? (startingAmount + earnings - expenses);
                         const isPositive = returns >= 0;
-                        const roleType = driver.role_type || t('modals.staffShift.driverRole');
+                        const roleType = driver.role_type === 'server'
+                          ? t('modals.staffShift.serverRole', 'Waiter')
+                          : (driver.role_type || t('modals.staffShift.driverRole'));
 
                         return (
-                          <div key={driver.driver_id} className={`p-3 rounded-xl border ${isPositive
+                          <div key={driver.shift_id || driver.driver_id} className={`p-3 rounded-xl border ${isPositive
                             ? 'bg-green-900/20 border-green-600/40'
                             : 'bg-red-900/20 border-red-600/40'
                             }`}>
@@ -3008,7 +3235,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             {/* Grid: Starting, Earnings, Returns */}
                             <div className="grid grid-cols-3 gap-2 text-sm">
                               <div>
-                                <div className="text-xs text-gray-400">{t('modals.staffShift.driverStarting')}</div>
+                                <div className="text-xs text-gray-400">{t('modals.staffShift.driverStarting', 'Starting Amount')}</div>
                                 <div className="font-medium liquid-glass-modal-text">€{startingAmount.toFixed(2)}</div>
                               </div>
                               <div>
@@ -3096,7 +3323,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <div className="mb-6">
                           <div className="flex items-center justify-between mb-3">
                             <h4 className="font-semibold text-sm text-gray-300">
-                              {t('modals.staffShift.paymentHistory', "Today's Payments")}
+                              {t('modals.staffShift.paymentHistoryToday', "Today's Payments")}
                             </h4>
                             <POSGlassBadge variant="info" size="sm">
                               {t('modals.staffShift.todayTotal', { amount: dailyPaymentTotal.toFixed(2) })}
@@ -3155,7 +3382,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {/* Amount */}
                       <div>
                         <label className="block text-xs font-semibold text-gray-300 mb-1">
-                          {t('modals.staffShift.amount', 'Amount')}
+                          {t('modals.staffShift.amountLabel', 'Amount')}
                           {expectedPayment !== null && (
                             <span className="ml-2 text-xs text-blue-400">
                               ({t('modals.staffShift.expected', 'Expected')}: €{expectedPayment.toFixed(2)})
@@ -3181,12 +3408,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                       {/* Notes */}
                       <div>
-                        <label className="block text-xs font-semibold text-gray-300 mb-1">{t('modals.staffShift.notes', 'Notes (optional)')}</label>
+                        <label className="block text-xs font-semibold text-gray-300 mb-1">{t('modals.staffShift.notesOptional', 'Notes (optional)')}</label>
                         <input
                           type="text"
                           value={paymentNotes}
                           onChange={(e) => setPaymentNotes(e.target.value)}
-                          placeholder={t('modals.staffShift.paymentNotesPlaceholder', 'e.g., End of shift payment')}
+                          placeholder={t('modals.staffShift.paymentNotesPlaceholder', 'Add notes (optional)')}
                           className="liquid-glass-modal-input w-full"
                         />
                       </div>
@@ -3225,16 +3452,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {staffPaymentsList.map((p) => (
                         <div key={p.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/10 text-sm">
                           <div className="flex-1">
-                            <div className="font-semibold liquid-glass-modal-text">{p.staff_name || 'Unknown'}</div>
-                            <div className="liquid-glass-modal-text-muted text-xs capitalize">{p.payment_type}{p.notes ? ` • ${p.notes}` : ''}</div>
+                            <div className="font-semibold liquid-glass-modal-text">{p.staff_name || t('common.unknown', 'Unknown')}</div>
+                            <div className="liquid-glass-modal-text-muted text-xs capitalize">
+                              {t(`modals.staffShift.paymentTypes.${p.payment_type}`, p.payment_type)}
+                              {p.notes ? ` • ${p.notes}` : ''}
+                            </div>
                           </div>
-                          <div className="font-bold text-red-400">-${p.amount.toFixed(2)}</div>
+                          <div className="font-bold text-red-400">-{formatCurrency(p.amount)}</div>
                         </div>
                       ))}
                       <div className="flex justify-between items-center pt-2 border-t border-white/10">
                         <span className="text-sm font-semibold liquid-glass-modal-text">{t('modals.staffShift.sessionTotal', 'Session Total')}</span>
                         <span className="font-bold text-red-400">
-                          -${staffPaymentsList.reduce((s, p) => s + p.amount, 0).toFixed(2)}
+                          -{formatCurrency(staffPaymentsList.reduce((s, p) => s + p.amount, 0))}
                         </span>
                       </div>
                     </div>
@@ -3267,7 +3497,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                             <div className="font-semibold liquid-glass-modal-text">{name}</div>
                             <div className="liquid-glass-modal-text-muted text-xs">{role} • {hours.toFixed(2)} h</div>
                           </div>
-                          <div className="font-bold text-red-400">-${amt.toFixed(2)}</div>
+                          <div className="font-bold text-red-400">-{formatCurrency(amt)}</div>
                         </div>
                       );
                     })}
@@ -3275,7 +3505,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <div className="flex justify-between items-center pt-2 border-t liquid-glass-modal-border">
                     <span className="font-semibold liquid-glass-modal-text">{t('modals.staffShift.totalStaffPayments')}</span>
                     <span className="font-bold text-red-400">
-                      -${(shiftSummary.staffPayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0)).toFixed(2)}
+                      -{formatCurrency(shiftSummary.staffPayments.reduce((s: number, p: any) => s + Number(p.amount || 0), 0))}
                     </span>
                   </div>
                 </div>
@@ -3334,27 +3564,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                   {/* Live Variance Calculation */}
                   {(() => {
-                    const opening = effectiveShift.opening_cash_amount || 0;
-                    // Use instore only (pickup/dine-in) - delivery cash is tracked via driver returns
-                    const totalCashOrders = shiftSummary?.breakdown?.instore?.cashTotal || 0;
-                    const cashRefunds = shiftSummary?.cashRefunds || 0;
-                    // Use local expenses state (which shows in UI) instead of shiftSummary.totalExpenses
+                    const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
                     const expensesTotal = expenses.reduce((sum, exp) => sum + exp.amount, 0);
-                    const cashDrops = shiftSummary?.cashDrawer?.cash_drops || 0;
-                    const driverGiven = shiftSummary?.cashDrawer?.driver_cash_given || 0;
-                    const driverReturned = shiftSummary?.cashDrawer?.driver_cash_returned || 0;
-                    // Get inherited driver expected returns (drivers transferred TO this cashier)
-                    const inheritedDrivers = shiftSummary?.transferredDrivers || [];
-                    const inheritedDriverExpectedReturns = inheritedDrivers.reduce((sum: number, d: any) => sum + (d.net_cash_amount || 0), 0);
-                    // V2 Formula: opening + cashSales - cashRefunds - expenses - cashDrops - driverGiven + driverReturned + inheritedDrivers
-                    // Note: Staff payments are informational only and NOT deducted from expected amount
-                    const expected = opening + totalCashOrders - cashRefunds - expensesTotal - cashDrops - driverGiven + driverReturned + inheritedDriverExpectedReturns;
-
-                    // Debug logging - check shift ID and all values
-                    console.log('[LiveVariance] Values (v2):', {
-                      opening, totalCashOrders, cashRefunds, expensesTotal, cashDrops,
-                      driverGiven, driverReturned, inheritedDriverExpectedReturns, expected
-                    });
+                    const cashierPayout = parseOptionalAmount(staffPayment);
+                    const breakdown = getCashierExpectedBreakdown(
+                      shiftSummary,
+                      effectiveShift,
+                      opening,
+                      expensesTotal,
+                      Number.isNaN(cashierPayout) ? 0 : cashierPayout
+                    );
+                    const expected = breakdown.expected;
 
                     const actual = parseFloat(closingCash || '0') || 0;
                     const variance = actual - expected;
@@ -3364,10 +3584,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
                     return (
                       <div className="flex flex-col items-center gap-2 mt-4 animate-in fade-in slide-in-from-top-2">
-                        {/* Debug: show calculation breakdown */}
-                        <div className="text-xs text-gray-400">
-                          Expected: {opening} + {totalCashOrders} - {cashRefunds} - {expensesTotal} - {cashDrops} - {driverGiven} + {driverReturned} + {inheritedDriverExpectedReturns} = {expected.toFixed(2)} | Actual: {actual}
-                        </div>
                         <POSGlassTooltip content={t('modals.staffShift.varianceExplanation', 'Difference between counted cash and expected cash')}>
                           <VarianceBadge variance={variance} size="lg" showIcon />
                         </POSGlassTooltip>
@@ -3414,7 +3630,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
               {/* DRIVER CHECKOUT - Earnings Calculation */}
               {effectiveShift?.role_type === 'driver' && shiftSummary && (() => {
-                const startingAmount = effectiveShift.opening_cash_amount || 0;
+                const startingAmount = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
 
                 // Filter out canceled orders and get actual cash collected from deliveries
                 const deliveries = shiftSummary?.driverDeliveries || [];
@@ -3452,7 +3668,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {/* Starting Amount (cash taken from cashier) */}
                       <div className="flex justify-between items-center p-3 bg-blue-900/30 rounded-lg border border-blue-600/40">
                         <span className="text-sm text-blue-200">{t('modals.staffShift.startingAmount')}</span>
-                        <span className="font-bold text-blue-300">+${startingAmount.toFixed(2)}</span>
+                        <span className="font-bold text-blue-300">+{formatCurrency(startingAmount)}</span>
                       </div>
 
                       {/* Cash Collected (from deliveries) */}
@@ -3460,14 +3676,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <span className="text-sm text-green-200">
                           {t('modals.staffShift.cashCollected')} ({completedDeliveries.length} {t('modals.staffShift.completedOrdersLabel')})
                         </span>
-                        <span className="font-bold text-green-300">+${cashCollected.toFixed(2)}</span>
+                        <span className="font-bold text-green-300">+{formatCurrency(cashCollected)}</span>
                       </div>
 
                       {/* Expenses (if any) */}
                       {totalExpenses > 0 && (
                         <div className="flex justify-between items-center p-3 bg-orange-900/30 rounded-lg border border-orange-600/40">
                           <span className="text-sm text-orange-200">{t('modals.staffShift.totalExpenses')}</span>
-                          <span className="font-bold text-orange-300">-${totalExpenses.toFixed(2)}</span>
+                          <span className="font-bold text-orange-300">-{formatCurrency(totalExpenses)}</span>
                         </div>
                       )}
 
@@ -3483,9 +3699,50 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           {t('modals.staffShift.amountToReturn', { defaultValue: 'Amount to collect from drawer' })}
                         </span>
                         <span className={amountToReturn >= 0 ? 'text-xl text-yellow-300' : 'text-xl text-red-300'}>
-                          ${amountToReturn.toFixed(2)}
+                          {formatCurrency(amountToReturn)}
                         </span>
                       </div>
+
+                      {/* Actual Cash Returned Input */}
+                      <div className="mt-3 p-4 bg-slate-800/60 rounded-xl border border-slate-600/40">
+                        <label className="block text-sm font-semibold text-slate-200 mb-2">
+                          {t('modals.staffShift.actualCashReturned', 'Actual Cash Returned')}
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={driverActualCash}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/[^0-9.]/g, '');
+                            setDriverActualCash(val);
+                          }}
+                          onFocus={(e) => e.target.select()}
+                          placeholder={formatCurrency(amountToReturn)}
+                          className="liquid-glass-modal-input w-full text-2xl font-bold text-center"
+                        />
+                      </div>
+
+                      {/* Variance Display */}
+                      {driverActualCash !== '' && (() => {
+                        const actual = parseFloat(driverActualCash) || 0;
+                        const variance = actual - amountToReturn;
+                        const isOver = variance >= 0;
+                        return (
+                          <div className={`flex justify-between items-center p-3 rounded-lg border ${isOver
+                            ? 'bg-green-900/30 border-green-500/40'
+                            : 'bg-red-900/30 border-red-500/40'
+                          }`}>
+                            <span className={`text-sm font-medium ${isOver ? 'text-green-200' : 'text-red-200'}`}>
+                              {isOver
+                                ? t('modals.staffShift.driverOverage', 'Overage')
+                                : t('modals.staffShift.driverShortage', 'Shortage')}
+                            </span>
+                            <span className={`text-lg font-bold ${isOver ? 'text-green-300' : 'text-red-300'}`}>
+                              {isOver ? '+' : '-'}{formatCurrency(Math.abs(variance))}
+                            </span>
+                          </div>
+                        );
+                      })()}
 
                       {/* Formula Explanation */}
                       <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-600/30 mt-2">

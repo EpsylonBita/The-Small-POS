@@ -44,11 +44,41 @@ interface SyncStatus {
   menuVersion: number;
   pendingPaymentItems: number;
   failedPaymentItems: number;
+  lastQueueFailure: QueueFailureInfo | null;
 }
 
 interface SyncStatusIndicatorProps {
   className?: string;
   showDetails?: boolean;
+}
+
+type QueueFailureClassification =
+  | 'backpressure'
+  | 'transient'
+  | 'permanent'
+  | 'unknown';
+
+interface QueueFailureInfo {
+  queueId: number;
+  entityType: string;
+  entityId: string;
+  operation: string;
+  status: string;
+  retryCount: number;
+  maxRetries: number;
+  nextRetryAt: string | null;
+  lastError: string;
+  classification: QueueFailureClassification;
+}
+
+type SyncHealthState = 'healthy' | 'pending' | 'blocked' | 'error' | 'stale';
+
+interface SyncHealthPresentation {
+  label: string;
+  badgeClassName: string;
+  textClassName: string;
+  dotClassName: string;
+  detail: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,11 +122,88 @@ const normalizeHealth = (value: any): number => {
   return Math.round(value);
 };
 
+const toTimestamp = (value: string | null | undefined): number | null => {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : time;
+};
+
+const STALE_TELEMETRY_MS = 10 * 60 * 1000;
+
 const toDateString = (value: any): string | null => {
   if (!value) return null;
   if (typeof value === 'string') return value;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+};
+
+const normalizeQueueFailure = (value: any): QueueFailureInfo | null => {
+  if (!value || typeof value !== 'object') return null;
+  const classificationRaw =
+    typeof value.classification === 'string'
+      ? value.classification.toLowerCase()
+      : 'unknown';
+  const classification: QueueFailureClassification =
+    classificationRaw === 'backpressure' ||
+    classificationRaw === 'transient' ||
+    classificationRaw === 'permanent'
+      ? classificationRaw
+      : 'unknown';
+
+  const queueId =
+    typeof value.queueId === 'number'
+      ? value.queueId
+      : typeof value.id === 'number'
+        ? value.id
+        : 0;
+  const entityType =
+    typeof value.entityType === 'string'
+      ? value.entityType
+      : typeof value.entity_type === 'string'
+        ? value.entity_type
+        : '';
+  const entityId =
+    typeof value.entityId === 'string'
+      ? value.entityId
+      : typeof value.entity_id === 'string'
+        ? value.entity_id
+        : '';
+  const operation =
+    typeof value.operation === 'string' ? value.operation : 'unknown';
+  const status = typeof value.status === 'string' ? value.status : 'unknown';
+  const retryCount =
+    typeof value.retryCount === 'number'
+      ? value.retryCount
+      : typeof value.retry_count === 'number'
+        ? value.retry_count
+        : 0;
+  const maxRetries =
+    typeof value.maxRetries === 'number'
+      ? value.maxRetries
+      : typeof value.max_retries === 'number'
+        ? value.max_retries
+        : 0;
+  const nextRetryAt = toDateString(value.nextRetryAt ?? value.next_retry_at);
+  const lastError =
+    typeof value.lastError === 'string'
+      ? value.lastError
+      : typeof value.last_error === 'string'
+        ? value.last_error
+        : '';
+
+  if (!entityType || !entityId || !lastError) return null;
+  return {
+    queueId,
+    entityType,
+    entityId,
+    operation,
+    status,
+    retryCount,
+    maxRetries,
+    nextRetryAt,
+    lastError,
+    classification,
+  };
 };
 
 const normalizeStatus = (status: any): SyncStatus => {
@@ -115,6 +222,7 @@ const normalizeStatus = (status: any): SyncStatus => {
       menuVersion: 0,
       pendingPaymentItems: 0,
       failedPaymentItems: 0,
+      lastQueueFailure: null,
     };
   }
   return {
@@ -137,6 +245,7 @@ const normalizeStatus = (status: any): SyncStatus => {
     menuVersion: coerceNumber(status.menuVersion, 0),
     pendingPaymentItems: coerceNumber(status.pendingPaymentItems, 0),
     failedPaymentItems: coerceNumber(status.failedPaymentItems, 0),
+    lastQueueFailure: normalizeQueueFailure(status.lastQueueFailure),
   };
 };
 
@@ -158,6 +267,71 @@ const ENTITY_TYPE_KEYS: Record<string, string> = {
   shift_expense: 'sync.entityTypes.shiftExpense',
   driver_earning: 'sync.entityTypes.driverEarning',
   staff_payment: 'sync.entityTypes.staffPayment',
+};
+
+const getSyncHealthPresentation = (
+  t: ReturnType<typeof useTranslation>['t'],
+  state: SyncHealthState,
+): SyncHealthPresentation => {
+  switch (state) {
+    case 'error':
+      return {
+        label: t('sync.health.error', { defaultValue: 'Sync Error' }),
+        badgeClassName:
+          'bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300',
+        textClassName: 'text-red-700 dark:text-red-300',
+        dotClassName: 'bg-red-500',
+        detail: t('sync.health.errorDetail', {
+          defaultValue: 'Failed sync rows are blocking a clean state.',
+        }),
+      };
+    case 'blocked':
+      return {
+        label: t('sync.health.blocked', { defaultValue: 'Blocked' }),
+        badgeClassName:
+          'bg-orange-500/10 border border-orange-500/30 text-orange-700 dark:text-orange-300',
+        textClassName: 'text-orange-700 dark:text-orange-300',
+        dotClassName: 'bg-orange-500',
+        detail: t('sync.health.blockedDetail', {
+          defaultValue: 'A queue item is stuck and needs intervention.',
+        }),
+      };
+    case 'pending':
+      return {
+        label: t('sync.health.pending', { defaultValue: 'Pending' }),
+        badgeClassName:
+          'bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300',
+        textClassName: 'text-amber-700 dark:text-amber-300',
+        dotClassName: 'bg-amber-500',
+        detail: t('sync.health.pendingDetail', {
+          defaultValue: 'Sync work is queued or currently processing.',
+        }),
+      };
+    case 'stale':
+      return {
+        label: t('sync.health.stale', { defaultValue: 'Telemetry Stale' }),
+        badgeClassName:
+          'bg-slate-500/10 border border-slate-500/30 text-slate-700 dark:text-slate-300',
+        textClassName: 'text-slate-700 dark:text-slate-300',
+        dotClassName: 'bg-slate-500',
+        detail: t('sync.health.staleDetail', {
+          defaultValue:
+            'Reachability looks fine, but sync telemetry is older than expected.',
+        }),
+      };
+    case 'healthy':
+    default:
+      return {
+        label: t('sync.health.healthy', { defaultValue: 'Healthy' }),
+        badgeClassName:
+          'bg-green-500/10 border border-green-500/30 text-green-700 dark:text-green-300',
+        textClassName: 'text-green-700 dark:text-green-300',
+        dotClassName: 'bg-green-500',
+        detail: t('sync.health.healthyDetail', {
+          defaultValue: 'No local sync backlog or failures are currently visible.',
+        }),
+      };
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -186,6 +360,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     menuVersion: 0,
     pendingPaymentItems: 0,
     failedPaymentItems: 0,
+    lastQueueFailure: null,
   }));
   const [financialStats, setFinancialStats] = useState(defaultFinancialStats);
 
@@ -193,6 +368,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [showDetailPanel, setShowDetailPanel] = useState(showDetails);
   const [showFinancialPanel, setShowFinancialPanel] = useState(false);
   const [justRefreshed, setJustRefreshed] = useState(false);
+  const [retryingBlockedOrder, setRetryingBlockedOrder] = useState(false);
 
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
@@ -307,34 +483,93 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   // --- Derived ---
 
+  const financialPendingCount =
+    financialStats.driver_earnings.pending +
+    financialStats.staff_payments.pending +
+    financialStats.shift_expenses.pending;
+
+  const financialFailedCount =
+    financialStats.driver_earnings.failed +
+    financialStats.staff_payments.failed +
+    financialStats.shift_expenses.failed;
+
   const hasErrors =
     !!syncStatus.error ||
     syncStatus.failedPaymentItems > 0 ||
-    financialStats.driver_earnings.failed > 0 ||
-    financialStats.staff_payments.failed > 0 ||
-    financialStats.shift_expenses.failed > 0;
+    financialFailedCount > 0;
 
   const hasPending =
     syncStatus.pendingItems > 0 ||
     syncStatus.pendingPaymentItems > 0 ||
-    syncStatus.backpressureDeferred > 0;
+    syncStatus.backpressureDeferred > 0 ||
+    syncStatus.queuedRemote > 0 ||
+    syncStatus.syncInProgress ||
+    financialPendingCount > 0;
+
+  const hasBlockedQueue =
+    !!syncStatus.lastQueueFailure &&
+    (syncStatus.lastQueueFailure.classification === 'permanent' ||
+      syncStatus.lastQueueFailure.status.toLowerCase() === 'failed');
+
+  const lastSyncTimestamp = toTimestamp(syncStatus.lastSync);
+  const telemetrySyncTimestamp = toTimestamp(systemHealth?.lastSyncTime);
+  const onlineMismatch =
+    systemHealth !== null &&
+    typeof systemHealth.isOnline === 'boolean' &&
+    systemHealth.isOnline !== syncStatus.isOnline;
+  const localSyncTelemetryLag =
+    lastSyncTimestamp !== null &&
+    telemetrySyncTimestamp !== null &&
+    Math.abs(lastSyncTimestamp - telemetrySyncTimestamp) > STALE_TELEMETRY_MS;
+  const actionableLocalState =
+    hasErrors ||
+    hasPending ||
+    hasBlockedQueue ||
+    syncStatus.lastQueueFailure !== null;
+  const missingTelemetryWhileActionable =
+    syncStatus.isOnline &&
+    actionableLocalState &&
+    telemetrySyncTimestamp === null &&
+    lastSyncTimestamp === null;
+  const staleHeartbeatTelemetry =
+    syncStatus.isOnline &&
+    actionableLocalState &&
+    telemetrySyncTimestamp !== null &&
+    Date.now() - telemetrySyncTimestamp > STALE_TELEMETRY_MS;
+  const isTelemetryStale =
+    onlineMismatch ||
+    localSyncTelemetryLag ||
+    missingTelemetryWhileActionable ||
+    staleHeartbeatTelemetry;
+
+  const syncHealthState: SyncHealthState = hasBlockedQueue
+    ? 'blocked'
+    : hasErrors
+      ? 'error'
+      : isTelemetryStale
+        ? 'stale'
+        : hasPending
+          ? 'pending'
+          : 'healthy';
+
+  const syncHealthPresentation = getSyncHealthPresentation(
+    t,
+    syncHealthState,
+  );
 
   const isSynced =
     syncStatus.isOnline &&
-    !syncStatus.syncInProgress &&
-    !hasErrors &&
-    !hasPending;
+    syncHealthState === 'healthy';
 
-  const getStatusText = () => {
-    if (!syncStatus.isOnline) return t('sync.status.offline');
-    if (syncStatus.syncInProgress) return t('sync.status.syncing');
-    if (hasErrors) return t('sync.status.error');
-    if (hasPending) {
-      const total = syncStatus.pendingItems + syncStatus.pendingPaymentItems;
-      return t('sync.status.pending', { count: total });
-    }
-    return t('sync.status.synced');
-  };
+  const getTransportText = () =>
+    syncStatus.isOnline
+      ? t('sync.labels.online')
+      : t('sync.labels.offline');
+
+  const getStatusText = () =>
+    `${getTransportText()} | ${t('sync.health.label', {
+      defaultValue: 'Sync health',
+    })}: ${syncHealthPresentation.label}`;
 
   const formatLastSync = () => {
     if (!syncStatus.lastSync) return t('sync.time.never');
@@ -350,6 +585,23 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     if (diffHours < 24) return t('sync.time.hoursAgo', { hours: diffHours });
     return formatDate(date);
   };
+
+  const syncHealthDetail = isTelemetryStale
+    ? onlineMismatch
+      ? t('sync.health.staleMismatch', {
+          defaultValue:
+            'Transport reachability and backend telemetry disagree.',
+        })
+      : staleHeartbeatTelemetry || localSyncTelemetryLag
+        ? t('sync.health.staleAge', {
+            defaultValue:
+              'Backend telemetry is older than the current local queue state.',
+          })
+        : t('sync.health.staleMissing', {
+            defaultValue:
+              'The queue still has actionable work, but telemetry freshness is unavailable.',
+          })
+    : syncHealthPresentation.detail;
 
   // --- Actions ---
 
@@ -412,6 +664,35 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   };
 
+  const handleRetryBlockedOrder = async () => {
+    const blocker = syncStatus.lastQueueFailure;
+    if (!blocker || blocker.entityType !== 'order' || !blocker.entityId) {
+      return;
+    }
+    try {
+      setRetryingBlockedOrder(true);
+      await bridge.orders.forceSyncRetry(blocker.entityId);
+      await bridge.sync.force();
+      toast.success(
+        t('sync.blocker.retryScheduled', {
+          defaultValue: 'Order retry scheduled',
+        }),
+      );
+      setTimeout(async () => {
+        await loadSyncStatus();
+      }, 1200);
+    } catch (error) {
+      console.error('Failed to retry blocked order sync:', error);
+      toast.error(
+        t('sync.blocker.retryFailed', {
+          defaultValue: 'Failed to retry blocked order',
+        }),
+      );
+    } finally {
+      setRetryingBlockedOrder(false);
+    }
+  };
+
   // --- System health helpers ---
 
   const totalBacklog = systemHealth
@@ -435,6 +716,13 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ? 'text-yellow-600 dark:text-yellow-400'
         : 'text-red-600 dark:text-red-400';
 
+  const heartStatusClass =
+    syncHealthState === 'healthy' && syncStatus.isOnline
+      ? 'text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)]'
+      : syncHealthState === 'error'
+        ? 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
+        : 'text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.55)]';
+
   // =========================================================================
   // Render
   // =========================================================================
@@ -448,11 +736,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         title={getStatusText()}
       >
         <svg
-          className={`w-6 h-6 transition-all duration-300 ${
-            isSynced
-              ? 'text-green-400 drop-shadow-[0_0_8px_rgba(34,197,94,0.6)]'
-              : 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
-          } ${syncStatus.syncInProgress ? 'animate-pulse' : ''}`}
+          className={`w-6 h-6 transition-all duration-300 ${heartStatusClass} ${
+            syncStatus.syncInProgress ? 'animate-pulse' : ''
+          }`}
           fill="currentColor"
           viewBox="0 0 24 24"
         >
@@ -481,7 +767,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
           {/* Modal shell — sits above backdrop; isolation prevents blur from affecting it */}
           <div
-            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell rounded-2xl flex flex-col"
+            className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell rounded-2xl flex flex-col transition-opacity ${
+              showFinancialPanel ? 'opacity-75' : 'opacity-100'
+            }`}
             style={{ width: '540px', maxWidth: '95vw', maxHeight: '85vh', backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
           >
             {/* -- Header ------------------------------------------------- */}
@@ -538,6 +826,20 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </span>
               </span>
               <span className="text-slate-400 dark:text-slate-500">|</span>
+              <span className="flex items-center gap-2">
+                <span className="text-slate-500 dark:text-slate-400">
+                  {t('sync.health.label', { defaultValue: 'Sync health' })}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 ${syncHealthPresentation.badgeClassName}`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${syncHealthPresentation.dotClassName}`}
+                  />
+                  <span>{syncHealthPresentation.label}</span>
+                </span>
+              </span>
+              <span className="text-slate-400 dark:text-slate-500">|</span>
               <span className="text-slate-700 dark:text-slate-300">
                 {formatLastSync()}
               </span>
@@ -553,6 +855,24 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
               style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
             >
               {/* ── SYNC SECTION ──────────────────────────────────────── */}
+
+              {(syncHealthState !== 'healthy' || isTelemetryStale) && (
+                <div
+                  className={`rounded-xl border px-3 py-2 ${
+                    syncHealthPresentation.badgeClassName
+                  }`}
+                >
+                  <div className="text-[11px] font-bold uppercase tracking-wide">
+                    {t('sync.health.label', { defaultValue: 'Sync health' })}
+                  </div>
+                  <div className={`mt-1 text-[11px] font-semibold ${syncHealthPresentation.textClassName}`}>
+                    {syncHealthPresentation.label}
+                  </div>
+                  <div className="mt-1 text-[10px] font-medium text-slate-600 dark:text-slate-300">
+                    {syncHealthDetail}
+                  </div>
+                </div>
+              )}
 
               {/* Sync queue + payments compact card */}
               <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">
@@ -599,6 +919,113 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </span>
                 </div>
               </div>
+
+              {syncStatus.lastQueueFailure && (
+                <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
+                      {t('sync.blocker.title', { defaultValue: 'Current blocker' })}
+                    </span>
+                    <span
+                      className={`text-[10px] font-extrabold uppercase tracking-wide ${
+                        syncStatus.lastQueueFailure.classification ===
+                        'backpressure'
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : syncStatus.lastQueueFailure.classification ===
+                              'permanent'
+                            ? 'text-red-600 dark:text-red-400'
+                            : syncStatus.lastQueueFailure.classification ===
+                                'transient'
+                              ? 'text-orange-600 dark:text-orange-400'
+                              : 'text-slate-500 dark:text-slate-300'
+                      }`}
+                    >
+                      {t(
+                        `sync.blocker.classification.${syncStatus.lastQueueFailure.classification}`,
+                        {
+                          defaultValue:
+                            syncStatus.lastQueueFailure.classification,
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-700 dark:text-slate-200">
+                    <span className="font-semibold">
+                      {t('sync.blocker.entity', { defaultValue: 'Entity' })}:{' '}
+                    </span>
+                    <span className="font-mono">
+                      {ENTITY_TYPE_KEYS[syncStatus.lastQueueFailure.entityType]
+                        ? t(
+                            ENTITY_TYPE_KEYS[
+                              syncStatus.lastQueueFailure.entityType
+                            ],
+                            {
+                              defaultValue:
+                                syncStatus.lastQueueFailure.entityType,
+                            },
+                          )
+                        : syncStatus.lastQueueFailure.entityType}{' '}
+                      {syncStatus.lastQueueFailure.entityId}
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-semibold text-red-600 dark:text-red-300 break-words">
+                    {syncStatus.lastQueueFailure.lastError}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold">
+                        {t('sync.blocker.retryProgress', {
+                          defaultValue: 'Retry',
+                        })}
+                        :{' '}
+                      </span>
+                      <span className="font-mono">
+                        {syncStatus.lastQueueFailure.retryCount}/
+                        {syncStatus.lastQueueFailure.maxRetries}
+                      </span>
+                    </div>
+                    <div className="text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold">
+                        {t('sync.blocker.status', {
+                          defaultValue: 'Status',
+                        })}
+                        :{' '}
+                      </span>
+                      <span className="font-mono">
+                        {syncStatus.lastQueueFailure.status}
+                      </span>
+                    </div>
+                    {syncStatus.lastQueueFailure.nextRetryAt && (
+                      <div className="col-span-2 text-amber-600 dark:text-amber-400 font-semibold">
+                        {t('sync.blocker.nextRetry', {
+                          defaultValue: 'Next retry',
+                        })}
+                        :{' '}
+                        {new Date(
+                          syncStatus.lastQueueFailure.nextRetryAt,
+                        ).toLocaleTimeString()}
+                      </div>
+                    )}
+                  </div>
+                  {syncStatus.lastQueueFailure.entityType === 'order' && (
+                    <button
+                      onClick={handleRetryBlockedOrder}
+                      disabled={
+                        retryingBlockedOrder || syncStatus.syncInProgress
+                      }
+                      className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-blue-500/20 hover:bg-blue-500/30 text-blue-700 dark:text-blue-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {retryingBlockedOrder
+                        ? t('sync.blocker.retrying', {
+                            defaultValue: 'Retrying...',
+                          })
+                        : t('sync.blocker.retryOrderNow', {
+                            defaultValue: 'Retry Order Now',
+                          })}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* Versions + terminal type compact card */}
               <div className="liquid-glass-modal-card p-3 rounded-xl">
@@ -1053,6 +1480,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         onClose={() => setShowFinancialPanel(false)}
         onRefresh={() => {
           void loadSyncStatus();
+        }}
+        queueSummary={{
+          pending: financialPendingCount,
+          failed: financialFailedCount,
         }}
       />
     </div>

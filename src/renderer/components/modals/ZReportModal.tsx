@@ -77,7 +77,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
   };
 
   const staffReportsSorted = useMemo(() => {
-    const list: any[] = Array.isArray((zReport as any)?.staffReports) ? [...(zReport as any).staffReports] : [];
+    const list = Array.isArray(zReport?.staffReports) ? [...zReport.staffReports] : [];
     if (!list.length) return list;
     switch (staffSortBy) {
       case 'name':
@@ -97,7 +97,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
   }, [zReport, staffSortBy]);
 
   const daySummary = useMemo(() => {
-    const ds: any = (zReport as any)?.daySummary;
+    const ds = zReport?.daySummary;
     if (ds) return ds;
     if (!zReport) return null;
     // Handle cases where sales object may be missing or incomplete
@@ -111,7 +111,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
   }, [zReport]);
 
   const exportStaffCSV = () => {
-    const rows = staffReportsSorted.map((s: any) => ({
+    const rows = staffReportsSorted.map((s) => ({
       'Staff Name': s.staffName || s.staffId,
       Role: s.role,
       'Check In': s.checkIn || '',
@@ -154,9 +154,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
         // IPC handlers wrap response in { success: true, data: ... }
         const report = result?.data || result;
         setZReport(report || null);
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (!mounted) return;
-        setError(e?.message || t('modals.zReport.loadFailed'));
+        setError(e instanceof Error ? e.message : t('modals.zReport.loadFailed'));
       } finally {
         if (!mounted) return;
         setLoading(false);
@@ -190,11 +190,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             aria-label={t('modals.zReport.selectDate')}
           />
           {/* Period indicator - shows when the current period started */}
-          {zReport && (zReport as any).periodStart && (
+          {zReport && zReport.periodStart && (
             <div className="mt-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
               {t('modals.zReport.periodSince', {
-                date: formatDate((zReport as any).periodStart),
-                time: formatTime((zReport as any).periodStart)
+                date: formatDate(zReport.periodStart),
+                time: formatTime(zReport.periodStart)
               })}
             </div>
           )}
@@ -221,7 +221,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
         {!loading && !error && activeTab === 'summary' && zReport && (() => {
           // Safe accessors for nested properties that may be missing
           const sales = zReport.sales || { totalOrders: 0, totalSales: 0, cashSales: 0, cardSales: 0, byType: {} };
-          const cashDrawer = zReport.cashDrawer || { totalVariance: 0, totalCashDrops: 0, unreconciledCount: 0, openingTotal: 0, driverCashGiven: 0, driverCashReturned: 0 };
+          const cashDrawer: ZReportData['cashDrawer'] = zReport.cashDrawer || { totalVariance: 0, totalCashDrops: 0, unreconciledCount: 0, openingTotal: 0, driverCashGiven: 0, driverCashReturned: 0 };
           const expenses = zReport.expenses || { total: 0, staffPaymentsTotal: 0, pendingCount: 0, items: [] };
 
           return (
@@ -322,7 +322,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               </div>
 
               {/* Driver Cash Breakdown - Per-driver cash transactions */}
-              {Array.isArray((cashDrawer as any).driverCashBreakdown) && (cashDrawer as any).driverCashBreakdown.length > 0 && (
+              {Array.isArray(cashDrawer.driverCashBreakdown) && cashDrawer.driverCashBreakdown.length > 0 && (
                 <div className="mt-4 pt-4 border-t border-yellow-500/30">
                   <h4 className="font-bold mb-3 text-orange-700 dark:text-orange-400 text-sm">{t('modals.zReport.driverCashBreakdown')}</h4>
                   <div className="overflow-x-auto">
@@ -330,14 +330,16 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                       <thead className="text-left">
                         <tr className="border-b border-slate-400/30">
                           <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200">{t('modals.zReport.driverName')}</th>
+                          <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.staffShift.startingAmount', 'Starting Amount')}</th>
                           <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.zReport.cashCollected')}</th>
                           <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.zReport.cashToReturn')}</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {(cashDrawer as any).driverCashBreakdown.map((driver: any, index: number) => (
+                        {cashDrawer.driverCashBreakdown.map((driver, index) => (
                           <tr key={driver.driverShiftId || index} className="border-b border-slate-400/20">
                             <td className="py-2 pr-3 text-indigo-700 dark:text-indigo-400 font-semibold">{driver.driverName || t('modals.zReport.unknownDriver')}</td>
+                            <td className="py-2 pr-3 text-red-700 dark:text-red-400 font-bold text-right">${(driver.startingAmount ?? 0).toFixed(2)}</td>
                             <td className="py-2 pr-3 text-emerald-700 dark:text-emerald-400 font-bold text-right">${(driver.cashCollected ?? 0).toFixed(2)}</td>
                             <td className="py-2 pr-3 text-orange-700 dark:text-orange-400 font-bold text-right">${(driver.cashToReturn ?? 0).toFixed(2)}</td>
                           </tr>
@@ -345,8 +347,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                         {/* Total row */}
                         <tr className="border-t-2 border-slate-500/50 font-bold">
                           <td className="py-2 pr-3 text-slate-800 dark:text-slate-100">{t('modals.zReport.total')}</td>
+                          <td className="py-2 pr-3 text-red-700 dark:text-red-400 text-right">
+                            ${(cashDrawer.driverCashBreakdown.reduce((sum, d) => sum + Number(d.startingAmount || 0), 0)).toFixed(2)}
+                          </td>
                           <td className="py-2 pr-3 text-emerald-700 dark:text-emerald-400 text-right">
-                            ${((cashDrawer as any).driverCashBreakdown.reduce((sum: number, d: any) => sum + Number(d.cashCollected || 0), 0)).toFixed(2)}
+                            ${(cashDrawer.driverCashBreakdown.reduce((sum, d) => sum + Number(d.cashCollected || 0), 0)).toFixed(2)}
                           </td>
                           <td className="py-2 pr-3 text-orange-700 dark:text-orange-400 text-right">
                             ${(cashDrawer.driverCashReturned ?? 0).toFixed(2)}
@@ -361,6 +366,36 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                       <span className="font-semibold">{t('receipt.formula.label')}</span>{' '}
                       {t('receipt.zreport.formula.driver')}
                     </p>
+                  </div>
+                </div>
+              )}
+
+              {Array.isArray(cashDrawer.waiterCashBreakdown) && cashDrawer.waiterCashBreakdown.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-yellow-500/30">
+                  <h4 className="font-bold mb-3 text-orange-700 dark:text-orange-400 text-sm">
+                    {t('modals.zReport.waiterCashBreakdown', 'Waiter Cash Breakdown')}
+                  </h4>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs">
+                      <thead className="text-left">
+                        <tr className="border-b border-slate-400/30">
+                          <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200">{t('modals.zReport.staffName')}</th>
+                          <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.staffShift.startingAmount', 'Starting Amount')}</th>
+                          <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.zReport.cashCollected')}</th>
+                          <th className="py-2 pr-3 font-semibold text-slate-700 dark:text-slate-200 text-right">{t('modals.zReport.cashToReturn')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cashDrawer.waiterCashBreakdown.map((waiter, index) => (
+                          <tr key={waiter.driverShiftId || index} className="border-b border-slate-400/20">
+                            <td className="py-2 pr-3 text-indigo-700 dark:text-indigo-400 font-semibold">{waiter.driverName || t('modals.zReport.staffName')}</td>
+                            <td className="py-2 pr-3 text-red-700 dark:text-red-400 font-bold text-right">${(waiter.startingAmount ?? 0).toFixed(2)}</td>
+                            <td className="py-2 pr-3 text-emerald-700 dark:text-emerald-400 font-bold text-right">${(waiter.cashCollected ?? 0).toFixed(2)}</td>
+                            <td className="py-2 pr-3 text-orange-700 dark:text-orange-400 font-bold text-right">${(waiter.cashToReturn ?? 0).toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -400,24 +435,24 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             </div>
 
             {/* CASHIERS & DRIVERS - Per Staff Member - Glass with dark text */}
-            {Array.isArray((zReport as any).staffReports) && (zReport as any).staffReports.length > 0 && (
+            {Array.isArray(zReport.staffReports) && zReport.staffReports.length > 0 && (
               <div className="rounded-lg p-4 border border-cyan-500/30 bg-cyan-500/10 dark:bg-cyan-900/20">
                 <h3 className="font-extrabold mb-3 text-cyan-900 dark:text-cyan-200 text-sm uppercase tracking-wide">{t('modals.zReport.staffPerformance')}</h3>
                 <div className="flex gap-2 mb-3">
-                  <select value={orderTypeFilter} onChange={(e) => setOrderTypeFilter(e.target.value as any)} className="px-3 py-2 rounded-lg border border-slate-400/30 bg-white/50 dark:bg-slate-800/50 text-black dark:text-white text-sm font-bold">
+                  <select value={orderTypeFilter} onChange={(e) => setOrderTypeFilter(e.target.value as typeof orderTypeFilter)} className="px-3 py-2 rounded-lg border border-slate-400/30 bg-white/50 dark:bg-slate-800/50 text-black dark:text-white text-sm font-bold">
                     <option value="all">{t('modals.zReport.filters.allTypes')}</option>
                     <option value="delivery">{t('modals.zReport.filters.delivery')}</option>
                     <option value="dine-in">{t('modals.zReport.filters.dineIn')}</option>
                     <option value="pickup">{t('modals.zReport.filters.pickup')}</option>
                   </select>
-                  <select value={paymentMethodFilter} onChange={(e) => setPaymentMethodFilter(e.target.value as any)} className="px-3 py-2 rounded-lg border border-slate-400/30 bg-white/50 dark:bg-slate-800/50 text-black dark:text-white text-sm font-bold">
+                  <select value={paymentMethodFilter} onChange={(e) => setPaymentMethodFilter(e.target.value as typeof paymentMethodFilter)} className="px-3 py-2 rounded-lg border border-slate-400/30 bg-white/50 dark:bg-slate-800/50 text-black dark:text-white text-sm font-bold">
                     <option value="all">{t('modals.zReport.filters.allPayments')}</option>
                     <option value="cash">{t('modals.zReport.filters.cash')}</option>
                     <option value="card">{t('modals.zReport.filters.card')}</option>
                   </select>
                 </div>
                 <div className="space-y-3">
-                  {(zReport as any).staffReports.map((staff: any) => {
+                  {zReport.staffReports.map((staff) => {
                     const isCashier = String(staff.role).toLowerCase() === 'cashier';
                     const isDriver = String(staff.role).toLowerCase() === 'driver';
 
@@ -683,8 +718,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                       {detailsExpenses.items.map(e => (
                         <tr key={e.id} className="border-b border-slate-400/20 hover:bg-slate-200/30 dark:hover:bg-slate-700/30">
                           <td className="py-2 pr-3 text-slate-800 dark:text-slate-100 font-medium">{e.description}</td>
-                          <td className="py-2 pr-3 text-purple-700 dark:text-purple-400 font-semibold">{(e as any).expenseType || '-'}</td>
-                          <td className="py-2 pr-3 text-blue-700 dark:text-blue-400 font-semibold">{(e as any).staffName || '-'}</td>
+                          <td className="py-2 pr-3 text-purple-700 dark:text-purple-400 font-semibold">{e.expenseType || '-'}</td>
+                          <td className="py-2 pr-3 text-blue-700 dark:text-blue-400 font-semibold">{e.staffName || '-'}</td>
                           <td className="py-2 pr-3 text-rose-700 dark:text-rose-400 font-bold">{e.amount.toFixed(2)}</td>
                           <td className="py-2 pr-3 text-slate-500 dark:text-slate-400 font-medium">{e.createdAt || ''}</td>
                         </tr>
@@ -713,7 +748,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
           {t('modals.zReport.exportCSV')}
         </button>
         <button
-          onClick={() => zReport && exportStaffOrdersToCSV((zReport as any).staffReports, `z-report-orders-${new Date().toISOString().split('T')[0]}`)}
+          onClick={() => zReport?.staffReports && exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${new Date().toISOString().split('T')[0]}`)}
           className={liquidGlassModalButton('secondary', 'sm') + ' text-sm'}
           disabled={!zReport}
         >
@@ -725,7 +760,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             setPrinting(true);
             try {
               const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
-              const result: any = await bridge.invoke('report:print-z-report', {
+              const result = await bridge.invoke('report:print-z-report', {
                 snapshot: zReport,
                 terminalName: typeof terminalName === 'string' ? terminalName : undefined,
               });
@@ -737,8 +772,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               console.error('[ZReportModal] Z-Report print error:', err);
               setSubmitResult(
                 t('modals.zReport.printFailed', {
-                  defaultValue: `Print failed: ${(err as any)?.message || 'unknown error'}`,
-                  error: (err as any)?.message || 'unknown error',
+                  defaultValue: `Print failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+                  error: err instanceof Error ? err.message : 'unknown error',
                 })
               );
             } finally {
@@ -790,17 +825,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   console.error('[ZReportModal] Unexpected response format:', res);
                   setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
                 }
-              } catch (e: any) {
+              } catch (e: unknown) {
                 // Log full error details for debugging (Requirements 3.4)
-                console.error('[ZReportModal] Submit error caught:', {
-                  message: e?.message,
-                  code: e?.code,
-                  name: e?.name,
-                  stack: e?.stack,
-                  fullError: e
-                });
+                console.error('[ZReportModal] Submit error caught:', e);
                 // Display specific error message to user
-                const errorMessage = e?.message || e?.error || t('modals.zReport.submissionFailed');
+                const errorMessage = e instanceof Error ? e.message : t('modals.zReport.submissionFailed');
                 setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
               } finally {
                 // Always reset button state (Requirements 5.2, 5.4)

@@ -218,12 +218,10 @@ fn create_session(auth: &AuthState, role: &str, staff_id: &str) -> Value {
     let user_json = session.to_user_json();
     let sid = session.session_id.clone();
 
-    {
-        let mut sessions = auth.sessions.lock().unwrap();
+    if let Ok(mut sessions) = auth.sessions.lock() {
         sessions.insert(sid.clone(), session);
     }
-    {
-        let mut current = auth.current_session_id.lock().unwrap();
+    if let Ok(mut current) = auth.current_session_id.lock() {
         *current = Some(sid);
     }
 
@@ -235,8 +233,8 @@ fn create_session(auth: &AuthState, role: &str, staff_id: &str) -> Value {
 
 /// Get the current active session (if it exists and is not expired).
 fn get_current_session(auth: &AuthState) -> Option<StaffSession> {
-    let current_id = auth.current_session_id.lock().unwrap().clone()?;
-    let sessions = auth.sessions.lock().unwrap();
+    let current_id = auth.current_session_id.lock().ok()?.clone()?;
+    let sessions = auth.sessions.lock().ok()?;
     let session = sessions.get(&current_id)?.clone();
     if session.is_expired() {
         return None;
@@ -259,52 +257,79 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
     }
 
     // Read PIN hashes and synchronize lockout state from durable storage.
+    // The entire lockout load→check→verify→record→persist flow is wrapped in
+    // a single DB transaction + mutex critical section to prevent TOCTOU races
+    // if two login attempts arrive simultaneously.
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    // BEGIN IMMEDIATE to acquire a write lock up front
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin auth transaction: {e}"))?;
+
     let persisted_lockout = load_lockout_from_db(&conn);
-    {
-        let mut lockout = auth.lockout.lock().unwrap();
-        *lockout = persisted_lockout;
-        check_lockout(&lockout)?;
+    let mut lockout = auth
+        .lockout
+        .lock()
+        .map_err(|e| format!("mutex poisoned: {e}"))?;
+    *lockout = persisted_lockout;
+    if let Err(e) = check_lockout(&lockout) {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(e);
     }
 
     let admin_hash = db::get_setting(&conn, "staff", "admin_pin_hash");
     let staff_hash = db::get_setting(&conn, "staff", "staff_pin_hash");
 
-    // Try admin PIN first
-    if let Some(ref hash) = admin_hash {
-        if bcrypt::verify(&pin, hash).unwrap_or(false) {
-            let mut lockout = auth.lockout.lock().unwrap();
-            reset_lockout(&mut lockout);
-            persist_lockout_to_db(&conn, &lockout);
-            info!("admin login successful");
-            return Ok(create_session(auth, "admin", "admin-user"));
-        }
-    }
+    // Dummy hash used when no PIN is configured, so bcrypt::verify still runs
+    // and the total timing remains constant regardless of which hashes exist.
+    const DUMMY_HASH: &str = "$2b$12$000000000000000000000uKYMKnMSMFxOuTQFqzfB/F6JcvrFvlq";
 
-    // Try staff PIN
-    if let Some(ref hash) = staff_hash {
-        if bcrypt::verify(&pin, hash).unwrap_or(false) {
-            let mut lockout = auth.lockout.lock().unwrap();
-            reset_lockout(&mut lockout);
-            persist_lockout_to_db(&conn, &lockout);
-            info!("staff login successful");
-            return Ok(create_session(auth, "staff", "staff-user"));
-        }
-    }
+    // Always verify against BOTH hashes to prevent timing side-channels.
+    // An attacker must not be able to distinguish admin/staff/no-PIN by
+    // measuring response time (each path runs exactly 2 bcrypt verifications).
+    let admin_ok =
+        bcrypt::verify(&pin, admin_hash.as_deref().unwrap_or(DUMMY_HASH)).unwrap_or(false);
+    let staff_ok =
+        bcrypt::verify(&pin, staff_hash.as_deref().unwrap_or(DUMMY_HASH)).unwrap_or(false);
 
-    // Neither matched
-    let mut lockout = auth.lockout.lock().unwrap();
-    record_failure(&mut lockout);
-    persist_lockout_to_db(&conn, &lockout);
-    Err("Invalid PIN".into())
+    let result = if admin_ok && admin_hash.is_some() {
+        reset_lockout(&mut lockout);
+        persist_lockout_to_db(&conn, &lockout);
+        info!("admin login successful");
+        Ok(("admin", "admin-user"))
+    } else if staff_ok && staff_hash.is_some() {
+        reset_lockout(&mut lockout);
+        persist_lockout_to_db(&conn, &lockout);
+        info!("staff login successful");
+        Ok(("staff", "staff-user"))
+    } else {
+        record_failure(&mut lockout);
+        persist_lockout_to_db(&conn, &lockout);
+        Err("Invalid PIN".to_string())
+    };
+
+    conn.execute_batch("COMMIT")
+        .map_err(|e| format!("commit auth transaction: {e}"))?;
+    // Release the lockout mutex before creating the session
+    drop(lockout);
+
+    match result {
+        Ok((role, user_id)) => Ok(create_session(auth, role, user_id)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Handle auth:logout — invalidate the current session.
 pub fn logout(auth: &AuthState) {
-    let mut current = auth.current_session_id.lock().unwrap();
+    let Ok(mut current) = auth.current_session_id.lock() else {
+        tracing::warn!("logout: current_session_id mutex poisoned");
+        return;
+    };
     if let Some(sid) = current.take() {
-        let mut sessions = auth.sessions.lock().unwrap();
+        let Ok(mut sessions) = auth.sessions.lock() else {
+            tracing::warn!("logout: sessions mutex poisoned");
+            return;
+        };
         sessions.remove(&sid);
         info!(session_id = %sid, "session logged out");
     }
@@ -324,10 +349,12 @@ pub fn validate_session(auth: &AuthState) -> Value {
         Some(_) => serde_json::json!({ "valid": true }),
         None => {
             // Clean up expired session
-            let mut current = auth.current_session_id.lock().unwrap();
-            if let Some(sid) = current.take() {
-                let mut sessions = auth.sessions.lock().unwrap();
-                sessions.remove(&sid);
+            if let Ok(mut current) = auth.current_session_id.lock() {
+                if let Some(sid) = current.take() {
+                    if let Ok(mut sessions) = auth.sessions.lock() {
+                        sessions.remove(&sid);
+                    }
+                }
             }
             serde_json::json!({ "valid": false, "reason": "Session expired or not found" })
         }
@@ -417,9 +444,11 @@ pub fn setup_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String>
 
 /// Handle staff-auth:track-activity — refresh the inactivity timer.
 pub fn track_activity(auth: &AuthState) {
-    let current_id = auth.current_session_id.lock().unwrap().clone();
+    let current_id = auth.current_session_id.lock().ok().and_then(|g| g.clone());
     if let Some(sid) = current_id {
-        let mut sessions = auth.sessions.lock().unwrap();
+        let Ok(mut sessions) = auth.sessions.lock() else {
+            return;
+        };
         if let Some(session) = sessions.get_mut(&sid) {
             session.last_activity = Utc::now();
         }

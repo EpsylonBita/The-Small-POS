@@ -64,6 +64,8 @@ interface MenuCartProps {
   isSaving?: boolean; // When true, shows loading state on save button
   orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
+  deliveryFee?: number;
+  deliveryFeeResolved?: boolean;
   // Coupon props
   appliedCoupon?: AppliedCoupon | null;
   onApplyCoupon?: (code: string) => void;
@@ -92,6 +94,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   isSaving = false,
   orderType,
   minimumOrderAmount = 0,
+  deliveryFee = 0,
+  deliveryFeeResolved = true,
   appliedCoupon,
   onApplyCoupon,
   onRemoveCoupon,
@@ -543,8 +547,16 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
+  const appliedDeliveryFee = isDeliveryOrder && deliveryFeeResolved ? deliveryFee : 0;
+  const totalWithDeliveryFee = totalAfterDiscount + appliedDeliveryFee;
   const isBelowMinimum = isDeliveryOrder && minimumOrderAmount > 0 && totalAfterDiscount < minimumOrderAmount;
   const shortfall = isBelowMinimum ? minimumOrderAmount - totalAfterDiscount : 0;
+  const isCheckoutBlocked =
+    uniqueCartItems.length === 0 ||
+    isAppliedDiscountOverMax ||
+    isSaving ||
+    (isBelowMinimum && !editMode) ||
+    (isDeliveryOrder && !deliveryFeeResolved);
 
   return (
     <div
@@ -979,13 +991,26 @@ export const MenuCart: React.FC<MenuCartProps> = ({
           </div>
         )}
 
+        {isDeliveryOrder && (
+          <div className="flex justify-between items-center text-sm font-medium antialiased">
+            <span className="liquid-glass-modal-text-muted">
+              {t('menu.cart.deliveryFee')}
+            </span>
+            <span className="liquid-glass-modal-text">
+              {deliveryFeeResolved
+                ? formatCurrency(appliedDeliveryFee)
+                : t('menu.cart.calculatingDeliveryFee')}
+            </span>
+          </div>
+        )}
+
         {/* Total */}
         <div className="flex justify-between items-center pt-2 border-t border-black/10 dark:border-white/10 antialiased">
           <span className="text-lg font-semibold liquid-glass-modal-text">
             {t('menu.cart.total')}
           </span>
           <span className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
-            {formatCurrency(totalAfterDiscount)}
+            {formatCurrency(totalWithDeliveryFee)}
           </span>
         </div>
 
@@ -1006,9 +1031,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
         <button
           onClick={onCheckout}
-          disabled={uniqueCartItems.length === 0 || isAppliedDiscountOverMax || isSaving || (isBelowMinimum && !editMode)}
+          disabled={isCheckoutBlocked}
           className={`w-full py-3 rounded-xl font-semibold antialiased transition-all duration-300 ${
-            uniqueCartItems.length === 0 || isAppliedDiscountOverMax || isSaving || (isBelowMinimum && !editMode)
+            isCheckoutBlocked
               ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
               : editMode
                 ? 'bg-amber-600 text-white hover:bg-amber-700 hover:scale-[1.02]'

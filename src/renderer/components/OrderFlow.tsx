@@ -24,6 +24,7 @@ import { ActivityTracker } from '../services/ActivityTracker';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { AlertTriangle } from 'lucide-react';
+import { resolveDeliveryFee } from '../utils/delivery-fee';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -520,6 +521,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       let deliveryZoneId = null;
       let zoneName = null;
       let estimatedDeliveryTime = null;
+      const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? deliveryZoneInfo;
 
       if (selectedOrderType === 'delivery' && selectedAddress) {
         deliveryAddress = `${selectedAddress.street_address}, ${selectedAddress.city}`;
@@ -530,14 +532,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           deliveryAddress += `, Floor: ${selectedAddress.floor_number}`;
         }
 
-        // Use delivery zone info if available, otherwise fallback to default
-        if (deliveryZoneInfo?.zone) {
-          deliveryFee = deliveryZoneInfo.zone.deliveryFee;
-          deliveryZoneId = deliveryZoneInfo.zone.id;
-          zoneName = deliveryZoneInfo.zone.name;
-          estimatedDeliveryTime = deliveryZoneInfo.zone.estimatedTime;
-        } else {
-          deliveryFee = 2.50; // Default delivery fee fallback
+        deliveryFee = Number(orderData.deliveryFee ?? resolveDeliveryFee(effectiveDeliveryZoneInfo));
+
+        if (effectiveDeliveryZoneInfo?.zone) {
+          deliveryZoneId = effectiveDeliveryZoneInfo.zone.id;
+          zoneName = effectiveDeliveryZoneInfo.zone.name;
+          estimatedDeliveryTime = effectiveDeliveryZoneInfo.zone.estimatedTime;
         }
       }
 
@@ -622,9 +622,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         delivery_zone_id: deliveryZoneId,
         zone_name: zoneName,
         estimated_delivery_time: estimatedDeliveryTime,
-        delivery_zone_validation: deliveryZoneInfo ? JSON.stringify({
-          deliveryAvailable: deliveryZoneInfo.deliveryAvailable,
-          requiresManagerApproval: deliveryZoneInfo.uiState?.requiresManagerApproval || false,
+        delivery_zone_validation: effectiveDeliveryZoneInfo ? JSON.stringify({
+          deliveryAvailable: effectiveDeliveryZoneInfo.deliveryAvailable,
+          requiresManagerApproval: effectiveDeliveryZoneInfo.uiState?.requiresManagerApproval || false,
           validatedAt: new Date().toISOString()
         }) : null,
 

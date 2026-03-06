@@ -38,6 +38,7 @@ import type { DeliveryBoundaryValidationResponse } from '../../shared/types/deli
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { openExternalUrl } from '../utils/electron-api';
+import { resolveDeliveryFee } from '../utils/delivery-fee';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -322,7 +323,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Auto-open approval panel for external pending orders (queue)
   const playExternalOrderAlert = useCallback(() => {
     try {
-      const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
       const oscillator = ctx.createOscillator();
@@ -1047,7 +1048,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     if (existingCustomer?.addresses && existingCustomer.addresses.length > 0) {
       const defaultAddress = existingCustomer.addresses.find(addr => addr.is_default) || existingCustomer.addresses[0];
       // Handle both snake_case (from API) and camelCase field names
-      const streetValue = (defaultAddress as any).street_address || defaultAddress.street;
+      const streetValue = defaultAddress.street_address || defaultAddress.street;
       if (streetValue) {
         console.log('[getSelectedAddress] Found address from existingCustomer.addresses:', streetValue);
         return {
@@ -1055,32 +1056,32 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           street_address: streetValue, // Include both for compatibility
           city: defaultAddress.city,
           postalCode: defaultAddress.postal_code,
-          floor: (defaultAddress as any).floor_number || (defaultAddress as any).floor,
-          notes: defaultAddress.delivery_notes || (defaultAddress as any).notes,
-          nameOnRinger: (defaultAddress as any).name_on_ringer
+          floor: defaultAddress.floor_number,
+          notes: defaultAddress.delivery_notes || defaultAddress.notes,
+          nameOnRinger: defaultAddress.name_on_ringer
         };
       }
     }
     // Then check address directly on the customer object (legacy/fallback)
-    if ((existingCustomer as any)?.address) {
-      const addrValue = (existingCustomer as any).address;
-      const streetValue = typeof addrValue === 'string' ? addrValue : (addrValue?.street_address || addrValue?.street || '');
+    if (existingCustomer?.address) {
+      const addrValue = existingCustomer.address;
+      const streetValue = typeof addrValue === 'string' ? addrValue : '';
       if (streetValue) {
         console.log('[getSelectedAddress] Found address from existingCustomer.address:', streetValue);
         return {
           street: streetValue,
           street_address: streetValue,
-          city: (existingCustomer as any).city || '',
-          postalCode: (existingCustomer as any).postal_code || '',
-          floor: (existingCustomer as any).floor || '',
-          notes: (existingCustomer as any).notes || '',
-          nameOnRinger: (existingCustomer as any).name_on_ringer || ''
+          city: '',
+          postalCode: existingCustomer.postal_code || '',
+          floor: '',
+          notes: '',
+          nameOnRinger: existingCustomer.name_on_ringer || ''
         };
       }
     }
     // Finally check customerInfo state
     if (customerInfo?.address) {
-      const streetValue = customerInfo.address.street || (customerInfo.address as any).street_address || '';
+      const streetValue = customerInfo.address.street || '';
       if (streetValue) {
         console.log('[getSelectedAddress] Found address from customerInfo.address:', streetValue);
         return {
@@ -1088,9 +1089,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           street_address: streetValue,
           city: customerInfo.address.city,
           postalCode: customerInfo.address.postalCode,
-          floor: (customerInfo.address as any).floor || '',
+          floor: '',
           notes: customerInfo.notes,
-          nameOnRinger: (customerInfo as any).nameOnRinger || ''
+          nameOnRinger: ''
         };
       }
     }
@@ -1109,7 +1110,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       })));
       console.log('[OrderDashboard.handleOrderComplete] orderData.address:', orderData.address);
       console.log('[OrderDashboard.handleOrderComplete] existingCustomer:', existingCustomer);
-      console.log('[OrderDashboard.handleOrderComplete] existingCustomer?.address:', (existingCustomer as any)?.address);
+      console.log('[OrderDashboard.handleOrderComplete] existingCustomer?.address:', existingCustomer?.address);
       console.log('[OrderDashboard.handleOrderComplete] customerInfo:', customerInfo);
       console.log('[OrderDashboard.handleOrderComplete] customerInfo?.address:', customerInfo?.address);
       console.log('[OrderDashboard.handleOrderComplete] getSelectedAddress():', getSelectedAddress());
@@ -1130,7 +1131,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // 3. existingCustomer.address (legacy field from customers table)
         // 4. customerInfo.address (from state)
         const addr = orderData.address || getSelectedAddress();
-        const legacyCustomerAddress = (existingCustomer as any)?.address;
+        const legacyCustomerAddress = existingCustomer?.address;
         const customerInfoAddress = customerInfo?.address;
 
         console.log('[OrderDashboard.handleOrderComplete] addr:', addr);
@@ -1160,7 +1161,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
               deliveryPostalCode = postalValue;
             }
             // Include floor number if available
-            const floorValue = addr.floor_number || addr.floor;
+            const floorValue = addr.floor_number;
             if (floorValue) {
               const floorPart = `Floor: ${floorValue}`;
               parts.push(floorPart);
@@ -1185,26 +1186,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
         // Fallback to legacy customer.address field if no structured address found
         if (!deliveryAddress && legacyCustomerAddress) {
-          if (typeof legacyCustomerAddress === 'string') {
-            deliveryAddress = legacyCustomerAddress;
-          } else if (legacyCustomerAddress.street || legacyCustomerAddress.street_address) {
-            const parts: string[] = [];
-            const streetValue = legacyCustomerAddress.street_address || legacyCustomerAddress.street;
-            if (streetValue) {
-              parts.push(streetValue);
-              if (!deliveryAddress) deliveryAddress = streetValue;
-            }
-            if (legacyCustomerAddress.city) {
-              parts.push(legacyCustomerAddress.city);
-              if (!deliveryCity) deliveryCity = legacyCustomerAddress.city;
-            }
-            const postalValue = legacyCustomerAddress.postal_code || legacyCustomerAddress.postalCode;
-            if (postalValue) {
-              parts.push(postalValue);
-              if (!deliveryPostalCode) deliveryPostalCode = postalValue;
-            }
-            if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
-          }
+          deliveryAddress = legacyCustomerAddress;
         }
 
         // Fallback to customerInfo.address from state
@@ -1237,12 +1219,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           const customerId = existingCustomer?.id || orderData.customer?.id;
           console.log('[OrderDashboard.handleOrderComplete] Attempting database fallback for customerId:', customerId);
           try {
-            const dbCustomer = (await bridge.customers.lookupById(customerId)) as any;
+            const dbCustomer = await bridge.customers.lookupById(customerId) as Customer | null;
             if (dbCustomer) {
               console.log('[OrderDashboard.handleOrderComplete] Database customer found:', dbCustomer);
               // Check customer.addresses array first
               if (Array.isArray(dbCustomer.addresses) && dbCustomer.addresses.length > 0) {
-                const addr = dbCustomer.addresses.find((a: any) => a.is_default) || dbCustomer.addresses[0];
+                const addr = dbCustomer.addresses.find((a) => a.is_default) || dbCustomer.addresses[0];
                 const parts: string[] = [];
                 const streetValue = addr.street_address || addr.street;
                 if (streetValue) {
@@ -1258,11 +1240,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
                   if (!deliveryPostalCode) deliveryPostalCode = addr.postal_code;
                 }
                 // Extract additional fields
-                if (addr.floor_number || addr.floor) {
-                  if (!deliveryFloor) deliveryFloor = String(addr.floor_number || addr.floor);
+                if (addr.floor_number) {
+                  if (!deliveryFloor) deliveryFloor = String(addr.floor_number);
                 }
                 if (addr.delivery_notes || addr.notes) {
-                  if (!deliveryNotes) deliveryNotes = addr.delivery_notes || addr.notes;
+                  if (!deliveryNotes) deliveryNotes = addr.delivery_notes || addr.notes || null;
                 }
                 if (addr.name_on_ringer) {
                   if (!nameOnRinger) nameOnRinger = addr.name_on_ringer;
@@ -1270,27 +1252,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
                 if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
                 console.log('[OrderDashboard.handleOrderComplete] Database fallback address from addresses[]:', deliveryAddress);
               }
-              // Check legacy customer.address field
+              // Check legacy customer.address field (simple string)
               else if (dbCustomer.address) {
-                if (typeof dbCustomer.address === 'string') {
-                  deliveryAddress = dbCustomer.address;
-                } else if (typeof dbCustomer.address === 'object') {
-                  const parts: string[] = [];
-                  const streetValue = dbCustomer.address.street_address || dbCustomer.address.street;
-                  if (streetValue) {
-                    parts.push(streetValue);
-                    if (!deliveryAddress) deliveryAddress = streetValue;
-                  }
-                  if (dbCustomer.address.city) {
-                    parts.push(dbCustomer.address.city);
-                    if (!deliveryCity) deliveryCity = dbCustomer.address.city;
-                  }
-                  if (dbCustomer.address.postal_code) {
-                    parts.push(dbCustomer.address.postal_code);
-                    if (!deliveryPostalCode) deliveryPostalCode = dbCustomer.address.postal_code;
-                  }
-                  if (!deliveryAddress) deliveryAddress = parts.filter(Boolean).join(', ');
-                }
+                deliveryAddress = dbCustomer.address;
                 console.log('[OrderDashboard.handleOrderComplete] Database fallback address from customer.address:', deliveryAddress);
               }
             }
@@ -1353,13 +1317,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         })
         : null;
 
-      // Get delivery fee from delivery zone info if available, otherwise use 0
-      let deliveryFee = 0;
-      if (selectedOrderType === 'delivery') {
-        if (orderData.deliveryZoneInfo?.zone?.deliveryFee !== undefined) {
-          deliveryFee = orderData.deliveryZoneInfo.zone.deliveryFee;
-        }
-      }
+      const deliveryFee = selectedOrderType === 'delivery'
+        ? Number(orderData.deliveryFee ?? resolveDeliveryFee(orderData.deliveryZoneInfo))
+        : 0;
 
       const total = subtotal - totalDiscountAmount + deliveryFee;
 
@@ -1519,14 +1479,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       if (action === 'receipt') {
         if (selectedOrders.length === 1) {
           try {
-            const result = await bridge.payments.getReceiptPreview(selectedOrders[0]);
-            const html = (result as any)?.html ?? (result as any)?.data?.html;
-            if ((result as any)?.success !== false && html) {
+            const result = await bridge.payments.getReceiptPreview(selectedOrders[0]) as { success?: boolean; html?: string; error?: string; data?: { html?: string } };
+            const html = result?.html ?? result?.data?.html;
+            if (result?.success !== false && html) {
               setReceiptPreviewHtml(html);
               setReceiptPreviewOrderId(selectedOrders[0]);
               setShowReceiptPreview(true);
             } else {
-              toast.error((result as any)?.error || 'Failed to generate receipt preview');
+              toast.error(result?.error || 'Failed to generate receipt preview');
             }
           } catch (err) {
             console.error('Receipt preview failed:', err);
@@ -1626,7 +1586,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
         const addresses = selectedOrderObjects
           .filter(order => order.orderType === 'delivery')
-          .map(order => (order as any).delivery_address || (order as any).address || (order as any).deliveryAddress)
+          .map(order => order.delivery_address || order.address)
           .filter(addr => !!addr)
           .map(addr => String(addr));
 
@@ -1726,8 +1686,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const editablePaymentMethod = React.useMemo<'cash' | 'card' | null>(() => {
     if (!editablePaymentOrder) return null;
     const method = String(
-      (editablePaymentOrder as any).payment_method ||
-      (editablePaymentOrder as any).paymentMethod ||
+      editablePaymentOrder.payment_method ||
+      editablePaymentOrder.paymentMethod ||
       ''
     )
       .trim()
@@ -1744,7 +1704,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       return t('orderDashboard.paymentMethodEditUnavailable');
     }
 
-    const status = String((editablePaymentOrder as any).status || '')
+    const status = String(editablePaymentOrder.status || '')
       .trim()
       .toLowerCase();
     if (status === 'cancelled' || status === 'canceled') {
@@ -1772,8 +1732,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     }
 
     const paymentStatus = String(
-      (editablePaymentOrder as any).payment_status ||
-      (editablePaymentOrder as any).paymentStatus ||
+      editablePaymentOrder.payment_status ||
+      editablePaymentOrder.paymentStatus ||
       'pending'
     )
       .trim()
@@ -1781,7 +1741,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
     setEditPaymentTarget({
       orderId: editablePaymentOrder.id,
-      orderNumber: (editablePaymentOrder as any).order_number || (editablePaymentOrder as any).orderNumber,
+      orderNumber: editablePaymentOrder.order_number || editablePaymentOrder.orderNumber,
       currentMethod: editablePaymentMethod,
       paymentStatus,
     });
@@ -1799,13 +1759,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // Store the order ID, supabase ID, and number before opening the modal
         // This ensures they persist even if pendingEditOrders gets cleared
         setCurrentEditOrderId(orderToEdit.id);
-        setCurrentEditSupabaseId(orderToEdit.supabase_id || (orderToEdit as any).supabaseId);
+        setCurrentEditSupabaseId(orderToEdit.supabase_id);
         setCurrentEditOrderNumber(orderToEdit.order_number || orderToEdit.orderNumber);
 
         console.log('[OrderDashboard] handleEditOrder - orderId:', orderToEdit.id, 'supabaseId:', orderToEdit.supabase_id, 'orderNumber:', orderToEdit.order_number || orderToEdit.orderNumber);
 
         // Determine order type - handle both camelCase and snake_case
-        const orderTypeValue = (orderToEdit.orderType || (orderToEdit as any).order_type || 'pickup') as string;
+        const orderTypeValue = (orderToEdit.orderType || orderToEdit.order_type || 'pickup') as string;
         // Map dine-in to pickup for menu display purposes
         const menuOrderType = (orderTypeValue === 'dine-in' || orderTypeValue === 'dine_in')
           ? 'pickup'
@@ -2309,12 +2269,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
             phone: existingCustomer.phone || '',
             name: existingCustomer.name,
             email: existingCustomer.email,
-            address: existingCustomer.addresses?.[0]?.street || (existingCustomer as any).address,
-            city: existingCustomer.addresses?.[0]?.city || (existingCustomer as any).city,
-            postal_code: existingCustomer.addresses?.[0]?.postal_code || (existingCustomer as any).postal_code,
-            floor_number: existingCustomer.addresses?.[0]?.floor_number || (existingCustomer as any).floor_number,
-            notes: existingCustomer.addresses?.[0]?.delivery_notes || (existingCustomer as any).notes,
-            name_on_ringer: (existingCustomer as any).name_on_ringer,
+            address: existingCustomer.addresses?.[0]?.street || existingCustomer.address || undefined,
+            city: existingCustomer.addresses?.[0]?.city,
+            postal_code: existingCustomer.addresses?.[0]?.postal_code || existingCustomer.postal_code || undefined,
+            floor_number: existingCustomer.addresses?.[0]?.floor_number,
+            notes: existingCustomer.addresses?.[0]?.delivery_notes,
+            name_on_ringer: existingCustomer.name_on_ringer,
           } : undefined}
           mode={customerModalMode}
         />

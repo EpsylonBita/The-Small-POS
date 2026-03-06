@@ -29,6 +29,76 @@ fn get_period_start(conn: &Connection) -> String {
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
+fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
+    match role_type {
+        "driver" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') = 'delivery'"),
+        "server" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') != 'delivery'"),
+        _ => String::new(),
+    }
+}
+
+fn build_staff_cash_breakdown_row(
+    conn: &Connection,
+    staff_shift_id: &str,
+    staff_name: Option<&str>,
+    role_type: &str,
+    opening_amount: f64,
+) -> Result<Value, String> {
+    let sql = format!(
+        "SELECT
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
+         FROM orders o
+         LEFT JOIN order_payments op ON op.order_id = o.id
+         WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           {}",
+        role_order_type_filter_sql(role_type, "o")
+    );
+
+    let (cash_collected, card_amount): (f64, f64) = conn
+        .query_row(&sql, params![staff_shift_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| format!("query staff cash breakdown totals: {e}"))?;
+
+    let expenses: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
+            params![staff_shift_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    Ok(serde_json::json!({
+        "roleType": role_type,
+        "driverName": staff_name.unwrap_or_default(),
+        "driverShiftId": staff_shift_id,
+        "startingAmount": opening_amount,
+        "cashCollected": cash_collected,
+        "cardAmount": card_amount,
+        "cashToReturn": opening_amount + cash_collected - expenses,
+        "expenses": expenses,
+    }))
+}
+
+fn shift_summary_row_to_cash_breakdown(row: &Value) -> Value {
+    serde_json::json!({
+        "roleType": row.get("role_type").and_then(Value::as_str).unwrap_or("driver"),
+        "driverName": row.get("driver_name")
+            .or_else(|| row.get("staff_name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "driverShiftId": row.get("shift_id").and_then(Value::as_str).unwrap_or_default(),
+        "startingAmount": row.get("starting_amount").and_then(Value::as_f64).unwrap_or(0.0),
+        "cashCollected": row.get("cash_collected").and_then(Value::as_f64).unwrap_or(0.0),
+        "cardAmount": row.get("card_amount").and_then(Value::as_f64).unwrap_or(0.0),
+        "cashToReturn": row.get("amount_to_return").and_then(Value::as_f64).unwrap_or(0.0),
+        "expenses": row.get("expenses").and_then(Value::as_f64).unwrap_or(0.0),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Generate Z-report (single shift — legacy path)
 // ---------------------------------------------------------------------------
@@ -101,7 +171,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         _shift_id,
         staff_id,
         staff_name,
-        _role_type,
+        role_type,
         status,
         opening_cash,
         closing_cash,
@@ -118,6 +188,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "Shift must be closed to generate Z-report (current status: {status})"
         ));
     }
+
+    let terminal_id = shift_terminal_id
+        .clone()
+        .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default());
+    let branch_id =
+        shift_branch_id.unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
     // --- Aggregate data from the shift ---
 
@@ -258,11 +334,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         .collect();
 
     // Cash drawer session
-    let drawer = conn
+    let mut drawer = conn
         .query_row(
             "SELECT opening_amount, closing_amount, expected_amount, variance_amount,
                     total_cash_sales, total_card_sales, total_refunds, total_expenses,
-                    cash_drops, driver_cash_given, driver_cash_returned, reconciled
+                    cash_drops, driver_cash_given, driver_cash_returned, reconciled,
+                    total_staff_payments
              FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
             params![shift_id],
             |row| {
@@ -280,10 +357,144 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                     "driverCashGiven": row.get::<_, f64>(9).unwrap_or(0.0),
                     "driverCashReturned": row.get::<_, f64>(10).unwrap_or(0.0),
                     "unreconciledCount": if reconciled { 0 } else { 1 },
+                    "staffPaymentsTotal": row.get::<_, f64>(12).unwrap_or(0.0),
                 }))
             },
         )
         .ok();
+
+    let (driver_cash_breakdown, waiter_cash_breakdown) = match role_type.as_str() {
+        "cashier" | "manager" => {
+            let staff_rows = crate::shifts::build_cashier_staff_checkout_rows(
+                &conn,
+                &shift_id,
+                &branch_id,
+                &terminal_id,
+                check_in_time.as_deref().unwrap_or(""),
+                check_out_time.as_deref(),
+            )?;
+            let driver_rows = staff_rows
+                .iter()
+                .filter(|row| row["role_type"].as_str() == Some("driver"))
+                .map(shift_summary_row_to_cash_breakdown)
+                .collect::<Vec<Value>>();
+            let waiter_rows = staff_rows
+                .iter()
+                .filter(|row| row["role_type"].as_str() == Some("server"))
+                .map(shift_summary_row_to_cash_breakdown)
+                .collect::<Vec<Value>>();
+            (driver_rows, waiter_rows)
+        }
+        "driver" => (
+            vec![build_staff_cash_breakdown_row(
+                &conn,
+                &shift_id,
+                staff_name.as_deref(),
+                "driver",
+                opening_cash,
+            )?],
+            Vec::new(),
+        ),
+        "server" => (
+            Vec::new(),
+            vec![build_staff_cash_breakdown_row(
+                &conn,
+                &shift_id,
+                staff_name.as_deref(),
+                "server",
+                opening_cash,
+            )?],
+        ),
+        _ => (Vec::new(), Vec::new()),
+    };
+
+    if drawer.is_none() {
+        drawer = Some(serde_json::json!({
+            "totalVariance": cash_variance,
+            "openingTotal": opening_cash,
+            "closing": closing_cash,
+            "expected": expected_cash,
+            "totalCashDrops": 0.0,
+            "driverCashGiven": 0.0,
+            "driverCashReturned": 0.0,
+            "staffPaymentsTotal": 0.0,
+            "unreconciledCount": 0,
+        }));
+    }
+
+    if let Some(ref mut drawer_obj) = drawer {
+        if let Some(obj) = drawer_obj.as_object_mut() {
+            obj.insert(
+                "driverCashBreakdown".to_string(),
+                Value::Array(driver_cash_breakdown.clone()),
+            );
+            obj.insert(
+                "waiterCashBreakdown".to_string(),
+                Value::Array(waiter_cash_breakdown.clone()),
+            );
+        }
+    }
+
+    // Order type breakdown (dine-in, takeaway, delivery)
+    let mut ot_stmt = conn
+        .prepare(
+            "SELECT COALESCE(order_type, 'dine-in'), COUNT(*), COALESCE(SUM(total_amount), 0)
+             FROM orders
+             WHERE staff_shift_id = ?1
+               AND COALESCE(is_ghost, 0) = 0
+               AND status NOT IN ('cancelled', 'canceled')
+             GROUP BY COALESCE(order_type, 'dine-in')",
+        )
+        .map_err(|e| format!("prepare order_type query: {e}"))?;
+
+    let mut dine_in_orders = 0_i64;
+    let mut dine_in_sales = 0.0_f64;
+    let mut takeaway_orders = 0_i64;
+    let mut takeaway_sales = 0.0_f64;
+    let mut delivery_orders = 0_i64;
+    let mut delivery_sales = 0.0_f64;
+
+    let ot_rows = ot_stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query order_type: {e}"))?;
+
+    for row in ot_rows.flatten() {
+        let (otype, count, total) = row;
+        match otype.as_str() {
+            "dine-in" | "dine_in" => {
+                dine_in_orders += count;
+                dine_in_sales += total;
+            }
+            "takeaway" | "pickup" => {
+                takeaway_orders += count;
+                takeaway_sales += total;
+            }
+            "delivery" => {
+                delivery_orders += count;
+                delivery_sales += total;
+            }
+            _ => {
+                // Unknown order types count as dine-in
+                dine_in_orders += count;
+                dine_in_sales += total;
+            }
+        }
+    }
+
+    // Staff payments total (from staff_payments table if it exists)
+    let staff_payments_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM staff_payments WHERE cashier_shift_id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
 
     // --- Compute derived totals ---
 
@@ -292,12 +503,6 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let closing = closing_cash.unwrap_or(0.0);
     let expected = expected_cash.unwrap_or(0.0);
     let variance = cash_variance.unwrap_or(0.0);
-
-    // Resolve terminal/branch from storage or shift record
-    let terminal_id = shift_terminal_id
-        .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default());
-    let branch_id =
-        shift_branch_id.unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
     // report_date = date portion of check_in_time
     let report_date = check_in_time
@@ -327,6 +532,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "totalSales": gross_sales,
             "cashSales": cash_sales,
             "cardSales": card_sales,
+            "dineInOrders": dine_in_orders,
+            "dineInSales": dine_in_sales,
+            "takeawayOrders": takeaway_orders,
+            "takeawaySales": takeaway_sales,
+            "deliveryOrders": delivery_orders,
+            "deliverySales": delivery_sales,
         },
         "cashDrawer": drawer.as_ref().unwrap_or(&serde_json::json!({
             "totalVariance": variance,
@@ -335,6 +546,12 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "expenses": {
             "total": expenses_total,
             "items": expense_items,
+        },
+        "staffPayments": {
+            "total": staff_payments_total,
+        },
+        "tips": {
+            "total": tips_total,
         },
         "daySummary": {
             "cashTotal": cash_sales,
@@ -806,7 +1023,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .collect();
 
     // --- Cash drawer sessions (aggregate across all shifts) ---
-    let drawer_agg = conn
+    let mut drawer_agg = conn
         .query_row(
             "SELECT COALESCE(SUM(opening_amount), 0),
                     COALESCE(SUM(closing_amount), 0),
@@ -819,7 +1036,8 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     COALESCE(SUM(cash_drops), 0),
                     COALESCE(SUM(driver_cash_given), 0),
                     COALESCE(SUM(driver_cash_returned), 0),
-                    SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END),
+                    COALESCE(SUM(total_staff_payments), 0)
              FROM cash_drawer_sessions
              WHERE opened_at > ?1",
             params![period_start],
@@ -837,10 +1055,97 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     "driverCashGiven": row.get::<_, f64>(9)?,
                     "driverCashReturned": row.get::<_, f64>(10)?,
                     "unreconciledCount": row.get::<_, i64>(11)?,
+                    "staffPaymentsTotal": row.get::<_, f64>(12)?,
                 }))
             },
         )
         .ok();
+
+    let cash_breakdown_rows: Vec<Value> = shifts
+        .iter()
+        .filter(|shift| matches!(shift.role_type.as_str(), "driver" | "server"))
+        .map(|shift| {
+            build_staff_cash_breakdown_row(
+                &conn,
+                &shift.id,
+                shift.staff_name.as_deref(),
+                &shift.role_type,
+                shift.opening_cash,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let driver_cash_breakdown: Vec<Value> = cash_breakdown_rows
+        .iter()
+        .filter(|row| row["roleType"].as_str() == Some("driver"))
+        .cloned()
+        .collect();
+    let waiter_cash_breakdown: Vec<Value> = cash_breakdown_rows
+        .iter()
+        .filter(|row| row["roleType"].as_str() == Some("server"))
+        .cloned()
+        .collect();
+
+    // --- Order type breakdown across all shifts in the period ---
+    let mut ot_stmt = conn
+        .prepare(
+            "SELECT COALESCE(order_type, 'dine-in'), COUNT(*), COALESCE(SUM(total_amount), 0)
+             FROM orders
+             WHERE created_at > ?1
+               AND COALESCE(is_ghost, 0) = 0
+               AND status NOT IN ('cancelled', 'canceled')
+             GROUP BY COALESCE(order_type, 'dine-in')",
+        )
+        .map_err(|e| format!("prepare order_type query: {e}"))?;
+
+    let mut dine_in_orders = 0_i64;
+    let mut dine_in_sales = 0.0_f64;
+    let mut takeaway_orders = 0_i64;
+    let mut takeaway_sales = 0.0_f64;
+    let mut delivery_orders = 0_i64;
+    let mut delivery_sales = 0.0_f64;
+
+    let ot_rows = ot_stmt
+        .query_map(params![period_start], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query order_type: {e}"))?;
+
+    for row in ot_rows.flatten() {
+        let (otype, count, total) = row;
+        match otype.as_str() {
+            "dine-in" | "dine_in" => {
+                dine_in_orders += count;
+                dine_in_sales += total;
+            }
+            "takeaway" | "pickup" => {
+                takeaway_orders += count;
+                takeaway_sales += total;
+            }
+            "delivery" => {
+                delivery_orders += count;
+                delivery_sales += total;
+            }
+            _ => {
+                dine_in_orders += count;
+                dine_in_sales += total;
+            }
+        }
+    }
+
+    // --- Staff payments total across all shifts ---
+    let staff_payments_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
+             WHERE created_at > ?1",
+            params![period_start],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
 
     // --- Compute derived totals ---
     let net_sales = gross_sales - refunds_total - voids_total - discounts_total;
@@ -848,7 +1153,35 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     // Sum opening/closing/variance across all cashier shifts
     let total_opening: f64 = shifts.iter().map(|s| s.opening_cash).sum();
     let total_closing: f64 = shifts.iter().map(|s| s.closing_cash.unwrap_or(0.0)).sum();
+    let total_expected: f64 = shifts.iter().map(|s| s.expected_cash.unwrap_or(0.0)).sum();
     let total_variance: f64 = shifts.iter().map(|s| s.cash_variance.unwrap_or(0.0)).sum();
+
+    if drawer_agg.is_none() {
+        drawer_agg = Some(serde_json::json!({
+            "totalVariance": total_variance,
+            "openingTotal": total_opening,
+            "closing": total_closing,
+            "expected": total_expected,
+            "totalCashDrops": 0.0,
+            "driverCashGiven": 0.0,
+            "driverCashReturned": 0.0,
+            "unreconciledCount": 0,
+            "staffPaymentsTotal": staff_payments_total,
+        }));
+    }
+
+    if let Some(ref mut drawer) = drawer_agg {
+        if let Some(obj) = drawer.as_object_mut() {
+            obj.insert(
+                "driverCashBreakdown".to_string(),
+                Value::Array(driver_cash_breakdown),
+            );
+            obj.insert(
+                "waiterCashBreakdown".to_string(),
+                Value::Array(waiter_cash_breakdown),
+            );
+        }
+    }
 
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
 
@@ -906,6 +1239,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "totalSales": gross_sales,
             "cashSales": cash_sales,
             "cardSales": card_sales,
+            "dineInOrders": dine_in_orders,
+            "dineInSales": dine_in_sales,
+            "takeawayOrders": takeaway_orders,
+            "takeawaySales": takeaway_sales,
+            "deliveryOrders": delivery_orders,
+            "deliverySales": delivery_sales,
         },
         "cashDrawer": drawer_agg.as_ref().unwrap_or(&serde_json::json!({
             "totalVariance": total_variance,
@@ -914,6 +1253,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "expenses": {
             "total": expenses_total,
             "items": expense_items,
+        },
+        "staffPayments": {
+            "total": staff_payments_total,
+        },
+        "tips": {
+            "total": tips_total,
         },
         "daySummary": {
             "cashTotal": cash_sales,
@@ -1142,11 +1487,12 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         generate_z_report_for_date(db, payload)?
     };
 
-    // Step 2: Store last_z_report_timestamp + reset order counter
+    // Step 2: Store last_z_report_timestamp, advance order sync cursor, and reset order counter
     let now = Utc::now().to_rfc3339();
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         db::set_setting(&conn, "system", "last_z_report_timestamp", &now)?;
+        db::set_setting(&conn, "sync", "orders_since", &now)?;
 
         // Reset order counter for next business day
         conn.execute(
@@ -1160,7 +1506,10 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         info!("Order counter reset to 0 after Z-report");
     }
 
-    info!(timestamp = %now, "Stored last_z_report_timestamp");
+    info!(
+        timestamp = %now,
+        "Stored last_z_report_timestamp and advanced sync.orders_since"
+    );
 
     // Step 3: Finalize end-of-day (clear operational data)
     let report_date =
@@ -1196,13 +1545,40 @@ pub fn finalize_end_of_day(db: &DbState, report_date: &str) -> Result<Value, Str
 
     // Helper: try DELETE using date() extraction for proper date comparison,
     // returns count (0 if table doesn't exist).
+    //
+    // Allowlisted table and column names to prevent any possibility of SQL
+    // injection if callers are ever changed.
+    const ALLOWED_TABLES: &[&str] = &[
+        "payment_adjustments",
+        "order_payments",
+        "driver_earnings",
+        "sync_queue",
+        "shift_expenses",
+        "staff_payments",
+        "print_jobs",
+        "cash_drawer_sessions",
+        "staff_shifts",
+        "orders",
+    ];
+    const ALLOWED_DATE_COLS: &[&str] = &["created_at"];
+
     fn safe_delete(
         conn: &Connection,
         table: &str,
         date_col: &str,
         report_date: &str,
         extra_where: &str,
+        allowed_tables: &[&str],
+        allowed_date_cols: &[&str],
     ) -> i64 {
+        if !allowed_tables.contains(&table) {
+            warn!(table = %table, "safe_delete: table not in allowlist, skipping");
+            return 0;
+        }
+        if !allowed_date_cols.contains(&date_col) {
+            warn!(date_col = %date_col, "safe_delete: date column not in allowlist, skipping");
+            return 0;
+        }
         let sql = format!("DELETE FROM {table} WHERE date({date_col}) <= ?1{extra_where}");
         match conn.execute(&sql, params![report_date]) {
             Ok(count) => count as i64,
@@ -1218,15 +1594,39 @@ pub fn finalize_end_of_day(db: &DbState, report_date: &str) -> Result<Value, Str
         let mut cleared = serde_json::Map::new();
 
         // 1. payment_adjustments (FK->order_payments)
-        let c = safe_delete(&conn, "payment_adjustments", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "payment_adjustments",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("payment_adjustments".into(), serde_json::json!(c));
 
         // 2. order_payments (FK->orders)
-        let c = safe_delete(&conn, "order_payments", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "order_payments",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("order_payments".into(), serde_json::json!(c));
 
         // 3. driver_earnings (FK->orders, staff_shifts) -- may not exist yet
-        let c = safe_delete(&conn, "driver_earnings", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "driver_earnings",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("driver_earnings".into(), serde_json::json!(c));
 
         // 4. sync_queue -- only clear synced items
@@ -1236,31 +1636,81 @@ pub fn finalize_end_of_day(db: &DbState, report_date: &str) -> Result<Value, Str
             "created_at",
             report_date,
             " AND status = 'synced'",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
         );
         cleared.insert("sync_queue".into(), serde_json::json!(c));
 
         // 5. shift_expenses (FK->staff_shifts)
-        let c = safe_delete(&conn, "shift_expenses", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "shift_expenses",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("shift_expenses".into(), serde_json::json!(c));
 
         // 6. staff_payments (FK->staff_shifts) -- may not exist yet
-        let c = safe_delete(&conn, "staff_payments", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "staff_payments",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("staff_payments".into(), serde_json::json!(c));
 
         // 7. print_jobs (standalone)
-        let c = safe_delete(&conn, "print_jobs", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "print_jobs",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("print_jobs".into(), serde_json::json!(c));
 
         // 8. cash_drawer_sessions (FK->staff_shifts)
-        let c = safe_delete(&conn, "cash_drawer_sessions", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "cash_drawer_sessions",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("cash_drawer_sessions".into(), serde_json::json!(c));
 
         // 9. staff_shifts (parent of drawers/expenses)
-        let c = safe_delete(&conn, "staff_shifts", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "staff_shifts",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("staff_shifts".into(), serde_json::json!(c));
 
         // 10. orders (parent of payments/driver_earnings)
-        let c = safe_delete(&conn, "orders", "created_at", report_date, "");
+        let c = safe_delete(
+            &conn,
+            "orders",
+            "created_at",
+            report_date,
+            "",
+            ALLOWED_TABLES,
+            ALLOWED_DATE_COLS,
+        );
         cleared.insert("orders".into(), serde_json::json!(c));
 
         Ok(Value::Object(cleared))
@@ -1989,6 +2439,157 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_generate_single_shift_z_report_includes_driver_breakdown_starting_amount() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'cashier-zr', 'cashier-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                100.0, 170.0, 170.0, 0.0,
+                '2026-03-05T09:00:00Z', '2026-03-05T17:00:00Z', 'closed', 2,
+                'pending', '2026-03-05T17:00:00Z', '2026-03-05T17:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, closing_amount, expected_amount, variance_amount,
+                total_cash_sales, total_card_sales, total_refunds, total_expenses,
+                cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                reconciled, opened_at, created_at, updated_at
+             ) VALUES (
+                'drawer-zr', 'cashier-zr', 'cashier-1', 'branch-1', 'term-1',
+                100.0, 170.0, 170.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                0.0, 20.0, 70.0, 0.0,
+                1, '2026-03-05T09:00:00Z', '2026-03-05T17:00:00Z', '2026-03-05T17:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'driver-zr', 'driver-1', 'Driver One', 'branch-1', 'term-1', 'driver',
+                20.0, 70.0, 70.0, 0.0,
+                '2026-03-05T10:00:00Z', '2026-03-05T16:00:00Z', 'closed', 2,
+                'pending', '2026-03-05T16:00:00Z', '2026-03-05T16:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        for (order_id, order_type, total_amount) in [
+            ("delivery-order", "delivery", 50.0),
+            ("pickup-order", "pickup", 40.0),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, status, order_type,
+                    payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+                 ) VALUES (?1, ?1, '[]', ?2, 'completed', ?3,
+                    'paid', 'cash', 'driver-zr', 'pending', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
+                params![order_id, total_amount, order_type],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                 ) VALUES (?1, ?2, 'cash', ?3, 'completed', 'driver-zr', 'EUR', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z')",
+                params![format!("pay-{order_id}"), order_id, total_amount],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let result = generate_z_report(&db, &serde_json::json!({ "shiftId": "cashier-zr" }))
+            .expect("single-shift z-report");
+
+        let breakdown = result["report"]["reportJson"]["cashDrawer"]["driverCashBreakdown"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0]["driverName"], "Driver One");
+        assert_eq!(breakdown[0]["startingAmount"], 20.0);
+        assert_eq!(breakdown[0]["cashCollected"], 50.0);
+        assert_eq!(breakdown[0]["cashToReturn"], 70.0);
+    }
+
+    #[test]
+    fn test_generate_driver_shift_z_report_includes_starting_amount_without_cash_drawer() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'driver-zr-single', 'driver-9', 'Driver Nine', 'branch-9', 'term-9', 'driver',
+                20.0, 65.0, 65.0, 0.0,
+                '2026-03-05T10:00:00Z', '2026-03-05T16:00:00Z', 'closed', 2,
+                'pending', '2026-03-05T16:00:00Z', '2026-03-05T16:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, payment_method, staff_shift_id, staff_id, driver_id,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'delivery-zr-single', 'ORD-DRIVER-1', '[]', 45.0, 'completed', 'delivery',
+                'paid', 'cash', 'driver-zr-single', 'driver-9', 'driver-9',
+                'pending', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+             ) VALUES (
+                'pay-driver-zr-single', 'delivery-zr-single', 'cash', 45.0, 'completed',
+                'driver-zr-single', 'EUR', '2026-03-05T12:00:00Z', '2026-03-05T12:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = generate_z_report(&db, &serde_json::json!({ "shiftId": "driver-zr-single" }))
+            .expect("driver single-shift z-report");
+
+        let breakdown = result["report"]["reportJson"]["cashDrawer"]["driverCashBreakdown"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(breakdown.len(), 1);
+        assert_eq!(breakdown[0]["driverName"], "Driver Nine");
+        assert_eq!(breakdown[0]["startingAmount"], 20.0);
+        assert_eq!(breakdown[0]["cashCollected"], 45.0);
+        assert_eq!(breakdown[0]["cashToReturn"], 65.0);
+    }
+
     // ---------------------------------------------------------------
     // Gap 8: Data clearing (finalize_end_of_day)
     // ---------------------------------------------------------------
@@ -2138,6 +2739,11 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let stored = db::get_setting(&conn, "system", "last_z_report_timestamp");
         assert!(stored.is_some(), "timestamp should be stored in settings");
+        let orders_since = db::get_setting(&conn, "sync", "orders_since");
+        assert_eq!(
+            orders_since, stored,
+            "orders_since cursor should advance with z-report submit"
+        );
 
         // Verify operational data was cleared
         let orders: i64 = conn

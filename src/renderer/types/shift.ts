@@ -49,8 +49,8 @@ export interface StaffShift {
   is_transfer_pending?: boolean;
   /**
    * Calculation version for the shift formula.
-   * Version 1 (legacy): Staff payments deducted from cashier expected, payment_amount included in driver/waiter return
-   * Version 2 (current): Staff payments informational only, payment_amount NOT included in driver/waiter return
+   * Current behavior: staff payments are deducted from the cashier drawer expected amount.
+   * Driver and waiter/mobile-POS staff return opening float plus collected cash minus expenses.
    * NULL or undefined defaults to version 1 for backward compatibility.
    */
   calculation_version?: number;
@@ -259,9 +259,15 @@ export interface ShiftSummary {
   driverDeliveries?: Array<{
     id: string;
     order_id: string;
+    shift_id?: string;
     order_number: string;
     customer_name?: string;
     delivery_address?: string;
+    driver_id?: string;
+    driver_name?: string;
+    staff_id?: string;
+    staff_name?: string;
+    role_type?: string;
     total_amount: number;
     payment_method: string;
     delivery_fee: number;
@@ -269,6 +275,10 @@ export interface ShiftSummary {
     total_earning: number;
     cash_collected: number;
     card_amount: number;
+    starting_amount?: number;
+    expenses?: number;
+    order_count?: number;
+    amount_to_return?: number;
     /** Order status: 'completed', 'delivered', 'cancelled', etc. */
     status?: string;
     /** Alias for status field for backward compatibility */
@@ -285,6 +295,7 @@ export interface ShiftSummary {
    * Their amounts are NOT included in the current cashier's expected drawer calculation.
    */
   transferredDrivers?: TransferredDriverInfo[];
+  transferredWaiters?: TransferredDriverInfo[];
   waiterTables?: Array<{
     table_number: string;
     order_count: number;

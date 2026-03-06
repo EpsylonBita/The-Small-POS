@@ -1,263 +1,485 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import type {
+  SyncFinancialQueueItem,
+  SyncFinancialQueueStatus,
+} from '../../lib/ipc-contracts';
 
-interface FinancialSyncItem {
-    id: string;
-    table_name: string;
-    record_id: string;
-    operation: string;
-    data: string; // JSON string
-    attempts: number;
-    error_message: string;
-    created_at: string;
+type ActionableFinancialStatus =
+  | 'failed'
+  | 'pending'
+  | 'in_progress'
+  | 'deferred'
+  | 'queued_remote';
+
+interface FinancialQueueSummary {
+  pending: number;
+  failed: number;
 }
 
-const asString = (value: unknown): string =>
-    typeof value === 'string' ? value : '';
+interface FinancialSyncPanelProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+  queueSummary?: FinancialQueueSummary;
+}
 
-const asNumber = (value: unknown, fallback = 0): number =>
-    typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+interface FinancialStatusPresentation {
+  label: string;
+  badgeClassName: string;
+  accentClassName: string;
+  description: string;
+}
 
-const normalizeFinancialSyncItem = (raw: any): FinancialSyncItem | null => {
-    const id = asString(raw?.id);
-    if (!id) return null;
+const ACTIONABLE_STATUS_ORDER: ActionableFinancialStatus[] = [
+  'failed',
+  'pending',
+  'deferred',
+  'queued_remote',
+  'in_progress',
+];
 
-    const payloadRaw = raw?.data ?? raw?.payload;
-    const payload =
-        typeof payloadRaw === 'string'
-            ? payloadRaw
-            : JSON.stringify(payloadRaw ?? {});
+const ACTIONABLE_STATUSES = new Set<ActionableFinancialStatus>(
+  ACTIONABLE_STATUS_ORDER,
+);
 
-    return {
-        id,
-        table_name: asString(raw?.table_name) || asString(raw?.entityType) || 'unknown',
-        record_id: asString(raw?.record_id) || asString(raw?.entityId),
-        operation: asString(raw?.operation) || 'insert',
-        data: payload,
-        attempts: asNumber(raw?.attempts ?? raw?.retryCount, 0),
-        error_message: asString(raw?.error_message) || asString(raw?.lastError) || 'Unknown sync error',
-        created_at: asString(raw?.created_at) || asString(raw?.createdAt) || new Date().toISOString(),
-    };
+const RETRYABLE_STATUSES = new Set<ActionableFinancialStatus>([
+  'failed',
+  'pending',
+  'deferred',
+]);
+
+const normalizeStatus = (status: SyncFinancialQueueStatus): ActionableFinancialStatus | null => {
+  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
+  return ACTIONABLE_STATUSES.has(normalized as ActionableFinancialStatus)
+    ? (normalized as ActionableFinancialStatus)
+    : null;
 };
 
 const formatPayload = (payload: string): string => {
-    try {
-        return JSON.stringify(JSON.parse(payload), null, 2);
-    } catch {
-        return payload;
-    }
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2);
+  } catch {
+    return payload;
+  }
 };
 
-interface FinancialSyncPanelProps {
-    isOpen: boolean;
-    onClose: () => void;
-    onRefresh: () => void;
-}
+const getStatusPresentation = (
+  t: ReturnType<typeof useTranslation>['t'],
+  status: ActionableFinancialStatus,
+): FinancialStatusPresentation => {
+  switch (status) {
+    case 'failed':
+      return {
+        label: t('sync.financial.failed', { defaultValue: 'Failed' }),
+        badgeClassName:
+          'bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30',
+        accentClassName: 'text-red-600 dark:text-red-300',
+        description: t('sync.financial.failedGroupDesc', {
+          defaultValue: 'These items stopped syncing and need intervention.',
+        }),
+      };
+    case 'pending':
+      return {
+        label: t('sync.financial.pending', { defaultValue: 'Pending' }),
+        badgeClassName:
+          'bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-500/30',
+        accentClassName: 'text-blue-600 dark:text-blue-300',
+        description: t('sync.financial.pendingGroupDesc', {
+          defaultValue: 'These items are queued locally and still waiting to sync.',
+        }),
+      };
+    case 'deferred':
+      return {
+        label: t('sync.financial.deferred', { defaultValue: 'Deferred' }),
+        badgeClassName:
+          'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30',
+        accentClassName: 'text-amber-600 dark:text-amber-300',
+        description: t('sync.financial.deferredGroupDesc', {
+          defaultValue: 'These items were delayed by retry or backpressure handling.',
+        }),
+      };
+    case 'queued_remote':
+      return {
+        label: t('sync.financial.queuedRemote', {
+          defaultValue: 'Queued Remotely',
+        }),
+        badgeClassName:
+          'bg-violet-500/15 text-violet-700 dark:text-violet-300 border border-violet-500/30',
+        accentClassName: 'text-violet-600 dark:text-violet-300',
+        description: t('sync.financial.queuedRemoteGroupDesc', {
+          defaultValue: 'These items were accepted and are still waiting upstream.',
+        }),
+      };
+    case 'in_progress':
+      return {
+        label: t('sync.financial.inProgress', { defaultValue: 'In Progress' }),
+        badgeClassName:
+          'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/30',
+        accentClassName: 'text-cyan-600 dark:text-cyan-300',
+        description: t('sync.financial.inProgressGroupDesc', {
+          defaultValue: 'These items are being processed right now.',
+        }),
+      };
+  }
+};
+
+const canRetry = (item: SyncFinancialQueueItem): boolean => {
+  const status = normalizeStatus(item.status);
+  return status ? RETRYABLE_STATUSES.has(status) : false;
+};
 
 export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
-    isOpen,
-    onClose,
-    onRefresh
+  isOpen,
+  onClose,
+  onRefresh,
+  queueSummary,
 }) => {
-    const bridge = getBridge();
-    const { t } = useTranslation();
-    const [items, setItems] = useState<FinancialSyncItem[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [processing, setProcessing] = useState<string | null>(null); // ID of item being processed
+  const bridge = getBridge();
+  const { t } = useTranslation();
+  const [items, setItems] = useState<SyncFinancialQueueItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [processing, setProcessing] = useState<string | null>(null);
 
-    const loadItems = async () => {
-        setLoading(true);
-        try {
-            const failedItems = await bridge.sync.getFailedFinancialItems(50);
-            const normalized = (Array.isArray(failedItems) ? failedItems : [])
-                .map(normalizeFinancialSyncItem)
-                .filter((item): item is FinancialSyncItem => item !== null);
-            setItems(normalized);
-        } catch (err) {
-            console.error('Failed to load financial sync items', err);
-        } finally {
-            setLoading(false);
-        }
+  const loadItems = async () => {
+    setLoading(true);
+    try {
+      const queueItems = await bridge.sync.getFailedFinancialItems(100);
+      setItems(Array.isArray(queueItems) ? queueItems : []);
+    } catch (err) {
+      console.error('Failed to load financial sync items', err);
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      void loadItems();
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const refreshQueue = () => {
+      void loadItems();
     };
 
-    useEffect(() => {
-        if (isOpen) {
-            void loadItems();
-        }
-    }, [isOpen]);
+    onEvent('sync:complete', refreshQueue);
+    onEvent('sync-retry-scheduled', refreshQueue);
+    onEvent('sync:status', refreshQueue);
 
-    useEffect(() => {
-        if (!isOpen) return;
-
-        const handleSyncComplete = () => {
-            void loadItems();
-        };
-
-        const handleRetryScheduled = () => {
-            void loadItems();
-        };
-
-        onEvent('sync:complete', handleSyncComplete);
-        onEvent('sync-retry-scheduled', handleRetryScheduled);
-
-        return () => {
-            offEvent('sync:complete', handleSyncComplete);
-            offEvent('sync-retry-scheduled', handleRetryScheduled);
-        };
-    }, [isOpen]);
-
-    const handleRetryItem = async (id: string) => {
-        setProcessing(id);
-        try {
-            await bridge.sync.retryFinancialItem(id);
-            await loadItems();
-            onRefresh();
-        } catch (err) {
-            console.error('Failed to retry item', err);
-        } finally {
-            setProcessing(null);
-        }
+    return () => {
+      offEvent('sync:complete', refreshQueue);
+      offEvent('sync-retry-scheduled', refreshQueue);
+      offEvent('sync:status', refreshQueue);
     };
+  }, [isOpen]);
 
-    const handleRetryAll = async () => {
-        setProcessing('all');
-        try {
-            await bridge.sync.retryAllFailedFinancial();
-            await loadItems();
-            onRefresh();
-        } catch (err) {
-            console.error('Failed to retry all', err);
-        } finally {
-            setProcessing(null);
-        }
-    };
+  const actionableItems = useMemo(() => {
+    return items
+      .map((item) => {
+        const normalizedStatus = normalizeStatus(item.status);
+        return normalizedStatus ? { ...item, normalizedStatus } : null;
+      })
+      .filter(
+        (
+          item,
+        ): item is SyncFinancialQueueItem & {
+          normalizedStatus: ActionableFinancialStatus;
+        } => item !== null,
+      );
+  }, [items]);
 
-    if (!isOpen) return null;
+  const groupedItems = useMemo(
+    () =>
+      ACTIONABLE_STATUS_ORDER.map((status) => ({
+        status,
+        items: actionableItems.filter(
+          (item) => item.normalizedStatus === status,
+        ),
+      })).filter((group) => group.items.length > 0),
+    [actionableItems],
+  );
 
-    return (
-        <>
-            {/* Backdrop */}
-            <div
-                className="fixed inset-0 z-[2000] liquid-glass-modal-backdrop"
-                onClick={onClose}
-            />
+  const actionableSummaryCount =
+    (queueSummary?.pending ?? 0) + (queueSummary?.failed ?? 0);
+  const hasQueueDetails = groupedItems.length > 0;
+  const hasActionableSummary = actionableSummaryCount > 0;
+  const failedItemsCount = actionableItems.filter(
+    (item) => item.normalizedStatus === 'failed',
+  ).length;
 
-            {/* Modal */}
-            <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell w-full max-w-4xl max-h-[85vh] overflow-hidden z-[2050] rounded-3xl">
-                {/* Header */}
-                <div className="p-6 border-b liquid-glass-modal-border rounded-t-3xl">
-                    <div className="flex justify-between items-center">
-                        <div className="flex items-center gap-3">
-                            <svg className="w-7 h-7 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            <div>
-                                <h2 className="text-2xl font-extrabold text-black dark:text-white">{t('sync.financial.title')}</h2>
-                                <p className="text-sm font-medium text-slate-600 dark:text-slate-400 mt-1">{t('sync.financial.subtitle')}</p>
-                            </div>
-                        </div>
-                        <button
-                            onClick={onClose}
-                            className="liquid-glass-modal-button p-2 min-h-0 min-w-0 rounded-xl"
-                            aria-label={t('common.actions.close')}
-                        >
-                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                        </button>
-                    </div>
-                </div>
+  const handleRetryItem = async (queueId: number) => {
+    setProcessing(String(queueId));
+    try {
+      await bridge.sync.retryFinancialItem(queueId);
+      await loadItems();
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to retry item', err);
+    } finally {
+      setProcessing(null);
+    }
+  };
 
-                {/* Content */}
-                <div className="flex-1 overflow-auto p-6 max-h-[calc(85vh-100px)] scrollbar-hide">
-                    {loading ? (
-                        <div className="flex justify-center items-center h-40">
-                            <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500/30 border-t-blue-500"></div>
-                        </div>
-                    ) : items.length === 0 ? (
-                        <div className="text-center py-16">
-                            <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-green-500/20 flex items-center justify-center">
-                                <svg className="w-10 h-10 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                </svg>
-                            </div>
-                            <h3 className="text-xl font-extrabold text-black dark:text-white mb-2">{t('sync.financial.allClear')}</h3>
-                            <p className="text-slate-600 dark:text-slate-400 font-medium">{t('sync.financial.noFailedItems')}</p>
-                        </div>
-                    ) : (
-                        <div className="space-y-4">
-                            {/* Failed items header */}
-                            <div className="flex justify-between items-center mb-4 p-4 liquid-glass-modal-card rounded-2xl">
-                                <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center">
-                                        <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                                        </svg>
-                                    </div>
-                                    <span className="text-red-700 dark:text-red-300 font-bold text-lg">
-                                        {items.length} {t('sync.financial.failedItems')}
-                                    </span>
-                                </div>
-                                <button
-                                    onClick={handleRetryAll}
-                                    disabled={!!processing}
-                                    className="px-5 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-                                >
-                                    {processing === 'all' ? t('sync.financial.retryingAll') : t('sync.financial.retryAll')}
-                                </button>
-                            </div>
+  const handleRetryAll = async () => {
+    setProcessing('all');
+    try {
+      await bridge.sync.retryAllFailedFinancial();
+      await loadItems();
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to retry all', err);
+    } finally {
+      setProcessing(null);
+    }
+  };
 
-                            {/* Items list */}
-                            <div className="space-y-3">
-                                {items.map(item => (
-                                    <div key={item.id} className="liquid-glass-modal-card rounded-2xl p-4 hover:border-white/20 transition-all">
-                                        <div className="flex justify-between items-start gap-4">
-                                            <div className="flex-1 min-w-0">
-                                                <div className="flex flex-wrap items-center gap-2 mb-2">
-                                                    <span className="bg-red-500/20 text-red-700 dark:text-red-300 px-3 py-1 rounded-lg text-xs font-bold uppercase border border-red-500/30">
-                                                        {item.table_name}
-                                                    </span>
-                                                    <span className="bg-slate-500/20 text-slate-700 dark:text-slate-300 px-3 py-1 rounded-lg text-xs font-bold uppercase border border-slate-500/30">
-                                                        {item.operation}
-                                                    </span>
-                                                    <span className="text-slate-500 dark:text-slate-400 text-xs font-medium">
-                                                        {new Date(item.created_at).toLocaleString()}
-                                                    </span>
-                                                </div>
-                                                <div className="text-red-700 dark:text-red-300 text-sm mb-3 font-medium break-all line-clamp-2">
-                                                    {item.error_message}
-                                                </div>
-                                                <details className="text-xs cursor-pointer group">
-                                                    <summary className="text-blue-600 dark:text-blue-400 hover:text-blue-500 dark:hover:text-blue-300 transition-colors font-semibold">
-                                                        {t('sync.financial.viewPayload')}
-                                                    </summary>
-                                                    <pre className="mt-2 p-3 bg-slate-100 dark:bg-slate-800/50 rounded-xl overflow-x-auto text-slate-700 dark:text-slate-300 font-mono text-[10px] border border-slate-300/50 dark:border-slate-600/50">
-                                                        {formatPayload(item.data)}
-                                                    </pre>
-                                                </details>
-                                            </div>
+  if (!isOpen || typeof document === 'undefined') {
+    return null;
+  }
 
-                                            <div className="flex flex-col items-end gap-2">
-                                                <span className="text-xs font-bold text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800/50 px-3 py-1.5 rounded-lg border border-slate-300/50 dark:border-slate-600/50">
-                                                    {t('sync.financial.attempts')}: <span className="text-black dark:text-white font-mono">{item.attempts}</span>
-                                                </span>
-                                                <button
-                                                    onClick={() => handleRetryItem(item.id)}
-                                                    disabled={!!processing}
-                                                    className="px-4 py-2 bg-white/10 hover:bg-white/20 dark:bg-white/5 dark:hover:bg-white/10 text-black dark:text-white rounded-xl text-xs font-bold border border-slate-300/50 dark:border-white/10 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-                                                >
-                                                    {processing === item.id ? '...' : t('sync.financial.retry')}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
+  return ReactDOM.createPortal(
+    <div
+      className="fixed inset-0 z-[10020] px-4 py-6 sm:px-6 sm:py-8"
+      style={{ isolation: 'isolate' }}
+    >
+      <div
+        className="absolute inset-0 bg-black/55 backdrop-blur-md"
+        onClick={onClose}
+      />
+
+      <div className="relative z-[10030] flex h-full items-center justify-center">
+        <div
+          className="liquid-glass-modal-shell flex w-full flex-col overflow-hidden rounded-3xl"
+          style={{
+            width: 'min(760px, calc(100vw - 32px))',
+            maxHeight: '76vh',
+          }}
+        >
+          <div className="flex items-start justify-between gap-4 border-b liquid-glass-modal-border px-5 py-4 sm:px-6">
+            <div className="min-w-0">
+              <h2 className="text-xl font-extrabold text-black dark:text-white sm:text-2xl">
+                {t('sync.financial.title')}
+              </h2>
+              <p className="mt-1 text-sm font-medium text-slate-600 dark:text-slate-400">
+                {t('sync.financial.subtitle')}
+              </p>
             </div>
-        </>
-    );
+            <button
+              onClick={onClose}
+              className="liquid-glass-modal-button min-h-0 min-w-0 rounded-xl p-2"
+              aria-label={t('common.actions.close')}
+            >
+              <svg
+                className="h-6 w-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto px-5 py-5 sm:px-6">
+            {loading ? (
+              <div className="flex h-40 items-center justify-center">
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-blue-500/30 border-t-blue-500" />
+              </div>
+            ) : !hasQueueDetails && !hasActionableSummary ? (
+              <div className="py-14 text-center">
+                <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-green-500/20">
+                  <svg
+                    className="h-10 w-10 text-green-500"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M5 13l4 4L19 7"
+                    />
+                  </svg>
+                </div>
+                <h3 className="mb-2 text-xl font-extrabold text-black dark:text-white">
+                  {t('sync.financial.allClear')}
+                </h3>
+                <p className="font-medium text-slate-600 dark:text-slate-400">
+                  {t('sync.financial.noFailedItems')}
+                </p>
+              </div>
+            ) : !hasQueueDetails ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-5">
+                <div className="mb-2 text-sm font-bold text-amber-700 dark:text-amber-300">
+                  {t('sync.financial.queueDetailsUnavailable', {
+                    defaultValue: 'Financial sync still has actionable items.',
+                  })}
+                </div>
+                <p className="text-sm font-medium text-amber-700/90 dark:text-amber-200">
+                  {t('sync.financial.queueDetailsUnavailableHint', {
+                    defaultValue:
+                      'The local summary still reports pending or failed financial sync rows, but their queue details were not returned.',
+                  })}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold">
+                  <span className="rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-blue-700 dark:text-blue-300">
+                    {t('sync.financial.pending', { defaultValue: 'Pending' })}:{' '}
+                    {queueSummary?.pending ?? 0}
+                  </span>
+                  <span className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-red-700 dark:text-red-300">
+                    {t('sync.financial.failed', { defaultValue: 'Failed' })}:{' '}
+                    {queueSummary?.failed ?? 0}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl liquid-glass-modal-card p-4">
+                  <div>
+                    <div className="text-sm font-bold text-black dark:text-white">
+                      {t('sync.financial.actionableItemsTitle', {
+                        defaultValue: 'Actionable financial queue items',
+                      })}
+                    </div>
+                    <div className="mt-1 text-xs font-medium text-slate-600 dark:text-slate-400">
+                      {t('sync.financial.actionableItemsSubtitle', {
+                        defaultValue:
+                          'Grouped by sync status so pending and blocked rows are visible before they fail.',
+                      })}
+                    </div>
+                  </div>
+                  {failedItemsCount > 0 && (
+                    <button
+                      onClick={handleRetryAll}
+                      disabled={!!processing}
+                      className="rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-blue-500/25 transition-all hover:from-blue-600 hover:to-cyan-600 hover:shadow-blue-500/40 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {processing === 'all'
+                        ? t('sync.financial.retryingAll')
+                        : t('sync.financial.retryAll')}
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-4">
+                  {groupedItems.map((group) => {
+                    const presentation = getStatusPresentation(t, group.status);
+
+                    return (
+                      <section
+                        key={group.status}
+                        className="rounded-2xl liquid-glass-modal-card p-4"
+                      >
+                        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`rounded-lg px-3 py-1 text-xs font-bold uppercase tracking-wide ${presentation.badgeClassName}`}
+                              >
+                                {presentation.label}
+                              </span>
+                              <span
+                                className={`text-sm font-extrabold ${presentation.accentClassName}`}
+                              >
+                                {group.items.length}
+                              </span>
+                            </div>
+                            <p className="mt-2 text-xs font-medium text-slate-600 dark:text-slate-400">
+                              {presentation.description}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-3">
+                          {group.items.map((item) => (
+                            <div
+                              key={item.queueId}
+                              className="rounded-2xl border border-white/10 bg-black/5 p-4 dark:bg-white/[0.03]"
+                            >
+                              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                <div className="min-w-0 flex-1">
+                                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                                    <span className="rounded-lg border border-slate-400/30 bg-slate-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-300">
+                                      {item.entityType}
+                                    </span>
+                                    <span className="rounded-lg border border-slate-400/30 bg-slate-500/10 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-slate-700 dark:text-slate-300">
+                                      {item.operation}
+                                    </span>
+                                    <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                                      {new Date(item.createdAt).toLocaleString()}
+                                    </span>
+                                  </div>
+
+                                  <div className="mb-2 text-sm font-semibold text-black dark:text-white break-all">
+                                    {item.entityId}
+                                  </div>
+
+                                  {item.lastError && (
+                                    <div className="mb-3 text-sm font-medium text-red-700 dark:text-red-300">
+                                      {item.lastError}
+                                    </div>
+                                  )}
+
+                                  <details className="group cursor-pointer text-xs">
+                                    <summary className="font-semibold text-blue-600 transition-colors hover:text-blue-500 dark:text-blue-400 dark:hover:text-blue-300">
+                                      {t('sync.financial.viewPayload')}
+                                    </summary>
+                                    <pre className="mt-2 overflow-x-auto rounded-xl border border-slate-300/50 bg-slate-100 p-3 font-mono text-[10px] text-slate-700 dark:border-slate-600/50 dark:bg-slate-800/50 dark:text-slate-300">
+                                      {formatPayload(item.payload)}
+                                    </pre>
+                                  </details>
+                                </div>
+
+                                <div className="flex flex-row items-start gap-2 sm:flex-col sm:items-end">
+                                  <span className="rounded-lg border border-slate-300/50 bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-600 dark:border-slate-600/50 dark:bg-slate-800/50 dark:text-slate-400">
+                                    {t('sync.financial.attempts')}:{' '}
+                                    <span className="font-mono text-black dark:text-white">
+                                      {item.retryCount}
+                                    </span>
+                                  </span>
+                                  {canRetry(item) && (
+                                    <button
+                                      onClick={() =>
+                                        void handleRetryItem(item.queueId)
+                                      }
+                                      disabled={!!processing}
+                                      className="rounded-xl border border-slate-300/50 px-4 py-2 text-xs font-bold text-black transition-all hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-white dark:hover:bg-white/10"
+                                    >
+                                      {processing === String(item.queueId)
+                                        ? '...'
+                                        : t('sync.financial.retry')}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 };

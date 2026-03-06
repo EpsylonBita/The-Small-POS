@@ -20,6 +20,7 @@ import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
 import { Pencil, Search, X, User, UserPlus } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
+import { hasResolvedDeliveryFee, resolveDeliveryFee } from '../../utils/delivery-fee';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
@@ -51,6 +52,7 @@ interface MenuModalProps {
     is_ghost?: boolean;
     ghost_source?: string | null;
     ghost_metadata?: Record<string, unknown> | null;
+    deliveryFee?: number;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   }) => void;
   // Edit mode props
@@ -190,6 +192,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Effective minimum order amount - prefer zone-specific, fallback to default
   const effectiveMinimumOrderAmount = effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount;
 
+  const buildSelectedAddressString = useCallback(() => {
+    if (!selectedAddress) {
+      return '';
+    }
+
+    return [
+      selectedAddress.street_address || selectedAddress.street || '',
+      selectedAddress.city || '',
+      selectedAddress.postal_code || selectedAddress.postalCode || '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+  }, [selectedAddress]);
+
   // Fetch order items from backend
   const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
     try {
@@ -276,18 +292,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         return;
       }
 
-      // Build address string from selectedAddress
-      const addressParts = [
-        selectedAddress.street_address || selectedAddress.street || '',
-        selectedAddress.city || '',
-        selectedAddress.postal_code || selectedAddress.postalCode || ''
-      ].filter(Boolean);
-
-      if (addressParts.length === 0) {
+      const addressString = buildSelectedAddressString();
+      if (!addressString) {
         return;
       }
-
-      const addressString = addressParts.join(', ');
 
       try {
         const result = await validateDeliveryAddress(addressString, 0);
@@ -300,7 +308,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-  }, [isOpen, orderType, deliveryZoneInfo, editMode, selectedAddress, validateDeliveryAddress]);
+  }, [buildSelectedAddressString, isOpen, orderType, deliveryZoneInfo, editMode, selectedAddress, validateDeliveryAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
@@ -753,6 +761,18 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return Math.min(appliedCoupon.discount_value, afterManualDiscount);
   };
 
+  const resolvedDeliveryFee = orderType === 'delivery' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0;
+  const deliveryFeeResolved = hasResolvedDeliveryFee(orderType, effectiveDeliveryZoneInfo);
+  const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+  const {
+    discountAmount: currentManualDiscountAmount,
+    discountPercentage: currentDiscountPercentage,
+  } = calculateManualDiscount(cartSubtotal);
+  const currentCouponDiscountAmount = calculateCouponDiscount();
+  const totalDiscountAmount = currentManualDiscountAmount + currentCouponDiscountAmount;
+  const discountedSubtotal = cartSubtotal - totalDiscountAmount;
+  const finalOrderTotal = discountedSubtotal + resolvedDeliveryFee;
+
   const handleAddToCart = async (item: any, quantity: number, customizations: any[], notes: string) => {
     // Get category ID from the item, or fallback to selected category
     const itemCategoryId = item.category_id || item.categoryId || item.category;
@@ -871,6 +891,37 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     setTimeout(() => menuSearchRef.current?.focus(), 50);
   };
 
+  const ensureDeliveryValidationForCheckout = useCallback(async () => {
+    if (orderType !== 'delivery') {
+      return effectiveDeliveryZoneInfo;
+    }
+
+    if (deliveryFeeResolved) {
+      return effectiveDeliveryZoneInfo;
+    }
+
+    const addressString = buildSelectedAddressString();
+    if (!addressString) {
+      return null;
+    }
+
+    try {
+      const result = await validateDeliveryAddress(addressString, discountedSubtotal);
+      setLocalDeliveryZoneInfo(result);
+      return result;
+    } catch (error) {
+      console.error('[MenuModal] Failed to refresh delivery validation before checkout:', error);
+      return null;
+    }
+  }, [
+    buildSelectedAddressString,
+    deliveryFeeResolved,
+    discountedSubtotal,
+    effectiveDeliveryZoneInfo,
+    orderType,
+    validateDeliveryAddress,
+  ]);
+
   const handleCheckout = async () => {
     if (cartItems.length === 0) {
       return;
@@ -920,14 +971,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
 
     if (shouldBypassPaymentWithGhostMode) {
-      const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
       await handlePaymentComplete({
         method: 'other',
         status: 'paid',
-        amount: subtotal,
+        amount: finalOrderTotal,
         isGhostBypass: true,
       });
       return;
+    }
+
+    if (orderType === 'delivery') {
+      const validationResult = await ensureDeliveryValidationForCheckout();
+      if (!hasResolvedDeliveryFee(orderType, validationResult)) {
+        toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
+        return;
+      }
     }
 
     // Show payment modal instead of immediately completing order
@@ -977,14 +1035,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handlePaymentComplete = async (paymentData: any) => {
-    const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-    const {
-      discountAmount: manualDiscountAmount,
-      discountPercentage: normalizedDiscountPercentage,
-    } = calculateManualDiscount(subtotal);
-    const couponDiscountAmount = calculateCouponDiscount();
-    const totalDiscountAmount = manualDiscountAmount + couponDiscountAmount;
-    const totalAfterDiscount = subtotal - totalDiscountAmount;
     const isGhostOrder = shouldBypassPaymentWithGhostMode;
     const ghostMetadata = isGhostOrder
       ? {
@@ -1019,25 +1069,26 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       if (onOrderComplete) {
         await onOrderComplete({
           items: cartItems,
-          total: totalAfterDiscount,
+          total: discountedSubtotal,
           customer: selectedCustomer,
           address: selectedAddress || null, // Explicitly pass null if undefined
           orderType,
           notes: '', // Could be enhanced to collect order notes
           paymentData,
-          discountPercentage: normalizedDiscountPercentage,
-          discountAmount: manualDiscountAmount,
+          discountPercentage: currentDiscountPercentage,
+          discountAmount: currentManualDiscountAmount,
           manualDiscountMode,
           manualDiscountValue,
           total_discount_amount: totalDiscountAmount,
           is_ghost: isGhostOrder,
           ghost_source: isGhostOrder ? 'ghost_mode_toggle' : null,
           ghost_metadata: ghostMetadata,
+          deliveryFee: resolvedDeliveryFee,
           deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
           ...(appliedCoupon ? {
             coupon_id: appliedCoupon.id,
             coupon_code: appliedCoupon.code,
-            coupon_discount_amount: couponDiscountAmount,
+            coupon_discount_amount: currentCouponDiscountAmount,
           } : {}),
         });
       }
@@ -1135,7 +1186,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
                     <span className="px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
                       {effectiveDeliveryZoneInfo.zone.name}
                     </span>
-                    <span>{t('modals.menu.fee')}: {formatCurrency(effectiveDeliveryZoneInfo.zone.deliveryFee)}</span>
+                    <span>{t('modals.menu.fee')}: {formatCurrency(resolvedDeliveryFee)}</span>
                     {effectiveDeliveryZoneInfo.zone.estimatedTime && (
                       <span>{effectiveDeliveryZoneInfo.zone.estimatedTime.min}-{effectiveDeliveryZoneInfo.zone.estimatedTime.max} min</span>
                     )}
@@ -1221,10 +1272,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               isSaving={isSavingEdit}
               orderType={orderType}
               minimumOrderAmount={effectiveMinimumOrderAmount}
+              deliveryFee={resolvedDeliveryFee}
+              deliveryFeeResolved={deliveryFeeResolved}
               appliedCoupon={appliedCoupon}
               onApplyCoupon={editMode ? undefined : handleApplyCoupon}
               onRemoveCoupon={handleRemoveCoupon}
-              couponDiscount={calculateCouponDiscount()}
+              couponDiscount={currentCouponDiscountAmount}
               isValidatingCoupon={isValidatingCoupon}
               couponError={couponError}
               onAddManualItem={editMode ? undefined : handleAddManualItem}
@@ -1266,25 +1319,17 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
       {/* Payment Modal */}
       {isOpen && (
-        (() => {
-          const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-          const { discountAmount: manualDiscountAmount } = calculateManualDiscount(subtotal);
-          const couponDiscountAmount = calculateCouponDiscount();
-          const discountAmount = manualDiscountAmount + couponDiscountAmount;
-          const orderTotal = subtotal - discountAmount;
-          return (
         <PaymentModal
           isOpen={showPaymentModal}
           onClose={() => setShowPaymentModal(false)}
-          orderTotal={orderTotal}
-          discountAmount={discountAmount}
+          orderTotal={finalOrderTotal}
+          discountAmount={totalDiscountAmount}
+          deliveryFee={resolvedDeliveryFee}
           orderType={orderType}
-          minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount || 0}
+          minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0}
           onPaymentComplete={handlePaymentComplete}
           isProcessing={isProcessingOrder}
         />
-          );
-        })()
       )}
 
       {/* Customer Info Modal — compact centered overlay */}

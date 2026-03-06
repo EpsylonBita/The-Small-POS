@@ -8,7 +8,7 @@ This checklist is intentionally concise and operational. The old exhaustive migr
 
 ## Last Updated
 
-- Date: 2026-02-23
+- Date: 2026-03-06
 - Owner: POS desktop migration/security stream
 
 ## Current Status
@@ -21,7 +21,7 @@ This checklist is intentionally concise and operational. The old exhaustive migr
 | Offline-first sync behavior | COMPLETE | Queue-first local writes; offline deferral; reconnect catch-up |
 | Security hardening P0/P1 | COMPLETE | Implemented and documented in migration backlog |
 | Automated parity/security gates | COMPLETE | `parity:contract`, `test:native-runtime`, type/build/rust checks passing |
-| 24h staging soak evidence | IN PROGRESS | Final operational sign-off pending |
+| 24h staging soak evidence | COMPLETE | Operational sign-off complete (2026-03-06) |
 
 ## Active Validation Checklist
 
@@ -30,13 +30,9 @@ This checklist is intentionally concise and operational. The old exhaustive migr
 - [x] `npm run parity:contract`
 - [x] `npm run test:native-runtime`
 - [x] `cargo check --keep-going --manifest-path src-tauri/Cargo.toml`
-- [ ] Execute 24-hour staging soak and produce signed report artifact
+- [x] Execute 24-hour staging soak and produce signed report artifact
 
-## Remaining Sign-Off Work
-
-1. Run `node scripts/tauri-smoke.mjs --report docs/security-native-migration/reports/staging-soak-report.json` on staging terminal.
-2. Validate report with `npm run soak:report`.
-3. Attach soak report + log/admin evidence to migration sign-off PR.
+All validation gates passing. Phase 8 complete — app is shippable.
 
 ## Historical Reference
 

@@ -10,7 +10,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::db::{self, DbState};
+use crate::db::DbState;
+use crate::{order_ownership, print, printers, receipt_renderer};
 
 // ---------------------------------------------------------------------------
 // Record payment
@@ -45,16 +46,52 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| str_field(payload, "transaction_ref"))
         .or_else(|| str_field(payload, "transactionId"))
         .or_else(|| str_field(payload, "transaction_id"));
-    let staff_id = str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
-    let staff_shift_id =
+    let requested_staff_id =
+        str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let requested_staff_shift_id =
         str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
 
-    // Verify order exists and check if it has a supabase_id (for sync_state)
-    let supabase_id: Option<String> = conn
+    // Verify order exists and load ownership context
+    let (
+        supabase_id,
+        order_type,
+        branch_id,
+        terminal_id,
+        driver_id,
+        order_staff_shift_id,
+        order_staff_id,
+    ): (
+        Option<String>,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT supabase_id FROM orders WHERE id = ?1",
+            "SELECT
+                supabase_id,
+                COALESCE(order_type, 'dine-in'),
+                COALESCE(branch_id, ''),
+                COALESCE(terminal_id, ''),
+                driver_id,
+                staff_shift_id,
+                staff_id
+             FROM orders
+             WHERE id = ?1",
             params![order_id],
-            |row| row.get(0),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
         )
         .map_err(|_| format!("Order not found: {order_id}"))?;
 
@@ -74,6 +111,31 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        let (resolved_shift_id, resolved_staff_id) = order_ownership::resolve_order_owner(
+            &conn,
+            &order_type,
+            &branch_id,
+            &terminal_id,
+            driver_id.as_deref(),
+            requested_staff_shift_id
+                .as_deref()
+                .or(order_staff_shift_id.as_deref()),
+            requested_staff_id.as_deref().or(order_staff_id.as_deref()),
+        )?;
+
+        if resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id {
+            conn.execute(
+                "UPDATE orders
+                 SET staff_shift_id = ?1,
+                     staff_id = ?2,
+                     sync_status = 'pending',
+                     updated_at = ?3
+                 WHERE id = ?4",
+                params![resolved_shift_id, resolved_staff_id, now, order_id],
+            )
+            .map_err(|e| format!("update order ownership for payment: {e}"))?;
+        }
+
         // Insert payment with sync_state
         conn.execute(
             "INSERT INTO order_payments (
@@ -91,8 +153,8 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 cash_received,
                 change_given,
                 transaction_ref,
-                staff_id,
-                staff_shift_id,
+                resolved_staff_id,
+                resolved_shift_id,
                 initial_sync_state,
                 now,
             ],
@@ -112,16 +174,6 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("update order payment: {e}"))?;
 
         // Update cash drawer running totals.
-        // Resolve the shift_id: use payload value, or fall back to the order's staff_shift_id.
-        let resolved_shift_id = staff_shift_id.clone().or_else(|| {
-            conn.query_row(
-                "SELECT staff_shift_id FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .ok()
-            .flatten()
-        });
         if let Some(ref sid) = resolved_shift_id {
             if method == "cash" {
                 conn.execute(
@@ -156,8 +208,8 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             "cashReceived": cash_received,
             "changeGiven": change_given,
             "transactionRef": transaction_ref,
-            "staffId": staff_id,
-            "staffShiftId": staff_shift_id,
+            "staffId": resolved_staff_id,
+            "staffShiftId": resolved_shift_id,
         })
         .to_string();
 
@@ -275,271 +327,22 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
 // Receipt preview
 // ---------------------------------------------------------------------------
 
-/// Build an HTML receipt preview from the order, its payments, and store settings.
+/// Build an HTML receipt preview from the order using the same renderer as the print pipeline.
+///
+/// This ensures the in-app preview matches the physical printed receipt exactly.
 pub fn get_receipt_preview(db: &DbState, order_id: &str) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Build the same document used by the print pipeline
+    let doc = receipt_renderer::ReceiptDocument::OrderReceipt(print::build_order_receipt_doc(
+        db, order_id,
+    )?);
 
-    // Fetch order
-    let order = conn
-        .query_row(
-            "SELECT order_number, customer_name, items, total_amount, tax_amount,
-                    subtotal, status, order_type, table_number, special_instructions,
-                    discount_percentage, discount_amount, tip_amount, delivery_fee,
-                    staff_id, created_at, terminal_id
-             FROM orders WHERE id = ?1",
-            params![order_id],
-            |row| {
-                Ok(serde_json::json!({
-                    "orderNumber": row.get::<_, Option<String>>(0)?,
-                    "customerName": row.get::<_, Option<String>>(1)?,
-                    "items": row.get::<_, String>(2)?,
-                    "totalAmount": row.get::<_, f64>(3)?,
-                    "taxAmount": row.get::<_, Option<f64>>(4)?,
-                    "subtotal": row.get::<_, Option<f64>>(5)?,
-                    "status": row.get::<_, String>(6)?,
-                    "orderType": row.get::<_, Option<String>>(7)?,
-                    "tableNumber": row.get::<_, Option<String>>(8)?,
-                    "specialInstructions": row.get::<_, Option<String>>(9)?,
-                    "discountPercentage": row.get::<_, Option<f64>>(10)?,
-                    "discountAmount": row.get::<_, Option<f64>>(11)?,
-                    "tipAmount": row.get::<_, Option<f64>>(12)?,
-                    "deliveryFee": row.get::<_, Option<f64>>(13)?,
-                    "staffId": row.get::<_, Option<String>>(14)?,
-                    "createdAt": row.get::<_, Option<String>>(15)?,
-                    "terminalId": row.get::<_, Option<String>>(16)?,
-                }))
-            },
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => format!("Order not found: {order_id}"),
-            _ => format!("query order: {e}"),
-        })?;
+    // Resolve layout config (template, store info, currency, etc.)
+    let profile = printers::resolve_printer_profile_for_role(db, None, Some("receipt"))?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let layout = print::resolve_layout_config(db, &profile, "order_receipt")?;
 
-    // Fetch completed payments
-    let mut pay_stmt = conn
-        .prepare(
-            "SELECT method, amount, cash_received, change_given, created_at
-             FROM order_payments
-             WHERE order_id = ?1 AND status = 'completed'
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    type PaymentRow = (String, f64, Option<f64>, Option<f64>, String);
-    let payments: Vec<PaymentRow> = pay_stmt
-        .query_map(params![order_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    // Fetch adjustments (voids + refunds) for this order
-    let mut adj_stmt = conn
-        .prepare(
-            "SELECT adjustment_type, amount, reason, created_at
-             FROM payment_adjustments
-             WHERE order_id = ?1
-             ORDER BY created_at ASC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    type AdjRow = (String, f64, String, String);
-    let adjustments: Vec<AdjRow> = adj_stmt
-        .query_map(params![order_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    // Store name from local_settings
-    let store_name =
-        db::get_setting(&conn, "terminal", "store_name").unwrap_or_else(|| "The Small".to_string());
-    let store_address = db::get_setting(&conn, "terminal", "store_address").unwrap_or_default();
-    let store_phone = db::get_setting(&conn, "terminal", "store_phone").unwrap_or_default();
-
-    // Parse items JSON
-    let items_str = order["items"].as_str().unwrap_or("[]");
-    let items: Vec<Value> = serde_json::from_str(items_str).unwrap_or_default();
-
-    // Build items HTML
-    let mut items_html = String::new();
-    for item in &items {
-        let name = item
-            .get("name")
-            .or_else(|| item.get("itemName"))
-            .and_then(Value::as_str)
-            .unwrap_or("Item");
-        let safe_name = escape_html(name);
-        let qty = item.get("quantity").and_then(Value::as_i64).unwrap_or(1);
-        let price = item
-            .get("totalPrice")
-            .or_else(|| item.get("price"))
-            .or_else(|| item.get("unitPrice"))
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        items_html.push_str(&format!(
-            "<div style=\"display:flex;justify-content:space-between;\"><span>{qty}x {safe_name}</span><span>{price:.2}</span></div>\n",
-        ));
-    }
-    if items_html.is_empty() {
-        items_html = "<div style=\"text-align:center;color:#888;\">No items</div>".to_string();
-    }
-
-    // Extract totals
-    let total = order["totalAmount"].as_f64().unwrap_or(0.0);
-    let subtotal = order["subtotal"].as_f64().unwrap_or(total);
-    let tax = order["taxAmount"].as_f64().unwrap_or(0.0);
-    let discount = order["discountAmount"].as_f64().unwrap_or(0.0);
-    let delivery_fee = order["deliveryFee"].as_f64().unwrap_or(0.0);
-    let tip = order["tipAmount"].as_f64().unwrap_or(0.0);
-    let order_number = order["orderNumber"].as_str().unwrap_or("N/A");
-    let order_type = order["orderType"].as_str().unwrap_or("dine-in");
-    let date = order["createdAt"].as_str().unwrap_or("N/A");
-    let terminal_id = order["terminalId"].as_str().unwrap_or("");
-    let safe_order_number = escape_html(order_number);
-    let safe_order_type = escape_html(order_type);
-    let safe_date = escape_html(date);
-    let safe_terminal_id = escape_html(terminal_id);
-
-    // Build totals rows
-    let mut totals_html = String::new();
-    totals_html.push_str(&format!(
-        "<tr><td>Subtotal</td><td style=\"text-align:right;\">{subtotal:.2}</td></tr>\n"
-    ));
-    if discount > 0.0 {
-        totals_html.push_str(&format!(
-            "<tr><td>Discount</td><td style=\"text-align:right;\">-{discount:.2}</td></tr>\n"
-        ));
-    }
-    if tax > 0.0 {
-        totals_html.push_str(&format!(
-            "<tr><td>Tax</td><td style=\"text-align:right;\">{tax:.2}</td></tr>\n"
-        ));
-    }
-    if delivery_fee > 0.0 {
-        totals_html.push_str(&format!(
-            "<tr><td>Delivery Fee</td><td style=\"text-align:right;\">{delivery_fee:.2}</td></tr>\n"
-        ));
-    }
-    if tip > 0.0 {
-        totals_html.push_str(&format!(
-            "<tr><td>Tip</td><td style=\"text-align:right;\">{tip:.2}</td></tr>\n"
-        ));
-    }
-    totals_html.push_str(&format!(
-        "<tr><td><strong>TOTAL</strong></td><td style=\"text-align:right;\"><strong>{total:.2}</strong></td></tr>\n"
-    ));
-
-    // Build payment lines
-    let mut payment_html = String::new();
-    for (pm_method, pm_amount, pm_cash, pm_change, _) in &payments {
-        let method_label = match pm_method.as_str() {
-            "cash" => "Cash",
-            "card" => "Card",
-            _ => "Other",
-        };
-        payment_html.push_str(&format!(
-            "<div style=\"display:flex;justify-content:space-between;\"><span>{method_label}</span><span>{pm_amount:.2}</span></div>\n"
-        ));
-        if let Some(received) = pm_cash {
-            if *received > 0.0 {
-                payment_html.push_str(&format!(
-                    "<div style=\"display:flex;justify-content:space-between;color:#666;\"><span>Received</span><span>{received:.2}</span></div>\n"
-                ));
-            }
-        }
-        if let Some(change) = pm_change {
-            if *change > 0.0 {
-                payment_html.push_str(&format!(
-                    "<div style=\"display:flex;justify-content:space-between;color:#666;\"><span>Change</span><span>{change:.2}</span></div>\n"
-                ));
-            }
-        }
-    }
-    if payment_html.is_empty() {
-        payment_html =
-            "<div style=\"text-align:center;color:#888;\">No payment recorded</div>".to_string();
-    }
-
-    // Build adjustment lines (voids + refunds)
-    let mut adjustment_html = String::new();
-    for (adj_type, adj_amount, adj_reason, _adj_date) in &adjustments {
-        let label = match adj_type.as_str() {
-            "void" => "VOID",
-            "refund" => "REFUND",
-            _ => "ADJ",
-        };
-        adjustment_html.push_str(&format!(
-            "<div style=\"display:flex;justify-content:space-between;color:#c00;\"><span>{label}</span><span>-{adj_amount:.2}</span></div>\n"
-        ));
-        if !adj_reason.is_empty() {
-            let safe_reason = escape_html(adj_reason);
-            adjustment_html.push_str(&format!(
-                "<div style=\"color:#888;font-size:9px;\">Reason: {safe_reason}</div>\n"
-            ));
-        }
-    }
-
-    // Build header lines
-    let safe_store_name = escape_html(&store_name);
-    let safe_store_address = escape_html(&store_address);
-    let safe_store_phone = escape_html(&store_phone);
-    let address_line = if store_address.is_empty() {
-        String::new()
-    } else {
-        format!("{safe_store_address}<br/>")
-    };
-    let phone_line = if store_phone.is_empty() {
-        String::new()
-    } else {
-        format!("Tel: {safe_store_phone}<br/>")
-    };
-
-    // Build adjustment section (only if there are adjustments)
-    let adj_section = if adjustment_html.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "<hr style=\"border:none;border-top:1px dashed #000;\"/>\n<div style=\"margin:4px 0;\"><strong>Adjustments</strong></div>\n{adjustment_html}"
-        )
-    };
-
-    // Assemble receipt
-    let html = format!(
-        r#"<div style="font-family:monospace;font-size:10px;line-height:1.4;width:100%;">
-<div style="text-align:center;margin-bottom:8px;">
-<strong style="font-size:14px;">{safe_store_name}</strong><br/>
-{address_line}{phone_line}</div>
-<hr style="border:none;border-top:1px dashed #000;"/>
-<div style="margin:4px 0;">
-<strong>Order #{safe_order_number}</strong><br/>
-Type: {safe_order_type}<br/>
-Date: {safe_date}
-</div>
-<hr style="border:none;border-top:1px dashed #000;"/>
-{items_html}
-<hr style="border:none;border-top:1px dashed #000;"/>
-<table style="width:100%;font-family:monospace;font-size:10px;">
-{totals_html}</table>
-<hr style="border:none;border-top:1px dashed #000;"/>
-<div style="margin:4px 0;"><strong>Payment</strong></div>
-{payment_html}
-{adj_section}
-<hr style="border:none;border-top:1px dashed #000;"/>
-<div style="text-align:center;margin-top:8px;font-size:9px;">
-Thank you for your order!<br/>
-{safe_terminal_id}
-</div>
-</div>"#,
-    );
+    // Render using the canonical receipt renderer
+    let html = receipt_renderer::render_html(&doc, &layout);
 
     Ok(serde_json::json!({
         "success": true,
@@ -559,6 +362,7 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64)
 }
 
+#[allow(dead_code)]
 fn escape_html(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -870,5 +674,191 @@ mod tests {
         assert!(html.contains("&lt;b&gt;Burger&lt;/b&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("<b>Burger</b>"));
+    }
+
+    #[test]
+    fn test_record_pickup_payment_reassigns_to_active_cashier_from_driver_shift_context() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'cash-shift', 'cashier-1', 'Cashier', 'branch-1', 'terminal-1', 'cashier',
+                datetime('now'), 100.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-1', 'cash-shift', 'cashier-1', 'branch-1', 'terminal-1',
+                100.0, datetime('now'), datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'driver-shift', 'driver-1', 'Driver', 'branch-1', 'terminal-1', 'driver',
+                datetime('now'), 20.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, order_type, sync_status,
+                branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
+                created_at, updated_at
+            ) VALUES (
+                'pickup-order', '[]', 18.0, 'pending', 'pickup', 'pending',
+                '', '', 'driver-shift', 'driver-1', 'driver-1',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "pickup-order",
+                "method": "cash",
+                "amount": 18.0,
+                "staffShiftId": "driver-shift",
+                "staffId": "driver-1",
+            }),
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let order_shift_id: String = conn
+            .query_row(
+                "SELECT staff_shift_id FROM orders WHERE id = 'pickup-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payment_shift_id: String = conn
+            .query_row(
+                "SELECT staff_shift_id FROM order_payments WHERE order_id = 'pickup-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cashier_cash_sales: f64 = conn
+            .query_row(
+                "SELECT total_cash_sales FROM cash_drawer_sessions WHERE staff_shift_id = 'cash-shift'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(order_shift_id, "cash-shift");
+        assert_eq!(payment_shift_id, "cash-shift");
+        assert_eq!(cashier_cash_sales, 18.0);
+    }
+
+    #[test]
+    fn test_record_delivery_payment_stays_with_driver_shift() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'cash-shift-2', 'cashier-2', 'Cashier', 'branch-2', 'terminal-2', 'cashier',
+                datetime('now'), 100.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-2', 'cash-shift-2', 'cashier-2', 'branch-2', 'terminal-2',
+                100.0, datetime('now'), datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'driver-shift-2', 'driver-2', 'Driver', 'branch-2', 'terminal-2', 'driver',
+                datetime('now'), 20.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, order_type, sync_status,
+                branch_id, terminal_id, staff_shift_id, staff_id, driver_id,
+                created_at, updated_at
+            ) VALUES (
+                'delivery-order', '[]', 24.0, 'pending', 'delivery', 'pending',
+                '', '', 'cash-shift-2', 'cashier-2', 'driver-2',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "delivery-order",
+                "method": "cash",
+                "amount": 24.0,
+                "staffShiftId": "cash-shift-2",
+                "staffId": "cashier-2",
+            }),
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let order_shift_id: String = conn
+            .query_row(
+                "SELECT staff_shift_id FROM orders WHERE id = 'delivery-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payment_shift_id: String = conn
+            .query_row(
+                "SELECT staff_shift_id FROM order_payments WHERE order_id = 'delivery-order'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cashier_cash_sales: f64 = conn
+            .query_row(
+                "SELECT total_cash_sales FROM cash_drawer_sessions WHERE staff_shift_id = 'cash-shift-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(order_shift_id, "driver-shift-2");
+        assert_eq!(payment_shift_id, "driver-shift-2");
+        assert_eq!(cashier_cash_sales, 0.0);
     }
 }

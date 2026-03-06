@@ -118,6 +118,7 @@ pub fn start_system_health_monitor(
     db: Arc<db::DbState>,
     sync_state: Arc<sync::SyncState>,
     interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let cadence = Duration::from_secs(interval_secs.max(10));
     tauri::async_runtime::spawn(async move {
@@ -135,7 +136,13 @@ pub fn start_system_health_monitor(
                 }
             }
 
-            tokio::time::sleep(cadence).await;
+            tokio::select! {
+                _ = tokio::time::sleep(cadence) => {}
+                _ = cancel.cancelled() => {
+                    info!("System health monitor cancelled");
+                    break;
+                }
+            }
         }
     });
 }

@@ -41,6 +41,22 @@ struct PrinterDiscoverPayload {
     printer_type: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct PrinterRecommendationInput {
+    name: String,
+    printer_type: String,
+    address: String,
+    paper_size_hint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PrinterRecommendation {
+    detected_brand: String,
+    recommended: serde_json::Value,
+    confidence: u8,
+    reasons: Vec<String>,
+}
+
 fn parse_order_id_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
     payload_arg0_as_string(
         arg0,
@@ -127,6 +143,213 @@ fn parse_printer_discover_types(arg0: Option<serde_json::Value>) -> Vec<String> 
         .map(|value| value.trim().to_lowercase())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn normalize_recommend_printer_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "system" => "system".to_string(),
+        "network" | "lan" => "network".to_string(),
+        "wifi" => "wifi".to_string(),
+        "bluetooth" | "bt" => "bluetooth".to_string(),
+        "usb" => "usb".to_string(),
+        _ => "system".to_string(),
+    }
+}
+
+fn normalize_paper_size_hint(value: &str) -> Option<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.contains("112") || lower.contains("4in") || lower.contains("4\"") {
+        return Some("112mm".to_string());
+    }
+    if lower.contains("58") || lower.contains("2in") || lower.contains("2\"") {
+        return Some("58mm".to_string());
+    }
+    if lower.contains("80") || lower.contains("3in") || lower.contains("3\"") {
+        return Some("80mm".to_string());
+    }
+    None
+}
+
+fn parse_printer_recommendation_input(
+    arg0: Option<serde_json::Value>,
+) -> PrinterRecommendationInput {
+    match arg0 {
+        Some(serde_json::Value::String(name)) => PrinterRecommendationInput {
+            name: name.trim().to_string(),
+            printer_type: "system".to_string(),
+            address: String::new(),
+            paper_size_hint: None,
+        },
+        Some(serde_json::Value::Object(obj)) => {
+            let payload = serde_json::Value::Object(obj);
+            PrinterRecommendationInput {
+                name: value_str(&payload, &["name", "printerName", "printer_name"])
+                    .unwrap_or_default(),
+                printer_type: normalize_recommend_printer_type(
+                    value_str(&payload, &["type", "printerType", "printer_type"])
+                        .unwrap_or_else(|| "system".to_string())
+                        .as_str(),
+                ),
+                address: value_str(
+                    &payload,
+                    &[
+                        "address",
+                        "ip",
+                        "hostname",
+                        "host",
+                        "systemName",
+                        "system_name",
+                        "deviceName",
+                        "device_name",
+                    ],
+                )
+                .unwrap_or_default(),
+                paper_size_hint: value_str(
+                    &payload,
+                    &[
+                        "paperSizeHint",
+                        "paper_size_hint",
+                        "paperSize",
+                        "paper_size",
+                        "paperWidth",
+                        "paper_width",
+                    ],
+                ),
+            }
+        }
+        _ => PrinterRecommendationInput {
+            name: String::new(),
+            printer_type: "system".to_string(),
+            address: String::new(),
+            paper_size_hint: None,
+        },
+    }
+}
+
+fn infer_recommended_paper_size(input: &PrinterRecommendationInput) -> (String, bool) {
+    if let Some(ref hint) = input.paper_size_hint {
+        if let Some(normalized) = normalize_paper_size_hint(hint) {
+            return (normalized, true);
+        }
+    }
+
+    let probe = format!("{} {}", input.name, input.address);
+    if let Some(normalized) = normalize_paper_size_hint(&probe) {
+        return (normalized, false);
+    }
+
+    ("80mm".to_string(), false)
+}
+
+fn is_star_mcp31_family(probe: &str) -> bool {
+    let lower = probe.to_ascii_lowercase();
+    lower.contains("mcp31")
+        || lower.contains("mcp31l")
+        || lower.contains("mcp31lb")
+        || lower.contains("mc-print3")
+        || lower.contains("mcprint3")
+}
+
+fn build_printer_recommendation(
+    input: &PrinterRecommendationInput,
+    app_language: &str,
+) -> PrinterRecommendation {
+    let detected_from_name = printers::detect_printer_brand(&input.name);
+    let detected_from_address = printers::detect_printer_brand(&input.address);
+    let combined_probe = format!("{} {}", input.name, input.address);
+    let detected_from_combined = printers::detect_printer_brand(&combined_probe);
+    let detected_brand = [
+        detected_from_name,
+        detected_from_address,
+        detected_from_combined,
+    ]
+    .into_iter()
+    .find(|brand| *brand != printers::PrinterBrand::Unknown)
+    .unwrap_or(printers::PrinterBrand::Unknown);
+
+    let character_set = receipt_renderer::language_to_character_set(app_language).to_string();
+    let escpos_code_page =
+        receipt_renderer::resolve_auto_code_page(detected_brand, &character_set).map(u16::from);
+    let (paper_size, paper_from_hint) = infer_recommended_paper_size(input);
+    let star_mcp31 = is_star_mcp31_family(&combined_probe);
+
+    let receipt_template = if star_mcp31 { "classic" } else { "modern" };
+    let font_type = "a";
+    let layout_density = "compact";
+    let header_emphasis = "strong";
+
+    let emulation = if star_mcp31 {
+        "star_line"
+    } else if detected_brand == printers::PrinterBrand::Star {
+        "star_line"
+    } else {
+        "auto"
+    };
+    let render_mode = if star_mcp31 { "raster_exact" } else { "text" };
+
+    let mut connection_details = serde_json::json!({
+        "type": input.printer_type.clone(),
+        "render_mode": render_mode,
+        "emulation": emulation
+    });
+    if star_mcp31 {
+        if let Some(obj) = connection_details.as_object_mut() {
+            obj.insert("threshold".to_string(), serde_json::json!(155));
+        }
+    }
+
+    let mut confidence: i32 = 30;
+    let mut reasons: Vec<String> = Vec::new();
+
+    if !input.name.is_empty() {
+        confidence += 10;
+        reasons.push("Printer name provided".to_string());
+    }
+    if !input.address.is_empty() {
+        confidence += 5;
+        reasons.push("Connection address provided".to_string());
+    }
+    if input.printer_type == "system" {
+        confidence += 15;
+        reasons.push("Windows queue printer type selected".to_string());
+    }
+    if paper_from_hint {
+        confidence += 5;
+        reasons.push("Paper size taken from explicit hint".to_string());
+    }
+    if detected_brand != printers::PrinterBrand::Unknown {
+        confidence += 25;
+        reasons.push(format!(
+            "Detected printer brand: {}",
+            detected_brand.label()
+        ));
+    } else {
+        reasons.push("Printer brand unknown, using generic defaults".to_string());
+    }
+    if star_mcp31 {
+        confidence += 20;
+        reasons.push("Detected Star MCP31/mC-Print3 family".to_string());
+    }
+
+    PrinterRecommendation {
+        detected_brand: detected_brand.label().to_string(),
+        recommended: serde_json::json!({
+            "printerType": input.printer_type.clone(),
+            "paperSize": paper_size,
+            "characterSet": character_set,
+            "escposCodePage": escpos_code_page,
+            "receiptTemplate": receipt_template,
+            "fontType": font_type,
+            "layoutDensity": layout_density,
+            "headerEmphasis": header_emphasis,
+            "connectionDetails": connection_details
+        }),
+        confidence: confidence.clamp(10, 99) as u8,
+        reasons,
+    }
 }
 
 fn should_discover_system_like(requested: &[String]) -> bool {
@@ -487,6 +710,9 @@ fn profile_to_electron_format(profile: &serde_json::Value) -> serde_json::Value 
         "characterSet": value_str(profile, &["characterSet", "character_set"]).unwrap_or_else(|| "PC437_USA".to_string()),
         "greekRenderMode": value_str(profile, &["greekRenderMode", "greek_render_mode"]),
         "receiptTemplate": value_str(profile, &["receiptTemplate", "receipt_template"]),
+        "fontType": value_str(profile, &["fontType", "font_type"]).unwrap_or_else(|| "a".to_string()),
+        "layoutDensity": value_str(profile, &["layoutDensity", "layout_density"]).unwrap_or_else(|| "compact".to_string()),
+        "headerEmphasis": value_str(profile, &["headerEmphasis", "header_emphasis"]).unwrap_or_else(|| "strong".to_string()),
         "escposCodePage": profile.get("escposCodePage").or_else(|| profile.get("escpos_code_page")).and_then(|v| v.as_i64()),
         "role": value_str(profile, &["role"]).unwrap_or_else(|| "receipt".to_string()),
         "isDefault": is_default,
@@ -580,6 +806,9 @@ fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> 
         ("characterSet", "characterSet"),
         ("greekRenderMode", "greekRenderMode"),
         ("receiptTemplate", "receiptTemplate"),
+        ("fontType", "fontType"),
+        ("layoutDensity", "layoutDensity"),
+        ("headerEmphasis", "headerEmphasis"),
         ("fallbackPrinterId", "fallbackPrinterId"),
         ("escposCodePage", "escposCodePage"),
     ];
@@ -1101,6 +1330,7 @@ pub fn start_printer_status_monitor(
     app: tauri::AppHandle,
     db: Arc<db::DbState>,
     interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let cadence = std::time::Duration::from_secs(interval_secs.max(5));
     tauri::async_runtime::spawn(async move {
@@ -1126,7 +1356,13 @@ pub fn start_printer_status_monitor(
                 }
             }
 
-            tokio::time::sleep(cadence).await;
+            tokio::select! {
+                _ = tokio::time::sleep(cadence) => {}
+                _ = cancel.cancelled() => {
+                    tracing::info!("Printer status monitor cancelled");
+                    break;
+                }
+            }
         }
     });
 
@@ -1637,9 +1873,13 @@ pub async fn printer_test(
         .text("0123456789 !@#$%^&*()\n")
         .separator()
         .center()
-        .text("-- End of Test --\n")
-        .feed(4)
-        .cut();
+        .text("-- End of Test --\n");
+    let detected_brand = printers::detect_printer_brand(&printer_name);
+    if detected_brand == printers::PrinterBrand::Star {
+        builder.feed(3).star_cut();
+    } else {
+        builder.feed(4).cut();
+    }
     let test_data = builder.build();
 
     let doc_name = "POS Test Print";
@@ -1718,11 +1958,27 @@ pub async fn printer_test_greek_direct(
         .unwrap_or(80) as i32;
     let paper = escpos::PaperWidth::from_mm(paper_mm);
 
-    let character_set = profile
+    let profile_character_set = profile
         .get("characterSet")
         .or_else(|| profile.get("character_set"))
         .and_then(|v| v.as_str())
         .unwrap_or("PC437_USA");
+
+    // Auto-upgrade: match the same logic as resolve_layout_config in print.rs
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let app_language = crate::db::get_setting(&conn, "general", "language")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "en".to_string());
+    drop(conn);
+
+    let character_set =
+        if profile_character_set == "PC437_USA" && !app_language.is_empty() && app_language != "en"
+        {
+            receipt_renderer::language_to_character_set(&app_language).to_string()
+        } else {
+            profile_character_set.to_string()
+        };
 
     let escpos_code_page = profile
         .get("escposCodePage")
@@ -1743,7 +1999,7 @@ pub async fn printer_test_greek_direct(
     // Apply character set using the same logic as receipts
     let cfg = receipt_renderer::LayoutConfig {
         paper_width: paper,
-        character_set: character_set.to_string(),
+        character_set: character_set.clone(),
         greek_render_mode: greek_render_mode.map(ToString::to_string),
         escpos_code_page,
         ..Default::default()
@@ -1764,7 +2020,7 @@ pub async fn printer_test_greek_direct(
         .bold(false)
         .separator()
         .left()
-        .text(&format!("Character Set: {}\n", character_set))
+        .text(&format!("Character Set: {}\n", cfg.character_set))
         .text(&format!(
             "Code Page Override: {}\n",
             escpos_code_page
@@ -1791,7 +2047,11 @@ pub async fn printer_test_greek_direct(
     builder.separator().center();
     builder
         .text("\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}!\n");
-    builder.feed(4).cut();
+    if detected_brand == printers::PrinterBrand::Star {
+        builder.feed(3).star_cut();
+    } else {
+        builder.feed(4).cut();
+    }
 
     let test_data = builder.build();
     let byte_count = test_data.len();
@@ -1866,6 +2126,29 @@ pub async fn printer_get_auto_config(
         "appLanguage": app_language,
         "autoCharacterSet": auto_character_set,
         "autoCodePage": auto_code_page,
+    }))
+}
+
+#[tauri::command]
+pub async fn printer_recommend_profile(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let input = parse_printer_recommendation_input(arg0);
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let app_language = db::get_setting(&conn, "general", "language")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "en".to_string());
+
+    let recommendation = build_printer_recommendation(&input, &app_language);
+    Ok(serde_json::json!({
+        "detectedBrand": recommendation.detected_brand,
+        "recommended": recommendation.recommended,
+        "confidence": recommendation.confidence,
+        "reasons": recommendation.reasons,
+        "appLanguage": app_language
     }))
 }
 
@@ -2038,6 +2321,103 @@ mod dto_tests {
     }
 
     #[test]
+    fn recommendation_prefers_star_mcp31_defaults() {
+        let input = PrinterRecommendationInput {
+            name: "Star MCP31LB".to_string(),
+            printer_type: "system".to_string(),
+            address: "Star MCP31LB".to_string(),
+            paper_size_hint: Some("80mm".to_string()),
+        };
+
+        let recommendation = build_printer_recommendation(&input, "el");
+        let connection = recommendation
+            .recommended
+            .get("connectionDetails")
+            .and_then(|v| v.as_object())
+            .expect("connectionDetails object");
+
+        assert_eq!(recommendation.detected_brand, "Star");
+        assert_eq!(
+            recommendation
+                .recommended
+                .get("characterSet")
+                .and_then(|v| v.as_str()),
+            Some("PC737_GREEK")
+        );
+        assert_eq!(
+            connection.get("render_mode").and_then(|v| v.as_str()),
+            Some("raster_exact")
+        );
+        assert_eq!(
+            connection.get("emulation").and_then(|v| v.as_str()),
+            Some("star_line")
+        );
+        assert!(connection.get("printable_width_dots").is_none());
+        assert!(connection.get("left_margin_dots").is_none());
+        assert!(recommendation.confidence >= 80);
+    }
+
+    #[test]
+    fn recommendation_falls_back_to_generic_for_unknown_models() {
+        let input = PrinterRecommendationInput {
+            name: "Generic POS Printer".to_string(),
+            printer_type: "network".to_string(),
+            address: "192.168.1.44".to_string(),
+            paper_size_hint: None,
+        };
+
+        let recommendation = build_printer_recommendation(&input, "en");
+        let connection = recommendation
+            .recommended
+            .get("connectionDetails")
+            .and_then(|v| v.as_object())
+            .expect("connectionDetails object");
+
+        assert_eq!(recommendation.detected_brand, "Unknown");
+        assert_eq!(
+            recommendation
+                .recommended
+                .get("paperSize")
+                .and_then(|v| v.as_str()),
+            Some("80mm")
+        );
+        assert_eq!(
+            recommendation
+                .recommended
+                .get("receiptTemplate")
+                .and_then(|v| v.as_str()),
+            Some("modern")
+        );
+        assert_eq!(
+            connection.get("render_mode").and_then(|v| v.as_str()),
+            Some("text")
+        );
+        assert_eq!(
+            connection.get("emulation").and_then(|v| v.as_str()),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn recommendation_confidence_is_higher_for_known_models() {
+        let known = PrinterRecommendationInput {
+            name: "Star MCP31".to_string(),
+            printer_type: "system".to_string(),
+            address: "Star MCP31".to_string(),
+            paper_size_hint: None,
+        };
+        let unknown = PrinterRecommendationInput {
+            name: "Printer Queue".to_string(),
+            printer_type: "system".to_string(),
+            address: "Printer Queue".to_string(),
+            paper_size_hint: None,
+        };
+        let known_recommendation = build_printer_recommendation(&known, "en");
+        let unknown_recommendation = build_printer_recommendation(&unknown, "en");
+        assert!(known_recommendation.confidence > unknown_recommendation.confidence);
+    }
+
+    #[test]
     fn parse_printer_update_payload_supports_legacy_tuple_and_object() {
         let legacy = parse_printer_update_payload(
             Some(serde_json::json!("printer-1")),
@@ -2082,6 +2462,44 @@ mod dto_tests {
             mapped.get("printerName").and_then(|v| v.as_str()),
             Some("Front Desk")
         );
+    }
+
+    #[test]
+    fn printer_profile_mapping_preserves_typography_fields() {
+        let mapped = electron_to_profile_input(
+            None,
+            serde_json::json!({
+                "name": "Receipt Printer",
+                "type": "system",
+                "connectionDetails": { "systemName": "Star MCP31" },
+                "fontType": "b",
+                "layoutDensity": "balanced",
+                "headerEmphasis": "normal"
+            }),
+        );
+        assert_eq!(mapped.get("fontType").and_then(|v| v.as_str()), Some("b"));
+        assert_eq!(
+            mapped.get("layoutDensity").and_then(|v| v.as_str()),
+            Some("balanced")
+        );
+        assert_eq!(
+            mapped.get("headerEmphasis").and_then(|v| v.as_str()),
+            Some("normal")
+        );
+
+        let electron = profile_to_electron_format(&serde_json::json!({
+            "id": "p-1",
+            "name": "Receipt Printer",
+            "printerType": "system",
+            "printerName": "Star MCP31",
+            "paperWidthMm": 80,
+            "font_type": "b",
+            "layout_density": "balanced",
+            "header_emphasis": "normal",
+        }));
+        assert_eq!(electron["fontType"], "b");
+        assert_eq!(electron["layoutDensity"], "balanced");
+        assert_eq!(electron["headerEmphasis"], "normal");
     }
 
     #[test]

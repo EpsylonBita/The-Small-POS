@@ -22,6 +22,7 @@ import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../services/terminal-credentials';
+import { hasResolvedDeliveryFee, resolveDeliveryFee } from '../../utils/delivery-fee';
 
 // Debounce hook for search input
 function useDebounce<T>(value: T, delay: number): T {
@@ -62,6 +63,8 @@ interface ProductCatalogModalProps {
     paymentData?: any;
     discountPercentage?: number;
     discountAmount?: number;
+    deliveryFee?: number;
+    deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
   }) => void;
 }
 
@@ -219,10 +222,13 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
   const subtotal = cartItems.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
   const discountAmount = subtotal * (discountPercentage / 100);
-  const total = subtotal - discountAmount;
+  const deliveryFee = orderType === 'delivery' ? resolveDeliveryFee(deliveryZoneInfo) : 0;
+  const deliveryFeeResolved = hasResolvedDeliveryFee(orderType, deliveryZoneInfo);
+  const subtotalAfterDiscount = subtotal - discountAmount;
+  const total = subtotalAfterDiscount + deliveryFee;
 
   const handleCheckout = () => {
-    if (cartItems.length === 0) return;
+    if (cartItems.length === 0 || (orderType === 'delivery' && !deliveryFeeResolved)) return;
     setShowPaymentModal(true);
   };
 
@@ -245,7 +251,9 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       orderType,
       paymentData,
       discountPercentage,
-      discountAmount
+      discountAmount,
+      deliveryFee,
+      deliveryZoneInfo,
     });
     setCartItems([]);
     setDiscountPercentage(0);
@@ -460,6 +468,16 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                   <span>-€{discountAmount.toFixed(2)}</span>
                 </div>
               )}
+              {orderType === 'delivery' && (
+                <div className="flex justify-between text-gray-400 mb-1">
+                  <span>{t('menu.cart.deliveryFee')}</span>
+                  <span>
+                    {deliveryFeeResolved
+                      ? `€${deliveryFee.toFixed(2)}`
+                      : t('menu.cart.calculatingDeliveryFee')}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between text-white text-xl font-bold mt-2">
                 <span>{t('productCatalog.total', 'Total')}</span>
                 <span>€{total.toFixed(2)}</span>
@@ -468,7 +486,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             {/* Checkout Button */}
             <button
               onClick={handleCheckout}
-              disabled={cartItems.length === 0 || isProcessingOrder}
+              disabled={cartItems.length === 0 || isProcessingOrder || (orderType === 'delivery' && !deliveryFeeResolved)}
               className="mt-4 w-full py-3 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition"
             >
               <DollarSign className="w-5 h-5" />
@@ -486,6 +504,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         onClose={() => setShowPaymentModal(false)}
         orderTotal={total}
         discountAmount={discountAmount}
+        deliveryFee={deliveryFee}
         orderType={orderType}
         onPaymentComplete={handlePaymentComplete}
       />
@@ -494,4 +513,3 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 };
 
 export default ProductCatalogModal;
-

@@ -55,6 +55,11 @@ pub struct EscPosBuilder {
     buffer: Vec<u8>,
     paper: PaperWidth,
     greek_mode: bool,
+    /// The active ESC/POS code page number (used to restore after inline switches).
+    active_code_page: u8,
+    /// When true, code page commands use Star Line Mode format (ESC GS t n)
+    /// instead of standard ESC/POS (ESC t n).
+    star_line_mode: bool,
 }
 
 impl EscPosBuilder {
@@ -63,7 +68,15 @@ impl EscPosBuilder {
             buffer: Vec::with_capacity(512),
             paper: PaperWidth::Mm80,
             greek_mode: false,
+            active_code_page: 0,
+            star_line_mode: false,
         }
+    }
+
+    /// Enable Star Line Mode code page commands (ESC GS t instead of ESC t).
+    pub fn with_star_line_mode(mut self) -> Self {
+        self.star_line_mode = true;
+        self
     }
 
     pub fn with_paper(mut self, paper: PaperWidth) -> Self {
@@ -90,6 +103,7 @@ impl EscPosBuilder {
     /// ESC t n — Select character code page (standard ESC/POS).
     pub fn code_page(&mut self, page: u8) -> &mut Self {
         self.buffer.extend_from_slice(&[ESC, 0x74, page]);
+        self.active_code_page = page;
         self
     }
 
@@ -97,8 +111,12 @@ impl EscPosBuilder {
     ///
     /// Star printers in native Star Line Mode use a different command from
     /// standard ESC/POS. This sends `1B 1D 74 n` instead of `1B 74 n`.
+    /// Also enables `star_line_mode` so inline code page switches (e.g. for €)
+    /// use the correct Star command format.
     pub fn star_code_page(&mut self, page: u8) -> &mut Self {
         self.buffer.extend_from_slice(&[ESC, GS, 0x74, page]);
+        self.active_code_page = page;
+        self.star_line_mode = true;
         self
     }
 
@@ -130,17 +148,67 @@ impl EscPosBuilder {
         self
     }
 
+    /// ESC M 0 — Select Font A (larger default glyphs).
+    pub fn font_a(&mut self) -> &mut Self {
+        self.buffer.extend_from_slice(&[ESC, 0x4D, 0x00]);
+        self
+    }
+
+    /// ESC M 1 — Select Font B (smaller compact glyphs).
+    pub fn font_b(&mut self) -> &mut Self {
+        self.buffer.extend_from_slice(&[ESC, 0x4D, 0x01]);
+        self
+    }
+
     /// ESC - n — Underline (0=off, 1=thin, 2=thick).
     pub fn underline(&mut self, mode: u8) -> &mut Self {
         self.buffer.extend_from_slice(&[ESC, 0x2D, mode]);
         self
     }
 
-    /// GS ! n — Set text size (width × height multiplier, 1–8 each).
+    /// GS B n — Reverse printing mode (white text on black background).
+    /// n=1: reverse on, n=0: reverse off.
+    ///
+    /// **Note:** Star printers do not support GS B and will print literal "B".
+    /// Use `star_reverse()` for Star printers instead.
+    pub fn reverse(&mut self, on: bool) -> &mut Self {
+        self.buffer
+            .extend_from_slice(&[GS, 0x42, if on { 1 } else { 0 }]);
+        self
+    }
+
+    /// ESC 4 / ESC 5 — Star Line Mode reverse (white-on-black) printing.
+    ///
+    /// Star printers in native Star Line Mode use `ESC 4` to turn on
+    /// reverse and `ESC 5` to turn off. Standard ESC/POS `GS B` is not
+    /// recognized and prints literal "B" text.
+    pub fn star_reverse(&mut self, on: bool) -> &mut Self {
+        if on {
+            self.buffer.extend_from_slice(&[ESC, 0x34]); // ESC 4
+        } else {
+            self.buffer.extend_from_slice(&[ESC, 0x35]); // ESC 5
+        }
+        self
+    }
+
+    /// Set text size multiplier.
+    ///
+    /// - Standard ESC/POS: `GS ! n` with width/height 1–8.
+    /// - Star Line Mode: `ESC W n` (double-width on/off) + `ESC h n` (double-height on/off).
+    ///   Star only supports 1× or 2× per axis (no 3×–8×).
     pub fn text_size(&mut self, width: u8, height: u8) -> &mut Self {
-        let w = width.clamp(1, 8) - 1;
-        let h = height.clamp(1, 8) - 1;
-        self.buffer.extend_from_slice(&[GS, 0x21, (w << 4) | h]);
+        if self.star_line_mode {
+            // ESC W n — expanded (double-width): n=1 on, n=0 off
+            self.buffer
+                .extend_from_slice(&[ESC, 0x57, if width > 1 { 1 } else { 0 }]);
+            // ESC h n — double-height: n=1 on, n=0 off
+            self.buffer
+                .extend_from_slice(&[ESC, 0x68, if height > 1 { 1 } else { 0 }]);
+        } else {
+            let w = width.clamp(1, 8) - 1;
+            let h = height.clamp(1, 8) - 1;
+            self.buffer.extend_from_slice(&[GS, 0x21, (w << 4) | h]);
+        }
         self
     }
 
@@ -186,21 +254,45 @@ impl EscPosBuilder {
     // -----------------------------------------------------------------------
 
     /// Append text. Characters are encoded as ASCII or CP737 (Greek mode).
+    ///
+    /// Euro sign (€) is handled via inline code page switching to CP858
+    /// (page 19) which has € at 0xD5, then restoring the active code page.
+    /// Uses Star Line Mode commands (ESC GS t) when `star_line_mode` is set.
     pub fn text(&mut self, s: &str) -> &mut Self {
-        if self.greek_mode {
-            self.buffer.extend(encode_cp737(s));
-        } else {
-            // ASCII fallback — pass through bytes < 0x80, replace rest with '?'
-            for ch in s.chars() {
-                let code = ch as u32;
-                if code < 0x80 {
-                    self.buffer.push(code as u8);
-                } else {
-                    self.buffer.push(b'?');
+        // Split on € to handle inline code page switches
+        for (i, segment) in s.split('€').enumerate() {
+            if i > 0 {
+                // Emit € via inline code page switch to CP858 (has € at 0xD5).
+                // Star Line Mode uses different code page numbers: CP858 = page 4.
+                // Standard ESC/POS (Epson): CP858 = page 19.
+                let cp858_page = if self.star_line_mode { 4 } else { 19 };
+                self.emit_code_page_cmd(cp858_page);
+                self.buffer.push(0xD5);
+                self.emit_code_page_cmd(self.active_code_page); // restore
+            }
+            if self.greek_mode {
+                self.buffer.extend(encode_cp737(segment));
+            } else {
+                for ch in segment.chars() {
+                    let code = ch as u32;
+                    if code < 0x80 {
+                        self.buffer.push(code as u8);
+                    } else {
+                        self.buffer.push(b'?');
+                    }
                 }
             }
         }
         self
+    }
+
+    /// Emit a code page switch using the correct command for the printer mode.
+    fn emit_code_page_cmd(&mut self, page: u8) {
+        if self.star_line_mode {
+            self.buffer.extend_from_slice(&[ESC, GS, 0x74, page]); // Star Line Mode
+        } else {
+            self.buffer.extend_from_slice(&[ESC, 0x74, page]); // Standard ESC/POS
+        }
     }
 
     /// Append raw bytes (e.g. pre-encoded text).
@@ -415,9 +507,15 @@ fn encode_cp737(text: &str) -> Vec<u8> {
             bytes.push(code as u8);
             continue;
         }
-        // Euro sign
-        if ch == '€' {
-            bytes.push(b'E'); // CP737 has no Euro — approximate with 'E'
+        // Note: € is handled at the EscPosBuilder::text() level via code page switching.
+        // Box-drawing characters (CP737 shares positions with CP437)
+        if let Some(b) = box_drawing_to_cp737(ch) {
+            bytes.push(b);
+            continue;
+        }
+        // Safe ASCII fallbacks for common Unicode punctuation
+        if let Some(b) = unicode_fallback(ch) {
+            bytes.push(b);
             continue;
         }
         // Greek character lookup
@@ -428,6 +526,49 @@ fn encode_cp737(text: &str) -> Vec<u8> {
         }
     }
     bytes
+}
+
+/// Map Unicode box-drawing characters to CP737/CP437 byte positions.
+fn box_drawing_to_cp737(ch: char) -> Option<u8> {
+    match ch {
+        '─' => Some(0xC4), // U+2500
+        '│' => Some(0xB3), // U+2502
+        '┌' => Some(0xDA), // U+250C
+        '┐' => Some(0xBF), // U+2510
+        '└' => Some(0xC0), // U+2514
+        '┘' => Some(0xD9), // U+2518
+        '├' => Some(0xC3), // U+251C
+        '┤' => Some(0xB4), // U+2524
+        '┬' => Some(0xC2), // U+252C
+        '┴' => Some(0xC1), // U+2534
+        '┼' => Some(0xC5), // U+253C
+        '═' => Some(0xCD), // U+2550
+        '║' => Some(0xBA), // U+2551
+        '╔' => Some(0xC9), // U+2554
+        '╗' => Some(0xBB), // U+2557
+        '╚' => Some(0xC8), // U+255A
+        '╝' => Some(0xBC), // U+255D
+        '╠' => Some(0xCC), // U+2560
+        '╣' => Some(0xB9), // U+2563
+        '╦' => Some(0xCB), // U+2566
+        '╩' => Some(0xCA), // U+2569
+        '╬' => Some(0xCE), // U+256C
+        _ => None,
+    }
+}
+
+/// Approximate common Unicode punctuation with ASCII equivalents.
+fn unicode_fallback(ch: char) -> Option<u8> {
+    match ch {
+        '\u{00D7}' => Some(b'x'),               // × multiplication sign
+        '\u{2013}' => Some(b'-'),               // – en-dash
+        '\u{2014}' => Some(b'-'),               // — em-dash
+        '\u{2018}' | '\u{2019}' => Some(b'\''), // '' smart quotes
+        '\u{201C}' | '\u{201D}' => Some(b'"'),  // "" smart quotes
+        '\u{2026}' => Some(b'.'),               // … ellipsis (single dot)
+        '\u{00B7}' => Some(b'.'),               // · middle dot
+        _ => None,
+    }
 }
 
 /// Map a Unicode Greek character to its CP737 byte value.
@@ -484,21 +625,27 @@ fn greek_to_cp737(ch: char) -> Option<u8> {
         '\u{03C7}' => Some(0xAE), // χ
         '\u{03C8}' => Some(0xAF), // ψ
         '\u{03C9}' => Some(0xE0), // ω
-        // Accented → base letter approximation
-        '\u{0386}' => Some(0x80), // Ά → Α
-        '\u{0388}' => Some(0x84), // Έ → Ε
-        '\u{0389}' => Some(0x86), // Ή → Η
-        '\u{038A}' => Some(0x88), // Ί → Ι
-        '\u{038C}' => Some(0x8E), // Ό → Ο
-        '\u{038E}' => Some(0x93), // Ύ → Υ
-        '\u{038F}' => Some(0x97), // Ώ → Ω
-        '\u{03AC}' => Some(0x98), // ά → α
-        '\u{03AD}' => Some(0x9C), // έ → ε
-        '\u{03AE}' => Some(0x9E), // ή → η
-        '\u{03AF}' => Some(0xA0), // ί → ι
-        '\u{03CC}' => Some(0xA6), // ό → ο
-        '\u{03CD}' => Some(0xAC), // ύ → υ
-        '\u{03CE}' => Some(0xE0), // ώ → ω
+        // Accented lowercase (tonos) — CP737 bytes 0xE1-0xE9
+        '\u{03AC}' => Some(0xE1), // ά
+        '\u{03AD}' => Some(0xE2), // έ
+        '\u{03AE}' => Some(0xE3), // ή
+        '\u{03AF}' => Some(0xE5), // ί
+        '\u{03CC}' => Some(0xE6), // ό
+        '\u{03CD}' => Some(0xE7), // ύ
+        '\u{03CE}' => Some(0xE9), // ώ
+        // Accented uppercase (tonos) — CP737 bytes 0xEA-0xF0
+        '\u{0386}' => Some(0xEA), // Ά
+        '\u{0388}' => Some(0xEB), // Έ
+        '\u{0389}' => Some(0xEC), // Ή
+        '\u{038A}' => Some(0xED), // Ί
+        '\u{038C}' => Some(0xEE), // Ό
+        '\u{038E}' => Some(0xEF), // Ύ
+        '\u{038F}' => Some(0xF0), // Ώ
+        // Dialytika — CP737 bytes 0xE4, 0xE8, 0xF4, 0xF5
+        '\u{03CA}' => Some(0xE4), // ϊ
+        '\u{03CB}' => Some(0xE8), // ϋ
+        '\u{03AA}' => Some(0xF4), // Ϊ
+        '\u{03AB}' => Some(0xF5), // Ϋ
         _ => None,
     }
 }
@@ -579,6 +726,38 @@ mod tests {
             b.build()
         };
         assert_eq!(data, vec![b'A', b'B', b'C', b'\n']);
+    }
+
+    #[test]
+    fn test_text_euro_uses_cp858_switch_standard_escpos() {
+        let data = {
+            let mut b = EscPosBuilder::new();
+            b.code_page(14).text("17,70 \u{20AC}");
+            b.build()
+        };
+
+        // ... text "17,70 " + ESC t 19 + 0xD5 + ESC t 14
+        assert!(data.windows(3).any(|window| window == [0x1B, 0x74, 19]));
+        assert!(data.windows(3).any(|window| window == [0x1B, 0x74, 14]));
+        assert!(data.contains(&0xD5));
+    }
+
+    #[test]
+    fn test_text_euro_uses_cp858_switch_star_line_mode() {
+        let data = {
+            let mut b = EscPosBuilder::new().with_star_line_mode();
+            b.star_code_page(15).text("17,70 \u{20AC}");
+            b.build()
+        };
+
+        // ... text "17,70 " + ESC GS t 4 + 0xD5 + ESC GS t 15
+        assert!(data
+            .windows(4)
+            .any(|window| window == [0x1B, 0x1D, 0x74, 4]));
+        assert!(data
+            .windows(4)
+            .any(|window| window == [0x1B, 0x1D, 0x74, 15]));
+        assert!(data.contains(&0xD5));
     }
 
     #[test]

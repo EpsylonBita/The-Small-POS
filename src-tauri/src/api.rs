@@ -13,6 +13,16 @@ use tracing::{info, warn};
 /// Default timeout for API requests (30 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Redact a sensitive string for log output: shows only the last 4 characters.
+/// Returns `"****"` for strings shorter than 5 chars, `"...XXXX"` otherwise.
+pub fn redact(s: &str) -> String {
+    if s.len() <= 4 {
+        "****".to_string()
+    } else {
+        format!("...{}", &s[s.len() - 4..])
+    }
+}
+
 /// Timeout used specifically for the lightweight connectivity test.
 const CONNECTIVITY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -244,8 +254,8 @@ pub async fn fetch_from_admin(
         if existing.is_empty() || existing != decoded_tid {
             if !existing.is_empty() && existing != decoded_tid {
                 warn!(
-                    stored_terminal_id = existing,
-                    decoded_terminal_id = %decoded_tid,
+                    stored_terminal_id = %redact(existing),
+                    decoded_terminal_id = %redact(&decoded_tid),
                     "terminal_id mismatch detected, preferring decoded terminal id from connection string"
                 );
             }

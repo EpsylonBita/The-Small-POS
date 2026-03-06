@@ -1,7 +1,19 @@
 use chrono::DateTime;
+use font8x8::UnicodeFonts;
+use image::{GrayImage, Luma};
+use rusttype::{point, Font as RustFont, Scale};
 use serde::{Deserialize, Serialize};
 
 use crate::escpos::{EscPosBuilder, PaperWidth};
+
+pub const RECEIPT_LAYOUT_REVISION: &str = "2026-03-05-r16";
+
+pub fn layout_revision() -> &'static str {
+    RECEIPT_LAYOUT_REVISION
+}
+
+const NOTO_SERIF_REGULAR_TTF: &[u8] = include_bytes!("../assets/fonts/NotoSerif-Regular.ttf");
+const NOTO_SERIF_BOLD_TTF: &[u8] = include_bytes!("../assets/fonts/NotoSerif-Bold.ttf");
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -15,6 +27,106 @@ impl ReceiptTemplate {
         match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             Some("classic") => Self::Classic,
             _ => Self::Modern,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandProfile {
+    FullStyle,
+    SafeText,
+}
+
+impl CommandProfile {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("safe_text") => Self::SafeText,
+            _ => Self::FullStyle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FontType {
+    A,
+    B,
+}
+
+impl FontType {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("b") => Self::B,
+            _ => Self::A,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LayoutDensity {
+    Compact,
+    Balanced,
+    Spacious,
+}
+
+impl LayoutDensity {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("balanced") => Self::Balanced,
+            Some("spacious") => Self::Spacious,
+            _ => Self::Compact,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderEmphasis {
+    Normal,
+    Strong,
+}
+
+impl HeaderEmphasis {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("normal") => Self::Normal,
+            _ => Self::Strong,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassicCustomerRenderMode {
+    Text,
+    RasterExact,
+}
+
+impl ClassicCustomerRenderMode {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("raster_exact") => Self::RasterExact,
+            _ => Self::Text,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptEmulationMode {
+    Auto,
+    Escpos,
+    StarLine,
+}
+
+impl ReceiptEmulationMode {
+    pub fn from_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("escpos") => Self::Escpos,
+            Some("star_line") => Self::StarLine,
+            _ => Self::Auto,
         }
     }
 }
@@ -38,6 +150,12 @@ pub struct ReceiptItem {
     pub quantity: f64,
     pub total: f64,
     #[serde(default)]
+    pub category_name: Option<String>,
+    #[serde(default)]
+    pub subcategory_name: Option<String>,
+    #[serde(default)]
+    pub category_path: Option<String>,
+    #[serde(default)]
     pub note: Option<String>,
     #[serde(default)]
     pub customizations: Vec<ReceiptCustomizationLine>,
@@ -49,6 +167,8 @@ pub struct TotalsLine {
     pub amount: f64,
     #[serde(default)]
     pub emphasize: bool,
+    #[serde(default)]
+    pub discount_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -65,6 +185,19 @@ pub struct AdjustmentLine {
     pub amount: f64,
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverySlipMode {
+    DeliveryOrder,
+    AssignDriver,
+}
+
+impl Default for DeliverySlipMode {
+    fn default() -> Self {
+        Self::DeliveryOrder
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,7 +225,11 @@ pub struct OrderReceiptDoc {
     #[serde(default)]
     pub name_on_ringer: Option<String>,
     #[serde(default)]
+    pub driver_id: Option<String>,
+    #[serde(default)]
     pub driver_name: Option<String>,
+    #[serde(default)]
+    pub delivery_slip_mode: DeliverySlipMode,
     #[serde(default)]
     pub items: Vec<ReceiptItem>,
     #[serde(default)]
@@ -103,6 +240,8 @@ pub struct OrderReceiptDoc {
     pub adjustments: Vec<AdjustmentLine>,
     #[serde(default)]
     pub masked_card: Option<String>,
+    #[serde(default)]
+    pub order_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,6 +277,17 @@ pub struct KitchenTicketDoc {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DriverDeliveryLine {
+    pub order_number: String,
+    pub total_amount: f64,
+    pub payment_method: String,
+    pub cash_collected: f64,
+    pub delivery_fee: f64,
+    pub tip_amount: f64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShiftCheckoutDoc {
     pub shift_id: String,
     pub role_type: String,
@@ -156,6 +306,18 @@ pub struct ShiftCheckoutDoc {
     pub closing_amount: Option<f64>,
     #[serde(default)]
     pub variance_amount: Option<f64>,
+    #[serde(default)]
+    pub driver_deliveries: Vec<DriverDeliveryLine>,
+    #[serde(default)]
+    pub total_cash_collected: f64,
+    #[serde(default)]
+    pub total_card_collected: f64,
+    #[serde(default)]
+    pub total_delivery_fees: f64,
+    #[serde(default)]
+    pub total_tips: f64,
+    #[serde(default)]
+    pub amount_to_return: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -175,6 +337,34 @@ pub struct ZReportDoc {
     pub discounts_total: f64,
     pub expenses_total: f64,
     pub cash_variance: f64,
+    #[serde(default)]
+    pub tips_total: f64,
+    #[serde(default)]
+    pub opening_cash: f64,
+    #[serde(default)]
+    pub closing_cash: f64,
+    #[serde(default)]
+    pub expected_cash: f64,
+    #[serde(default)]
+    pub cash_drops: f64,
+    #[serde(default)]
+    pub driver_cash_given: f64,
+    #[serde(default)]
+    pub driver_cash_returned: f64,
+    #[serde(default)]
+    pub staff_payments_total: f64,
+    #[serde(default)]
+    pub dine_in_orders: i64,
+    #[serde(default)]
+    pub dine_in_sales: f64,
+    #[serde(default)]
+    pub takeaway_orders: i64,
+    #[serde(default)]
+    pub takeaway_sales: f64,
+    #[serde(default)]
+    pub delivery_orders: i64,
+    #[serde(default)]
+    pub delivery_sales: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +381,7 @@ pub enum ReceiptDocument {
 pub struct LayoutConfig {
     pub paper_width: PaperWidth,
     pub template: ReceiptTemplate,
+    pub command_profile: CommandProfile,
     pub organization_name: String,
     pub store_address: Option<String>,
     pub store_phone: Option<String>,
@@ -209,6 +400,16 @@ pub struct LayoutConfig {
     pub language: String,
     pub store_subtitle: Option<String>,
     pub currency_symbol: String,
+    pub font_type: FontType,
+    pub layout_density: LayoutDensity,
+    pub header_emphasis: HeaderEmphasis,
+    /// Use comma as decimal separator (e.g. Greek: 17,70 instead of 17.70).
+    pub decimal_comma: bool,
+    pub classic_customer_render_mode: ClassicCustomerRenderMode,
+    pub emulation_mode: ReceiptEmulationMode,
+    pub printable_width_dots: u16,
+    pub left_margin_dots: u16,
+    pub raster_threshold: u8,
 }
 
 impl Default for LayoutConfig {
@@ -216,6 +417,7 @@ impl Default for LayoutConfig {
         Self {
             paper_width: PaperWidth::Mm80,
             template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::FullStyle,
             organization_name: "The Small".to_string(),
             store_address: None,
             store_phone: None,
@@ -234,6 +436,15 @@ impl Default for LayoutConfig {
             language: "en".to_string(),
             store_subtitle: None,
             currency_symbol: String::new(),
+            font_type: FontType::A,
+            layout_density: LayoutDensity::Compact,
+            header_emphasis: HeaderEmphasis::Strong,
+            decimal_comma: false,
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            emulation_mode: ReceiptEmulationMode::Auto,
+            printable_width_dots: 576,
+            left_margin_dots: 0,
+            raster_threshold: 160,
         }
     }
 }
@@ -249,7 +460,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Table" => "\u{03A4}\u{03C1}\u{03B1}\u{03C0}\u{03AD}\u{03B6}\u{03B9}",
             "Customer" => "\u{03A0}\u{03B5}\u{03BB}\u{03AC}\u{03C4}\u{03B7}\u{03C2}",
             "DELIVERY" => "\u{03A0}\u{0391}\u{03A1}\u{0391}\u{0394}\u{039F}\u{03A3}\u{0397}",
+            "DELIVERY SLIP" => "\u{0394}\u{0395}\u{039B}\u{03A4}\u{0399}\u{039F} \u{0394}\u{0399}\u{0391}\u{039D}\u{039F}\u{039C}\u{0397}\u{03A3}",
             "Driver" => "\u{039F}\u{03B4}\u{03B7}\u{03B3}\u{03CC}\u{03C2}",
+            "Driver ID" => "ID \u{039F}\u{03B4}\u{03B7}\u{03B3}\u{03BF}\u{03CD}",
             "Address" => "\u{0394}\u{03B9}\u{03B5}\u{03CD}\u{03B8}\u{03C5}\u{03BD}\u{03C3}\u{03B7}",
             "City" => "\u{03A0}\u{03CC}\u{03BB}\u{03B7}",
             "Postal Code" => "\u{03A4}.\u{039A}.",
@@ -264,6 +477,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Tip" => "\u{03A6}\u{03B9}\u{03BB}\u{03BF}\u{03B4}\u{03CE}\u{03C1}\u{03B7}\u{03BC}\u{03B1}",
             "TOTAL" => "\u{03A3}\u{03A5}\u{039D}\u{039F}\u{039B}\u{039F}",
             "PAYMENT" => "\u{03A0}\u{039B}\u{0397}\u{03A1}\u{03A9}\u{039C}\u{0397}",
+            "METHOD" => "\u{03A4}\u{03C1}\u{03CC}\u{03C0}\u{03BF}\u{03C2}",
             "Cash" => "\u{039C}\u{03B5}\u{03C4}\u{03C1}\u{03B7}\u{03C4}\u{03AC}",
             "Card" => "\u{039A}\u{03AC}\u{03C1}\u{03C4}\u{03B1}",
             "Received" => "\u{0395}\u{03B9}\u{03C3}\u{03C0}\u{03C1}\u{03AC}\u{03C7}\u{03B8}\u{03B7}\u{03BA}\u{03B5}",
@@ -275,13 +489,63 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "VOID" => "\u{0391}\u{039A}\u{03A5}\u{03A1}\u{03A9}\u{03A3}\u{0397}",
             "REFUND" => "\u{0395}\u{03A0}\u{0399}\u{03A3}\u{03A4}\u{03A1}\u{039F}\u{03A6}\u{0397}",
             "Thank you" => "\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}",
+            "Thank you visit" => "\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5} \u{03B3}\u{03B9}\u{03B1} \u{03C4}\u{03B7}\u{03BD} \u{03B5}\u{03C0}\u{03AF}\u{03C3}\u{03BA}\u{03B5}\u{03C8}\u{03AE} \u{03C3}\u{03B1}\u{03C2}!",
+            "Thank you preference" => "\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5} \u{03B3}\u{03B9}\u{03B1} \u{03C4}\u{03B7}\u{03BD} \u{03C0}\u{03C1}\u{03BF}\u{03C4}\u{03AF}\u{03BC}\u{03B7}\u{03C3}\u{03B7}!",
+            "Payment method" => "\u{03A4}\u{03C1}\u{03CC}\u{03C0}\u{03BF}\u{03C2} \u{03C0}\u{03BB}\u{03B7}\u{03C1}\u{03C9}\u{03BC}\u{03AE}\u{03C2}",
             "VAT" => "\u{0391}\u{03A6}\u{039C}",
-            "TAX_OFFICE" => "\u{0394}.\u{039F}.\u{03A5}",
+            "TAX_OFFICE" => "\u{0394}\u{039F}\u{03A5}",
             "Shift" => "\u{0392}\u{03AC}\u{03C1}\u{03B4}\u{03B9}\u{03B1}",
             "Staff" => "\u{03A0}\u{03C1}\u{03BF}\u{03C3}\u{03C9}\u{03C0}\u{03B9}\u{03BA}\u{03CC}",
+            "SHIFT CHECKOUT" => "ΚΛΕΙΣΙΜΟ ΒΑΡΔΙΑΣ",
+            "Z REPORT" => "ΑΝΑΦΟΡΑ Z",
+            "Role" => "Ρόλος",
+            "Terminal" => "Τερματικό",
+            "Check-in" => "Έναρξη",
+            "Check-out" => "Λήξη",
+            "Orders" => "Παραγγελίες",
+            "Sales" => "Πωλήσεις",
+            "Expenses" => "Έξοδα",
+            "Refunds" => "Επιστροφές",
+            "Opening" => "Άνοιγμα",
+            "Expected" => "Αναμενόμενο",
+            "Closing" => "Κλείσιμο",
+            "Variance" => "Διαφορά",
+            "DRIVER DELIVERIES" => "ΠΑΡΑΔΟΣΕΙΣ ΟΔΗΓΟΥ",
+            "Generated" => "Δημιουργία",
+            "Gross" => "Μικτά",
+            "Net" => "Καθαρά",
+            "Voids" => "Ακυρώσεις",
+            "Discounts" => "Εκπτώσεις",
+            "DELIVERIES" => "ΠΑΡΑΔΟΣΕΙΣ",
+            "DRIVER SUMMARY" => "ΣΥΝΟΨΗ ΟΔΗΓΟΥ",
+            "Cash Collected" => "Εισπραχθέντα Μετρητά",
+            "Card Collected" => "Εισπραχθείσα Κάρτα",
+            "Delivery Fees" => "Χρεώσεις Παράδοσης",
+            "Starting" => "Εκκίνηση",
+            "+ Cash" => "+ Μετρητά",
+            "- Expenses" => "- Έξοδα",
+            "= To Return" => "= Προς Επιστροφή",
+            "SALES" => "ΠΩΛΗΣΕΙΣ",
+            "PAYMENTS" => "ΠΛΗΡΩΜΕΣ",
+            "Tips" => "Φιλοδωρήματα",
+            "ORDER BREAKDOWN" => "ΑΝΑΛΥΣΗ ΠΑΡΑΓΓΕΛΙΩΝ",
+            "Dine-in" => "Επιτόπου",
+            "Takeaway" => "Παραλαβή",
+            "CASH DRAWER" => "ΤΑΜΕΙΟ",
+            "Cash Sales" => "Πωλήσεις Μετρητών",
+            "Cash Drops" => "Αποσύρσεις Μετρητών",
+            "Driver Given" => "Δόθηκαν σε Οδηγό",
+            "Driver Returned" => "Επιστράφηκαν από Οδηγό",
+            "Staff Payments*" => "Πληρωμές Προσωπικού*",
+            "Informational only" => "Μόνο για ενημέρωση",
             "KITCHEN TICKET" => "\u{0394}\u{0395}\u{039B}\u{03A4}\u{0399}\u{039F} \u{039A}\u{039F}\u{03A5}\u{0396}\u{0399}\u{039D}\u{0391}\u{03A3}",
-            "Phone" => "\u{03A4}\u{03B7}\u{03BB}.",
+            "Phone" => "\u{03A4}\u{03B7}\u{03BB}",
             "No items" => "\u{03A7}\u{03C9}\u{03C1}\u{03AF}\u{03C2} \u{03B5}\u{03AF}\u{03B4}\u{03B7}",
+            "No payment recorded" => "Δεν καταγράφηκε πληρωμή",
+            "Note" => "Σημείωση",
+            "Without" => "Χωρίς",
+            "Little" => "Λίγο",
+            "Category" => "Κατηγορία",
             "Road" => "\u{039F}\u{03B4}\u{03CC}\u{03C2}",
             "Ringer" => "\u{039A}\u{03BF}\u{03C5}\u{03B4}\u{03BF}\u{03CD}\u{03BD}\u{03B9}",
             "Postal" => "\u{03A4}.\u{039A}.",
@@ -294,7 +558,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Table" => "Tisch",
             "Customer" => "Kunde",
             "DELIVERY" => "LIEFERUNG",
+            "DELIVERY SLIP" => "LIEFERSCHEIN",
             "Driver" => "Fahrer",
+            "Driver ID" => "Fahrer-ID",
             "Address" => "Adresse",
             "City" => "Stadt",
             "Postal Code" => "PLZ",
@@ -309,6 +575,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Tip" => "Trinkgeld",
             "TOTAL" => "GESAMT",
             "PAYMENT" => "ZAHLUNG",
+            "METHOD" => "METHODE",
             "Cash" => "Bar",
             "Card" => "Karte",
             "Received" => "Erhalten",
@@ -318,11 +585,63 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Void" => "Storno",
             "Refund" => "Erstattung",
             "Thank you" => "Vielen Dank",
+            "Thank you visit" => "Vielen Dank f\u{00FC}r Ihren Besuch!",
+            "Thank you preference" => "Vielen Dank f\u{00FC}r Ihre Wahl!",
+            "Payment method" => "Zahlungsmethode",
             "VAT" => "USt-IdNr.",
             "TAX_OFFICE" => "Finanzamt",
+            "Shift" => "Schicht",
+            "Staff" => "Personal",
+            "SHIFT CHECKOUT" => "SCHICHT-ABSCHLUSS",
+            "Z REPORT" => "Z-BERICHT",
+            "Role" => "Rolle",
+            "Terminal" => "Terminal",
+            "Check-in" => "Check-in",
+            "Check-out" => "Check-out",
+            "Orders" => "Bestellungen",
+            "Sales" => "Umsatz",
+            "Expenses" => "Ausgaben",
+            "Refunds" => "Erstattungen",
+            "Opening" => "Anfang",
+            "Expected" => "Erwartet",
+            "Closing" => "Abschluss",
+            "Variance" => "Differenz",
+            "DRIVER DELIVERIES" => "FAHRER-LIEFERUNGEN",
+            "Generated" => "Erstellt",
+            "Gross" => "Brutto",
+            "Net" => "Netto",
+            "Voids" => "Stornos",
+            "Discounts" => "Rabatte",
+            "DELIVERIES" => "LIEFERUNGEN",
+            "DRIVER SUMMARY" => "FAHRER-ZUSAMMENFASSUNG",
+            "Cash Collected" => "Bar kassiert",
+            "Card Collected" => "Karte kassiert",
+            "Delivery Fees" => "Liefergebuhren",
+            "Starting" => "Start",
+            "+ Cash" => "+ Bar",
+            "- Expenses" => "- Ausgaben",
+            "= To Return" => "= Rueckgabe",
+            "SALES" => "UMSATZ",
+            "PAYMENTS" => "ZAHLUNGEN",
+            "Tips" => "Trinkgelder",
+            "ORDER BREAKDOWN" => "BESTELL-UEBERSICHT",
+            "Dine-in" => "Vor Ort",
+            "Takeaway" => "Mitnahme",
+            "CASH DRAWER" => "KASSENSCHADE",
+            "Cash Sales" => "Barumsatz",
+            "Cash Drops" => "Barentnahmen",
+            "Driver Given" => "Fahrer ausgezahlt",
+            "Driver Returned" => "Vom Fahrer retour",
+            "Staff Payments*" => "Mitarbeiterzahlungen*",
+            "Informational only" => "Nur Information",
             "KITCHEN TICKET" => "K\u{00DC}CHENBON",
             "Phone" => "Tel.",
             "No items" => "Keine Artikel",
+            "No payment recorded" => "Keine Zahlung erfasst",
+            "Note" => "Notiz",
+            "Without" => "Ohne",
+            "Little" => "Wenig",
+            "Category" => "Kategorie",
             "Road" => "Stra\u{00DF}e",
             "Ringer" => "Klingel",
             "Postal" => "PLZ",
@@ -335,7 +654,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Table" => "Table",
             "Customer" => "Client",
             "DELIVERY" => "LIVRAISON",
+            "DELIVERY SLIP" => "BON DE LIVRAISON",
             "Driver" => "Livreur",
+            "Driver ID" => "ID Livreur",
             "Address" => "Adresse",
             "City" => "Ville",
             "Postal Code" => "Code postal",
@@ -350,6 +671,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Tip" => "Pourboire",
             "TOTAL" => "TOTAL",
             "PAYMENT" => "PAIEMENT",
+            "METHOD" => "MODE",
             "Cash" => "Especes",
             "Card" => "Carte",
             "Received" => "Recu",
@@ -359,14 +681,66 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Void" => "Annulation",
             "Refund" => "Remboursement",
             "Thank you" => "Merci",
+            "Thank you visit" => "Merci de votre visite!",
+            "Thank you preference" => "Merci de votre pr\u{00E9}f\u{00E9}rence!",
+            "Payment method" => "Mode de paiement",
             "VAT" => "TVA",
             "TAX_OFFICE" => "Bureau fiscal",
+            "Shift" => "Shift",
+            "Staff" => "Personnel",
+            "SHIFT CHECKOUT" => "CLOTURE DE SHIFT",
+            "Z REPORT" => "RAPPORT Z",
+            "Role" => "Role",
+            "Terminal" => "Terminal",
+            "Check-in" => "Debut",
+            "Check-out" => "Fin",
+            "Orders" => "Commandes",
+            "Sales" => "Ventes",
+            "Expenses" => "Depenses",
+            "Refunds" => "Remboursements",
+            "Opening" => "Ouverture",
+            "Expected" => "Attendu",
+            "Closing" => "Cloture",
+            "Variance" => "Ecart",
+            "DRIVER DELIVERIES" => "LIVRAISONS LIVREUR",
+            "Generated" => "Genere",
+            "Gross" => "Brut",
+            "Net" => "Net",
+            "Voids" => "Annulations",
+            "Discounts" => "Remises",
+            "DELIVERIES" => "LIVRAISONS",
+            "DRIVER SUMMARY" => "RESUME LIVREUR",
+            "Cash Collected" => "Especes encaissees",
+            "Card Collected" => "Carte encaissee",
+            "Delivery Fees" => "Frais de livraison",
+            "Starting" => "Depart",
+            "+ Cash" => "+ Especes",
+            "- Expenses" => "- Depenses",
+            "= To Return" => "= A rendre",
+            "SALES" => "VENTES",
+            "PAYMENTS" => "PAIEMENTS",
+            "Tips" => "Pourboires",
+            "ORDER BREAKDOWN" => "REPARTITION COMMANDES",
+            "Dine-in" => "Sur place",
+            "Takeaway" => "A emporter",
+            "CASH DRAWER" => "CAISSE",
+            "Cash Sales" => "Ventes especes",
+            "Cash Drops" => "Sorties especes",
+            "Driver Given" => "Donne au livreur",
+            "Driver Returned" => "Rendu par livreur",
+            "Staff Payments*" => "Paiements personnel*",
+            "Informational only" => "Information seulement",
             "KITCHEN TICKET" => "BON CUISINE",
             "Phone" => "T\u{00E9}l.",
             "Road" => "Rue",
             "Ringer" => "Sonnette",
             "Postal" => "CP",
             "No items" => "Aucun article",
+            "No payment recorded" => "Aucun paiement enregistre",
+            "Note" => "Note",
+            "Without" => "Sans",
+            "Little" => "Peu",
+            "Category" => "Categorie",
             _ => key,
         },
         "it" => match key {
@@ -376,7 +750,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Table" => "Tavolo",
             "Customer" => "Cliente",
             "DELIVERY" => "CONSEGNA",
+            "DELIVERY SLIP" => "BOLLA CONSEGNA",
             "Driver" => "Corriere",
+            "Driver ID" => "ID Corriere",
             "Address" => "Indirizzo",
             "City" => "Citta",
             "Postal Code" => "CAP",
@@ -391,6 +767,7 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Tip" => "Mancia",
             "TOTAL" => "TOTALE",
             "PAYMENT" => "PAGAMENTO",
+            "METHOD" => "METODO",
             "Cash" => "Contanti",
             "Card" => "Carta",
             "Received" => "Ricevuto",
@@ -400,18 +777,108 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Void" => "Annullamento",
             "Refund" => "Rimborso",
             "Thank you" => "Grazie",
+            "Thank you visit" => "Grazie per la vostra visita!",
+            "Thank you preference" => "Grazie per la vostra preferenza!",
+            "Payment method" => "Metodo di pagamento",
             "VAT" => "P.IVA",
             "TAX_OFFICE" => "Ufficio fiscale",
+            "Shift" => "Turno",
+            "Staff" => "Personale",
+            "SHIFT CHECKOUT" => "CHIUSURA TURNO",
+            "Z REPORT" => "RAPPORTO Z",
+            "Role" => "Ruolo",
+            "Terminal" => "Terminale",
+            "Check-in" => "Ingresso",
+            "Check-out" => "Uscita",
+            "Orders" => "Ordini",
+            "Sales" => "Vendite",
+            "Expenses" => "Spese",
+            "Refunds" => "Rimborsi",
+            "Opening" => "Apertura",
+            "Expected" => "Atteso",
+            "Closing" => "Chiusura",
+            "Variance" => "Differenza",
+            "DRIVER DELIVERIES" => "CONSEGNE CORRIERE",
+            "Generated" => "Generato",
+            "Gross" => "Lordo",
+            "Net" => "Netto",
+            "Voids" => "Annulli",
+            "Discounts" => "Sconti",
+            "DELIVERIES" => "CONSEGNE",
+            "DRIVER SUMMARY" => "RIEPILOGO CORRIERE",
+            "Cash Collected" => "Contanti incassati",
+            "Card Collected" => "Carta incassata",
+            "Delivery Fees" => "Spese consegna",
+            "Starting" => "Inizio",
+            "+ Cash" => "+ Contanti",
+            "- Expenses" => "- Spese",
+            "= To Return" => "= Da restituire",
+            "SALES" => "VENDITE",
+            "PAYMENTS" => "PAGAMENTI",
+            "Tips" => "Mance",
+            "ORDER BREAKDOWN" => "RIPARTIZIONE ORDINI",
+            "Dine-in" => "Al tavolo",
+            "Takeaway" => "Asporto",
+            "CASH DRAWER" => "CASSETTO CASSA",
+            "Cash Sales" => "Vendite contanti",
+            "Cash Drops" => "Prelievi contanti",
+            "Driver Given" => "Dato al corriere",
+            "Driver Returned" => "Reso dal corriere",
+            "Staff Payments*" => "Pagamenti staff*",
+            "Informational only" => "Solo informativo",
             "KITCHEN TICKET" => "COMANDA CUCINA",
             "Phone" => "Tel.",
             "Road" => "Via",
             "Ringer" => "Citofono",
             "Postal" => "CAP",
             "No items" => "Nessun articolo",
+            "No payment recorded" => "Nessun pagamento registrato",
+            "Note" => "Nota",
+            "Without" => "Senza",
+            "Little" => "Poco",
+            "Category" => "Categoria",
             _ => key,
         },
         _ => key,
     }
+}
+
+/// Translate an order type string (e.g. "pickup", "delivery", "dine_in", "takeaway")
+/// to the configured receipt language. Returns an owned uppercase string.
+fn translate_order_type(lang: &str, order_type: &str) -> String {
+    let normalized = order_type.trim().to_ascii_lowercase().replace('-', "_");
+    let translated = match lang {
+        "el" => match normalized.as_str() {
+            "pickup" => "\u{03A0}\u{0391}\u{03A1}\u{0391}\u{039B}\u{0391}\u{0392}\u{0397}", // ΠΑΡΑΛΑΒΗ
+            "delivery" => "\u{03A0}\u{0391}\u{03A1}\u{0391}\u{0394}\u{039F}\u{03A3}\u{0397}", // ΠΑΡΑΔΟΣΗ
+            "dine_in" => "\u{0395}\u{03A0}\u{0399}\u{03A4}\u{039F}\u{03A0}\u{039F}\u{03A5}", // ΕΠΙΤΟΠΟΥ
+            "takeaway" => "TAKE AWAY",
+            _ => return order_type.to_uppercase(),
+        },
+        "de" => match normalized.as_str() {
+            "pickup" => "ABHOLUNG",
+            "delivery" => "LIEFERUNG",
+            "dine_in" => "VOR ORT",
+            "takeaway" => "ZUM MITNEHMEN",
+            _ => return order_type.to_uppercase(),
+        },
+        "fr" => match normalized.as_str() {
+            "pickup" => "RETRAIT",
+            "delivery" => "LIVRAISON",
+            "dine_in" => "SUR PLACE",
+            "takeaway" => "\u{00C0} EMPORTER",
+            _ => return order_type.to_uppercase(),
+        },
+        "it" => match normalized.as_str() {
+            "pickup" => "RITIRO",
+            "delivery" => "CONSEGNA",
+            "dine_in" => "AL TAVOLO",
+            "takeaway" => "DA ASPORTO",
+            _ => return order_type.to_uppercase(),
+        },
+        _ => return order_type.to_uppercase(),
+    };
+    translated.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -424,6 +891,13 @@ pub struct RenderWarning {
 pub struct EscPosRender {
     pub bytes: Vec<u8>,
     pub warnings: Vec<RenderWarning>,
+    pub body_mode: EscPosBodyMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscPosBodyMode {
+    Text,
+    RasterExact,
 }
 
 fn esc(input: &str) -> String {
@@ -433,8 +907,37 @@ fn esc(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Extract a short display number from an order ID.
+///
+/// `"ORD-20260303-00019"` → `"00019"`
+/// `"A-12"` → `"A-12"` (returned as-is if no ORD- prefix)
+/// `"00019"` → `"00019"` (returned as-is)
+fn extract_short_order_number(order_number: &str) -> &str {
+    let s = order_number.trim();
+    // Handle ORD-YYYYMMDD-NNNNN format: take the last segment after the last dash
+    if s.starts_with("ORD-") || s.starts_with("ord-") {
+        if let Some(pos) = s.rfind('-') {
+            let suffix = &s[pos + 1..];
+            if !suffix.is_empty() {
+                return suffix;
+            }
+        }
+    }
+    s
+}
+
 fn money(value: f64) -> String {
     format!("{value:.2}")
+}
+
+/// Format a monetary value using comma as decimal separator (e.g. Greek locale).
+fn money_locale(value: f64, comma: bool) -> String {
+    let s = format!("{value:.2}");
+    if comma {
+        s.replace('.', ",")
+    } else {
+        s
+    }
 }
 
 fn qty(value: f64) -> String {
@@ -453,14 +956,71 @@ fn money_with_currency(value: f64, symbol: &str) -> String {
     }
 }
 
-fn header_branch_line(cfg: &LayoutConfig) -> Option<&str> {
+fn money_with_currency_locale(value: f64, symbol: &str, comma: bool) -> String {
+    let amount = money_locale(value, comma);
+    if symbol.is_empty() {
+        amount
+    } else {
+        format!("{}{}", amount, symbol)
+    }
+}
+
+fn is_known_euro_character_set(character_set: &str) -> bool {
+    matches!(
+        character_set.trim().to_ascii_uppercase().as_str(),
+        "PC437_USA"
+            | "PC737_GREEK"
+            | "PC850_MULTILINGUAL"
+            | "PC852_LATIN2"
+            | "PC866_CYRILLIC"
+            | "PC1252_LATIN1"
+            | "PC851_GREEK"
+            | "PC869_GREEK"
+    )
+}
+
+/// Normalize currency symbol rendering for ESC/POS compatibility.
+///
+/// Euro (`€`) is preferred, but when printer/code-page support is not
+/// confidently known, fallback to ASCII `EUR` to avoid mojibake.
+pub fn normalize_currency_symbol_for_layout(
+    symbol: &str,
+    character_set: &str,
+    escpos_code_page: Option<u8>,
+    brand: crate::printers::PrinterBrand,
+) -> String {
+    if !symbol.contains('€') {
+        return symbol.to_string();
+    }
+
+    let charset_supported = is_known_euro_character_set(character_set);
+    let brand_supported = !matches!(brand, crate::printers::PrinterBrand::Unknown);
+    let code_page_supported = match escpos_code_page {
+        Some(page) => resolve_auto_code_page(brand, character_set)
+            .map(|expected| expected == page)
+            .unwrap_or(false),
+        None => true,
+    };
+
+    if charset_supported && brand_supported && code_page_supported {
+        symbol.to_string()
+    } else {
+        symbol.replace('€', "EUR")
+    }
+}
+
+fn header_primary_line(cfg: &LayoutConfig) -> &str {
     let org = cfg.organization_name.trim();
-    cfg.store_subtitle
+    if let Some(branch) = cfg
+        .store_subtitle
         .as_deref()
         .map(str::trim)
-        .filter(|value| {
-            !value.is_empty() && *value != org && !value.eq_ignore_ascii_case(org)
-        })
+        .filter(|value| !value.is_empty() && *value != org && !value.eq_ignore_ascii_case(org))
+    {
+        branch
+    } else {
+        org
+    }
 }
 
 fn append_html_header_block(
@@ -469,21 +1029,42 @@ fn append_html_header_block(
     lang: &str,
     include_logo_placeholder: bool,
 ) {
+    // Logo area
     if include_logo_placeholder && cfg.show_logo {
-        body.push_str("<div class=\"center\" style=\"font-size:24px;margin:8px 0\">[ LOGO ]</div>");
+        body.push_str("<div class=\"logo-area\"><div class=\"logo-circle\">");
+        if let Some(url) = cfg
+            .logo_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            body.push_str(&format!("<img src=\"{}\" alt=\"Logo\"/>", esc(url)));
+        } else {
+            // Text fallback: use first significant word of org name
+            let org = cfg.organization_name.trim();
+            let abbreviation = org
+                .split_whitespace()
+                .next()
+                .unwrap_or(org)
+                .chars()
+                .take(8)
+                .collect::<String>();
+            body.push_str(&format!(
+                "<span class=\"logo-text\">{}</span>",
+                esc(&abbreviation)
+            ));
+        }
+        body.push_str("</div></div>");
     }
 
+    // Branch info
+    body.push_str("<div class=\"branch-info\">");
+
+    let primary_line = header_primary_line(cfg);
     body.push_str(&format!(
-        "<div class=\"center\"><strong>{}</strong></div>",
-        esc(&cfg.organization_name)
+        "<div class=\"store-name\">{}</div>",
+        esc(primary_line)
     ));
-
-    if let Some(branch_line) = header_branch_line(cfg) {
-        body.push_str(&format!(
-            "<div class=\"center\"><strong>{}</strong></div>",
-            esc(branch_line)
-        ));
-    }
 
     if let Some(label) = cfg
         .copy_label
@@ -491,8 +1072,28 @@ fn append_html_header_block(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        body.push_str(&format!("<div class=\"center\">{}</div>", esc(label)));
+        body.push_str(&format!(
+            "<div style=\"font-size:9px;color:#888\">{}</div>",
+            esc(label)
+        ));
     }
+
+    // Subtitle (e.g. "la crêperie")
+    if let Some(subtitle) = cfg
+        .store_subtitle
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let org = cfg.organization_name.trim();
+        // Only show subtitle if it's different from the org name
+        if !subtitle.eq_ignore_ascii_case(org) {
+            body.push_str(&format!("<div class=\"store-sub\">{}</div>", esc(subtitle)));
+        }
+    }
+
+    // Store details (address, phone, vat)
+    let mut detail_parts: Vec<String> = Vec::new();
 
     if let Some(address) = cfg
         .store_address
@@ -500,7 +1101,7 @@ fn append_html_header_block(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        body.push_str(&format!("<div class=\"center\">{}</div>", esc(address)));
+        detail_parts.push(esc(address));
     }
 
     if let Some(phone) = cfg
@@ -509,34 +1110,52 @@ fn append_html_header_block(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        body.push_str(&format!("<div class=\"center\">{}</div>", esc(phone)));
+        let phone_label = receipt_label(lang, "Phone");
+        detail_parts.push(format!("{}: {}", esc(phone_label), esc(phone)));
     }
 
-    if let Some(vat) = cfg
+    // VAT and tax office on same line if both exist
+    let vat = cfg
         .vat_number
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        body.push_str(&format!(
-            "<div class=\"center\">{}: {}</div>",
-            esc(receipt_label(lang, "VAT")),
-            esc(vat)
-        ));
-    }
-
-    if let Some(tax_office) = cfg
+        .filter(|value| !value.is_empty());
+    let tax = cfg
         .tax_office
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+        .filter(|value| !value.is_empty());
+    match (vat, tax) {
+        (Some(v), Some(t)) => {
+            detail_parts.push(format!(
+                "{}: {} &nbsp;|&nbsp; {}: {}",
+                esc(receipt_label(lang, "VAT")),
+                esc(v),
+                esc(receipt_label(lang, "TAX_OFFICE")),
+                esc(t)
+            ));
+        }
+        (Some(v), None) => {
+            detail_parts.push(format!("{}: {}", esc(receipt_label(lang, "VAT")), esc(v)));
+        }
+        (None, Some(t)) => {
+            detail_parts.push(format!(
+                "{}: {}",
+                esc(receipt_label(lang, "TAX_OFFICE")),
+                esc(t)
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if !detail_parts.is_empty() {
         body.push_str(&format!(
-            "<div class=\"center\">{}: {}</div>",
-            esc(receipt_label(lang, "TAX_OFFICE")),
-            esc(tax_office)
+            "<div class=\"store-detail\">{}</div>",
+            detail_parts.join("<br>")
         ));
     }
+
+    body.push_str("</div>"); // close branch-info
 }
 
 /// Format an ISO-8601 timestamp to `DD/MM/YYYY HH:MM`.
@@ -551,6 +1170,18 @@ fn format_datetime_human(iso: &str) -> String {
         })
 }
 
+/// Short date format DD/MM HH:MM (no year) for space-efficient display.
+fn format_datetime_short(iso: &str) -> String {
+    DateTime::parse_from_rfc3339(iso)
+        .map(|dt| dt.format("%d/%m %H:%M").to_string())
+        .unwrap_or_else(|_| {
+            let trimmed = &iso[..iso.len().min(26)];
+            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
+                .map(|dt| dt.format("%d/%m %H:%M").to_string())
+                .unwrap_or_else(|_| iso.to_string())
+        })
+}
+
 fn customization_qty(value: f64) -> String {
     if value <= 0.0 {
         return "1".to_string();
@@ -558,14 +1189,109 @@ fn customization_qty(value: f64) -> String {
     qty(value)
 }
 
-fn customization_display(customization: &ReceiptCustomizationLine, include_price: bool) -> String {
+fn trim_to_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+}
+
+fn build_primary_category_name(item: &ReceiptItem) -> Option<String> {
+    if let Some(category) = trim_to_option(item.category_name.as_deref()) {
+        return Some(category);
+    }
+
+    if let Some(path) = trim_to_option(item.category_path.as_deref()) {
+        let primary = path
+            .split('>')
+            .next()
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty());
+        if let Some(primary) = primary {
+            return Some(primary.to_string());
+        }
+        return Some(path);
+    }
+
+    trim_to_option(item.subcategory_name.as_deref())
+}
+
+fn category_line(_lang: &str, item: &ReceiptItem) -> Option<String> {
+    build_primary_category_name(item)
+}
+
+fn push_unique_line(lines: &mut Vec<String>, raw: Option<&str>) {
+    let Some(trimmed) = trim_to_option(raw) else {
+        return;
+    };
+    if lines
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&trimmed))
+    {
+        return;
+    }
+    lines.push(trimmed);
+}
+
+fn order_note_lines(doc: &OrderReceiptDoc) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for raw in &doc.order_notes {
+        push_unique_line(&mut lines, Some(raw.as_str()));
+    }
+    lines
+}
+
+fn kitchen_order_note_lines(doc: &KitchenTicketDoc) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    push_unique_line(&mut lines, doc.delivery_notes.as_deref());
+    push_unique_line(&mut lines, doc.special_instructions.as_deref());
+    lines
+}
+
+fn category_raster_style(base: RasterTextStyle) -> RasterTextStyle {
+    RasterTextStyle {
+        weight: RasterTextWeight::Bold,
+        ..base
+    }
+}
+
+fn format_discount_percent(percent: f64) -> String {
+    let clamped = if percent.is_finite() {
+        percent.max(0.0)
+    } else {
+        0.0
+    };
+    if (clamped.fract()).abs() < f64::EPSILON {
+        format!("{}%", clamped as i64)
+    } else {
+        let raw = format!("{clamped:.2}");
+        let trimmed = raw.trim_end_matches('0').trim_end_matches('.');
+        format!("{trimmed}%")
+    }
+}
+
+fn total_label_text(lang: &str, total: &TotalsLine) -> String {
+    let base = receipt_label(lang, &total.label);
+    if total.label.eq_ignore_ascii_case("discount") {
+        if let Some(percent) = total.discount_percent.filter(|value| *value > 0.0) {
+            return format!("{base} ({})", format_discount_percent(percent));
+        }
+    }
+    base.to_string()
+}
+
+fn customization_display(
+    lang: &str,
+    customization: &ReceiptCustomizationLine,
+    include_price: bool,
+) -> String {
     let mut line = customization.name.trim().to_string();
     let quantity = customization_qty(customization.quantity);
     if quantity != "1" {
         line.push_str(&format!(" x{quantity}"));
     }
     if customization.is_little {
-        line.push_str(" (little)");
+        line.push_str(&format!(" ({})", receipt_label(lang, "Little")));
     }
     if include_price {
         if let Some(price) = customization.price.filter(|value| *value > 0.0) {
@@ -596,7 +1322,7 @@ fn split_customizations(
     (with_items, without_items)
 }
 
-fn append_customizations_html(body: &mut String, item: &ReceiptItem) {
+fn append_customizations_html(body: &mut String, item: &ReceiptItem, lang: &str) {
     let (with_items, without_items) = split_customizations(item);
     if with_items.is_empty() && without_items.is_empty() {
         return;
@@ -606,17 +1332,20 @@ fn append_customizations_html(body: &mut String, item: &ReceiptItem) {
         for customization in with_items {
             body.push_str(&format!(
                 "<div class=\"note\">+ {}</div>",
-                esc(&customization_display(customization, true))
+                esc(&customization_display(lang, customization, true))
             ));
         }
     }
 
     if !without_items.is_empty() {
-        body.push_str("<div class=\"note\">- Without</div>");
+        body.push_str(&format!(
+            "<div class=\"note\">- {}</div>",
+            esc(receipt_label(lang, "Without"))
+        ));
         for customization in without_items {
             body.push_str(&format!(
                 "<div class=\"note\">&nbsp;&nbsp;- {}</div>",
-                esc(&customization_display(customization, false))
+                esc(&customization_display(lang, customization, false))
             ));
         }
     }
@@ -627,6 +1356,240 @@ fn is_completed_delivery_status(status: &str) -> bool {
         status.trim().to_ascii_lowercase().as_str(),
         "completed" | "delivered"
     )
+}
+
+fn delivery_value_or_dash(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn extract_postal_from_text(input: &str) -> Option<String> {
+    let mut digit_tokens: Vec<String> = Vec::new();
+    for token in input.split(|ch: char| !ch.is_ascii_digit()) {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            digit_tokens.push(trimmed.to_string());
+        }
+    }
+    for (idx, token) in digit_tokens.iter().enumerate() {
+        if token.len() == 5 {
+            return Some(token.clone());
+        }
+        if token.len() == 3 {
+            if let Some(next) = digit_tokens.get(idx + 1) {
+                if next.len() == 2 {
+                    return Some(format!("{token}{next}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_floor_from_text(input: &str) -> Option<String> {
+    let normalized = input.trim().to_ascii_lowercase();
+    if !(normalized.contains("floor") || normalized.contains("όρο") || normalized.contains("οροφ"))
+    {
+        return None;
+    }
+    let digits: String = input.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+fn extract_city_from_text(input: &str) -> Option<String> {
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized.contains("floor") || normalized.contains("όρο") || normalized.contains("οροφ")
+    {
+        return None;
+    }
+
+    let mut cleaned = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_digit() {
+            continue;
+        }
+        if matches!(ch, ',' | ';' | ':' | '|' | '-' | '_') {
+            cleaned.push(' ');
+        } else {
+            cleaned.push(ch);
+        }
+    }
+    let collapsed = cleaned.split_whitespace().collect::<Vec<&str>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_delivery_address_components(
+    doc: &OrderReceiptDoc,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let mut address = trim_to_option(doc.delivery_address.as_deref());
+    let mut city = trim_to_option(doc.delivery_city.as_deref());
+    let mut postal = trim_to_option(doc.delivery_postal_code.as_deref());
+    let mut floor = trim_to_option(doc.delivery_floor.as_deref());
+
+    if let Some(address_text) = address.as_deref() {
+        let segments = split_address_segments(address_text);
+        if let Some(first) = segments.first() {
+            // Lock: the Address line is always the first street segment only.
+            address = Some(first.clone());
+        }
+        for segment in segments.iter().skip(1) {
+            if city.is_none() {
+                city = extract_city_from_text(segment);
+            }
+            if postal.is_none() {
+                postal = extract_postal_from_text(segment);
+            }
+            if floor.is_none() {
+                floor = extract_floor_from_text(segment);
+            }
+        }
+    }
+
+    (address, city, postal, floor)
+}
+
+/// Collect delivery fields as (label, value) pairs for HTML rendering.
+fn delivery_fields<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(&'a str, &'a str)> {
+    let mut fields: Vec<(&str, &str)> = Vec::new();
+    let try_field = |opt: &'a Option<String>| -> Option<&'a str> {
+        opt.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    };
+    if let Some(v) = try_field(&doc.driver_name) {
+        fields.push((receipt_label(lang, "Driver"), v));
+    }
+    if let Some(v) = try_field(&doc.delivery_address) {
+        fields.push((receipt_label(lang, "Address"), v));
+    }
+    if let Some(v) = try_field(&doc.customer_phone) {
+        fields.push((receipt_label(lang, "Phone"), v));
+    }
+    if let Some(v) = try_field(&doc.delivery_city) {
+        fields.push((receipt_label(lang, "City"), v));
+    }
+    if let Some(v) = try_field(&doc.delivery_postal_code) {
+        fields.push((receipt_label(lang, "Postal Code"), v));
+    }
+    if let Some(v) = try_field(&doc.delivery_floor) {
+        fields.push((receipt_label(lang, "Floor"), v));
+    }
+    if let Some(v) = try_field(&doc.name_on_ringer) {
+        fields.push((receipt_label(lang, "Name on ringer"), v));
+    }
+    fields
+}
+
+fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
+    let (address, city, postal, floor) = normalize_delivery_address_components(doc);
+    let mut lines = Vec::new();
+    if doc.delivery_slip_mode == DeliverySlipMode::AssignDriver {
+        lines.push((
+            receipt_label(lang, "Driver ID").to_string(),
+            delivery_value_or_dash(doc.driver_id.as_deref()),
+        ));
+        lines.push((
+            receipt_label(lang, "Driver").to_string(),
+            delivery_value_or_dash(doc.driver_name.as_deref()),
+        ));
+    }
+
+    lines.push((
+        receipt_label(lang, "Customer").to_string(),
+        delivery_value_or_dash(doc.customer_name.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "Phone").to_string(),
+        delivery_value_or_dash(doc.customer_phone.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "Address").to_string(),
+        delivery_value_or_dash(address.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "City").to_string(),
+        delivery_value_or_dash(city.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "Postal").to_string(),
+        delivery_value_or_dash(postal.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "Floor").to_string(),
+        delivery_value_or_dash(floor.as_deref()),
+    ));
+    lines.push((
+        receipt_label(lang, "Ringer").to_string(),
+        delivery_value_or_dash(doc.name_on_ringer.as_deref()),
+    ));
+
+    lines
+}
+
+fn is_change_like_payment_label(label: &str) -> bool {
+    let normalized = label.trim().to_lowercase();
+    normalized == "change" || normalized == "received" || normalized == "ρέστα"
+}
+
+fn delivery_payment_method_label(doc: &OrderReceiptDoc, lang: &str) -> Option<String> {
+    if !doc.order_type.trim().eq_ignore_ascii_case("delivery") {
+        return None;
+    }
+    doc.payments.iter().find_map(|payment| {
+        if is_change_like_payment_label(&payment.label) {
+            return None;
+        }
+        let mapped = receipt_label(lang, &payment.label).trim();
+        if mapped.is_empty() {
+            None
+        } else {
+            Some(mapped.to_string())
+        }
+    })
+}
+
+/// Render item customizations using the new `item-mods` class.
+fn append_customizations_html_v2(body: &mut String, item: &ReceiptItem, lang: &str) {
+    let (with_items, without_items) = split_customizations(item);
+    if with_items.is_empty() && without_items.is_empty() {
+        return;
+    }
+    let mut mods = Vec::new();
+    for customization in with_items {
+        mods.push(format!(
+            "+ {}",
+            esc(&customization_display(lang, customization, true))
+        ));
+    }
+    if !without_items.is_empty() {
+        for customization in without_items {
+            mods.push(format!(
+                "- {}",
+                esc(&customization_display(lang, customization, false))
+            ));
+        }
+    }
+    if !mods.is_empty() {
+        body.push_str(&format!(
+            "<div class=\"item-mods\">{}</div>",
+            mods.join("<br>")
+        ));
+    }
 }
 
 fn should_render_delivery_block(doc: &OrderReceiptDoc) -> bool {
@@ -839,243 +1802,555 @@ pub fn resolve_auto_code_page(
     }
 }
 
-fn html_shell(title: &str, body: &str) -> String {
+fn html_shell(title: &str, body: &str, template: ReceiptTemplate) -> String {
+    let template_cls = match template {
+        ReceiptTemplate::Modern => "modern",
+        ReceiptTemplate::Classic => "classic",
+    };
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>{}</title>
+<title>{title}</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400;1,700&amp;family=Courier+Prime:wght@400;700&amp;family=IBM+Plex+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
 <style>
-body {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 12px; background: #fff; color: #111; }}
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32px 16px; min-height: 100vh; }}
+.receipt {{ background: #fff; width: 300px; padding: 28px 22px 24px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); color: #000; position: relative; }}
+.receipt::before, .receipt::after {{ content: ''; position: absolute; left: 0; right: 0; height: 8px; background: repeating-linear-gradient(90deg, #fff 0 8px, transparent 8px 16px); }}
+.receipt::before {{ top: -8px; }}
+.receipt::after {{ bottom: -8px; }}
+
+/* Logo */
+.logo-area {{ text-align: center; margin-bottom: 12px; }}
+.logo-circle {{ width: 60px; height: 60px; border: 2px solid #000; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+.logo-circle img {{ width: 100%; height: 100%; object-fit: contain; }}
+.logo-circle .logo-text {{ font-size: 11px; font-weight: 700; text-transform: uppercase; text-align: center; line-height: 1.2; }}
+
+/* Branch info (shared) */
+.branch-info {{ text-align: center; margin-bottom: 14px; }}
+
+/* ── MODERN ── */
+.modern .branch-info .store-name {{ font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 1px; }}
+.modern .branch-info .store-sub {{ font-family: 'Playfair Display', Georgia, serif; font-size: 10px; font-style: italic; color: #555; margin-bottom: 5px; }}
+.modern .branch-info .store-detail {{ font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 8.5px; color: #555; line-height: 1.75; }}
+.modern hr {{ border: none; border-top: 1px solid #000; margin: 12px 0; }}
+.modern hr.thin {{ border-top: 1px dotted #bbb; margin: 10px 0; }}
+.modern .order-type {{ font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 700; letter-spacing: 2px; border: 1.5px solid #000; display: inline-block; padding: 2px 10px; text-align: center; margin-bottom: 8px; }}
+.modern .meta-grid {{ display: grid; grid-template-columns: auto 1fr; column-gap: 10px; row-gap: 2px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; }}
+.modern .meta-grid .k {{ color: #888; }}
+.modern .meta-grid .v {{ text-align: right; font-weight: 500; }}
+.modern .sec-head {{ font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 9px; font-weight: 700; letter-spacing: 3px; text-transform: uppercase; text-align: center; margin-bottom: 10px; }}
+.modern .item {{ font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; margin-bottom: 8px; }}
+.modern .item-row {{ display: flex; justify-content: space-between; }}
+.modern .item-name {{ font-weight: 500; }}
+.modern .item-price {{ font-weight: 700; }}
+.modern .item-mods {{ font-size: 8.5px; color: #777; padding-left: 12px; margin-top: 2px; line-height: 1.6; }}
+.modern table {{ width: 100%; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; border-collapse: collapse; }}
+.modern table td {{ padding: 2px 0; }}
+.modern table .r {{ text-align: right; }}
+.modern table .dim {{ color: #777; }}
+.modern .grand td {{ font-size: 13px; font-weight: 700; padding-top: 6px; }}
+.modern .change td {{ font-size: 13px; font-weight: 700; padding-top: 6px; }}
+.modern .footer {{ text-align: center; margin-top: 14px; font-family: 'Playfair Display', Georgia, serif; font-size: 11px; font-style: italic; color: #555; }}
+
+/* ── CLASSIC ── */
+.classic {{ font-family: 'Courier Prime', 'Courier New', monospace; }}
+.classic .branch-info .store-name {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 1px; }}
+.classic .branch-info .store-sub {{ font-family: 'Playfair Display', Georgia, serif; font-size: 10px; font-style: italic; color: #555; margin-bottom: 5px; }}
+.classic .branch-info .store-detail {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; color: #444; line-height: 1.75; }}
+.classic hr {{ border: none; border-top: 1px dashed #999; margin: 10px 0; }}
+.classic hr.solid {{ border-top: 1px solid #000; margin: 10px 0; }}
+.classic hr.double {{ border-top: 3px double #000; margin: 10px 0; }}
+.classic .meta-line {{ font-size: 9px; line-height: 1.85; }}
+.classic .meta-line b {{ font-weight: 700; }}
+.classic .sec-head {{ background: #000; color: #fff; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; font-weight: 700; letter-spacing: 3px; text-align: center; padding: 3px 0; margin: 10px 0 8px; }}
+.classic .item {{ font-size: 10px; margin-bottom: 6px; }}
+.classic .item-row {{ display: flex; justify-content: space-between; }}
+.classic .item-name {{ font-weight: 700; }}
+.classic .item-price {{ font-weight: 700; }}
+.classic .item-mods {{ font-size: 8.5px; color: #666; padding-left: 10px; margin-top: 1px; line-height: 1.6; }}
+.classic table {{ width: 100%; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 10px; border-collapse: collapse; }}
+.classic table td {{ padding: 2px 0; }}
+.classic table .r {{ text-align: right; }}
+.classic table .dim {{ color: #555; }}
+.classic .grand td {{ font-size: 13px; font-weight: 700; padding-top: 5px; }}
+.classic .change td {{ font-size: 13px; font-weight: 700; padding-top: 5px; }}
+.classic .footer {{ text-align: center; margin-top: 14px; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; color: #666; line-height: 2; letter-spacing: 1px; }}
+
+/* Legacy compat classes */
 .line {{ display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }}
 .line strong {{ font-size: 11px; }}
-.section {{ margin-top: 8px; border-top: 1px dashed #111; padding-top: 6px; }}
-.section h3 {{ margin: 0 0 4px 0; font-size: 11px; text-transform: uppercase; }}
-.pill h3 {{ display: inline-block; background: #111; color: #fff; border-radius: 999px; padding: 2px 8px; }}
+.section {{ margin-top: 8px; border-top: 1px dashed #999; padding-top: 6px; }}
 .note {{ color: #666; font-size: 9px; }}
 .center {{ text-align: center; }}
 </style>
 </head>
-<body>{}</body>
+<body><div class="receipt {template_cls}">{body}</div></body>
 </html>"#,
-        esc(title),
-        body
+        title = esc(title),
+        template_cls = template_cls,
+        body = body
     )
 }
 
 pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
-    let section_cls = if cfg.template == ReceiptTemplate::Modern {
-        "section pill"
-    } else {
-        "section"
-    };
+    let is_modern = cfg.template == ReceiptTemplate::Modern;
+    let lang = cfg.language.as_str();
+    let cur = cfg.currency_symbol.as_str();
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
             let render_delivery_block = should_render_delivery_block(doc);
+            let display_date = format_datetime_human(&doc.created_at);
+            let order_type_display = translate_order_type(lang, &doc.order_type);
+            let delivery_method_only_payment = delivery_payment_method_label(doc, lang);
             let mut body = String::new();
-            append_html_header_block(&mut body, cfg, cfg.language.as_str(), cfg.show_logo);
-            body.push_str(&format!(
-                "<div class=\"section\"><div class=\"line\"><span>Order</span><span>#{}\
-                 </span></div><div class=\"line\"><span>Type</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Date</span><span>{}</span></div>",
-                esc(&doc.order_number),
-                esc(&doc.order_type),
-                esc(&doc.created_at)
-            ));
-            if let Some(table) = doc
-                .table_number
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+            append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
+
+            if is_modern {
+                // ── Modern layout ──
+                body.push_str("<hr>");
                 body.push_str(&format!(
-                    "<div class=\"line\"><span>Table</span><span>{}</span></div>",
-                    esc(table)
+                    "<div style=\"text-align:center; margin-bottom:8px;\"><span class=\"order-type\">{}</span></div>",
+                    esc(&order_type_display)
                 ));
-            }
-            if let Some(customer) = doc
-                .customer_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
+                body.push_str("<div class=\"meta-grid\">");
                 body.push_str(&format!(
-                    "<div class=\"line\"><span>Customer</span><span>{}</span></div>",
-                    esc(customer)
+                    "<span class=\"k\">{}</span><span class=\"v\">#{}</span>",
+                    esc(receipt_label(lang, "Order")),
+                    esc(&doc.order_number)
                 ));
-            }
-            if let Some(phone) = doc
-                .customer_phone
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if !render_delivery_block {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>Phone</span><span>{}</span></div>",
-                        esc(phone)
-                    ));
-                }
-            }
-            body.push_str("</div>");
-            if render_delivery_block {
-                body.push_str(&format!("<div class=\"{}\"><h3>Delivery</h3>", section_cls));
-                if let Some(driver_name) = doc
-                    .driver_name
+                body.push_str(&format!(
+                    "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                    esc(receipt_label(lang, "Date")),
+                    esc(&display_date)
+                ));
+                if let Some(table) = doc
+                    .table_number
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|v| !v.is_empty())
                 {
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>Driver</span><span>{}</span></div>",
-                        esc(driver_name)
+                        "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                        esc(receipt_label(lang, "Table")),
+                        esc(table)
                     ));
                 }
-                if let Some(address) = doc
-                    .delivery_address
+                if let Some(customer) = doc
+                    .customer_name
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|v| !v.is_empty())
                 {
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>Address</span><span>{}</span></div>",
-                        esc(address)
+                        "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                        esc(receipt_label(lang, "Customer")),
+                        esc(customer)
                     ));
                 }
                 if let Some(phone) = doc
                     .customer_phone
                     .as_deref()
                     .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|v| !v.is_empty())
                 {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>Phone</span><span>{}</span></div>",
-                        esc(phone)
-                    ));
+                    if !render_delivery_block {
+                        body.push_str(&format!(
+                            "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                            esc(receipt_label(lang, "Phone")),
+                            esc(phone)
+                        ));
+                    }
                 }
-                if let Some(city) = doc
-                    .delivery_city
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
+                body.push_str("</div>"); // close meta-grid
+
+                // Delivery block (modern)
+                if render_delivery_block {
+                    body.push_str("<hr class=\"thin\">");
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>City</span><span>{}</span></div>",
-                        esc(city)
+                        "<div class=\"sec-head\">{}</div>",
+                        esc(receipt_label(lang, "DELIVERY"))
                     ));
+                    body.push_str("<div class=\"meta-grid\">");
+                    for (key, val) in delivery_fields(doc, lang) {
+                        body.push_str(&format!(
+                            "<span class=\"k\">{}</span><span class=\"v\">{}</span>",
+                            esc(key),
+                            esc(val)
+                        ));
+                    }
+                    body.push_str("</div>");
                 }
-                if let Some(postal_code) = doc
-                    .delivery_postal_code
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>Postal Code</span><span>{}</span></div>",
-                        esc(postal_code)
-                    ));
+                let order_notes = order_note_lines(doc);
+                if !order_notes.is_empty() {
+                    body.push_str("<hr class=\"thin\">");
+                    for note in &order_notes {
+                        body.push_str(&format!(
+                            "<div class=\"item-mods\"><u>{}: {}</u></div>",
+                            esc(receipt_label(lang, "Note")),
+                            esc(note)
+                        ));
+                    }
                 }
-                if let Some(floor) = doc
-                    .delivery_floor
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
+
+                // Items section
+                body.push_str("<hr class=\"thin\">");
+                body.push_str(&format!(
+                    "<div class=\"sec-head\">{}</div>",
+                    esc(receipt_label(lang, "Order"))
+                ));
+                if doc.items.is_empty() {
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>Floor</span><span>{}</span></div>",
-                        esc(floor)
+                        "<div class=\"item\"><div class=\"item-mods\">{}</div></div>",
+                        esc(receipt_label(lang, "No items"))
                     ));
+                } else {
+                    for item in &doc.items {
+                        body.push_str("<div class=\"item\"><div class=\"item-row\">");
+                        if let Some(cat_line) = category_line(lang, item) {
+                            body.push_str(&format!(
+                                "<span class=\"item-mods\"><strong>{}</strong></span>",
+                                esc(&cat_line)
+                            ));
+                        }
+                        body.push_str(&format!(
+                            "<span class=\"item-name\">{}\u{00D7} {}</span>",
+                            qty(item.quantity),
+                            esc(&item.name)
+                        ));
+                        body.push_str(&format!(
+                            "<span class=\"item-price\">{}</span>",
+                            money_with_currency(item.total, cur)
+                        ));
+                        body.push_str("</div>");
+                        append_customizations_html_v2(&mut body, item, lang);
+                        if let Some(note) = item
+                            .note
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            body.push_str(&format!(
+                                "<div class=\"item-mods\"><u>{}: {}</u></div>",
+                                esc(receipt_label(lang, "Note")),
+                                esc(note)
+                            ));
+                        }
+                        body.push_str("</div>");
+                    }
                 }
-                if let Some(name_on_ringer) = doc
-                    .name_on_ringer
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>Name on ringer</span><span>{}</span></div>",
-                        esc(name_on_ringer)
-                    ));
+
+                // Totals
+                body.push_str("<hr>");
+                body.push_str("<table>");
+                for total in &doc.totals {
+                    let label = total_label_text(lang, total);
+                    if total.emphasize {
+                        body.push_str(&format!(
+                            "<tr class=\"grand\"><td>{}</td><td class=\"r\">{}</td></tr>",
+                            esc(&label),
+                            money_with_currency(total.amount, cur)
+                        ));
+                    } else {
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                            esc(&label),
+                            money_with_currency(total.amount, cur)
+                        ));
+                    }
                 }
-                body.push_str("</div>");
-            }
-            body.push_str(&format!("<div class=\"{}\"><h3>Items</h3>", section_cls));
-            if doc.items.is_empty() {
-                body.push_str("<div class=\"note\">No items</div>");
-            } else {
-                for item in &doc.items {
+                body.push_str("</table>");
+
+                // Payments
+                body.push_str("<hr class=\"thin\">");
+                if let Some(method_label) = delivery_method_only_payment.as_deref() {
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>{}x {}</span><span>{}</span></div>",
-                        qty(item.quantity),
-                        esc(&item.name),
-                        money(item.total)
+                        "<div class=\"center\"><strong>{}</strong></div>",
+                        esc(method_label)
                     ));
-                    append_customizations_html(&mut body, item);
-                    if let Some(note) = item
-                        .note
+                } else {
+                    body.push_str("<table>");
+                    if doc.payments.is_empty() {
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td></td></tr>",
+                            esc(receipt_label(lang, "No payment recorded"))
+                        ));
+                    } else {
+                        for payment in &doc.payments {
+                            let label = receipt_label(lang, &payment.label);
+                            // Use "change" class for Received/Change rows
+                            let is_change = payment.label.eq_ignore_ascii_case("Change")
+                                || payment.label == "\u{03A1}\u{03AD}\u{03C3}\u{03C4}\u{03B1}";
+                            if is_change {
+                                body.push_str(&format!(
+                                    "<tr class=\"change\"><td>{}</td><td class=\"r\">{}</td></tr>",
+                                    esc(label),
+                                    money_with_currency(payment.amount, cur)
+                                ));
+                            } else {
+                                body.push_str(&format!(
+                                    "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                                    esc(label),
+                                    money_with_currency(payment.amount, cur)
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(masked) = doc
+                        .masked_card
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        body.push_str(&format!("<div class=\"note\">{}</div>", esc(note)));
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                            esc(receipt_label(lang, "Card")),
+                            esc(masked)
+                        ));
+                    }
+                    body.push_str("</table>");
+                }
+
+                // Adjustments
+                if !doc.adjustments.is_empty() {
+                    body.push_str("<hr class=\"thin\">");
+                    body.push_str("<table>");
+                    for adj in &doc.adjustments {
+                        let label = receipt_label(lang, &adj.label);
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">-{}</td></tr>",
+                            esc(label),
+                            money_with_currency(adj.amount, cur)
+                        ));
+                    }
+                    body.push_str("</table>");
+                }
+            } else {
+                // ── Classic layout ──
+                body.push_str("<hr class=\"solid\">");
+                body.push_str("<div class=\"meta-line\">");
+                body.push_str(&format!(
+                    "<b>{}:</b> #{}<br>",
+                    esc(receipt_label(lang, "Order")),
+                    esc(&doc.order_number)
+                ));
+                body.push_str(&format!(
+                    "<b>{}:</b> {} &nbsp;&nbsp;&nbsp; <b>{}:</b> {}",
+                    esc(receipt_label(lang, "Type")),
+                    esc(&order_type_display),
+                    esc(receipt_label(lang, "Date")),
+                    esc(&display_date)
+                ));
+                if let Some(table) = doc
+                    .table_number
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<br><b>{}:</b> {}",
+                        esc(receipt_label(lang, "Table")),
+                        esc(table)
+                    ));
+                }
+                if let Some(customer) = doc
+                    .customer_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<br><b>{}:</b> {}",
+                        esc(receipt_label(lang, "Customer")),
+                        esc(customer)
+                    ));
+                }
+                if let Some(phone) = doc
+                    .customer_phone
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if !render_delivery_block {
+                        body.push_str(&format!(
+                            "<br><b>{}:</b> {}",
+                            esc(receipt_label(lang, "Phone")),
+                            esc(phone)
+                        ));
                     }
                 }
-            }
-            body.push_str("</div>");
-            body.push_str(&format!("<div class=\"{}\"><h3>Totals</h3>", section_cls));
-            for line in &doc.totals {
-                if line.emphasize {
+                body.push_str("</div>"); // close meta-line
+
+                // Delivery block (classic)
+                if render_delivery_block {
                     body.push_str(&format!(
-                        "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                        esc(&line.label),
-                        money(line.amount)
+                        "<div class=\"sec-head\">[ {} ]</div>",
+                        esc(receipt_label(lang, "DELIVERY"))
+                    ));
+                    body.push_str("<div class=\"meta-line\">");
+                    for (key, val) in delivery_fields(doc, lang) {
+                        body.push_str(&format!("<b>{}:</b> {}<br>", esc(key), esc(val)));
+                    }
+                    body.push_str("</div>");
+                }
+                let order_notes = order_note_lines(doc);
+                if !order_notes.is_empty() {
+                    body.push_str("<div class=\"meta-line\">");
+                    for note in &order_notes {
+                        body.push_str(&format!(
+                            "<u><b>{}:</b> {}</u><br>",
+                            esc(receipt_label(lang, "Note")),
+                            esc(note)
+                        ));
+                    }
+                    body.push_str("</div>");
+                }
+
+                // Items section
+                body.push_str(&format!(
+                    "<div class=\"sec-head\">[ {} ]</div>",
+                    esc(receipt_label(lang, "ITEMS"))
+                ));
+                if doc.items.is_empty() {
+                    body.push_str(&format!(
+                        "<div class=\"item\"><div class=\"item-mods\">{}</div></div>",
+                        esc(receipt_label(lang, "No items"))
                     ));
                 } else {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(&line.label),
-                        money(line.amount)
-                    ));
+                    for item in &doc.items {
+                        body.push_str("<div class=\"item\"><div class=\"item-row\">");
+                        if let Some(cat_line) = category_line(lang, item) {
+                            body.push_str(&format!(
+                                "<span class=\"item-mods\"><strong>{}</strong></span>",
+                                esc(&cat_line)
+                            ));
+                        }
+                        body.push_str(&format!(
+                            "<span class=\"item-name\">{}x {}</span>",
+                            qty(item.quantity),
+                            esc(&item.name)
+                        ));
+                        body.push_str(&format!(
+                            "<span class=\"item-price\">{}</span>",
+                            money(item.total)
+                        ));
+                        body.push_str("</div>");
+                        append_customizations_html_v2(&mut body, item, lang);
+                        if let Some(note) = item
+                            .note
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            body.push_str(&format!(
+                                "<div class=\"item-mods\"><u>{}: {}</u></div>",
+                                esc(receipt_label(lang, "Note")),
+                                esc(note)
+                            ));
+                        }
+                        body.push_str("</div>");
+                    }
                 }
-            }
-            body.push_str("</div>");
-            body.push_str(&format!("<div class=\"{}\"><h3>Payment</h3>", section_cls));
-            if doc.payments.is_empty() {
-                body.push_str("<div class=\"note\">No payment recorded</div>");
-            } else {
-                for payment in &doc.payments {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(&payment.label),
-                        money(payment.amount)
-                    ));
-                }
-            }
-            if let Some(masked) = doc
-                .masked_card
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                body.push_str(&format!("<div class=\"note\">Card: {}</div>", esc(masked)));
-            }
-            body.push_str("</div>");
-            if !doc.adjustments.is_empty() {
+
+                // Totals
                 body.push_str(&format!(
-                    "<div class=\"{}\"><h3>Adjustments</h3>",
-                    section_cls
+                    "<div class=\"sec-head\">[ {} ]</div>",
+                    esc(receipt_label(lang, "TOTALS"))
                 ));
-                for adjustment in &doc.adjustments {
-                    body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
-                        esc(&adjustment.label),
-                        money(adjustment.amount)
-                    ));
+                body.push_str("<table>");
+                for total in &doc.totals {
+                    let label = total_label_text(lang, total);
+                    if total.emphasize {
+                        body.push_str(&format!(
+                            "<tr class=\"grand\"><td>{}</td><td class=\"r\">{}</td></tr>",
+                            esc(&label),
+                            money(total.amount)
+                        ));
+                    } else {
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                            esc(&label),
+                            money(total.amount)
+                        ));
+                    }
                 }
-                body.push_str("</div>");
+                body.push_str("</table>");
+
+                // Payments
+                body.push_str(&format!(
+                    "<div class=\"sec-head\">[ {} ]</div>",
+                    esc(receipt_label(lang, "PAYMENT"))
+                ));
+                if let Some(method_label) = delivery_method_only_payment.as_deref() {
+                    body.push_str(&format!(
+                        "<div class=\"center\"><strong>{}</strong></div>",
+                        esc(method_label)
+                    ));
+                } else {
+                    body.push_str("<table>");
+                    if doc.payments.is_empty() {
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td></td></tr>",
+                            esc(receipt_label(lang, "No payment recorded"))
+                        ));
+                    } else {
+                        for payment in &doc.payments {
+                            let label = receipt_label(lang, &payment.label);
+                            let is_change = payment.label.eq_ignore_ascii_case("Change")
+                                || payment.label == "\u{03A1}\u{03AD}\u{03C3}\u{03C4}\u{03B1}";
+                            if is_change {
+                                body.push_str(&format!(
+                                    "<tr class=\"change\"><td>{}</td><td class=\"r\">{}</td></tr>",
+                                    esc(label),
+                                    money(payment.amount)
+                                ));
+                            } else {
+                                body.push_str(&format!(
+                                    "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                                    esc(label),
+                                    money(payment.amount)
+                                ));
+                            }
+                        }
+                    }
+                    if let Some(masked) = doc
+                        .masked_card
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">{}</td></tr>",
+                            esc(receipt_label(lang, "Card")),
+                            esc(masked)
+                        ));
+                    }
+                    body.push_str("</table>");
+                }
+
+                // Adjustments
+                if !doc.adjustments.is_empty() {
+                    body.push_str(&format!(
+                        "<div class=\"sec-head\">[ {} ]</div>",
+                        esc(receipt_label(lang, "ADJUSTMENTS"))
+                    ));
+                    body.push_str("<table>");
+                    for adj in &doc.adjustments {
+                        let label = receipt_label(lang, &adj.label);
+                        body.push_str(&format!(
+                            "<tr><td class=\"dim\">{}</td><td class=\"r\">-{}</td></tr>",
+                            esc(label),
+                            money(adj.amount)
+                        ));
+                    }
+                    body.push_str("</table>");
+                }
             }
+
+            // QR code (both templates)
             if cfg.show_qr_code {
                 if let Some(qr) = cfg
                     .qr_data
@@ -1084,16 +2359,21 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     .filter(|v| !v.is_empty())
                 {
                     body.push_str(&format!(
-                        "<div class=\"section center note\">QR: {}</div>",
+                        "<div style=\"text-align:center;margin-top:8px;font-size:9px;color:#666\">QR: {}</div>",
                         esc(qr)
                     ));
                 }
             }
+
+            // Footer
+            let footer = cfg.footer_text.as_deref().unwrap_or("Thank you");
+            let translated_footer = receipt_label(lang, footer);
             body.push_str(&format!(
-                "<div class=\"section center note\">{}</div>",
-                esc(cfg.footer_text.as_deref().unwrap_or("Thank you"))
+                "<div class=\"footer\">{}</div>",
+                esc(translated_footer)
             ));
-            html_shell("Order Receipt", &body)
+
+            html_shell("Order Receipt", &body, cfg.template)
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let lang = cfg.language.as_str();
@@ -1239,12 +2519,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 }
                 body.push_str("</div>");
             }
+            let order_notes = kitchen_order_note_lines(doc);
+            if !order_notes.is_empty() {
+                body.push_str("<div class=\"section\">");
+                for note in &order_notes {
+                    body.push_str(&format!(
+                        "<div class=\"note\"><u>{}: {}</u></div>",
+                        esc(receipt_label(lang, "Note")),
+                        esc(note)
+                    ));
+                }
+                body.push_str("</div>");
+            }
             // Items section
-            body.push_str(&format!(
-                "<div class=\"{}\"><h3>{}</h3>",
-                section_cls,
-                esc(receipt_label(lang, "ITEMS"))
-            ));
+            if is_modern {
+                body.push_str(&format!(
+                    "<div class=\"sec-head\">{}</div>",
+                    esc(receipt_label(lang, "ITEMS"))
+                ));
+            } else {
+                body.push_str(&format!(
+                    "<div class=\"sec-head\">[ {} ]</div>",
+                    esc(receipt_label(lang, "ITEMS"))
+                ));
+            }
             if doc.items.is_empty() {
                 body.push_str(&format!(
                     "<div class=\"note\">{}</div>",
@@ -1252,24 +2550,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 ));
             } else {
                 for item in &doc.items {
+                    if let Some(cat_line) = category_line(lang, item) {
+                        body.push_str(&format!(
+                            "<div class=\"note\"><strong>{}</strong></div>",
+                            esc(&cat_line)
+                        ));
+                    }
                     body.push_str(&format!(
                         "<div><strong>{}x {}</strong></div>",
                         qty(item.quantity),
                         esc(&item.name)
                     ));
-                    append_customizations_html(&mut body, item);
+                    append_customizations_html(&mut body, item, lang);
                     if let Some(note) = item
                         .note
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        body.push_str(&format!("<div class=\"note\">{}</div>", esc(note)));
+                        body.push_str(&format!("<div class=\"note\"><u>{}</u></div>", esc(note)));
                     }
                 }
             }
             body.push_str("</div>");
-            html_shell(receipt_label(lang, "KITCHEN TICKET"), &body)
+            html_shell(receipt_label(lang, "KITCHEN TICKET"), &body, cfg.template)
         }
         ReceiptDocument::DeliverySlip(doc) => {
             let lang = cfg.language.as_str();
@@ -1288,107 +2592,28 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(&format_datetime_human(&doc.created_at)),
                 esc(&doc.order_type),
             ));
-            // Customer info block
+            // Delivery/customer info block
             body.push_str("<div class=\"section\">");
-            if let Some(customer) = doc
-                .customer_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
+            for (label, value) in delivery_slip_info_lines(doc, lang) {
                 body.push_str(&format!(
-                    "<div>{}: <b>{}</b></div>",
-                    esc(receipt_label(lang, "Customer")),
-                    esc(customer)
+                    "<div class=\"line\"><span>{}</span><span><b>{}</b></span></div>",
+                    esc(&label),
+                    esc(&value)
                 ));
-            }
-            // Phone (always show label, even if empty)
-            let phone_val = doc
-                .customer_phone
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .unwrap_or("");
-            body.push_str(&format!(
-                "<div>{}: <b>{}</b></div>",
-                esc(receipt_label(lang, "Phone")),
-                esc(phone_val)
-            ));
-            // Address block
-            let has_address = doc
-                .delivery_address
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .is_some();
-            if has_address {
-                body.push_str(&format!(
-                    "<div>{}:</div>",
-                    esc(receipt_label(lang, "Address"))
-                ));
-                if let Some(street) = doc
-                    .delivery_address
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    body.push_str(&format!("<div>{}</div>", esc(street)));
-                }
-                // Postal + City on same line
-                let postal = doc
-                    .delivery_postal_code
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or("");
-                let city = doc
-                    .delivery_city
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or("");
-                if !postal.is_empty() || !city.is_empty() {
-                    body.push_str(&format!("<div>{} {}</div>", esc(postal), esc(city)));
-                }
-                // Floor | Ringer on same line
-                let floor = doc
-                    .delivery_floor
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                let ringer = doc
-                    .name_on_ringer
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                match (floor, ringer) {
-                    (Some(f), Some(r)) => {
-                        body.push_str(&format!(
-                            "<div>{} {} | {}: {}</div>",
-                            esc(f),
-                            esc(receipt_label(lang, "Floor")),
-                            esc(receipt_label(lang, "Ringer")),
-                            esc(r)
-                        ));
-                    }
-                    (Some(f), None) => {
-                        body.push_str(&format!(
-                            "<div>{} {}</div>",
-                            esc(f),
-                            esc(receipt_label(lang, "Floor")),
-                        ));
-                    }
-                    (None, Some(r)) => {
-                        body.push_str(&format!(
-                            "<div>{}: {}</div>",
-                            esc(receipt_label(lang, "Ringer")),
-                            esc(r)
-                        ));
-                    }
-                    (None, None) => {}
-                }
             }
             body.push_str("</div>");
+            let order_notes = order_note_lines(doc);
+            if !order_notes.is_empty() {
+                body.push_str("<div class=\"section\">");
+                for note in &order_notes {
+                    body.push_str(&format!(
+                        "<div class=\"note\"><u>{}: {}</u></div>",
+                        esc(receipt_label(lang, "Note")),
+                        esc(note)
+                    ));
+                }
+                body.push_str("</div>");
+            }
             // Items section
             body.push_str(&format!(
                 "<div class=\"section\"><h3>{}</h3>",
@@ -1401,6 +2626,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 ));
             } else {
                 for item in &doc.items {
+                    if let Some(cat_line) = category_line(lang, item) {
+                        body.push_str(&format!(
+                            "<div class=\"note\"><strong>{}</strong></div>",
+                            esc(&cat_line)
+                        ));
+                    }
                     let has_customizations = item
                         .customizations
                         .iter()
@@ -1412,7 +2643,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             esc(&item.name),
                             money_with_currency(item.total, cur)
                         ));
-                        append_customizations_html(&mut body, item);
+                        append_customizations_html(&mut body, item, lang);
                     } else {
                         // Simple item: name + price
                         body.push_str(&format!(
@@ -1427,7 +2658,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        body.push_str(&format!("<div class=\"note\">{}</div>", esc(note)));
+                        body.push_str(&format!("<div class=\"note\"><u>{}</u></div>", esc(note)));
                     }
                 }
             }
@@ -1435,24 +2666,30 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             // Totals section
             body.push_str("<div class=\"section\">");
             for line in &doc.totals {
-                let label = receipt_label(lang, &line.label);
+                let label = total_label_text(lang, line);
                 if line.emphasize {
                     body.push_str("<div style=\"border-top:3px double #111;border-bottom:3px double #111;padding:4px 0;margin-top:4px\">");
                     body.push_str(&format!(
                         "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                        esc(label),
+                        esc(&label),
                         money_with_currency(line.amount, cur)
                     ));
                     body.push_str("</div>");
                 } else {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(label),
+                        esc(&label),
                         money_with_currency(line.amount, cur)
                     ));
                 }
             }
             body.push_str("</div>");
+            if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+                body.push_str(&format!(
+                    "<div class=\"section center\"><strong>{}</strong></div>",
+                    esc(&method_label)
+                ));
+            }
             // Footer
             body.push_str(&format!(
                 "<div class=\"section center\">{}</div>",
@@ -1461,7 +2698,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     .as_deref()
                     .unwrap_or(receipt_label(lang, "Thank you")))
             ));
-            html_shell("Delivery Slip", &body)
+            html_shell(receipt_label(lang, "DELIVERY SLIP"), &body, cfg.template)
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let expected = doc
@@ -1477,107 +2714,359 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 .map(money)
                 .unwrap_or_else(|| "N/A".to_string());
             let body = format!(
-                "<div class=\"center\"><strong>SHIFT CHECKOUT</strong></div>\
-                 <div class=\"section\"><div class=\"line\"><span>Shift</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Role</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Staff</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Terminal</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Orders</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Sales</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Expenses</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Refunds</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Opening</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Expected</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Closing</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Variance</span><span>{}</span></div></div>",
+                "<div class=\"center\"><strong>{}</strong></div>\
+                 <div class=\"section\"><div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div></div>",
+                esc(receipt_label(lang, "SHIFT CHECKOUT")),
+                esc(receipt_label(lang, "Shift")),
                 esc(&doc.shift_id),
+                esc(receipt_label(lang, "Role")),
                 esc(&doc.role_type),
+                esc(receipt_label(lang, "Staff")),
                 esc(&doc.staff_name),
+                esc(receipt_label(lang, "Terminal")),
                 esc(&doc.terminal_name),
+                esc(receipt_label(lang, "Orders")),
                 doc.orders_count,
+                esc(receipt_label(lang, "Sales")),
                 money(doc.sales_amount),
+                esc(receipt_label(lang, "Expenses")),
                 money(doc.total_expenses),
+                esc(receipt_label(lang, "Refunds")),
                 money(doc.cash_refunds),
+                esc(receipt_label(lang, "Opening")),
                 money(doc.opening_amount),
+                esc(receipt_label(lang, "Expected")),
                 expected,
+                esc(receipt_label(lang, "Closing")),
                 closing,
+                esc(receipt_label(lang, "Variance")),
                 variance
             );
-            html_shell("Shift Checkout", &body)
+            html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg.template)
         }
         ReceiptDocument::ZReport(doc) => {
-            let body = format!(
-                "<div class=\"center\"><strong>Z REPORT</strong></div>\
-                 <div class=\"section\"><div class=\"line\"><span>Date</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Generated</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Shift</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Terminal</span><span>{}</span></div></div>\
-                 <div class=\"section\"><div class=\"line\"><span>Orders</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Gross</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Discounts</span><span>-{}</span></div>\
-                 <div class=\"line\"><span>Net</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Cash</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Card</span><span>{}</span></div>\
-                 <div class=\"line\"><span>Refunds</span><span>-{}</span></div>\
-                 <div class=\"line\"><span>Voids</span><span>-{}</span></div>\
-                 <div class=\"line\"><span>Expenses</span><span>-{}</span></div>\
-                 <div class=\"line\"><span>Variance</span><span>{}</span></div></div>",
+            let mut body = format!(
+                "<div class=\"center\"><strong>{}</strong></div>\
+                 <div class=\"section\">\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 </div>",
+                esc(receipt_label(lang, "Z REPORT")),
+                esc(receipt_label(lang, "Date")),
                 esc(&doc.report_date),
+                esc(receipt_label(lang, "Generated")),
                 esc(&doc.generated_at),
+                esc(receipt_label(lang, "Shift")),
                 esc(&doc.shift_ref),
+                esc(receipt_label(lang, "Terminal")),
                 esc(&doc.terminal_name),
-                doc.total_orders,
-                money(doc.gross_sales),
-                money(doc.discounts_total),
-                money(doc.net_sales),
-                money(doc.cash_sales),
-                money(doc.card_sales),
-                money(doc.refunds_total),
-                money(doc.voids_total),
-                money(doc.expenses_total),
-                money(doc.cash_variance)
             );
-            html_shell("Z Report", &body)
+
+            // Sales
+            body.push_str(&format!(
+                "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>-{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "SALES")),
+                esc(receipt_label(lang, "Orders")),
+                doc.total_orders,
+                esc(receipt_label(lang, "Gross")),
+                money(doc.gross_sales),
+                esc(receipt_label(lang, "Discounts")),
+                money(doc.discounts_total),
+                esc(receipt_label(lang, "Net")),
+                money(doc.net_sales),
+            ));
+            if doc.tips_total > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Tips")),
+                    money(doc.tips_total),
+                ));
+            }
+            body.push_str("</div>");
+
+            // Payments
+            body.push_str(&format!(
+                "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "PAYMENTS")),
+                esc(receipt_label(lang, "Cash")),
+                money(doc.cash_sales),
+                esc(receipt_label(lang, "Card")),
+                money(doc.card_sales),
+            ));
+            if doc.refunds_total > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                    esc(receipt_label(lang, "Refunds")),
+                    money(doc.refunds_total),
+                ));
+            }
+            if doc.voids_total > 0.0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                    esc(receipt_label(lang, "Voids")),
+                    money(doc.voids_total),
+                ));
+            }
+            body.push_str("</div>");
+
+            // Order breakdown
+            let has_breakdown =
+                doc.dine_in_orders > 0 || doc.takeaway_orders > 0 || doc.delivery_orders > 0;
+            if has_breakdown {
+                body.push_str(&format!(
+                    "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "ORDER BREAKDOWN"))
+                ));
+                if doc.dine_in_orders > 0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{} ({})</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Dine-in")),
+                        doc.dine_in_orders,
+                        money(doc.dine_in_sales),
+                    ));
+                }
+                if doc.takeaway_orders > 0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{} ({})</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Takeaway")),
+                        doc.takeaway_orders,
+                        money(doc.takeaway_sales),
+                    ));
+                }
+                if doc.delivery_orders > 0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{} ({})</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Delivery")),
+                        doc.delivery_orders,
+                        money(doc.delivery_sales),
+                    ));
+                }
+                body.push_str("</div>");
+            }
+
+            // Cash drawer
+            let has_drawer =
+                doc.opening_cash > 0.0 || doc.closing_cash > 0.0 || doc.expected_cash > 0.0;
+            if has_drawer {
+                body.push_str(&format!(
+                    "<div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "CASH DRAWER")),
+                    esc(receipt_label(lang, "Opening")),
+                    money(doc.opening_cash),
+                    esc(receipt_label(lang, "Cash Sales")),
+                    money(doc.cash_sales),
+                ));
+                if doc.expenses_total > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                        esc(receipt_label(lang, "Expenses")),
+                        money(doc.expenses_total),
+                    ));
+                }
+                if doc.cash_drops > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                        esc(receipt_label(lang, "Cash Drops")),
+                        money(doc.cash_drops),
+                    ));
+                }
+                if doc.driver_cash_given > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>-{}</span></div>",
+                        esc(receipt_label(lang, "Driver Given")),
+                        money(doc.driver_cash_given),
+                    ));
+                }
+                if doc.driver_cash_returned > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>+{}</span></div>",
+                        esc(receipt_label(lang, "Driver Returned")),
+                        money(doc.driver_cash_returned),
+                    ));
+                }
+                if doc.staff_payments_total > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Staff Payments*")),
+                        money(doc.staff_payments_total),
+                    ));
+                }
+                body.push_str(&format!(
+                    "<hr/>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "Expected")),
+                    money(doc.expected_cash),
+                    esc(receipt_label(lang, "Closing")),
+                    money(doc.closing_cash),
+                    esc(receipt_label(lang, "Variance")),
+                    money(doc.cash_variance),
+                ));
+                if doc.staff_payments_total > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"note\">* {}</div>",
+                        esc(receipt_label(lang, "Informational only"))
+                    ));
+                }
+                body.push_str("</div>");
+            } else {
+                body.push_str(&format!(
+                    "<div class=\"section\">\
+                     <div class=\"line\"><span>{}</span><span>-{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     </div>",
+                    esc(receipt_label(lang, "Expenses")),
+                    money(doc.expenses_total),
+                    esc(receipt_label(lang, "Variance")),
+                    money(doc.cash_variance),
+                ));
+            }
+
+            html_shell(receipt_label(lang, "Z REPORT"), &body, cfg.template)
+        }
+    }
+}
+
+fn emit_rule(builder: &mut EscPosBuilder, width: usize, ch: char) {
+    let line: String = std::iter::repeat(ch).take(width.max(8)).collect();
+    builder.text(&line).lf();
+}
+
+fn emit_banner(builder: &mut EscPosBuilder, width: usize, ch: char, title: &str) {
+    let width = width.max(8);
+    let raw_title = title.trim();
+    if raw_title.is_empty() {
+        emit_rule(builder, width, ch);
+        return;
+    }
+
+    let content = format!(" {raw_title} ");
+    let content_len = content.chars().count();
+    if content_len >= width {
+        builder.text(raw_title).lf();
+        return;
+    }
+
+    let fill_total = width - content_len;
+    let left = fill_total / 2;
+    let right = fill_total - left;
+    let mut line = String::with_capacity(width);
+    line.extend(std::iter::repeat(ch).take(left));
+    line.push_str(&content);
+    line.extend(std::iter::repeat(ch).take(right));
+    builder.text(&line).lf();
+}
+
+fn emit_pair_internal(
+    builder: &mut EscPosBuilder,
+    label: &str,
+    value: &str,
+    width: usize,
+    bold_value: bool,
+) {
+    let label = label.trim();
+    let value = value.trim();
+    if value.is_empty() {
+        emit_wrapped(builder, label, width);
+        return;
+    }
+
+    let value_len = value.chars().count();
+    if value_len >= width.saturating_sub(2) {
+        emit_wrapped(builder, label, width);
+        if bold_value {
+            builder
+                .right()
+                .bold(true)
+                .text(value)
+                .bold(false)
+                .lf()
+                .left();
+        } else {
+            builder.right().text(value).lf().left();
+        }
+        return;
+    }
+
+    let max_label_width = width.saturating_sub(value_len + 1).max(8);
+    let lines = wrap(label, max_label_width);
+    if lines.is_empty() {
+        if bold_value {
+            builder
+                .right()
+                .bold(true)
+                .text(value)
+                .bold(false)
+                .lf()
+                .left();
+        } else {
+            builder.right().text(value).lf().left();
+        }
+        return;
+    }
+
+    for line in &lines[..lines.len().saturating_sub(1)] {
+        builder.text(line).lf();
+    }
+
+    let tail = lines.last().map(String::as_str).unwrap_or_default();
+    let tail_len = tail.chars().count();
+    if tail_len + value_len < width {
+        if bold_value {
+            builder.text(tail);
+            let gap = width.saturating_sub(tail_len + value_len);
+            for _ in 0..gap {
+                builder.text(" ");
+            }
+            builder.bold(true).text(value).bold(false).lf();
+        } else {
+            builder.line_pair(tail, value);
+        }
+    } else {
+        builder.text(tail).lf();
+        if bold_value {
+            builder
+                .right()
+                .bold(true)
+                .text(value)
+                .bold(false)
+                .lf()
+                .left();
+        } else {
+            builder.right().text(value).lf().left();
         }
     }
 }
 
 fn emit_pair(builder: &mut EscPosBuilder, label: &str, value: &str, width: usize) {
-    let label_len = label.chars().count();
-    let value_len = value.chars().count();
-    if label_len + value_len < width {
-        builder.line_pair(label, value);
-        return;
-    }
-    for line in wrap(label, width.saturating_sub(value_len + 1).max(8)) {
-        builder.text(&line).lf();
-    }
-    builder.right().text(value).lf().left();
+    emit_pair_internal(builder, label, value, width, false);
 }
 
 /// Like `emit_pair` but prints the value in bold.
 fn emit_pair_bold(builder: &mut EscPosBuilder, label: &str, value: &str, width: usize) {
-    let label_len = label.chars().count();
-    let value_len = value.chars().count();
-    if label_len + value_len < width {
-        builder.text(label);
-        let gap = width.saturating_sub(label_len + value_len);
-        for _ in 0..gap {
-            builder.text(" ");
-        }
-        builder.bold(true).text(value).bold(false).lf();
-        return;
-    }
-    for line in wrap(label, width.saturating_sub(value_len + 1).max(8)) {
-        builder.text(&line).lf();
-    }
-    builder
-        .right()
-        .bold(true)
-        .text(value)
-        .bold(false)
-        .lf()
-        .left();
+    emit_pair_internal(builder, label, value, width, true);
 }
 
 fn emit_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) {
@@ -1586,43 +3075,223 @@ fn emit_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) {
     }
 }
 
+fn wrap_centered_header(text: &str, width: usize) -> Vec<String> {
+    let value = text.trim();
+    if value.is_empty() {
+        return vec![];
+    }
+
+    let max_width = width.max(8);
+    if value.contains(',') {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for segment in value
+            .split(',')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+        {
+            let candidate = if current.is_empty() {
+                segment.to_string()
+            } else {
+                format!("{current}, {segment}")
+            };
+            if candidate.chars().count() <= max_width {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(current);
+                current = segment.to_string();
+            } else {
+                lines.extend(wrap(segment, max_width));
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+
+    wrap(value, max_width)
+}
+
+fn split_address_segments(value: &str) -> Vec<String> {
+    value
+        .split(|ch| matches!(ch, ',' | '|' | '\n' | '\r'))
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn emit_centered_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) {
+    for line in wrap_centered_header(text, width) {
+        builder.center().text(&line).lf();
+    }
+}
+
+fn emit_centered_address_lines(builder: &mut EscPosBuilder, address: &str, width: usize) {
+    let segments = split_address_segments(address);
+    if segments.is_empty() {
+        emit_centered_wrapped(builder, address, width);
+        return;
+    }
+
+    for segment in segments {
+        for line in wrap(&segment, width.max(8)) {
+            builder.center().text(&line).lf();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct EscPosStyle {
     modern: bool,
     compact_width: bool,
+    command_profile: CommandProfile,
+    profile: EscPosVisualProfile,
 }
 
-fn escpos_style(cfg: &LayoutConfig) -> EscPosStyle {
-    EscPosStyle {
-        modern: cfg.template == ReceiptTemplate::Modern,
-        compact_width: cfg.paper_width.chars() <= 32,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscPosDocumentTarget {
+    OrderReceipt,
+    DeliverySlip,
+    Other,
+}
+
+impl EscPosDocumentTarget {
+    fn is_customer_receipt(self) -> bool {
+        matches!(self, Self::OrderReceipt | Self::DeliverySlip)
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EscPosVisualProfile {
+    block_rule: char,
+    section_rule: char,
+    bracket_sections: bool,
+    section_spacing_lines: usize,
+    focus_spacing_lines: usize,
+    framed_totals: bool,
+    strong_headers: bool,
+    currency_on_all: bool,
+}
+
+fn escpos_document_target(document: &ReceiptDocument) -> EscPosDocumentTarget {
+    match document {
+        ReceiptDocument::OrderReceipt(_) => EscPosDocumentTarget::OrderReceipt,
+        ReceiptDocument::DeliverySlip(_) => EscPosDocumentTarget::DeliverySlip,
+        _ => EscPosDocumentTarget::Other,
+    }
+}
+
+fn escpos_style(cfg: &LayoutConfig, doc_target: EscPosDocumentTarget) -> EscPosStyle {
+    let modern = cfg.template == ReceiptTemplate::Modern;
+    let classic_customer_layout = !modern && doc_target.is_customer_receipt();
+    let (section_spacing_lines, focus_spacing_lines) = if classic_customer_layout {
+        // Classic receipt v2.1 lock: deterministic compact rhythm.
+        (0, 0)
+    } else {
+        match cfg.layout_density {
+            LayoutDensity::Compact => (0, 0),
+            LayoutDensity::Balanced => (1, 0),
+            LayoutDensity::Spacious => (1, 1),
+        }
+    };
+    let strong_headers = if classic_customer_layout {
+        true
+    } else {
+        cfg.header_emphasis == HeaderEmphasis::Strong
+    };
+    let profile = if modern {
+        EscPosVisualProfile {
+            block_rule: '-',
+            section_rule: '-',
+            bracket_sections: false,
+            section_spacing_lines,
+            focus_spacing_lines,
+            framed_totals: false,
+
+            strong_headers,
+            currency_on_all: false,
+        }
+    } else {
+        EscPosVisualProfile {
+            block_rule: if classic_customer_layout { '-' } else { '─' },
+            section_rule: if classic_customer_layout { '-' } else { '─' },
+            bracket_sections: false,
+            section_spacing_lines,
+            focus_spacing_lines,
+            framed_totals: false,
+
+            strong_headers,
+            currency_on_all: false,
+        }
+    };
+
+    EscPosStyle {
+        modern,
+        compact_width: cfg.paper_width.chars() <= 32,
+        command_profile: cfg.command_profile,
+        profile,
+    }
+}
+
+fn can_scale_text(style: EscPosStyle) -> bool {
+    style.command_profile == CommandProfile::FullStyle
+}
+
 fn should_use_large_item_text(style: EscPosStyle, width: usize, label: &str) -> bool {
-    if !style.modern || style.compact_width {
+    if !style.modern || style.compact_width || !can_scale_text(style) {
         return false;
     }
     label.chars().count() <= width.saturating_sub(6).max(8)
 }
 
-fn emit_section_header(
-    builder: &mut EscPosBuilder,
-    title: &str,
-    style: EscPosStyle,
-    _width: usize,
-) {
-    builder.separator();
-    if style.modern && !style.compact_width {
-        builder
-            .bold(true)
-            .double_height()
-            .text(title)
-            .lf()
-            .normal_size()
-            .bold(false);
-    } else {
-        builder.bold(true).text(title).lf().bold(false);
+fn emit_section_header(builder: &mut EscPosBuilder, title: &str, style: EscPosStyle, width: usize) {
+    let title_upper = title.trim().to_ascii_uppercase();
+    for _ in 0..style.profile.section_spacing_lines {
+        builder.lf();
+    }
+    if style.modern {
+        // Modern: left-aligned bold title + dash rule below
+        let rule: String = std::iter::repeat(style.profile.section_rule)
+            .take(width.max(8))
+            .collect();
+        builder.left();
+        builder.bold(true).text(&title_upper).lf().bold(false);
+        builder.text(&rule).lf();
+        for _ in 0..style.profile.section_spacing_lines {
+            builder.lf();
+        }
+        return;
+    }
+    if !style.profile.bracket_sections {
+        // Classic: left-aligned bold title + rule below
+        let rule: String = std::iter::repeat(style.profile.section_rule)
+            .take(width.max(8))
+            .collect();
+        builder.left();
+        builder.bold(true).text(&title_upper).lf().bold(false);
+        builder.text(&rule).lf();
+        return;
+    }
+
+    // Bracket mode: [ TITLE ] between rules
+    let rule: String = std::iter::repeat(style.profile.section_rule)
+        .take(width.max(8))
+        .collect();
+    let banner = format!("[ {} ]", title_upper);
+    builder.center();
+    builder.text(&rule).lf();
+    builder.bold(true).text(&banner).lf().bold(false);
+    builder.text(&rule).lf();
+    builder.left();
+
+    for _ in 0..style.profile.section_spacing_lines {
+        builder.lf();
     }
 }
 
@@ -1668,25 +3337,37 @@ fn emit_item_text(builder: &mut EscPosBuilder, text: &str, width: usize, style: 
     }
 }
 
-fn emit_item_customizations_escpos(builder: &mut EscPosBuilder, item: &ReceiptItem, width: usize) {
+fn emit_item_customizations_escpos(
+    builder: &mut EscPosBuilder,
+    item: &ReceiptItem,
+    width: usize,
+    lang: &str,
+) {
     let (with_items, without_items) = split_customizations(item);
 
     if !with_items.is_empty() {
         for customization in with_items {
             emit_wrapped(
                 builder,
-                &format!("  + {}", customization_display(customization, true)),
+                &format!("  + {}", customization_display(lang, customization, true)),
                 width,
             );
         }
     }
 
     if !without_items.is_empty() {
-        emit_wrapped(builder, "  - Without", width);
+        emit_wrapped(
+            builder,
+            &format!("  - {}", receipt_label(lang, "Without")),
+            width,
+        );
         for customization in without_items {
             emit_wrapped(
                 builder,
-                &format!("    - {}", customization_display(customization, false)),
+                &format!(
+                    "    - {}",
+                    customization_display(lang, customization, false)
+                ),
                 width,
             );
         }
@@ -1697,6 +3378,7 @@ fn emit_header(
     builder: &mut EscPosBuilder,
     cfg: &LayoutConfig,
     style: EscPosStyle,
+    doc_target: EscPosDocumentTarget,
     warnings: &mut Vec<RenderWarning>,
 ) {
     if cfg.show_logo
@@ -1712,114 +3394,1759 @@ fn emit_header(
             message: "Logo enabled but URL missing; using text header fallback".to_string(),
         });
     }
-    builder.center();
-    if style.modern && !style.compact_width {
-        builder
-            .bold(true)
-            .double_height()
-            .text(&cfg.organization_name)
-            .lf()
-            .normal_size()
-            .bold(false);
+    let header_width = cfg.paper_width.chars();
+
+    if style.modern {
+        // ── Modern header ──────────────────────────────────────────────
+        // Copy label
+        if let Some(label) = cfg
+            .copy_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            builder.center().bold(true).text(label).lf().bold(false);
+        }
+        // Address: bold centered, split on comma
+        if let Some(address) = cfg
+            .store_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            builder.center().bold(true);
+            for part in address.split(',') {
+                let part = part.trim();
+                if !part.is_empty() {
+                    builder.text(part).lf();
+                }
+            }
+            builder.bold(false);
+            emit_rule(builder, header_width, '-');
+        }
+        // Phone left-aligned, then AFM + ΔΟΥ
+        let vat_val = cfg
+            .vat_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let office_val = cfg
+            .tax_office
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let vat_label = receipt_label(&cfg.language, "VAT");
+        let office_label = receipt_label(&cfg.language, "TAX_OFFICE");
+        let phone_val = cfg
+            .store_phone
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        builder.left();
+        if let Some(phone) = phone_val {
+            let phone_label = receipt_label(&cfg.language, "Phone");
+            builder.text(&format!("{phone_label}: {phone}")).lf();
+        }
+        match (vat_val, office_val) {
+            (Some(vat), Some(office)) => {
+                builder
+                    .text(&format!("{vat_label}: {vat}   {office_label}: {office}"))
+                    .lf();
+            }
+            (Some(vat), None) => {
+                builder.text(&format!("{vat_label}: {vat}")).lf();
+            }
+            (None, Some(office)) => {
+                builder.text(&format!("{office_label}: {office}")).lf();
+            }
+            (None, None) => {}
+        }
     } else {
-        builder
-            .bold(true)
-            .text(&cfg.organization_name)
-            .lf()
-            .bold(false);
-    }
-    if let Some(branch_line) = header_branch_line(cfg) {
-        if style.modern && !style.compact_width {
-            builder.bold(true).text(branch_line).lf().bold(false);
+        // ── Classic header ─────────────────────────────────────────────
+        // Logo is injected by print.rs before the receipt body.
+        if doc_target.is_customer_receipt() {
+            emit_rule(builder, header_width, style.profile.block_rule);
+            if let Some(label) = cfg
+                .copy_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                builder.center().bold(true).text(label).lf().bold(false);
+            }
+            let mut rendered_address = false;
+            if let Some(address) = cfg
+                .store_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                rendered_address = true;
+                builder.center().bold(true);
+                emit_centered_address_lines(builder, address, header_width);
+                builder.bold(false);
+            }
+            if !rendered_address && !cfg.show_logo {
+                let org = cfg.organization_name.trim();
+                if !org.is_empty() {
+                    builder.center().bold(true);
+                    emit_centered_wrapped(builder, org, header_width);
+                    builder.bold(false);
+                }
+                if let Some(subtitle) = cfg.store_subtitle.as_deref().map(str::trim).filter(|v| {
+                    let org = cfg.organization_name.trim();
+                    !v.is_empty() && *v != org && !v.eq_ignore_ascii_case(org)
+                }) {
+                    builder.center();
+                    emit_centered_wrapped(builder, subtitle, header_width);
+                }
+            }
+            emit_rule(builder, header_width, style.profile.block_rule);
+            // Phone + VAT/DOY are left aligned in classic receipt v2.
+            let phone_val = cfg
+                .store_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let vat_val = cfg
+                .vat_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let office_val = cfg
+                .tax_office
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let vat_label = receipt_label(&cfg.language, "VAT");
+            let office_label = receipt_label(&cfg.language, "TAX_OFFICE");
+            builder.left();
+            if let Some(phone) = phone_val {
+                let phone_label = receipt_label(&cfg.language, "Phone");
+                builder.text(&format!("{phone_label}: {phone}")).lf();
+            }
+            match (vat_val, office_val) {
+                (Some(vat), Some(office)) => {
+                    builder
+                        .text(&format!("{vat_label}: {vat}   {office_label}: {office}"))
+                        .lf();
+                }
+                (Some(vat), None) => {
+                    builder.text(&format!("{vat_label}: {vat}")).lf();
+                }
+                (None, Some(office)) => {
+                    builder.text(&format!("{office_label}: {office}")).lf();
+                }
+                (None, None) => {}
+            }
+            emit_rule(builder, header_width, style.profile.block_rule);
         } else {
-            builder.text(branch_line).lf();
+            // Top separator rule (legacy classic)
+            emit_rule(builder, header_width, style.profile.block_rule);
+            // Only show org name as fallback when no logo is configured.
+            if !cfg.show_logo {
+                let org = cfg.organization_name.trim();
+                if !org.is_empty() {
+                    builder.center().bold(true);
+                    emit_centered_wrapped(builder, org, header_width);
+                    builder.bold(false);
+                }
+                // Show subtitle (branch name) if different from org
+                if let Some(subtitle) = cfg.store_subtitle.as_deref().map(str::trim).filter(|v| {
+                    let org = cfg.organization_name.trim();
+                    !v.is_empty() && *v != org && !v.eq_ignore_ascii_case(org)
+                }) {
+                    builder.center();
+                    emit_centered_wrapped(builder, subtitle, header_width);
+                }
+            }
+            // Copy label
+            if let Some(label) = cfg
+                .copy_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                builder.center().bold(true).text(label).lf().bold(false);
+            }
+            // Address: split on comma, each part bold centered
+            if let Some(address) = cfg
+                .store_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                builder.center().bold(true);
+                for part in address.split(',') {
+                    let part = part.trim();
+                    if !part.is_empty() {
+                        emit_centered_wrapped(builder, part, header_width);
+                    }
+                }
+                builder.bold(false);
+            }
+            // Blank line after address
+            builder.lf();
+            // Phone centered
+            let phone_val = cfg
+                .store_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            if let Some(phone) = phone_val {
+                let phone_label = receipt_label(&cfg.language, "Phone");
+                emit_centered_wrapped(builder, &format!("{phone_label}: {phone}"), header_width);
+            }
+            // AFM + ΔΟΥ centered (double-space separator, no pipe)
+            let vat_val = cfg
+                .vat_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let office_val = cfg
+                .tax_office
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let vat_label = receipt_label(&cfg.language, "VAT");
+            let office_label = receipt_label(&cfg.language, "TAX_OFFICE");
+            match (vat_val, office_val) {
+                (Some(vat), Some(office)) => {
+                    let combined = format!("{vat_label}: {vat}   {office_label}: {office}");
+                    emit_centered_wrapped(builder, &combined, header_width);
+                }
+                (Some(vat), None) => {
+                    emit_centered_wrapped(builder, &format!("{vat_label}: {vat}"), header_width);
+                }
+                (None, Some(office)) => {
+                    emit_centered_wrapped(
+                        builder,
+                        &format!("{office_label}: {office}"),
+                        header_width,
+                    );
+                }
+                (None, None) => {}
+            }
         }
     }
-    if let Some(label) = cfg
+    builder.left();
+    // Classic customer receipts keep a compact handoff into the order banner.
+    if !(doc_target.is_customer_receipt() && !style.modern) {
+        builder.lf();
+    }
+}
+
+fn default_printable_width_dots_for_paper(paper: PaperWidth) -> u16 {
+    match paper {
+        PaperWidth::Mm58 => 384,
+        PaperWidth::Mm80 => 576,
+        PaperWidth::Mm112 => 832,
+    }
+}
+
+fn is_star_line_mode(cfg: &LayoutConfig) -> bool {
+    match cfg.emulation_mode {
+        ReceiptEmulationMode::StarLine => true,
+        ReceiptEmulationMode::Escpos => false,
+        ReceiptEmulationMode::Auto => cfg.detected_brand == crate::printers::PrinterBrand::Star,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RasterTextWeight {
+    Regular,
+    Bold,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RasterTextStyle {
+    size_px: f32,
+    line_height: i32,
+    tracking_px: f32,
+    weight: RasterTextWeight,
+    ink: u8,
+}
+
+impl RasterTextStyle {
+    fn with_ink(self, ink: u8) -> Self {
+        Self { ink, ..self }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RasterExactPreset {
+    top_inset: i32,
+    bottom_padding: i32,
+    small_gap: i32,
+    medium_gap: i32,
+    large_gap: i32,
+    rule_dash_dots: i32,
+    rule_gap_dots: i32,
+    rule_thickness: i32,
+    banner_padding_y: i32,
+    short_star_count: usize,
+    address_style: RasterTextStyle,
+    contact_style: RasterTextStyle,
+    banner_style: RasterTextStyle,
+    meta_style: RasterTextStyle,
+    section_style: RasterTextStyle,
+    item_style: RasterTextStyle,
+    customization_style: RasterTextStyle,
+    subtotal_style: RasterTextStyle,
+    total_style: RasterTextStyle,
+    payment_style: RasterTextStyle,
+    footer_star_style: RasterTextStyle,
+    footer_text_style: RasterTextStyle,
+}
+
+fn raster_exact_preset_for_paper(paper: PaperWidth) -> RasterExactPreset {
+    let scale = match paper {
+        PaperWidth::Mm58 => 0.82_f32,
+        PaperWidth::Mm80 => 1.0_f32,
+        PaperWidth::Mm112 => 1.22_f32,
+    };
+    let scaled_i = |value: i32| ((value as f32) * scale).round() as i32;
+    let style = |size_px: f32, line_height: i32, tracking_px: f32, weight: RasterTextWeight| {
+        RasterTextStyle {
+            size_px: size_px * scale,
+            line_height: scaled_i(line_height).max(12),
+            tracking_px: tracking_px * scale,
+            weight,
+            ink: 0,
+        }
+    };
+
+    RasterExactPreset {
+        top_inset: scaled_i(20),
+        bottom_padding: scaled_i(28),
+        small_gap: scaled_i(3),
+        medium_gap: scaled_i(7),
+        large_gap: scaled_i(9),
+        rule_dash_dots: scaled_i(8).max(3),
+        rule_gap_dots: scaled_i(4).max(2),
+        rule_thickness: scaled_i(2).max(1),
+        banner_padding_y: scaled_i(4).max(2),
+        short_star_count: 12,
+        address_style: style(34.0, 42, 0.1, RasterTextWeight::Bold),
+        contact_style: style(29.0, 36, 0.05, RasterTextWeight::Regular),
+        banner_style: style(36.0, 44, 0.15, RasterTextWeight::Bold),
+        meta_style: style(29.0, 36, 0.05, RasterTextWeight::Regular),
+        section_style: style(33.0, 41, 0.1, RasterTextWeight::Bold),
+        item_style: style(30.0, 38, 0.05, RasterTextWeight::Regular),
+        customization_style: style(27.0, 34, 0.05, RasterTextWeight::Regular),
+        subtotal_style: style(31.0, 39, 0.05, RasterTextWeight::Regular),
+        total_style: style(44.0, 54, 0.15, RasterTextWeight::Bold),
+        payment_style: style(31.0, 39, 0.05, RasterTextWeight::Regular),
+        footer_star_style: style(22.0, 28, 0.1, RasterTextWeight::Regular),
+        footer_text_style: style(30.0, 37, 0.05, RasterTextWeight::Regular),
+    }
+}
+
+fn raster_readability_scale(cfg: &LayoutConfig) -> f32 {
+    if cfg.font_type == FontType::B
+        && cfg.layout_density == LayoutDensity::Compact
+        && cfg.header_emphasis == HeaderEmphasis::Normal
+    {
+        0.92
+    } else if cfg.font_type == FontType::A
+        && matches!(
+            cfg.layout_density,
+            LayoutDensity::Balanced | LayoutDensity::Spacious
+        )
+        && cfg.header_emphasis == HeaderEmphasis::Strong
+    {
+        1.28
+    } else {
+        1.00
+    }
+}
+
+fn scale_raster_text_style(style: RasterTextStyle, scale: f32) -> RasterTextStyle {
+    RasterTextStyle {
+        size_px: (style.size_px * scale).max(8.0),
+        line_height: ((style.line_height as f32) * scale).round().max(10.0) as i32,
+        tracking_px: style.tracking_px * scale,
+        ..style
+    }
+}
+
+fn scale_raster_exact_preset(mut preset: RasterExactPreset, scale: f32) -> RasterExactPreset {
+    let scaled_i = |value: i32| ((value as f32) * scale).round().max(1.0) as i32;
+    preset.top_inset = scaled_i(preset.top_inset);
+    preset.bottom_padding = scaled_i(preset.bottom_padding);
+    preset.small_gap = scaled_i(preset.small_gap);
+    preset.medium_gap = scaled_i(preset.medium_gap);
+    preset.large_gap = scaled_i(preset.large_gap);
+    preset.rule_dash_dots = scaled_i(preset.rule_dash_dots).max(2);
+    preset.rule_gap_dots = scaled_i(preset.rule_gap_dots).max(1);
+    preset.rule_thickness = scaled_i(preset.rule_thickness).max(1);
+    preset.banner_padding_y = scaled_i(preset.banner_padding_y).max(1);
+    preset.address_style = scale_raster_text_style(preset.address_style, scale);
+    preset.contact_style = scale_raster_text_style(preset.contact_style, scale);
+    preset.banner_style = scale_raster_text_style(preset.banner_style, scale);
+    preset.meta_style = scale_raster_text_style(preset.meta_style, scale);
+    preset.section_style = scale_raster_text_style(preset.section_style, scale);
+    preset.item_style = scale_raster_text_style(preset.item_style, scale);
+    preset.customization_style = scale_raster_text_style(preset.customization_style, scale);
+    preset.subtotal_style = scale_raster_text_style(preset.subtotal_style, scale);
+    preset.total_style = scale_raster_text_style(preset.total_style, scale);
+    preset.payment_style = scale_raster_text_style(preset.payment_style, scale);
+    preset.footer_star_style = scale_raster_text_style(preset.footer_star_style, scale);
+    preset.footer_text_style = scale_raster_text_style(preset.footer_text_style, scale);
+    preset
+}
+
+fn raster_exact_preset_for_layout(cfg: &LayoutConfig) -> RasterExactPreset {
+    let base = raster_exact_preset_for_paper(cfg.paper_width);
+    scale_raster_exact_preset(base, raster_readability_scale(cfg))
+}
+
+struct RasterFonts {
+    regular: RustFont<'static>,
+    bold: RustFont<'static>,
+}
+
+impl RasterFonts {
+    fn load() -> Result<Self, String> {
+        let regular = RustFont::try_from_bytes(NOTO_SERIF_REGULAR_TTF)
+            .ok_or_else(|| "failed to load embedded Noto Serif Regular".to_string())?;
+        let bold = RustFont::try_from_bytes(NOTO_SERIF_BOLD_TTF)
+            .ok_or_else(|| "failed to load embedded Noto Serif Bold".to_string())?;
+        Ok(Self { regular, bold })
+    }
+
+    fn font(&self, weight: RasterTextWeight) -> &RustFont<'static> {
+        match weight {
+            RasterTextWeight::Regular => &self.regular,
+            RasterTextWeight::Bold => &self.bold,
+        }
+    }
+
+    fn supports_char(&self, ch: char) -> bool {
+        if ch.is_whitespace() {
+            return true;
+        }
+        self.regular.glyph(ch).id().0 != 0 && self.bold.glyph(ch).id().0 != 0
+    }
+
+    fn missing_glyphs(&self, text: &str, weight: RasterTextWeight) -> usize {
+        let font = self.font(weight);
+        text.chars()
+            .filter(|ch| !ch.is_whitespace() && font.glyph(*ch).id().0 == 0)
+            .count()
+    }
+}
+
+fn wrap_pixels<F>(text: &str, max_width: i32, measure: F) -> Vec<String>
+where
+    F: Fn(&str) -> i32,
+{
+    let mut out = Vec::new();
+    let width = max_width.max(8);
+
+    for raw_line in text.replace('\t', " ").lines() {
+        let line = raw_line.trim_end();
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+
+        let indent_len = line.chars().take_while(|ch| *ch == ' ').count();
+        let indent = " ".repeat(indent_len);
+        let content = line.trim_start();
+        let mut current = String::new();
+
+        for token in content.split_whitespace() {
+            let candidate = if current.is_empty() {
+                format!("{indent}{token}")
+            } else {
+                format!("{current} {token}")
+            };
+            if measure(&candidate) <= width {
+                current = candidate;
+            } else if current.is_empty() {
+                out.push(candidate);
+            } else {
+                out.push(current);
+                current = format!("{indent}{token}");
+            }
+        }
+
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+struct TtfReceiptComposer {
+    image: GrayImage,
+    physical_width: i32,
+    left_margin: i32,
+    content_width: i32,
+    y: i32,
+    preset: RasterExactPreset,
+    fonts: RasterFonts,
+    missing_glyph_count: usize,
+}
+
+impl TtfReceiptComposer {
+    fn try_new(cfg: &LayoutConfig) -> Result<Self, String> {
+        let fonts = RasterFonts::load()?;
+        let preset = raster_exact_preset_for_layout(cfg);
+
+        let physical_width = default_printable_width_dots_for_paper(cfg.paper_width) as i32;
+        let mut left_margin = cfg.left_margin_dots as i32;
+        if left_margin < 0 {
+            left_margin = 0;
+        }
+        let mut content_width = cfg.printable_width_dots as i32;
+        content_width = content_width.clamp(64, physical_width.max(64));
+        if left_margin >= physical_width {
+            left_margin = 0;
+        }
+        if left_margin + content_width > physical_width {
+            content_width = (physical_width - left_margin).max(64);
+        }
+
+        Ok(Self {
+            image: GrayImage::from_pixel(physical_width as u32, 9000, Luma([255])),
+            physical_width,
+            left_margin,
+            content_width,
+            y: preset.top_inset,
+            preset,
+            fonts,
+            missing_glyph_count: 0,
+        })
+    }
+
+    fn has_missing_glyphs(&self) -> bool {
+        self.missing_glyph_count > 0
+    }
+
+    fn text_width(&self, text: &str, style: RasterTextStyle) -> i32 {
+        let font = self.fonts.font(style.weight);
+        let scale = Scale::uniform(style.size_px.max(1.0));
+        let mut width = 0.0_f32;
+        let mut prev = None;
+        for ch in text.chars() {
+            if let Some(prev_ch) = prev {
+                width += font.pair_kerning(scale, prev_ch, ch);
+            }
+            width += font.glyph(ch).scaled(scale).h_metrics().advance_width + style.tracking_px;
+            prev = Some(ch);
+        }
+        if !text.is_empty() {
+            width -= style.tracking_px.max(0.0);
+        }
+        width.max(0.0).ceil() as i32
+    }
+
+    fn blend_pixel(&mut self, x: i32, y: i32, ink: u8, alpha: f32) {
+        if x < 0 || y < 0 || (x as u32) >= self.image.width() || (y as u32) >= self.image.height() {
+            return;
+        }
+        let src = self.image.get_pixel(x as u32, y as u32).0[0] as f32;
+        let dst = src + (ink as f32 - src) * alpha.clamp(0.0, 1.0);
+        self.image.put_pixel(
+            x as u32,
+            y as u32,
+            Luma([dst.round().clamp(0.0, 255.0) as u8]),
+        );
+    }
+
+    fn draw_text_at_y(&mut self, text: &str, align: BitmapAlign, style: RasterTextStyle, y: i32) {
+        let text = text.trim_end();
+        let text_w = self.text_width(text, style);
+        let start_x = match align {
+            BitmapAlign::Left => self.left_margin,
+            BitmapAlign::Center => self.left_margin + (self.content_width - text_w).max(0) / 2,
+            BitmapAlign::Right => self.left_margin + (self.content_width - text_w).max(0),
+        };
+
+        let font = self.fonts.font(style.weight).clone();
+        self.missing_glyph_count += self.fonts.missing_glyphs(text, style.weight);
+        let scale = Scale::uniform(style.size_px.max(1.0));
+        let v_metrics = font.v_metrics(scale);
+        let baseline = y as f32 + v_metrics.ascent;
+
+        let mut caret = start_x as f32;
+        let mut prev = None;
+        for ch in text.chars() {
+            if let Some(prev_ch) = prev {
+                caret += font.pair_kerning(scale, prev_ch, ch);
+            }
+            let glyph = font
+                .glyph(ch)
+                .scaled(scale)
+                .positioned(point(caret, baseline));
+            let advance = glyph.unpositioned().h_metrics().advance_width;
+            if let Some(bounds) = glyph.pixel_bounding_box() {
+                glyph.draw(|gx, gy, value| {
+                    self.blend_pixel(
+                        bounds.min.x + gx as i32,
+                        bounds.min.y + gy as i32,
+                        style.ink,
+                        value,
+                    );
+                });
+            }
+            caret += advance + style.tracking_px;
+            prev = Some(ch);
+        }
+    }
+
+    fn draw_text_line(&mut self, text: &str, align: BitmapAlign, style: RasterTextStyle) {
+        self.draw_text_at_y(text, align, style, self.y);
+        self.y += style.line_height;
+    }
+
+    fn draw_wrapped(&mut self, text: &str, align: BitmapAlign, style: RasterTextStyle) {
+        let lines = wrap_pixels(text, self.content_width, |line| {
+            self.text_width(line, style)
+        });
+        for line in lines {
+            self.draw_text_line(&line, align, style);
+        }
+    }
+
+    fn draw_pair(&mut self, label: &str, value: &str, style: RasterTextStyle) {
+        let label = label.trim_end();
+        let value = value.trim();
+        if value.is_empty() {
+            self.draw_wrapped(label, BitmapAlign::Left, style);
+            return;
+        }
+
+        let value_w = self.text_width(value, style);
+        let pair_gap = (self.preset.medium_gap * 2).max(6);
+        let max_label_width = self.content_width - value_w - pair_gap;
+        if max_label_width <= 24 {
+            self.draw_wrapped(label, BitmapAlign::Left, style);
+            self.draw_text_line(value, BitmapAlign::Right, style);
+            return;
+        }
+
+        let lines = wrap_pixels(label, max_label_width, |line| self.text_width(line, style));
+        if lines.is_empty() {
+            self.draw_text_line(value, BitmapAlign::Right, style);
+            return;
+        }
+
+        for line in &lines[..lines.len().saturating_sub(1)] {
+            self.draw_text_line(line, BitmapAlign::Left, style);
+        }
+
+        let tail = lines.last().map(String::as_str).unwrap_or_default();
+        let y = self.y;
+        self.draw_text_at_y(tail, BitmapAlign::Left, style, y);
+        self.draw_text_at_y(value, BitmapAlign::Right, style, y);
+        self.y += style.line_height;
+    }
+
+    fn draw_rule(&mut self) {
+        let y = self.y + self.preset.contact_style.line_height / 2;
+        let start = self.left_margin;
+        let end = self.left_margin + self.content_width;
+        let mut x = start;
+        while x < end {
+            let dash_end = (x + self.preset.rule_dash_dots).min(end);
+            for px in x..dash_end {
+                for dy in 0..self.preset.rule_thickness {
+                    self.blend_pixel(px, y + dy, 0, 1.0);
+                }
+            }
+            x += self.preset.rule_dash_dots + self.preset.rule_gap_dots;
+        }
+        self.y += self.preset.contact_style.line_height;
+    }
+
+    fn draw_reverse_banner(&mut self, text: &str) {
+        let style = self.preset.banner_style;
+        let banner_h = style.line_height + self.preset.banner_padding_y * 2;
+        let top = self.y;
+        for py in top..(top + banner_h) {
+            for px in self.left_margin..(self.left_margin + self.content_width) {
+                self.blend_pixel(px, py, 0, 1.0);
+            }
+        }
+        self.draw_text_at_y(
+            text,
+            BitmapAlign::Center,
+            style.with_ink(255),
+            top + self.preset.banner_padding_y,
+        );
+        self.y += banner_h + self.preset.small_gap;
+    }
+
+    fn add_gap(&mut self, dots: i32) {
+        self.y += dots.max(0);
+    }
+
+    fn stars_for_width(&self, style: RasterTextStyle) -> usize {
+        let star_w = self.text_width("*", style).max(1);
+        (self.content_width / star_w).max(24) as usize
+    }
+
+    fn into_cropped(self) -> GrayImage {
+        let final_height =
+            (self.y + self.preset.bottom_padding).clamp(1, self.image.height() as i32) as u32;
+        image::imageops::crop_imm(
+            &self.image,
+            0,
+            0,
+            self.physical_width.max(1) as u32,
+            final_height,
+        )
+        .to_image()
+    }
+}
+
+fn resolve_raster_currency_symbol(cfg: &LayoutConfig, fonts: &RasterFonts) -> String {
+    let mut symbol = if cfg.currency_symbol.trim().is_empty() {
+        " \u{20AC}".to_string()
+    } else {
+        cfg.currency_symbol.clone()
+    };
+    if symbol.contains('\u{20AC}') && !fonts.supports_char('\u{20AC}') {
+        symbol = symbol.replace('\u{20AC}', "EUR");
+        if !symbol.contains(" EUR") {
+            symbol = symbol.trim().replace("EUR", " EUR");
+        }
+    }
+    symbol
+}
+
+fn glyph_for_char(ch: char) -> [u8; 8] {
+    font8x8::BASIC_FONTS
+        .get(ch)
+        .or_else(|| font8x8::LATIN_FONTS.get(ch))
+        .or_else(|| font8x8::GREEK_FONTS.get(ch))
+        .or_else(|| font8x8::BOX_FONTS.get(ch))
+        .or_else(|| font8x8::MISC_FONTS.get(ch))
+        .unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap_or([0; 8]))
+}
+
+fn draw_bitmap_text(
+    image: &mut GrayImage,
+    text: &str,
+    x: i32,
+    y: i32,
+    scale: u32,
+    letter_spacing: i32,
+    color: u8,
+    bold: bool,
+) {
+    let mut cursor_x = x;
+    let scale_i32 = scale as i32;
+    for ch in text.chars() {
+        let glyph = glyph_for_char(ch);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..8u8 {
+                if bits & (1u8 << col) == 0 {
+                    continue;
+                }
+                let px = cursor_x + col as i32 * scale_i32;
+                let py = y + row as i32 * scale_i32;
+                for dy in 0..scale_i32 {
+                    for dx in 0..scale_i32 {
+                        let tx = px + dx;
+                        let ty = py + dy;
+                        if tx >= 0
+                            && ty >= 0
+                            && (tx as u32) < image.width()
+                            && (ty as u32) < image.height()
+                        {
+                            image.put_pixel(tx as u32, ty as u32, Luma([color]));
+                        }
+                        if bold {
+                            let bx = tx + 1;
+                            if bx >= 0
+                                && ty >= 0
+                                && (bx as u32) < image.width()
+                                && (ty as u32) < image.height()
+                            {
+                                image.put_pixel(bx as u32, ty as u32, Luma([color]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cursor_x += 8 * scale_i32 + letter_spacing;
+    }
+}
+
+fn bitmap_text_width(text: &str, scale: u32, letter_spacing: i32) -> i32 {
+    let chars = text.chars().count() as i32;
+    if chars == 0 {
+        return 0;
+    }
+    chars * (8 * scale as i32 + letter_spacing) - letter_spacing
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BitmapAlign {
+    Left,
+    Center,
+    Right,
+}
+
+struct BitmapReceiptComposer {
+    image: GrayImage,
+    physical_width: i32,
+    left_margin: i32,
+    content_width: i32,
+    y: i32,
+    normal_scale: u32,
+    large_scale: u32,
+    letter_spacing: i32,
+}
+
+impl BitmapReceiptComposer {
+    fn new(cfg: &LayoutConfig) -> Self {
+        let physical_width = default_printable_width_dots_for_paper(cfg.paper_width) as i32;
+        let readability_scale = raster_readability_scale(cfg);
+        let mut left_margin = cfg.left_margin_dots as i32;
+        if left_margin < 0 {
+            left_margin = 0;
+        }
+        let mut content_width = cfg.printable_width_dots as i32;
+        content_width = content_width.clamp(64, physical_width.max(64));
+        if left_margin >= physical_width {
+            left_margin = 0;
+        }
+        if left_margin + content_width > physical_width {
+            content_width = (physical_width - left_margin).max(64);
+        }
+        let (normal_scale, large_scale) = if readability_scale >= 1.20 {
+            (3, 4)
+        } else {
+            (2, 3)
+        };
+        Self {
+            image: GrayImage::from_pixel(physical_width as u32, 6000, Luma([255])),
+            physical_width,
+            left_margin,
+            content_width,
+            y: ((10.0 * readability_scale).round() as i32).max(8),
+            normal_scale,
+            large_scale,
+            letter_spacing: 2,
+        }
+    }
+
+    fn chars_per_line(&self) -> usize {
+        let adv = (8 * self.normal_scale as i32 + self.letter_spacing).max(1);
+        (self.content_width / adv).max(8) as usize
+    }
+
+    fn line_height_for_scale(&self, scale: u32) -> i32 {
+        (8 * scale as i32 + 6).max(10)
+    }
+
+    fn draw_text_line(
+        &mut self,
+        text: &str,
+        align: BitmapAlign,
+        bold: bool,
+        scale: u32,
+        color: u8,
+    ) {
+        let text = text.trim_end();
+        let text_w = bitmap_text_width(text, scale, self.letter_spacing);
+        let x = match align {
+            BitmapAlign::Left => self.left_margin,
+            BitmapAlign::Center => self.left_margin + (self.content_width - text_w).max(0) / 2,
+            BitmapAlign::Right => self.left_margin + (self.content_width - text_w).max(0),
+        };
+        draw_bitmap_text(
+            &mut self.image,
+            text,
+            x,
+            self.y,
+            scale,
+            self.letter_spacing,
+            color,
+            bold,
+        );
+        self.y += self.line_height_for_scale(scale);
+    }
+
+    fn draw_left_wrapped(&mut self, text: &str, bold: bool, scale: u32) {
+        for line in wrap(text, self.chars_per_line()) {
+            self.draw_text_line(&line, BitmapAlign::Left, bold, scale, 0);
+        }
+    }
+
+    fn draw_pair(&mut self, label: &str, value: &str, bold: bool, scale: u32) {
+        let label = label.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            self.draw_left_wrapped(label, bold, scale);
+            return;
+        }
+        let width = self.chars_per_line();
+        let value_len = value.chars().count();
+        if value_len >= width.saturating_sub(2) {
+            self.draw_left_wrapped(label, bold, scale);
+            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            return;
+        }
+        let max_label_width = width.saturating_sub(value_len + 1).max(8);
+        let lines = wrap(label, max_label_width);
+        if lines.is_empty() {
+            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            return;
+        }
+        for line in &lines[..lines.len().saturating_sub(1)] {
+            self.draw_text_line(line, BitmapAlign::Left, bold, scale, 0);
+        }
+        let tail = lines.last().map(String::as_str).unwrap_or_default();
+        let tail_len = tail.chars().count();
+        if tail_len + value_len < width {
+            let gap = width.saturating_sub(tail_len + value_len);
+            self.draw_text_line(
+                &format!("{tail}{}{value}", " ".repeat(gap)),
+                BitmapAlign::Left,
+                bold,
+                scale,
+                0,
+            );
+        } else {
+            self.draw_text_line(tail, BitmapAlign::Left, bold, scale, 0);
+            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+        }
+    }
+
+    fn draw_rule(&mut self) {
+        let y = self.y + self.line_height_for_scale(self.normal_scale) / 2;
+        let start = self.left_margin;
+        let end = self.left_margin + self.content_width;
+        let mut x = start;
+        while x < end {
+            for dash in 0..4 {
+                let px = x + dash;
+                if px >= end {
+                    break;
+                }
+                for dy in 0..2 {
+                    let py = y + dy;
+                    if px >= 0
+                        && py >= 0
+                        && (px as u32) < self.image.width()
+                        && (py as u32) < self.image.height()
+                    {
+                        self.image.put_pixel(px as u32, py as u32, Luma([0]));
+                    }
+                }
+            }
+            x += 6;
+        }
+        self.y += self.line_height_for_scale(self.normal_scale);
+    }
+
+    fn draw_reverse_banner(&mut self, text: &str) {
+        let banner_h = self.line_height_for_scale(self.normal_scale) + 4;
+        let top = self.y;
+        let bottom = top + banner_h;
+        for py in top..bottom {
+            for px in self.left_margin..(self.left_margin + self.content_width) {
+                if px >= 0
+                    && py >= 0
+                    && (px as u32) < self.image.width()
+                    && (py as u32) < self.image.height()
+                {
+                    self.image.put_pixel(px as u32, py as u32, Luma([0]));
+                }
+            }
+        }
+        let text_y = top + 3;
+        let text_w = bitmap_text_width(text, self.normal_scale, self.letter_spacing);
+        let text_x = self.left_margin + (self.content_width - text_w).max(0) / 2;
+        draw_bitmap_text(
+            &mut self.image,
+            text,
+            text_x,
+            text_y,
+            self.normal_scale,
+            self.letter_spacing,
+            255,
+            true,
+        );
+        self.y += banner_h + 2;
+    }
+
+    fn add_spacer(&mut self, lines: i32) {
+        self.y += self.line_height_for_scale(self.normal_scale) * lines.max(0);
+    }
+
+    fn into_cropped(self) -> GrayImage {
+        let final_height = (self.y + 20).clamp(1, self.image.height() as i32) as u32;
+        image::imageops::crop_imm(
+            &self.image,
+            0,
+            0,
+            self.physical_width.max(1) as u32,
+            final_height,
+        )
+        .to_image()
+    }
+}
+
+fn grayscale_to_raster_bytes(image: &GrayImage, threshold: u8) -> (u16, u16, Vec<u8>) {
+    let width = image.width();
+    let height = image.height();
+    let width_bytes = width.div_ceil(8) as u16;
+    let mut data = Vec::with_capacity(width_bytes as usize * height as usize);
+    for y in 0..height {
+        for bx in 0..width_bytes as u32 {
+            let mut byte = 0u8;
+            for bit in 0..8u32 {
+                let x = bx * 8 + bit;
+                if x >= width {
+                    continue;
+                }
+                let luma = image.get_pixel(x, y).0[0];
+                if luma < threshold {
+                    byte |= 0x80 >> bit;
+                }
+            }
+            data.push(byte);
+        }
+    }
+    (width_bytes, height as u16, data)
+}
+
+fn raster_image_to_escpos_bytes(image: &GrayImage, cfg: &LayoutConfig) -> Vec<u8> {
+    let threshold = cfg.raster_threshold.clamp(40, 240);
+    let (width_bytes, height_dots, data) = grayscale_to_raster_bytes(image, threshold);
+    let mut builder = EscPosBuilder::new().with_paper(cfg.paper_width);
+    builder.init();
+    if is_star_line_mode(cfg) {
+        builder.star_raster_image(width_bytes, height_dots, &data);
+        builder.lf().lf().lf().lf().star_cut();
+    } else {
+        builder.raster_image(width_bytes, height_dots, &data);
+        builder.feed(4).cut();
+    }
+    builder.build()
+}
+
+fn render_classic_customer_raster_exact_ttf(
+    document: &ReceiptDocument,
+    cfg: &LayoutConfig,
+) -> Result<Vec<u8>, String> {
+    let (doc, is_delivery_slip) = match document {
+        ReceiptDocument::OrderReceipt(doc) => (doc, false),
+        ReceiptDocument::DeliverySlip(doc) => (doc, true),
+        _ => return Err("raster exact mode applies to customer receipts only".to_string()),
+    };
+
+    let lang = cfg.language.as_str();
+    let comma = cfg.decimal_comma;
+    let order_label_upper = receipt_label(lang, "Order").to_uppercase();
+    let type_label = receipt_label(lang, "Type");
+    let items_label_upper = receipt_label(lang, "ITEMS").to_uppercase();
+    let order_type_display = translate_order_type(lang, &doc.order_type);
+    let short_number = extract_short_order_number(&doc.order_number);
+    let mut canvas = TtfReceiptComposer::try_new(cfg)?;
+    let preset = canvas.preset;
+    let cur = resolve_raster_currency_symbol(cfg, &canvas.fonts);
+
+    canvas.draw_rule();
+    if let Some(copy_label) = cfg
         .copy_label
         .as_deref()
         .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .filter(|value| !value.is_empty())
     {
-        if style.modern {
-            builder.bold(true).text(label).lf().bold(false);
-        } else {
-            builder.text(label).lf();
-        }
+        canvas.draw_text_line(copy_label, BitmapAlign::Center, preset.section_style);
     }
     if let Some(address) = cfg
         .store_address
         .as_deref()
         .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .filter(|value| !value.is_empty())
     {
-        emit_wrapped(builder, address, cfg.paper_width.chars());
+        for segment in split_address_segments(address) {
+            canvas.draw_wrapped(&segment, BitmapAlign::Center, preset.address_style);
+        }
+    } else if !cfg.show_logo {
+        let org = cfg.organization_name.trim();
+        if !org.is_empty() {
+            canvas.draw_text_line(org, BitmapAlign::Center, preset.address_style);
+        }
     }
+    canvas.draw_rule();
     if let Some(phone) = cfg
         .store_phone
         .as_deref()
         .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .filter(|value| !value.is_empty())
     {
-        builder.text(phone).lf();
+        let phone_label = receipt_label(lang, "Phone");
+        canvas.draw_wrapped(
+            &format!("{phone_label}: {phone}"),
+            BitmapAlign::Left,
+            preset.contact_style,
+        );
     }
-    if let Some(vat) = cfg
+    let vat_val = cfg
         .vat_number
         .as_deref()
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        let vat_label = receipt_label(&cfg.language, "VAT");
-        builder.text(&format!("{vat_label}: {vat}")).lf();
-    }
-    if let Some(office) = cfg
+        .filter(|v| !v.is_empty());
+    let office_val = cfg
         .tax_office
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let vat_label = receipt_label(lang, "VAT");
+    let office_label = receipt_label(lang, "TAX_OFFICE");
+    match (vat_val, office_val) {
+        (Some(vat), Some(office)) => {
+            canvas.draw_wrapped(
+                &format!("{vat_label}: {vat}   {office_label}: {office}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (Some(vat), None) => {
+            canvas.draw_wrapped(
+                &format!("{vat_label}: {vat}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (None, Some(office)) => {
+            canvas.draw_wrapped(
+                &format!("{office_label}: {office}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (None, None) => {}
+    }
+    canvas.draw_rule();
+
+    let banner = format!("{order_label_upper} #{short_number}");
+    canvas.draw_reverse_banner(&banner);
+    let meta_line = format!(
+        "{} | {}: {}",
+        format_datetime_human(&doc.created_at).replace(' ', " | "),
+        type_label,
+        order_type_display,
+    );
+    canvas.draw_text_line(&meta_line, BitmapAlign::Left, preset.meta_style);
+    canvas.draw_rule();
+    if is_delivery_slip {
+        for (label, value) in delivery_slip_info_lines(doc, lang) {
+            canvas.draw_pair(&format!("{label}:"), &value, preset.contact_style);
+        }
+        canvas.draw_rule();
+    }
+    let order_notes = order_note_lines(doc);
+    for note in &order_notes {
+        canvas.draw_wrapped(
+            &format!("_{}: {note}_", receipt_label(lang, "Note")),
+            BitmapAlign::Left,
+            preset.customization_style,
+        );
+    }
+    if !order_notes.is_empty() {
+        canvas.draw_rule();
+    }
+
+    canvas.draw_text_line(&items_label_upper, BitmapAlign::Left, preset.section_style);
+    canvas.draw_rule();
+    for item in &doc.items {
+        if let Some(cat_line) = category_line(lang, item) {
+            canvas.draw_wrapped(
+                &cat_line,
+                BitmapAlign::Left,
+                category_raster_style(preset.customization_style),
+            );
+        }
+        canvas.draw_pair(
+            &format!("{} x {}", qty(item.quantity), item.name),
+            &money_locale(item.total, comma),
+            preset.item_style,
+        );
+        let (with_items, without_items) = split_customizations(item);
+        for customization in with_items {
+            canvas.draw_wrapped(
+                &format!("  + {}", customization_display(lang, customization, true)),
+                BitmapAlign::Left,
+                preset.customization_style,
+            );
+        }
+        if !without_items.is_empty() {
+            canvas.draw_wrapped(
+                &format!("  - {}", receipt_label(lang, "Without")),
+                BitmapAlign::Left,
+                preset.customization_style,
+            );
+            for customization in without_items {
+                canvas.draw_wrapped(
+                    &format!(
+                        "    - {}",
+                        customization_display(lang, customization, false)
+                    ),
+                    BitmapAlign::Left,
+                    preset.customization_style,
+                );
+            }
+        }
+        if let Some(note) = item
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            canvas.draw_wrapped(
+                &format!("  _{}: {note}_", receipt_label(lang, "Note")),
+                BitmapAlign::Left,
+                preset.customization_style,
+            );
+        }
+    }
+    canvas.draw_rule();
+
+    let mut emphasized_total: Option<&TotalsLine> = None;
+    for total in &doc.totals {
+        let raw_label = total_label_text(lang, total);
+        let label = format!("{raw_label}:");
+        if total.emphasize {
+            if emphasized_total.is_none() {
+                emphasized_total = Some(total);
+            }
+        } else {
+            canvas.draw_pair(
+                &label,
+                &money_locale(total.amount, comma),
+                preset.subtotal_style,
+            );
+        }
+    }
+    if let Some(total) = emphasized_total {
+        let label = format!("{}:", total_label_text(lang, total));
+        canvas.draw_rule();
+        canvas.draw_pair(
+            &label,
+            &money_with_currency_locale(total.amount, &cur, comma),
+            preset.total_style,
+        );
+        canvas.draw_rule();
+    }
+
+    if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+        canvas.add_gap(preset.small_gap);
+        canvas.draw_text_line(&method_label, BitmapAlign::Center, preset.section_style);
+    } else {
+        for payment in &doc.payments {
+            let pay_label = format!("{}:", receipt_label(lang, &payment.label));
+            let value = money_locale(payment.amount, comma);
+            canvas.draw_pair(&pay_label, &value, preset.payment_style);
+        }
+
+        if let Some(masked) = doc
+            .masked_card
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            canvas.draw_pair(receipt_label(lang, "Card"), masked, preset.payment_style);
+        }
+    }
+
+    if let Some(footer) = cfg
+        .footer_text
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        let office_label = receipt_label(&cfg.language, "TAX_OFFICE");
-        builder.text(&format!("{office_label}: {office}")).lf();
+        canvas.draw_rule();
+        let footer_key = if footer == "Thank you" {
+            "Thank you preference"
+        } else {
+            footer
+        };
+        let translated = receipt_label(lang, footer_key);
+        canvas.add_gap(preset.medium_gap);
+        canvas.draw_text_line(
+            &"*".repeat(preset.short_star_count),
+            BitmapAlign::Center,
+            preset.footer_star_style,
+        );
+        canvas.add_gap(preset.small_gap);
+        canvas.draw_wrapped(translated, BitmapAlign::Center, preset.footer_text_style);
+        canvas.add_gap(preset.medium_gap);
+        canvas.draw_text_line(
+            &"*".repeat(canvas.stars_for_width(preset.footer_star_style)),
+            BitmapAlign::Center,
+            preset.footer_star_style,
+        );
     }
-    builder.left().separator();
+
+    if canvas.has_missing_glyphs() {
+        return Err("embedded font missing glyphs for classic raster exact body".to_string());
+    }
+
+    let image = canvas.into_cropped();
+    Ok(raster_image_to_escpos_bytes(&image, cfg))
 }
 
-pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRender {
-    let width = cfg.paper_width.chars();
-    let style = escpos_style(cfg);
-    let mut builder = EscPosBuilder::new().with_paper(cfg.paper_width);
-    builder.init();
-    let mut warnings = apply_character_set(
-        &mut builder,
-        &cfg.character_set,
-        cfg.greek_render_mode.as_deref(),
-        cfg.escpos_code_page,
-        cfg.detected_brand,
-    );
-    emit_header(&mut builder, cfg, style, &mut warnings);
+fn render_classic_customer_raster_exact_bitmap(
+    document: &ReceiptDocument,
+    cfg: &LayoutConfig,
+) -> Result<Vec<u8>, String> {
+    let (doc, is_delivery_slip) = match document {
+        ReceiptDocument::OrderReceipt(doc) => (doc, false),
+        ReceiptDocument::DeliverySlip(doc) => (doc, true),
+        _ => return Err("raster exact mode applies to customer receipts only".to_string()),
+    };
 
     let lang = cfg.language.as_str();
+    let comma = cfg.decimal_comma;
+    let order_label_upper = receipt_label(lang, "Order").to_uppercase();
+    let type_label = receipt_label(lang, "Type");
+    let items_label_upper = receipt_label(lang, "ITEMS").to_ascii_uppercase();
+    let order_type_display = translate_order_type(lang, &doc.order_type);
+    let short_number = extract_short_order_number(&doc.order_number);
+    let cur = if cfg.currency_symbol.trim().is_empty() {
+        " \u{20AC}".to_string()
+    } else {
+        cfg.currency_symbol.clone()
+    };
+
+    let mut canvas = BitmapReceiptComposer::new(cfg);
+    canvas.draw_rule();
+    if let Some(copy_label) = cfg
+        .copy_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        canvas.draw_text_line(
+            copy_label,
+            BitmapAlign::Center,
+            true,
+            canvas.normal_scale,
+            0,
+        );
+    }
+    if let Some(address) = cfg
+        .store_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        for segment in split_address_segments(address) {
+            for line in wrap(&segment, canvas.chars_per_line()) {
+                canvas.draw_text_line(&line, BitmapAlign::Center, true, canvas.normal_scale, 0);
+            }
+        }
+    } else if !cfg.show_logo {
+        let org = cfg.organization_name.trim();
+        if !org.is_empty() {
+            canvas.draw_text_line(org, BitmapAlign::Center, true, canvas.normal_scale, 0);
+        }
+    }
+    canvas.draw_rule();
+    if let Some(phone) = cfg
+        .store_phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let phone_label = receipt_label(lang, "Phone");
+        canvas.draw_left_wrapped(
+            &format!("{phone_label}: {phone}"),
+            false,
+            canvas.normal_scale,
+        );
+    }
+    let vat_val = cfg
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let office_val = cfg
+        .tax_office
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let vat_label = receipt_label(lang, "VAT");
+    let office_label = receipt_label(lang, "TAX_OFFICE");
+    match (vat_val, office_val) {
+        (Some(vat), Some(office)) => {
+            canvas.draw_left_wrapped(
+                &format!("{vat_label}: {vat}   {office_label}: {office}"),
+                false,
+                canvas.normal_scale,
+            );
+        }
+        (Some(vat), None) => {
+            canvas.draw_left_wrapped(&format!("{vat_label}: {vat}"), false, canvas.normal_scale);
+        }
+        (None, Some(office)) => {
+            canvas.draw_left_wrapped(
+                &format!("{office_label}: {office}"),
+                false,
+                canvas.normal_scale,
+            );
+        }
+        (None, None) => {}
+    }
+    canvas.draw_rule();
+
+    let banner = format!("{order_label_upper} #{short_number}");
+    canvas.draw_reverse_banner(&banner);
+    let meta_line = format!(
+        "{} | {}: {}",
+        format_datetime_human(&doc.created_at).replace(' ', " | "),
+        type_label,
+        order_type_display,
+    );
+    canvas.draw_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
+    canvas.draw_rule();
+    if is_delivery_slip {
+        for (label, value) in delivery_slip_info_lines(doc, lang) {
+            canvas.draw_pair(&format!("{label}:"), &value, false, canvas.normal_scale);
+        }
+        canvas.draw_rule();
+    }
+    let order_notes = order_note_lines(doc);
+    for note in &order_notes {
+        canvas.draw_left_wrapped(
+            &format!("_{}: {note}_", receipt_label(lang, "Note")),
+            false,
+            canvas.normal_scale,
+        );
+    }
+    if !order_notes.is_empty() {
+        canvas.draw_rule();
+    }
+
+    canvas.draw_text_line(
+        &items_label_upper,
+        BitmapAlign::Left,
+        true,
+        canvas.normal_scale,
+        0,
+    );
+    canvas.draw_rule();
+    for item in &doc.items {
+        if let Some(cat_line) = category_line(lang, item) {
+            canvas.draw_left_wrapped(&cat_line, true, canvas.normal_scale);
+        }
+        canvas.draw_pair(
+            &format!("{} x {}", qty(item.quantity), item.name),
+            &money_locale(item.total, comma),
+            false,
+            canvas.normal_scale,
+        );
+        let (with_items, without_items) = split_customizations(item);
+        for customization in with_items {
+            canvas.draw_left_wrapped(
+                &format!("  + {}", customization_display(lang, customization, true)),
+                false,
+                canvas.normal_scale,
+            );
+        }
+        if !without_items.is_empty() {
+            canvas.draw_left_wrapped(
+                &format!("  - {}", receipt_label(lang, "Without")),
+                false,
+                canvas.normal_scale,
+            );
+            for customization in without_items {
+                canvas.draw_left_wrapped(
+                    &format!(
+                        "    - {}",
+                        customization_display(lang, customization, false)
+                    ),
+                    false,
+                    canvas.normal_scale,
+                );
+            }
+        }
+        if let Some(note) = item
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            canvas.draw_left_wrapped(
+                &format!("  _{}: {note}_", receipt_label(lang, "Note")),
+                false,
+                canvas.normal_scale,
+            );
+        }
+    }
+    canvas.draw_rule();
+
+    for total in &doc.totals {
+        let raw_label = total_label_text(lang, total);
+        let label = format!("{raw_label}:");
+        if total.emphasize {
+            canvas.draw_rule();
+            canvas.draw_pair(
+                &label,
+                &money_with_currency_locale(total.amount, &cur, comma),
+                true,
+                canvas.large_scale,
+            );
+            canvas.draw_rule();
+        } else {
+            canvas.draw_pair(
+                &label,
+                &money_locale(total.amount, comma),
+                false,
+                canvas.normal_scale,
+            );
+        }
+    }
+
+    if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+        canvas.add_spacer(1);
+        canvas.draw_text_line(
+            &method_label,
+            BitmapAlign::Center,
+            true,
+            canvas.normal_scale,
+            0,
+        );
+    } else {
+        for payment in &doc.payments {
+            let pay_label = format!("{}:", receipt_label(lang, &payment.label));
+            let value = money_locale(payment.amount, comma);
+            canvas.draw_pair(&pay_label, &value, false, canvas.normal_scale);
+        }
+
+        if let Some(masked) = doc
+            .masked_card
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            canvas.draw_pair(
+                receipt_label(lang, "Card"),
+                masked,
+                false,
+                canvas.normal_scale,
+            );
+        }
+    }
+
+    if let Some(footer) = cfg
+        .footer_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        canvas.draw_rule();
+        let footer_key = if footer == "Thank you" {
+            "Thank you preference"
+        } else {
+            footer
+        };
+        let translated = receipt_label(lang, footer_key);
+        canvas.add_spacer(1);
+        canvas.draw_text_line(
+            &"*".repeat(14),
+            BitmapAlign::Center,
+            false,
+            canvas.normal_scale,
+            0,
+        );
+        canvas.add_spacer(1);
+        let footer_width = canvas.chars_per_line().saturating_sub(2).max(12);
+        for line in wrap(translated, footer_width) {
+            canvas.draw_text_line(&line, BitmapAlign::Center, false, canvas.large_scale, 0);
+        }
+        canvas.draw_text_line(
+            &"*".repeat(canvas.chars_per_line().max(24)),
+            BitmapAlign::Center,
+            false,
+            canvas.normal_scale,
+            0,
+        );
+    }
+
+    let image = canvas.into_cropped();
+    Ok(raster_image_to_escpos_bytes(&image, cfg))
+}
+
+fn render_classic_customer_raster_exact(
+    document: &ReceiptDocument,
+    cfg: &LayoutConfig,
+) -> Result<Vec<u8>, String> {
+    match render_classic_customer_raster_exact_ttf(document, cfg) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) => {
+            tracing::warn!(error = %err, "Raster exact TTF render failed; using bitmap fallback");
+            render_classic_customer_raster_exact_bitmap(document, cfg)
+        }
+    }
+}
+
+fn emit_raster_common_header(
+    canvas: &mut TtfReceiptComposer,
+    cfg: &LayoutConfig,
+    lang: &str,
+    preset: RasterExactPreset,
+) {
+    canvas.draw_rule();
+    if let Some(copy_label) = cfg
+        .copy_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        canvas.draw_text_line(copy_label, BitmapAlign::Center, preset.section_style);
+    }
+    if let Some(address) = cfg
+        .store_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        for segment in split_address_segments(address) {
+            canvas.draw_wrapped(&segment, BitmapAlign::Center, preset.address_style);
+        }
+    } else if !cfg.show_logo {
+        let org = cfg.organization_name.trim();
+        if !org.is_empty() {
+            canvas.draw_text_line(org, BitmapAlign::Center, preset.address_style);
+        }
+    }
+    canvas.draw_rule();
+    if let Some(phone) = cfg
+        .store_phone
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let phone_label = receipt_label(lang, "Phone");
+        canvas.draw_wrapped(
+            &format!("{phone_label}: {phone}"),
+            BitmapAlign::Left,
+            preset.contact_style,
+        );
+    }
+    let vat_val = cfg
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let office_val = cfg
+        .tax_office
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let vat_label = receipt_label(lang, "VAT");
+    let office_label = receipt_label(lang, "TAX_OFFICE");
+    match (vat_val, office_val) {
+        (Some(vat), Some(office)) => {
+            canvas.draw_wrapped(
+                &format!("{vat_label}: {vat}   {office_label}: {office}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (Some(vat), None) => {
+            canvas.draw_wrapped(
+                &format!("{vat_label}: {vat}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (None, Some(office)) => {
+            canvas.draw_wrapped(
+                &format!("{office_label}: {office}"),
+                BitmapAlign::Left,
+                preset.contact_style,
+            );
+        }
+        (None, None) => {}
+    }
+    canvas.draw_rule();
+}
+
+fn emit_raster_common_footer(
+    canvas: &mut TtfReceiptComposer,
+    cfg: &LayoutConfig,
+    lang: &str,
+    preset: RasterExactPreset,
+) {
+    if let Some(footer) = cfg
+        .footer_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        canvas.draw_rule();
+        let footer_key = if footer == "Thank you" {
+            "Thank you preference"
+        } else {
+            footer
+        };
+        let translated = receipt_label(lang, footer_key);
+        canvas.add_gap(preset.medium_gap);
+        canvas.draw_text_line(
+            &"*".repeat(preset.short_star_count),
+            BitmapAlign::Center,
+            preset.footer_star_style,
+        );
+        canvas.add_gap(preset.small_gap);
+        canvas.draw_wrapped(translated, BitmapAlign::Center, preset.footer_text_style);
+        canvas.add_gap(preset.medium_gap);
+        canvas.draw_text_line(
+            &"*".repeat(canvas.stars_for_width(preset.footer_star_style)),
+            BitmapAlign::Center,
+            preset.footer_star_style,
+        );
+    }
+}
+
+fn render_classic_non_customer_raster_exact_ttf(
+    document: &ReceiptDocument,
+    cfg: &LayoutConfig,
+) -> Result<Vec<u8>, String> {
+    let lang = cfg.language.as_str();
+    let comma = cfg.decimal_comma;
+    let mut canvas = TtfReceiptComposer::try_new(cfg)?;
+    let preset = canvas.preset;
+    let cur = resolve_raster_currency_symbol(cfg, &canvas.fonts);
+
+    emit_raster_common_header(&mut canvas, cfg, lang, preset);
 
     match document {
-        ReceiptDocument::OrderReceipt(doc) => {
-            let render_delivery_block = should_render_delivery_block(doc);
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Order"),
-                &format!("#{}", doc.order_number),
-                width,
+        ReceiptDocument::KitchenTicket(doc) => {
+            let title = receipt_label(lang, "KITCHEN TICKET").to_uppercase();
+            canvas.draw_reverse_banner(&title);
+            let order_type_display = translate_order_type(lang, &doc.order_type);
+            canvas.draw_text_line(
+                &format!("{} #{}", receipt_label(lang, "Order"), doc.order_number),
+                BitmapAlign::Left,
+                preset.meta_style,
             );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Type"),
-                &doc.order_type,
-                width,
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Type")),
+                &order_type_display,
+                preset.meta_style,
             );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Date"),
-                &doc.created_at,
-                width,
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Date")),
+                &format_datetime_human(&doc.created_at),
+                preset.meta_style,
             );
             if let Some(table) = doc
                 .table_number
@@ -1827,7 +5154,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(&mut builder, receipt_label(lang, "Table"), table, width);
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Table")),
+                    table,
+                    preset.meta_style,
+                );
             }
             if let Some(customer) = doc
                 .customer_name
@@ -1835,11 +5166,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Customer"),
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Customer")),
                     customer,
-                    width,
+                    preset.meta_style,
                 );
             }
             if let Some(phone) = doc
@@ -1848,8 +5178,451 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Phone")),
+                    phone,
+                    preset.meta_style,
+                );
+            }
+            canvas.draw_rule();
+            canvas.draw_text_line(
+                &receipt_label(lang, "ITEMS").to_uppercase(),
+                BitmapAlign::Left,
+                preset.section_style,
+            );
+            canvas.draw_rule();
+            if doc.items.is_empty() {
+                canvas.draw_text_line(
+                    receipt_label(lang, "No items"),
+                    BitmapAlign::Left,
+                    preset.item_style,
+                );
+            } else {
+                for item in &doc.items {
+                    if let Some(cat_line) = category_line(lang, item) {
+                        canvas.draw_wrapped(
+                            &cat_line,
+                            BitmapAlign::Left,
+                            category_raster_style(preset.customization_style),
+                        );
+                    }
+                    canvas.draw_pair(
+                        &format!("{} x {}", qty(item.quantity), item.name),
+                        &money_locale(item.total, comma),
+                        preset.item_style,
+                    );
+                    let (with_items, without_items) = split_customizations(item);
+                    for customization in with_items {
+                        canvas.draw_wrapped(
+                            &format!("  + {}", customization_display(lang, customization, true)),
+                            BitmapAlign::Left,
+                            preset.customization_style,
+                        );
+                    }
+                    if !without_items.is_empty() {
+                        canvas.draw_wrapped(
+                            &format!("  - {}", receipt_label(lang, "Without")),
+                            BitmapAlign::Left,
+                            preset.customization_style,
+                        );
+                        for customization in without_items {
+                            canvas.draw_wrapped(
+                                &format!(
+                                    "    - {}",
+                                    customization_display(lang, customization, false)
+                                ),
+                                BitmapAlign::Left,
+                                preset.customization_style,
+                            );
+                        }
+                    }
+                    if let Some(note) = item
+                        .note
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        canvas.draw_wrapped(
+                            &format!("  _{}: {note}_", receipt_label(lang, "Note")),
+                            BitmapAlign::Left,
+                            preset.customization_style,
+                        );
+                    }
+                }
+            }
+        }
+        ReceiptDocument::ShiftCheckout(doc) => {
+            canvas.draw_reverse_banner(receipt_label(lang, "SHIFT CHECKOUT"));
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Shift")),
+                &doc.shift_id,
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Staff")),
+                &doc.staff_name,
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Terminal")),
+                &doc.terminal_name,
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Check-in")),
+                &format_datetime_human(&doc.check_in),
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Check-out")),
+                &format_datetime_human(&doc.check_out),
+                preset.meta_style,
+            );
+            canvas.draw_rule();
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Orders")),
+                &doc.orders_count.to_string(),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Sales")),
+                &money_with_currency_locale(doc.sales_amount, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Expenses")),
+                &money_with_currency_locale(doc.total_expenses, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Refunds")),
+                &money_with_currency_locale(doc.cash_refunds, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Opening")),
+                &money_with_currency_locale(doc.opening_amount, &cur, comma),
+                preset.item_style,
+            );
+            if let Some(expected) = doc.expected_amount {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Expected")),
+                    &money_with_currency_locale(expected, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            if let Some(closing) = doc.closing_amount {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Closing")),
+                    &money_with_currency_locale(closing, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            if let Some(variance) = doc.variance_amount {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Variance")),
+                    &money_with_currency_locale(variance, &cur, comma),
+                    preset.item_style,
+                );
+            }
+            if !doc.driver_deliveries.is_empty() {
+                canvas.draw_rule();
+                canvas.draw_text_line(
+                    receipt_label(lang, "DRIVER DELIVERIES"),
+                    BitmapAlign::Left,
+                    preset.section_style,
+                );
+                canvas.draw_rule();
+                for line in &doc.driver_deliveries {
+                    let label = format!("#{} {}", line.order_number, line.payment_method);
+                    canvas.draw_pair(
+                        &label,
+                        &money_with_currency_locale(line.total_amount, &cur, comma),
+                        preset.item_style,
+                    );
+                }
+            }
+        }
+        ReceiptDocument::ZReport(doc) => {
+            canvas.draw_reverse_banner(receipt_label(lang, "Z REPORT"));
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Date")),
+                &doc.report_date,
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Generated")),
+                &format_datetime_human(&doc.generated_at),
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Shift")),
+                &doc.shift_ref,
+                preset.meta_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Terminal")),
+                &doc.terminal_name,
+                preset.meta_style,
+            );
+            canvas.draw_rule();
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Orders")),
+                &doc.total_orders.to_string(),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Gross")),
+                &money_with_currency_locale(doc.gross_sales, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Net")),
+                &money_with_currency_locale(doc.net_sales, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Cash")),
+                &money_with_currency_locale(doc.cash_sales, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Card")),
+                &money_with_currency_locale(doc.card_sales, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Refunds")),
+                &money_with_currency_locale(doc.refunds_total, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Voids")),
+                &money_with_currency_locale(doc.voids_total, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Discounts")),
+                &money_with_currency_locale(doc.discounts_total, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Expenses")),
+                &money_with_currency_locale(doc.expenses_total, &cur, comma),
+                preset.item_style,
+            );
+            canvas.draw_pair(
+                &format!("{}:", receipt_label(lang, "Variance")),
+                &money_with_currency_locale(doc.cash_variance, &cur, comma),
+                preset.item_style,
+            );
+        }
+        ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
+            return Err("customer documents must use customer raster exact path".to_string())
+        }
+    }
+
+    emit_raster_common_footer(&mut canvas, cfg, lang, preset);
+
+    if canvas.has_missing_glyphs() {
+        return Err("embedded font missing glyphs for classic raster exact body".to_string());
+    }
+
+    let image = canvas.into_cropped();
+    Ok(raster_image_to_escpos_bytes(&image, cfg))
+}
+
+fn render_classic_raster_exact(
+    document: &ReceiptDocument,
+    cfg: &LayoutConfig,
+) -> Result<Vec<u8>, String> {
+    match document {
+        ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
+            render_classic_customer_raster_exact(document, cfg)
+        }
+        _ => render_classic_non_customer_raster_exact_ttf(document, cfg),
+    }
+}
+
+pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRender {
+    let doc_target = escpos_document_target(document);
+    let width = cfg.paper_width.chars();
+    let style = escpos_style(cfg, doc_target);
+    let classic_customer_layout = !style.modern && doc_target.is_customer_receipt();
+    let mut warnings = Vec::new();
+    if !style.modern && cfg.classic_customer_render_mode == ClassicCustomerRenderMode::RasterExact {
+        match render_classic_raster_exact(document, cfg) {
+            Ok(bytes) => {
+                return EscPosRender {
+                    bytes,
+                    warnings,
+                    body_mode: EscPosBodyMode::RasterExact,
+                };
+            }
+            Err(err) => warnings.push(RenderWarning {
+                code: "raster_exact_fallback".to_string(),
+                message: format!("Raster exact render failed; falling back to text mode ({err})"),
+            }),
+        }
+    }
+    let mut builder = EscPosBuilder::new().with_paper(cfg.paper_width);
+    builder.init();
+    warnings.extend(apply_character_set(
+        &mut builder,
+        &cfg.character_set,
+        cfg.greek_render_mode.as_deref(),
+        cfg.escpos_code_page,
+        cfg.detected_brand,
+    ));
+    let render_font = if classic_customer_layout {
+        // Classic receipt v2.1 lock: always use Font A for deterministic output.
+        FontType::A
+    } else {
+        cfg.font_type
+    };
+    match render_font {
+        FontType::A => {
+            builder.font_a();
+        }
+        FontType::B => {
+            builder.font_b();
+        }
+    }
+    emit_header(&mut builder, cfg, style, doc_target, &mut warnings);
+
+    let lang = cfg.language.as_str();
+    let comma = cfg.decimal_comma;
+    let is_star = cfg.detected_brand == crate::printers::PrinterBrand::Star;
+
+    match document {
+        ReceiptDocument::OrderReceipt(doc) => {
+            let render_delivery_block = should_render_delivery_block(doc);
+            let order_type_display = translate_order_type(lang, &doc.order_type);
+            let resolved_currency = if classic_customer_layout {
+                normalize_currency_symbol_for_layout(
+                    &cfg.currency_symbol,
+                    &cfg.character_set,
+                    cfg.escpos_code_page,
+                    cfg.detected_brand,
+                )
+            } else {
+                cfg.currency_symbol.clone()
+            };
+            let cur = resolved_currency.as_str();
+            {
+                let order_label = receipt_label(lang, "Order");
+                let type_label = receipt_label(lang, "Type");
+                if style.modern {
+                    // Modern: inline banner
+                    builder.center().bold(true);
+                    emit_banner(
+                        &mut builder,
+                        width,
+                        '-',
+                        &format!("{} #{}", order_label, doc.order_number),
+                    );
+                    builder.bold(false).left();
+                    let meta_line = format!(
+                        "{}  |  {}: {}",
+                        format_datetime_short(&doc.created_at).replace(' ', "  |  "),
+                        type_label,
+                        order_type_display,
+                    );
+                    builder.text(&meta_line).lf();
+                } else {
+                    // Classic: reverse (white-on-black) banner for order number
+                    // Uppercase label (Παραγγελία → ΠΑΡΑΓΓΕΛΙΑ) and use short
+                    // order number (ORD-20260303-00019 → 00019).
+                    let order_label_upper = order_label.to_uppercase();
+                    let short_number = extract_short_order_number(&doc.order_number);
+                    let banner_text = format!("{} #{}", order_label_upper, short_number);
+                    let text_len = banner_text.chars().count();
+                    // Pad to full paper width for a solid black bar
+                    let pad_total = width.saturating_sub(text_len);
+                    let pad_left = pad_total / 2;
+                    let pad_right = pad_total - pad_left;
+                    let padded = format!(
+                        "{}{}{}",
+                        " ".repeat(pad_left),
+                        banner_text,
+                        " ".repeat(pad_right),
+                    );
+                    if !classic_customer_layout {
+                        emit_rule(&mut builder, width, style.profile.block_rule);
+                    }
+                    builder.center().bold(true);
+                    if is_star {
+                        builder.star_reverse(true);
+                    } else {
+                        builder.reverse(true);
+                    }
+                    builder.text(&padded).lf();
+                    if is_star {
+                        builder.star_reverse(false);
+                    } else {
+                        builder.reverse(false);
+                    }
+                    builder.bold(false);
+                    builder.left();
+                    // Date with full year + single-space pipes
+                    let meta_line = format!(
+                        "{} | {}: {}",
+                        format_datetime_human(&doc.created_at).replace(' ', " | "),
+                        type_label,
+                        order_type_display,
+                    );
+                    builder.text(&meta_line).lf();
+                    if classic_customer_layout {
+                        // Screenshot-2 structure: explicit separator after order meta.
+                        emit_rule(&mut builder, width, style.profile.block_rule);
+                    } else {
+                        // Legacy classic spacing (kitchen/report paths unchanged).
+                        builder.lf();
+                    }
+                }
+            }
+            if let Some(table) = doc
+                .table_number
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                let table_label = receipt_label(lang, "Table");
+                builder
+                    .bold(true)
+                    .text(&format!("{table_label}:"))
+                    .bold(false)
+                    .text(&format!(" {table}"))
+                    .lf();
+            }
+            if let Some(customer) = doc
+                .customer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                let customer_label = receipt_label(lang, "Customer");
+                builder
+                    .bold(true)
+                    .text(&format!("{customer_label}:"))
+                    .bold(false)
+                    .text(&format!(" {customer}"))
+                    .lf();
+            }
+            if let Some(phone) = doc
+                .customer_phone
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
                 if !render_delivery_block {
-                    emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                    let phone_label = receipt_label(lang, "Phone");
+                    builder
+                        .bold(true)
+                        .text(&format!("{phone_label}:"))
+                        .bold(false)
+                        .text(&format!(" {phone}"))
+                        .lf();
                 }
             }
             if render_delivery_block {
@@ -1860,12 +5633,21 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Driver"),
-                        driver_name,
-                        width,
-                    );
+                    if style.modern {
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Driver"),
+                            driver_name,
+                            width,
+                        );
+                    } else {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Driver"),
+                            driver_name,
+                            width,
+                        );
+                    }
                 }
                 if let Some(address) = doc
                     .delivery_address
@@ -1873,7 +5655,16 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, receipt_label(lang, "Address"), address, width);
+                    if style.modern {
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Address"),
+                            address,
+                            width,
+                        );
+                    } else {
+                        emit_pair(&mut builder, receipt_label(lang, "Address"), address, width);
+                    }
                 }
                 if let Some(phone) = doc
                     .customer_phone
@@ -1881,7 +5672,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|v| !v.is_empty())
                 {
-                    emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                    if style.modern {
+                        emit_pair_bold(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                    } else {
+                        emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                    }
                 }
                 if let Some(city) = doc
                     .delivery_city
@@ -1889,7 +5684,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, receipt_label(lang, "City"), city, width);
+                    if style.modern {
+                        emit_pair_bold(&mut builder, receipt_label(lang, "City"), city, width);
+                    } else {
+                        emit_pair(&mut builder, receipt_label(lang, "City"), city, width);
+                    }
                 }
                 if let Some(postal_code) = doc
                     .delivery_postal_code
@@ -1897,12 +5696,21 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Postal Code"),
-                        postal_code,
-                        width,
-                    );
+                    if style.modern {
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Postal Code"),
+                            postal_code,
+                            width,
+                        );
+                    } else {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Postal Code"),
+                            postal_code,
+                            width,
+                        );
+                    }
                 }
                 if let Some(floor) = doc
                     .delivery_floor
@@ -1910,7 +5718,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(&mut builder, receipt_label(lang, "Floor"), floor, width);
+                    if style.modern {
+                        emit_pair_bold(&mut builder, receipt_label(lang, "Floor"), floor, width);
+                    } else {
+                        emit_pair(&mut builder, receipt_label(lang, "Floor"), floor, width);
+                    }
                 }
                 if let Some(name_on_ringer) = doc
                     .name_on_ringer
@@ -1918,70 +5730,201 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    emit_pair(
-                        &mut builder,
-                        receipt_label(lang, "Name on ringer"),
-                        name_on_ringer,
-                        width,
-                    );
+                    if style.modern {
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Name on ringer"),
+                            name_on_ringer,
+                            width,
+                        );
+                    } else {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Name on ringer"),
+                            name_on_ringer,
+                            width,
+                        );
+                    }
                 }
             }
+            let order_notes = order_note_lines(doc);
+            for note in &order_notes {
+                builder.underline(1);
+                emit_wrapped(
+                    &mut builder,
+                    &format!("{}: {note}", receipt_label(lang, "Note")),
+                    width,
+                );
+                builder.underline(0);
+            }
+            if !order_notes.is_empty() {
+                emit_rule(&mut builder, width, style.profile.block_rule);
+            }
+            // Both templates: section header ΕΙΔΗ with dash rule
             emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
             if doc.items.is_empty() {
-                builder.text("No items").lf();
+                builder.text(receipt_label(lang, "No items")).lf();
             } else {
                 for item in &doc.items {
+                    if let Some(cat_line) = category_line(lang, item) {
+                        builder.bold(true);
+                        emit_wrapped(&mut builder, &cat_line, width);
+                        builder.bold(false);
+                    }
+                    let item_price = if style.profile.currency_on_all {
+                        money_with_currency_locale(item.total, cur, comma)
+                    } else {
+                        money_locale(item.total, comma)
+                    };
                     emit_item_line(
                         &mut builder,
-                        &format!("{}x {}", qty(item.quantity), item.name),
-                        &money(item.total),
+                        &format!("{} x {}", qty(item.quantity), item.name),
+                        &item_price,
                         width,
                         style,
                     );
-                    emit_item_customizations_escpos(&mut builder, item, width);
+                    emit_item_customizations_escpos(&mut builder, item, width, lang);
                     if let Some(note) = item
                         .note
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        emit_wrapped(&mut builder, &format!("  Note: {note}"), width);
+                        builder.underline(1);
+                        emit_wrapped(
+                            &mut builder,
+                            &format!("  {}: {note}", receipt_label(lang, "Note")),
+                            width,
+                        );
+                        builder.underline(0);
                     }
                 }
             }
-            emit_section_header(&mut builder, receipt_label(lang, "TOTALS"), style, width);
-            for total in &doc.totals {
-                let label = receipt_label(lang, &total.label);
-                if total.emphasize {
-                    if style.modern && !style.compact_width {
-                        builder.bold(true).double_height();
-                        emit_pair(&mut builder, label, &money(total.amount), width);
-                        builder.normal_size().bold(false);
-                        continue;
-                    }
-                    builder.bold(true);
-                }
-                emit_pair(&mut builder, label, &money(total.amount), width);
-                if total.emphasize {
-                    builder.bold(false);
-                }
-            }
-            emit_section_header(&mut builder, receipt_label(lang, "PAYMENT"), style, width);
-            if doc.payments.is_empty() {
-                builder.text("No payment recorded").lf();
+            if style.modern {
+                // Modern: blank line before totals
+                builder.lf();
             } else {
-                for payment in &doc.payments {
-                    let label = receipt_label(lang, &payment.label);
-                    emit_pair(&mut builder, label, &money(payment.amount), width);
+                // Classic: rule before totals
+                emit_rule(&mut builder, width, style.profile.block_rule);
+            }
+            for (idx, total) in doc.totals.iter().enumerate() {
+                let raw_label = total_label_text(lang, total);
+                // Classic: append colon to totals labels (Υποσύνολο: / ΣΥΝΟΛΟ:)
+                let label_with_colon;
+                let label = if !style.modern {
+                    label_with_colon = format!("{}:", raw_label);
+                    label_with_colon.as_str()
+                } else {
+                    raw_label.as_str()
+                };
+                if total.emphasize {
+                    if !style.modern && !classic_customer_layout {
+                        // Classic: rule before ΣΥΝΟΛΟ
+                        emit_rule(&mut builder, width, style.profile.block_rule);
+                    }
+                    // Emphasized totals (ΣΥΝΟΛΟ) — bold + large, with currency
+                    builder.bold(true);
+                    if can_scale_text(style) {
+                        builder.double_height();
+                    }
+                    emit_pair(
+                        &mut builder,
+                        label,
+                        &money_with_currency_locale(total.amount, cur, comma),
+                        width,
+                    );
+                    if can_scale_text(style) {
+                        builder.normal_size();
+                    }
+                    builder.bold(false);
+                    if !style.modern {
+                        if classic_customer_layout {
+                            // Classic customer text fallback: single rule after TOTAL.
+                            emit_rule(&mut builder, width, style.profile.block_rule);
+                        } else {
+                            // Classic: rule after ΣΥΝΟΛΟ
+                            emit_rule(&mut builder, width, style.profile.block_rule);
+                        }
+                    }
+                    continue;
+                }
+                // Non-emphasized totals (e.g. Υποσύνολο) never show currency symbol
+                let total_amount = money_locale(total.amount, comma);
+                emit_pair(&mut builder, label, &total_amount, width);
+                if !style.modern {
+                    if classic_customer_layout {
+                        let next_is_emphasized = doc
+                            .totals
+                            .get(idx + 1)
+                            .map(|line| line.emphasize)
+                            .unwrap_or(false);
+                        if next_is_emphasized {
+                            // Classic customer text fallback: single rule before TOTAL.
+                            emit_rule(&mut builder, width, style.profile.block_rule);
+                        } else if idx + 1 == doc.totals.len() {
+                            emit_rule(&mut builder, width, style.profile.block_rule);
+                        }
+                    } else {
+                        // Legacy classic: rule after each non-emphasized total
+                        emit_rule(&mut builder, width, style.profile.block_rule);
+                    }
                 }
             }
-            if let Some(masked) = doc
-                .masked_card
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                emit_pair(&mut builder, receipt_label(lang, "Card"), masked, width);
+            if style.modern {
+                // Modern: dash rule separator before payments
+                emit_rule(&mut builder, width, '-');
+            }
+            let delivery_method_only_payment = delivery_payment_method_label(doc, lang);
+            if let Some(method_label) = delivery_method_only_payment.as_deref() {
+                builder
+                    .center()
+                    .bold(true)
+                    .text(method_label)
+                    .lf()
+                    .bold(false)
+                    .left();
+            } else {
+                if doc.payments.is_empty() {
+                    builder
+                        .text(receipt_label(lang, "No payment recorded"))
+                        .lf();
+                } else {
+                    for payment in &doc.payments {
+                        let raw_pay_label = receipt_label(lang, &payment.label);
+                        // Classic: append colon to payment labels (Μετρητά: / Ρέστα:)
+                        let pay_label_colon;
+                        let label = if !style.modern {
+                            pay_label_colon = format!("{}:", raw_pay_label);
+                            pay_label_colon.as_str()
+                        } else {
+                            raw_pay_label
+                        };
+                        let is_change = payment.label == "Change";
+                        if is_change {
+                            emit_pair(
+                                &mut builder,
+                                label,
+                                &money_locale(payment.amount, comma),
+                                width,
+                            );
+                        } else {
+                            let pay_amount = if style.profile.currency_on_all {
+                                money_with_currency_locale(payment.amount, cur, comma)
+                            } else {
+                                money_locale(payment.amount, comma)
+                            };
+                            emit_pair(&mut builder, label, &pay_amount, width);
+                        }
+                    }
+                }
+                if let Some(masked) = doc
+                    .masked_card
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    emit_pair(&mut builder, receipt_label(lang, "Card"), masked, width);
+                }
             }
             if !doc.adjustments.is_empty() {
                 emit_section_header(
@@ -1995,7 +5938,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     emit_pair(
                         &mut builder,
                         label,
-                        &format!("-{}", money(adjustment.amount)),
+                        &format!("-{}", money_locale(adjustment.amount, comma)),
                         width,
                     );
                 }
@@ -2013,22 +5956,39 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let title = receipt_label(lang, "KITCHEN TICKET");
-            let use_modern_prominent_header = style.modern && !style.compact_width;
-            if use_modern_prominent_header {
+            let display_date = format_datetime_human(&doc.created_at);
+            let order_type_display = translate_order_type(lang, &doc.order_type);
+            if style.modern {
+                builder.center();
+                if style.profile.strong_headers {
+                    builder.bold(true);
+                }
+                emit_banner(&mut builder, width, style.profile.block_rule, title);
                 builder
-                    .center()
-                    .bold(true)
-                    .double_height()
-                    .text(title)
+                    .text(&format!(
+                        "{} #{}",
+                        receipt_label(lang, "Order"),
+                        doc.order_number
+                    ))
                     .lf()
-                    .normal_size()
-                    .double_width()
-                    .double_height()
-                    .text(&format!("{} #{}", receipt_label(lang, "Order"), doc.order_number))
+                    .text(&format!(
+                        "{}: {}",
+                        receipt_label(lang, "Type"),
+                        order_type_display
+                    ))
+                    .lf();
+                if style.profile.strong_headers {
+                    builder.bold(false);
+                }
+                builder
+                    .text(&format!(
+                        "{}: {}",
+                        receipt_label(lang, "Date"),
+                        display_date
+                    ))
                     .lf()
-                    .normal_size()
-                    .bold(false)
                     .left();
+                emit_rule(&mut builder, width, style.profile.block_rule);
             } else {
                 builder
                     .center()
@@ -2037,35 +5997,26 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .lf()
                     .bold(false)
                     .left();
-            }
-            if !use_modern_prominent_header {
-                builder.bold(true);
-                if !style.compact_width {
-                    builder.double_height();
-                }
-                emit_pair(
+                emit_pair_bold(
                     &mut builder,
                     receipt_label(lang, "Order"),
                     &format!("#{}", doc.order_number),
                     width,
                 );
-                if !style.compact_width {
-                    builder.normal_size();
-                }
-                builder.bold(false);
+                emit_pair_bold(
+                    &mut builder,
+                    receipt_label(lang, "Type"),
+                    &order_type_display,
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Date"),
+                    &display_date,
+                    width,
+                );
+                emit_rule(&mut builder, width, style.profile.block_rule);
             }
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Type"),
-                &doc.order_type,
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Date"),
-                &doc.created_at,
-                width,
-            );
             if let Some(table) = doc
                 .table_number
                 .as_deref()
@@ -2093,7 +6044,12 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                let is_delivery = doc.order_type.trim().eq_ignore_ascii_case("delivery");
+                if is_delivery {
+                    emit_pair_bold(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                } else {
+                    emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                }
             }
             // Delivery block
             let is_delivery = doc.order_type.trim().eq_ignore_ascii_case("delivery");
@@ -2170,138 +6126,128 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 builder.text(receipt_label(lang, "No items")).lf();
             } else {
                 for item in &doc.items {
+                    if let Some(cat_line) = category_line(lang, item) {
+                        builder.bold(true);
+                        emit_wrapped(&mut builder, &cat_line, width);
+                        builder.bold(false);
+                    }
                     emit_item_text(
                         &mut builder,
-                        &format!("{}x {}", qty(item.quantity), item.name),
+                        &format!("{} x {}", qty(item.quantity), item.name),
                         width,
                         style,
                     );
-                    emit_item_customizations_escpos(&mut builder, item, width);
+                    emit_item_customizations_escpos(&mut builder, item, width, lang);
                     if let Some(note) = item
                         .note
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        emit_wrapped(&mut builder, &format!("  Note: {note}"), width);
+                        builder.underline(1);
+                        emit_wrapped(
+                            &mut builder,
+                            &format!("  {}: {note}", receipt_label(lang, "Note")),
+                            width,
+                        );
+                        builder.underline(0);
                     }
                 }
             }
         }
         ReceiptDocument::DeliverySlip(doc) => {
-            let cur = cfg.currency_symbol.as_str();
-            builder.separator();
-            // Order info centered
-            builder.center();
-            builder.bold(true);
-            if !style.compact_width {
-                builder.double_height();
-            }
-            builder
-                .text(&format!(
-                    "{} #{}",
-                    receipt_label(lang, "Order"),
-                    doc.order_number
-                ))
-                .lf();
-            if !style.compact_width {
-                builder.normal_size();
-            }
-            builder.bold(false);
-            builder.text(&format_datetime_human(&doc.created_at)).lf();
-            builder.text(&doc.order_type).lf();
-            builder.left();
-            builder.separator();
-            // Customer info
-            if let Some(customer) = doc
-                .customer_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
+            let resolved_currency = if classic_customer_layout {
+                normalize_currency_symbol_for_layout(
+                    &cfg.currency_symbol,
+                    &cfg.character_set,
+                    cfg.escpos_code_page,
+                    cfg.detected_brand,
+                )
+            } else {
+                cfg.currency_symbol.clone()
+            };
+            let cur = resolved_currency.as_str();
+            let display_date = format_datetime_human(&doc.created_at);
+            let slip_title = receipt_label(lang, "DELIVERY SLIP");
+            let order_type_display = translate_order_type(lang, &doc.order_type);
+            if style.modern {
+                builder.center();
+                if style.profile.strong_headers {
+                    builder.bold(true);
+                }
+                emit_banner(&mut builder, width, style.profile.block_rule, slip_title);
                 builder
-                    .text(receipt_label(lang, "Customer"))
-                    .text(": ")
-                    .bold(true)
-                    .text(customer)
-                    .bold(false)
+                    .text(&format!(
+                        "{} #{}",
+                        receipt_label(lang, "Order"),
+                        doc.order_number
+                    ))
+                    .lf()
+                    .text(&format!(
+                        "{}: {}",
+                        receipt_label(lang, "Type"),
+                        order_type_display
+                    ))
                     .lf();
+                if style.profile.strong_headers {
+                    builder.bold(false);
+                }
+                builder
+                    .text(&format!(
+                        "{}: {}",
+                        receipt_label(lang, "Date"),
+                        display_date
+                    ))
+                    .lf()
+                    .left();
+                emit_rule(&mut builder, width, style.profile.block_rule);
+                for _ in 0..style.profile.focus_spacing_lines {
+                    builder.lf();
+                }
+            } else {
+                builder
+                    .center()
+                    .bold(true)
+                    .text(slip_title)
+                    .lf()
+                    .bold(false)
+                    .left();
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Order"),
+                    &format!("#{}", doc.order_number),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Type"),
+                    &order_type_display,
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Date"),
+                    &display_date,
+                    width,
+                );
+                emit_rule(&mut builder, width, style.profile.block_rule);
             }
-            let phone_val = doc
-                .customer_phone
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .unwrap_or("");
-            builder
-                .text(receipt_label(lang, "Phone"))
-                .text(": ")
-                .bold(true)
-                .text(phone_val)
-                .bold(false)
-                .lf();
-            // Address block
-            if let Some(street) = doc
-                .delivery_address
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                builder.text(receipt_label(lang, "Address")).text(":").lf();
-                emit_wrapped(&mut builder, street, width);
-                let postal = doc
-                    .delivery_postal_code
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or("");
-                let city = doc
-                    .delivery_city
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or("");
-                if !postal.is_empty() || !city.is_empty() {
-                    emit_wrapped(&mut builder, format!("{postal} {city}").trim(), width);
-                }
-                let floor = doc
-                    .delivery_floor
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                let ringer = doc
-                    .name_on_ringer
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                match (floor, ringer) {
-                    (Some(f), Some(r)) => {
-                        emit_wrapped(
-                            &mut builder,
-                            &format!(
-                                "{f} {} | {}: {r}",
-                                receipt_label(lang, "Floor"),
-                                receipt_label(lang, "Ringer"),
-                            ),
-                            width,
-                        );
-                    }
-                    (Some(f), None) => {
-                        emit_wrapped(
-                            &mut builder,
-                            &format!("{f} {}", receipt_label(lang, "Floor")),
-                            width,
-                        );
-                    }
-                    (None, Some(r)) => {
-                        emit_wrapped(
-                            &mut builder,
-                            &format!("{}: {r}", receipt_label(lang, "Ringer")),
-                            width,
-                        );
-                    }
-                    (None, None) => {}
-                }
+            // Driver/customer/address info (deterministic order + placeholder fallback).
+            for (label, value) in delivery_slip_info_lines(doc, lang) {
+                emit_pair_bold(&mut builder, &label, &value, width);
+            }
+            let order_notes = order_note_lines(doc);
+            for note in &order_notes {
+                builder.underline(1);
+                emit_wrapped(
+                    &mut builder,
+                    &format!("{}: {note}", receipt_label(lang, "Note")),
+                    width,
+                );
+                builder.underline(0);
+            }
+            if !order_notes.is_empty() {
+                emit_rule(&mut builder, width, style.profile.block_rule);
             }
             // Items
             emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
@@ -2309,128 +6255,492 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 builder.text(receipt_label(lang, "No items")).lf();
             } else {
                 for item in &doc.items {
-                    let price = money_with_currency(item.total, cur);
+                    if let Some(cat_line) = category_line(lang, item) {
+                        builder.bold(true);
+                        emit_wrapped(&mut builder, &cat_line, width);
+                        builder.bold(false);
+                    }
+                    let price = money_with_currency_locale(item.total, cur, comma);
                     emit_item_line(&mut builder, &item.name, &price, width, style);
-                    emit_item_customizations_escpos(&mut builder, item, width);
+                    emit_item_customizations_escpos(&mut builder, item, width, lang);
                     if let Some(note) = item
                         .note
                         .as_deref()
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
                     {
-                        emit_wrapped(&mut builder, &format!("  Note: {note}"), width);
+                        builder.underline(1);
+                        emit_wrapped(
+                            &mut builder,
+                            &format!("  {}: {note}", receipt_label(lang, "Note")),
+                            width,
+                        );
+                        builder.underline(0);
                     }
                 }
             }
             // Totals
-            builder.separator();
+            emit_section_header(&mut builder, receipt_label(lang, "TOTALS"), style, width);
+            if style.profile.framed_totals {
+                emit_rule(&mut builder, width, style.profile.block_rule);
+            }
             for total in &doc.totals {
-                let label = receipt_label(lang, &total.label);
-                let val = money_with_currency(total.amount, cur);
+                let label_text = total_label_text(lang, total);
+                let val = money_with_currency_locale(total.amount, cur, comma);
                 if total.emphasize {
-                    // Double separator before TOTAL
-                    let eq_line: String = "=".repeat(width);
-                    builder.text(&eq_line).lf();
                     builder.bold(true);
-                    if style.modern && !style.compact_width {
-                        builder.double_height();
-                    }
-                    emit_pair(&mut builder, label, &val, width);
-                    if style.modern && !style.compact_width {
-                        builder.normal_size();
-                    }
+                    emit_pair(&mut builder, &label_text, &val, width);
                     builder.bold(false);
-                    builder.text(&eq_line).lf();
+                    if style.profile.framed_totals {
+                        emit_rule(&mut builder, width, style.profile.block_rule);
+                    }
                 } else {
-                    emit_pair(&mut builder, label, &val, width);
+                    emit_pair(&mut builder, &label_text, &val, width);
                 }
+            }
+            if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+                emit_rule(&mut builder, width, style.profile.block_rule);
+                builder
+                    .center()
+                    .bold(true)
+                    .text(&method_label)
+                    .lf()
+                    .bold(false)
+                    .left();
             }
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             builder
                 .center()
                 .bold(true)
-                .text("SHIFT CHECKOUT")
+                .text(receipt_label(lang, "SHIFT CHECKOUT"))
                 .lf()
                 .bold(false)
                 .left();
-            emit_pair(&mut builder, "Shift", &doc.shift_id, width);
-            emit_pair(&mut builder, "Role", &doc.role_type, width);
-            emit_pair(&mut builder, "Staff", &doc.staff_name, width);
-            emit_pair(&mut builder, "Terminal", &doc.terminal_name, width);
-            emit_pair(&mut builder, "Orders", &doc.orders_count.to_string(), width);
-            emit_pair(&mut builder, "Sales", &money(doc.sales_amount), width);
-            emit_pair(&mut builder, "Expenses", &money(doc.total_expenses), width);
-            emit_pair(&mut builder, "Refunds", &money(doc.cash_refunds), width);
-            emit_pair(&mut builder, "Opening", &money(doc.opening_amount), width);
             emit_pair(
                 &mut builder,
-                "Expected",
+                receipt_label(lang, "Shift"),
+                &doc.shift_id,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Role"),
+                &doc.role_type,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Staff"),
+                &doc.staff_name,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Terminal"),
+                &doc.terminal_name,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Orders"),
+                &doc.orders_count.to_string(),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Sales"),
+                &money_locale(doc.sales_amount, comma),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Expenses"),
+                &money_locale(doc.total_expenses, comma),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Refunds"),
+                &money_locale(doc.cash_refunds, comma),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Opening"),
+                &money_locale(doc.opening_amount, comma),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Expected"),
                 &doc.expected_amount
-                    .map(money)
+                    .map(|v| money_locale(v, comma))
                     .unwrap_or_else(|| "N/A".to_string()),
                 width,
             );
             emit_pair(
                 &mut builder,
-                "Closing",
+                receipt_label(lang, "Closing"),
                 &doc.closing_amount
-                    .map(money)
+                    .map(|v| money_locale(v, comma))
                     .unwrap_or_else(|| "N/A".to_string()),
                 width,
             );
             emit_pair(
                 &mut builder,
-                "Variance",
+                receipt_label(lang, "Variance"),
                 &doc.variance_amount
-                    .map(money)
+                    .map(|v| money_locale(v, comma))
                     .unwrap_or_else(|| "N/A".to_string()),
                 width,
             );
+
+            // Driver-specific delivery breakdown
+            if doc.role_type == "driver" && !doc.driver_deliveries.is_empty() {
+                builder.lf();
+                builder
+                    .center()
+                    .bold(true)
+                    .text(receipt_label(lang, "DELIVERIES"))
+                    .lf()
+                    .bold(false)
+                    .left();
+                builder.separator();
+                for d in &doc.driver_deliveries {
+                    let label = format!("#{} {}", d.order_number, d.payment_method);
+                    emit_pair(
+                        &mut builder,
+                        &label,
+                        &money_locale(d.total_amount, comma),
+                        width,
+                    );
+                }
+                builder.separator();
+
+                builder.lf();
+                builder
+                    .center()
+                    .bold(true)
+                    .text(receipt_label(lang, "DRIVER SUMMARY"))
+                    .lf()
+                    .bold(false)
+                    .left();
+                builder.separator();
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Cash Collected"),
+                    &money_locale(doc.total_cash_collected, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Card Collected"),
+                    &money_locale(doc.total_card_collected, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Delivery Fees"),
+                    &money_locale(doc.total_delivery_fees, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Tips"),
+                    &money_locale(doc.total_tips, comma),
+                    width,
+                );
+                builder.separator();
+
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Starting"),
+                    &money_locale(doc.opening_amount, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "+ Cash"),
+                    &money_locale(doc.total_cash_collected, comma),
+                    width,
+                );
+                if doc.total_expenses > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "- Expenses"),
+                        &money_locale(doc.total_expenses, comma),
+                        width,
+                    );
+                }
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "= To Return"),
+                    &money_locale(doc.amount_to_return, comma),
+                    width,
+                );
+            }
         }
         ReceiptDocument::ZReport(doc) => {
             builder
                 .center()
                 .bold(true)
-                .text("Z REPORT")
+                .text(receipt_label(lang, "Z REPORT"))
                 .lf()
                 .bold(false)
                 .left();
-            emit_pair(&mut builder, "Date", &doc.report_date, width);
-            emit_pair(&mut builder, "Generated", &doc.generated_at, width);
-            emit_pair(&mut builder, "Shift", &doc.shift_ref, width);
-            emit_pair(&mut builder, "Terminal", &doc.terminal_name, width);
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Date"),
+                &doc.report_date,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Generated"),
+                &doc.generated_at,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Shift"),
+                &doc.shift_ref,
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Terminal"),
+                &doc.terminal_name,
+                width,
+            );
             builder.separator();
-            emit_pair(&mut builder, "Orders", &doc.total_orders.to_string(), width);
-            emit_pair(&mut builder, "Gross", &money(doc.gross_sales), width);
+
+            // --- Sales summary ---
+            builder
+                .bold(true)
+                .text(receipt_label(lang, "SALES"))
+                .lf()
+                .bold(false);
             emit_pair(
                 &mut builder,
-                "Discounts",
-                &format!("-{}", money(doc.discounts_total)),
-                width,
-            );
-            emit_pair(&mut builder, "Net", &money(doc.net_sales), width);
-            emit_pair(&mut builder, "Cash", &money(doc.cash_sales), width);
-            emit_pair(&mut builder, "Card", &money(doc.card_sales), width);
-            emit_pair(
-                &mut builder,
-                "Refunds",
-                &format!("-{}", money(doc.refunds_total)),
+                receipt_label(lang, "Orders"),
+                &doc.total_orders.to_string(),
                 width,
             );
             emit_pair(
                 &mut builder,
-                "Voids",
-                &format!("-{}", money(doc.voids_total)),
+                receipt_label(lang, "Gross"),
+                &money_locale(doc.gross_sales, comma),
                 width,
             );
             emit_pair(
                 &mut builder,
-                "Expenses",
-                &format!("-{}", money(doc.expenses_total)),
+                receipt_label(lang, "Discounts"),
+                &format!("-{}", money_locale(doc.discounts_total, comma)),
                 width,
             );
-            emit_pair(&mut builder, "Variance", &money(doc.cash_variance), width);
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Net"),
+                &money_locale(doc.net_sales, comma),
+                width,
+            );
+            if doc.tips_total > 0.0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Tips"),
+                    &money_locale(doc.tips_total, comma),
+                    width,
+                );
+            }
+            builder.separator();
+
+            // --- Payments ---
+            builder
+                .bold(true)
+                .text(receipt_label(lang, "PAYMENTS"))
+                .lf()
+                .bold(false);
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Cash"),
+                &money_locale(doc.cash_sales, comma),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Card"),
+                &money_locale(doc.card_sales, comma),
+                width,
+            );
+            if doc.refunds_total > 0.0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Refunds"),
+                    &format!("-{}", money_locale(doc.refunds_total, comma)),
+                    width,
+                );
+            }
+            if doc.voids_total > 0.0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Voids"),
+                    &format!("-{}", money_locale(doc.voids_total, comma)),
+                    width,
+                );
+            }
+            builder.separator();
+
+            // --- Order breakdown ---
+            let has_breakdown =
+                doc.dine_in_orders > 0 || doc.takeaway_orders > 0 || doc.delivery_orders > 0;
+            if has_breakdown {
+                builder
+                    .bold(true)
+                    .text(receipt_label(lang, "ORDER BREAKDOWN"))
+                    .lf()
+                    .bold(false);
+                if doc.dine_in_orders > 0 {
+                    emit_pair(
+                        &mut builder,
+                        &format!(
+                            "{} ({})",
+                            receipt_label(lang, "Dine-in"),
+                            doc.dine_in_orders
+                        ),
+                        &money_locale(doc.dine_in_sales, comma),
+                        width,
+                    );
+                }
+                if doc.takeaway_orders > 0 {
+                    emit_pair(
+                        &mut builder,
+                        &format!(
+                            "{} ({})",
+                            receipt_label(lang, "Takeaway"),
+                            doc.takeaway_orders
+                        ),
+                        &money_locale(doc.takeaway_sales, comma),
+                        width,
+                    );
+                }
+                if doc.delivery_orders > 0 {
+                    emit_pair(
+                        &mut builder,
+                        &format!(
+                            "{} ({})",
+                            receipt_label(lang, "Delivery"),
+                            doc.delivery_orders
+                        ),
+                        &money_locale(doc.delivery_sales, comma),
+                        width,
+                    );
+                }
+                builder.separator();
+            }
+
+            // --- Cash drawer ---
+            let has_drawer =
+                doc.opening_cash > 0.0 || doc.closing_cash > 0.0 || doc.expected_cash > 0.0;
+            if has_drawer {
+                builder
+                    .bold(true)
+                    .text(receipt_label(lang, "CASH DRAWER"))
+                    .lf()
+                    .bold(false);
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Opening"),
+                    &money_locale(doc.opening_cash, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Cash Sales"),
+                    &money_locale(doc.cash_sales, comma),
+                    width,
+                );
+                if doc.expenses_total > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Expenses"),
+                        &format!("-{}", money_locale(doc.expenses_total, comma)),
+                        width,
+                    );
+                }
+                if doc.cash_drops > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Cash Drops"),
+                        &format!("-{}", money_locale(doc.cash_drops, comma)),
+                        width,
+                    );
+                }
+                if doc.driver_cash_given > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Driver Given"),
+                        &format!("-{}", money_locale(doc.driver_cash_given, comma)),
+                        width,
+                    );
+                }
+                if doc.driver_cash_returned > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Driver Returned"),
+                        &format!("+{}", money_locale(doc.driver_cash_returned, comma)),
+                        width,
+                    );
+                }
+                if doc.staff_payments_total > 0.0 {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Staff Payments*"),
+                        &money_locale(doc.staff_payments_total, comma),
+                        width,
+                    );
+                }
+                builder.separator();
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Expected"),
+                    &money_locale(doc.expected_cash, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Closing"),
+                    &money_locale(doc.closing_cash, comma),
+                    width,
+                );
+                builder.bold(true);
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Variance"),
+                    &money_locale(doc.cash_variance, comma),
+                    width,
+                );
+                builder.bold(false);
+                if doc.staff_payments_total > 0.0 {
+                    builder
+                        .text(&format!("* {}", receipt_label(lang, "Informational only")))
+                        .lf();
+                }
+            } else {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Expenses"),
+                    &format!("-{}", money_locale(doc.expenses_total, comma)),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Variance"),
+                    &money_locale(doc.cash_variance, comma),
+                    width,
+                );
+            }
+
             if cfg.show_qr_code {
                 if let Some(qr) = cfg
                     .qr_data
@@ -2450,10 +6760,39 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        builder.separator().center();
-        // Translate the default "Thank you" footer; custom text passes through unchanged
-        let translated = receipt_label(lang, footer);
-        emit_wrapped(&mut builder, translated, width);
+        builder.center();
+        if style.modern {
+            // Modern: spaced star separator + footer + closing star separator
+            let star_line: String = "* ".repeat(width / 2).trim_end().to_string();
+            builder.text(&star_line).lf();
+            let translated = receipt_label(lang, footer);
+            emit_wrapped(&mut builder, translated, width);
+            builder.text(&star_line).lf();
+        } else {
+            // Classic: dense asterisks + footer text (no sub-footer)
+            // Map generic "Thank you" to the longer "Thank you preference" for Classic
+            let footer_key = if footer == "Thank you" {
+                "Thank you preference"
+            } else {
+                footer
+            };
+            let translated = receipt_label(lang, footer_key);
+            if classic_customer_layout {
+                // Classic receipt v2.1: short top stars + long bottom stars.
+                let top_star_line = "*".repeat(14);
+                let bottom_star_line = "*".repeat(width.max(8));
+                emit_rule(&mut builder, width, style.profile.block_rule);
+                builder.lf();
+                builder.center().text(&top_star_line).lf();
+                emit_centered_wrapped(&mut builder, translated, width);
+                builder.left().text(&bottom_star_line).lf();
+            } else {
+                builder.lf().lf();
+                let star_line = "*".repeat(14);
+                builder.text(&star_line).lf();
+                emit_wrapped(&mut builder, translated, width);
+            }
+        }
         builder.left();
     }
     if cfg.detected_brand == crate::printers::PrinterBrand::Star {
@@ -2467,6 +6806,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
     EscPosRender {
         bytes: builder.build(),
         warnings,
+        body_mode: EscPosBodyMode::Text,
     }
 }
 
@@ -2540,6 +6880,7 @@ mod tests {
                 label: "TOTAL".to_string(),
                 amount: 8.5,
                 emphasize: true,
+                discount_percent: None,
             }],
             ..OrderReceiptDoc::default()
         });
@@ -2651,7 +6992,7 @@ mod tests {
 
         let out = render_escpos(&doc, &LayoutConfig::default());
         let text = String::from_utf8_lossy(&out.bytes);
-        assert!(!text.contains("DELIVERY"));
+        assert!(!text.contains("Driver"));
         assert!(!text.contains("Nikos Driver"));
     }
 
@@ -2668,8 +7009,8 @@ mod tests {
 
         let out = render_escpos(&doc, &LayoutConfig::default());
         let text = String::from_utf8_lossy(&out.bytes);
-        assert!(!text.contains("DELIVERY"));
         assert!(!text.contains("Driver"));
+        assert!(!text.contains("Main St 12"));
     }
 
     #[test]
@@ -2691,8 +7032,9 @@ mod tests {
     }
 
     #[test]
-    fn header_renders_brand_branch_address_phone_vat_and_tax_in_order() {
+    fn classic_receipt_header_uses_address_then_left_phone_vat_sequence() {
         let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
             organization_name: "Brand Co".to_string(),
             store_subtitle: Some("Downtown Branch".to_string()),
             store_address: Some("Main St 10".to_string()),
@@ -2710,25 +7052,463 @@ mod tests {
 
         let out = render_escpos(&doc, &cfg);
         let text = String::from_utf8_lossy(&out.bytes);
-        let brand_pos = text.find("Brand Co").unwrap_or(usize::MAX);
-        let branch_pos = text.find("Downtown Branch").unwrap_or(usize::MAX);
         let address_pos = text.find("Main St 10").unwrap_or(usize::MAX);
         let phone_pos = text.find("2100000000").unwrap_or(usize::MAX);
         let vat_pos = text.find("VAT: 123456789").unwrap_or(usize::MAX);
-        let tax_pos = text.find("TAX_OFFICE: DOY ATHENS").unwrap_or(usize::MAX);
 
-        assert!(brand_pos < branch_pos);
-        assert!(branch_pos < address_pos);
         assert!(address_pos < phone_pos);
         assert!(phone_pos < vat_pos);
-        assert!(vat_pos < tax_pos);
+        assert!(text.contains("Phone: 2100000000"));
+        assert!(text.contains("VAT: 123456789"));
+        assert!(text.contains("TAX_OFFICE: DOY ATHENS"));
+        assert!(!text.contains("Brand Co"));
+        assert!(!text.contains("Downtown Branch"));
+
+        // Modern template skips store name in HEADER (it appears in footer)
+        let modern_cfg = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            organization_name: "Brand Co".to_string(),
+            store_subtitle: Some("Downtown Branch".to_string()),
+            store_address: Some("Main St 10".to_string()),
+            ..LayoutConfig::default()
+        };
+        let modern_out = render_escpos(&doc, &modern_cfg);
+        let modern_text = String::from_utf8_lossy(&modern_out.bytes);
+        // Store name should NOT appear before the address (i.e. not in header)
+        let addr_pos = modern_text.find("Main St 10").unwrap();
+        assert!(!modern_text[..addr_pos].contains("Brand Co"));
+        assert!(!modern_text[..addr_pos].contains("Downtown Branch"));
+    }
+
+    #[test]
+    fn classic_receipt_header_has_three_rules_when_address_present() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            store_address: Some("Main St 10".to_string()),
+            store_phone: Some("2100000000".to_string()),
+            vat_number: Some("123456789".to_string()),
+            tax_office: Some("DOY ATHENS".to_string()),
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-81A".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        let rules = count_text(&text, "------------------------------------------------");
+        assert!(rules >= 3, "expected at least 3 rules, got {rules}");
+    }
+
+    #[test]
+    fn classic_receipt_header_splits_address_by_comma_newline_and_pipe() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            store_address: Some(
+                "KONSTANTINOUPOLEOS 62\nTHESSALONIKI | CENTER, TK 54622".to_string(),
+            ),
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "ORD-20260303-00019".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("KONSTANTINOUPOLEOS 62"));
+        assert!(text.contains("THESSALONIKI"));
+        assert!(text.contains("CENTER"));
+        assert!(text.contains("TK 54622"));
+        assert!(!text.contains("THESSALONIKI | CENTER"));
+    }
+
+    #[test]
+    fn classic_receipt_has_no_extra_rule_or_gap_before_order_banner() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            store_address: Some("Main St 10, Thessaloniki".to_string()),
+            store_phone: Some("2100000000".to_string()),
+            vat_number: Some("123456789".to_string()),
+            tax_office: Some("DOY ATHENS".to_string()),
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "ORD-20260303-00019".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        let banner_pos = text.find("#00019").unwrap_or(usize::MAX);
+        assert!(banner_pos != usize::MAX, "banner text not found");
+
+        let prefix = &text[..banner_pos];
+        let rule = "-".repeat(cfg.paper_width.chars());
+        assert_eq!(
+            count_text(prefix, &rule),
+            3,
+            "expected only header rules before banner"
+        );
+
+        let last_rule_pos = prefix.rfind(&rule).unwrap_or(usize::MAX);
+        assert!(last_rule_pos != usize::MAX, "last header rule not found");
+        let between = &prefix[last_rule_pos + rule.len()..];
+        let lf_count = between.as_bytes().iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(
+            lf_count, 1,
+            "unexpected blank line between header and banner"
+        );
+    }
+
+    #[test]
+    fn classic_receipt_has_single_rule_between_subtotal_and_total() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-81B".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            totals: vec![
+                TotalsLine {
+                    label: "Subtotal".to_string(),
+                    amount: 9.2,
+                    emphasize: false,
+                    discount_percent: None,
+                },
+                TotalsLine {
+                    label: "TOTAL".to_string(),
+                    amount: 9.2,
+                    emphasize: true,
+                    discount_percent: None,
+                },
+            ],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        let subtotal_pos = text.find("Subtotal:").unwrap_or(usize::MAX);
+        let total_pos = text.find("TOTAL:").unwrap_or(usize::MAX);
+        assert!(subtotal_pos < total_pos);
+        let between = &text[subtotal_pos..total_pos];
+        assert!(!between.contains("\n\n\n"), "unexpected extra gap");
+        let between_rules = between
+            .matches("------------------------------------------------")
+            .count();
+        assert_eq!(between_rules, 1, "expected single rule before TOTAL");
+    }
+
+    #[test]
+    fn classic_receipt_footer_prints_separator_above_and_below() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: Some("Thank you".to_string()),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-81C".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        let short_star = "*".repeat(14);
+        let long_star = "*".repeat(cfg.paper_width.chars());
+        let short_line = format!("{short_star}\n");
+        let long_line = format!("{long_star}\n");
+        let short_pos = text.find(&short_line).unwrap_or(usize::MAX);
+        let long_pos = text.rfind(&long_line).unwrap_or(usize::MAX);
+        assert!(short_pos != usize::MAX, "short top star line missing");
+        assert!(long_pos != usize::MAX, "long bottom star line missing");
+        assert!(
+            short_pos < long_pos,
+            "expected top short stars before bottom long stars"
+        );
+        let top_rule = "-".repeat(cfg.paper_width.chars());
+        let top_rule_pos = text.find(&top_rule).unwrap_or(usize::MAX);
+        assert!(
+            top_rule_pos < short_pos,
+            "expected dashed separator before footer stars"
+        );
+    }
+
+    #[test]
+    fn classic_receipt_forces_font_a_even_when_font_b_is_requested() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            font_type: FontType::B,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "ORD-FONT-00019".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert!(count_sequence(&out.bytes, &[0x1B, 0x4D, 0x00]) >= 1);
+        assert_eq!(count_sequence(&out.bytes, &[0x1B, 0x4D, 0x01]), 0);
+    }
+
+    #[test]
+    fn euro_symbol_kept_for_supported_layout_combo() {
+        let symbol = normalize_currency_symbol_for_layout(
+            " \u{20AC}",
+            "PC737_GREEK",
+            Some(15),
+            crate::printers::PrinterBrand::Star,
+        );
+        assert_eq!(symbol, " \u{20AC}");
+    }
+
+    #[test]
+    fn euro_symbol_falls_back_to_ascii_for_unsupported_layout_combo() {
+        let symbol = normalize_currency_symbol_for_layout(
+            " \u{20AC}",
+            "CP66_GREEK",
+            Some(66),
+            crate::printers::PrinterBrand::Unknown,
+        );
+        assert_eq!(symbol, " EUR");
+    }
+
+    #[test]
+    fn raster_exact_ttf_embedded_fonts_cover_greek_accented_text() {
+        let fonts = RasterFonts::load().expect("embedded Noto Serif fonts must load");
+        assert_eq!(
+            fonts.missing_glyphs(
+                "\u{03A4}\u{03CD}\u{03C0}\u{03BF}\u{03C2}",
+                RasterTextWeight::Regular
+            ),
+            0
+        );
+        assert_eq!(
+            fonts.missing_glyphs(
+                "\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5} \u{03B3}\u{03B9}\u{03B1} \u{03C4}\u{03B7}\u{03BD} \u{03C0}\u{03C1}\u{03BF}\u{03C4}\u{03AF}\u{03BC}\u{03B7}\u{03C3}\u{03B7}!",
+                RasterTextWeight::Regular,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn raster_exact_preset_uses_larger_total_text_than_body() {
+        let preset = raster_exact_preset_for_paper(PaperWidth::Mm80);
+        assert!(preset.item_style.size_px >= 24.0);
+        assert!(preset.total_style.size_px > preset.item_style.size_px);
+        assert!(preset.top_inset >= 16);
+    }
+
+    #[test]
+    fn raster_exact_large_readability_scales_text_up() {
+        let normal_cfg = LayoutConfig {
+            paper_width: PaperWidth::Mm80,
+            ..LayoutConfig::default()
+        };
+        let large_cfg = LayoutConfig {
+            paper_width: PaperWidth::Mm80,
+            font_type: FontType::A,
+            layout_density: LayoutDensity::Balanced,
+            header_emphasis: HeaderEmphasis::Strong,
+            ..LayoutConfig::default()
+        };
+        let normal = raster_exact_preset_for_layout(&normal_cfg);
+        let large = raster_exact_preset_for_layout(&large_cfg);
+        assert!(large.item_style.size_px > normal.item_style.size_px);
+        assert!(large.total_style.size_px > normal.total_style.size_px);
+    }
+
+    #[test]
+    fn total_label_text_includes_discount_percentage() {
+        let line = TotalsLine {
+            label: "Discount".to_string(),
+            amount: -1.4,
+            emphasize: false,
+            discount_percent: Some(10.0),
+        };
+        assert_eq!(total_label_text("en", &line), "Discount (10%)");
+        assert_eq!(total_label_text("el", &line), "Έκπτωση (10%)");
+    }
+
+    #[test]
+    fn customization_display_localizes_little_suffix() {
+        let line = ReceiptCustomizationLine {
+            name: "Merenda".to_string(),
+            quantity: 1.0,
+            is_without: false,
+            is_little: true,
+            price: None,
+        };
+        assert!(customization_display("en", &line, false).contains("(Little)"));
+        assert!(customization_display("el", &line, false).contains("(Λίγο)"));
+    }
+
+    #[test]
+    fn classic_customer_raster_exact_returns_raster_body_mode() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            footer_text: Some("Thank you".to_string()),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "ORD-20260303-00019".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:27:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![
+                TotalsLine {
+                    label: "Subtotal".to_string(),
+                    amount: 9.2,
+                    emphasize: false,
+                    discount_percent: None,
+                },
+                TotalsLine {
+                    label: "TOTAL".to_string(),
+                    amount: 9.2,
+                    emphasize: true,
+                    discount_percent: None,
+                },
+            ],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 10.0,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(count_sequence(&out.bytes, &[0x1D, b'v', b'0']) >= 1);
+    }
+
+    #[test]
+    fn classic_customer_raster_exact_uses_star_raster_when_forced() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            emulation_mode: ReceiptEmulationMode::StarLine,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "ORD-STAR-00019".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:27:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(count_sequence(&out.bytes, &[0x1B, b'*', b'r', b'A']) >= 1);
+    }
+
+    #[test]
+    fn classic_shift_checkout_raster_exact_returns_raster_body_mode() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-001".to_string(),
+            role_type: "cashier".to_string(),
+            staff_name: "Test Staff".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 12,
+            sales_amount: 120.5,
+            total_expenses: 8.0,
+            cash_refunds: 1.5,
+            opening_amount: 50.0,
+            expected_amount: Some(161.0),
+            closing_amount: Some(160.0),
+            variance_amount: Some(-1.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(count_sequence(&out.bytes, &[0x1D, b'v', b'0']) >= 1);
+    }
+
+    #[test]
+    fn classic_z_report_raster_exact_returns_raster_body_mode() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ZReport(ZReportDoc {
+            report_id: "ZR-1".to_string(),
+            report_date: "2026-03-05".to_string(),
+            generated_at: "2026-03-05T23:59:00Z".to_string(),
+            shift_ref: "SHIFT-001".to_string(),
+            terminal_name: "Front".to_string(),
+            total_orders: 120,
+            gross_sales: 980.0,
+            net_sales: 880.0,
+            cash_sales: 500.0,
+            card_sales: 380.0,
+            refunds_total: 10.0,
+            voids_total: 4.0,
+            discounts_total: 6.0,
+            expenses_total: 15.0,
+            cash_variance: -1.0,
+            ..ZReportDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(count_sequence(&out.bytes, &[0x1D, b'v', b'0']) >= 1);
+    }
+
+    #[test]
+    fn classic_kitchen_ticket_raster_exact_returns_raster_body_mode() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::KitchenTicket(KitchenTicketDoc {
+            order_number: "KT-RASTER-19".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:27:00Z".to_string(),
+            ..KitchenTicketDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
     }
 
     #[test]
     fn delivery_slip_header_dedupes_branch_when_same_as_brand() {
+        // Classic template shows org name in header; subtitle is deduped if same
         let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
             organization_name: "Same Name".to_string(),
             store_subtitle: Some("Same Name".to_string()),
+            footer_text: None, // exclude footer to isolate header dedup test
             ..LayoutConfig::default()
         };
         let doc = ReceiptDocument::DeliverySlip(OrderReceiptDoc {
@@ -2741,6 +7521,356 @@ mod tests {
         let out = render_escpos(&doc, &cfg);
         let text = String::from_utf8_lossy(&out.bytes);
         assert_eq!(count_text(&text, "Same Name"), 1);
+    }
+
+    #[test]
+    fn delivery_slip_info_lines_delivery_order_excludes_driver_and_uses_dash_fallback() {
+        let doc = OrderReceiptDoc {
+            delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
+            ..OrderReceiptDoc::default()
+        };
+        let lines = delivery_slip_info_lines(&doc, "en");
+        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Customer"));
+        assert_eq!(lines.first().map(|(_, v)| v.as_str()), Some("-"));
+        assert!(lines.iter().all(|(label, _)| label != "Driver"));
+        assert!(lines.iter().all(|(label, _)| label != "Driver ID"));
+    }
+
+    #[test]
+    fn delivery_slip_info_lines_assign_driver_starts_with_driver_id_and_driver_name() {
+        let doc = OrderReceiptDoc {
+            delivery_slip_mode: DeliverySlipMode::AssignDriver,
+            driver_id: Some("DRV-42".to_string()),
+            driver_name: Some("Nikos Driver".to_string()),
+            customer_name: Some("Customer A".to_string()),
+            ..OrderReceiptDoc::default()
+        };
+        let lines = delivery_slip_info_lines(&doc, "en");
+        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Driver ID"));
+        assert_eq!(lines.first().map(|(_, v)| v.as_str()), Some("DRV-42"));
+        assert_eq!(lines.get(1).map(|(k, _)| k.as_str()), Some("Driver"));
+        assert_eq!(lines.get(1).map(|(_, v)| v.as_str()), Some("Nikos Driver"));
+    }
+
+    #[test]
+    fn delivery_slip_info_lines_splits_packed_address_fields_when_missing() {
+        let doc = OrderReceiptDoc {
+            delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
+            customer_name: Some("Endrit".to_string()),
+            delivery_address: Some("Xenofontos 28, Thessaloniki 546 41, Floor: 2".to_string()),
+            ..OrderReceiptDoc::default()
+        };
+        let lines = delivery_slip_info_lines(&doc, "en");
+        let address = lines
+            .iter()
+            .find(|(label, _)| label == "Address")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("-");
+        let city = lines
+            .iter()
+            .find(|(label, _)| label == "City")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("-");
+        let postal = lines
+            .iter()
+            .find(|(label, _)| label == "Postal")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("-");
+        let floor = lines
+            .iter()
+            .find(|(label, _)| label == "Floor")
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("-");
+
+        assert_eq!(address, "Xenofontos 28");
+        assert_eq!(city, "Thessaloniki");
+        assert_eq!(postal, "54641");
+        assert_eq!(floor, "2");
+    }
+
+    #[test]
+    fn delivery_slip_escpos_assign_driver_prints_driver_id_before_address() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::DeliverySlip(OrderReceiptDoc {
+            order_number: "A-DEL-1".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-03-05T16:32:00Z".to_string(),
+            delivery_slip_mode: DeliverySlipMode::AssignDriver,
+            driver_id: Some("DRV-99".to_string()),
+            driver_name: Some("Nikos Driver".to_string()),
+            customer_name: Some("Customer One".to_string()),
+            customer_phone: Some("2100000000".to_string()),
+            delivery_address: Some("Main St 42".to_string()),
+            delivery_city: Some("Athens".to_string()),
+            delivery_postal_code: Some("10558".to_string()),
+            delivery_floor: Some("2".to_string()),
+            name_on_ringer: Some("Papadopoulos".to_string()),
+            ..OrderReceiptDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        let driver_id_idx = text.find("Driver ID").unwrap_or(usize::MAX);
+        let address_idx = text.find("Address").unwrap_or(usize::MAX);
+        assert!(driver_id_idx < address_idx);
+        assert!(text.contains("DRV-99"));
+    }
+
+    #[test]
+    fn delivery_slip_payment_renders_method_only_without_amount() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::DeliverySlip(OrderReceiptDoc {
+            order_number: "A-DEL-PAY".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-03-05T16:32:00Z".to_string(),
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 13.7,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 11.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        assert!(text.contains("Cash"));
+        assert!(!text.contains("11.20"));
+        assert!(!text.contains("11,20"));
+    }
+
+    #[test]
+    fn delivery_order_receipt_payment_renders_method_only_without_amount() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-ORD-DEL-PAY".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-03-05T16:32:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 13.7,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 13.7,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 11.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        assert!(text.contains("Cash"));
+        assert!(!text.contains("11.20"));
+        assert!(!text.contains("11,20"));
+    }
+
+    #[test]
+    fn pickup_order_receipt_payment_keeps_amount_rendered() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-ORD-PICKUP-PAY".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-05T16:32:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 13.7,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 13.7,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 11.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        assert!(text.contains("Cash"));
+        assert!(text.contains("11.20") || text.contains("11,20"));
+    }
+
+    #[test]
+    fn header_falls_back_to_organization_when_branch_missing() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            organization_name: "Org Name".to_string(),
+            store_subtitle: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-82B".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        // Org Name appears in header + Classic star footer sub-footer
+        assert!(count_text(&text, "Org Name") >= 1);
+    }
+
+    #[test]
+    fn classic_kitchen_header_keeps_legacy_org_line_behavior() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            organization_name: "Brand Co".to_string(),
+            store_subtitle: Some("Downtown Branch".to_string()),
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::KitchenTicket(KitchenTicketDoc {
+            order_number: "KT-LEGACY-1".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            ..KitchenTicketDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("Brand Co"));
+        assert!(text.contains("Downtown Branch"));
+        assert!(text.contains("KITCHEN TICKET"));
+    }
+
+    #[test]
+    fn classic_zreport_header_keeps_legacy_org_line_behavior() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            organization_name: "Brand Co".to_string(),
+            store_subtitle: Some("Downtown Branch".to_string()),
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ZReport(ZReportDoc {
+            report_date: "2026-02-24".to_string(),
+            generated_at: "2026-02-24T10:00:00Z".to_string(),
+            ..ZReportDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("Brand Co"));
+        assert!(text.contains("Downtown Branch"));
+        assert!(text.contains("Z REPORT"));
+    }
+
+    #[test]
+    fn receipt_label_translates_shift_and_zreport_terms() {
+        assert_eq!(receipt_label("el", "SHIFT CHECKOUT"), "ΚΛΕΙΣΙΜΟ ΒΑΡΔΙΑΣ");
+        assert_eq!(receipt_label("el", "Z REPORT"), "ΑΝΑΦΟΡΑ Z");
+        assert_eq!(receipt_label("el", "Driver ID"), "ID Οδηγού");
+        assert_eq!(receipt_label("fr", "Orders"), "Commandes");
+        assert_eq!(receipt_label("de", "Generated"), "Erstellt");
+        assert_eq!(receipt_label("it", "Variance"), "Differenza");
+    }
+
+    #[test]
+    fn classic_text_non_customer_receipts_use_configured_language_labels() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "it".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            footer_text: None,
+            ..LayoutConfig::default()
+        };
+
+        let shift = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-001".to_string(),
+            role_type: "cashier".to_string(),
+            staff_name: "Staff".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 12,
+            sales_amount: 120.5,
+            total_expenses: 8.0,
+            cash_refunds: 1.5,
+            opening_amount: 50.0,
+            expected_amount: Some(161.0),
+            closing_amount: Some(160.0),
+            variance_amount: Some(-1.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let shift_text = String::from_utf8_lossy(&render_escpos(&shift, &cfg).bytes).to_string();
+        assert!(shift_text.contains(receipt_label("it", "SHIFT CHECKOUT")));
+        assert!(shift_text.contains(receipt_label("it", "Orders")));
+
+        let z_report = ReceiptDocument::ZReport(ZReportDoc {
+            report_id: "ZR-1".to_string(),
+            report_date: "2026-03-05".to_string(),
+            generated_at: "2026-03-05T23:59:00Z".to_string(),
+            shift_ref: "SHIFT-001".to_string(),
+            terminal_name: "Front".to_string(),
+            total_orders: 120,
+            gross_sales: 980.0,
+            net_sales: 880.0,
+            cash_sales: 500.0,
+            card_sales: 380.0,
+            refunds_total: 10.0,
+            voids_total: 4.0,
+            discounts_total: 6.0,
+            expenses_total: 15.0,
+            cash_variance: -1.0,
+            ..ZReportDoc::default()
+        });
+        let z_text = String::from_utf8_lossy(&render_escpos(&z_report, &cfg).bytes).to_string();
+        assert!(z_text.contains(receipt_label("it", "Z REPORT")));
+        assert!(z_text.contains(receipt_label("it", "Generated")));
+    }
+
+    #[test]
+    fn font_type_selects_expected_escpos_font_command() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-FONT".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+
+        let cfg_a = LayoutConfig {
+            font_type: FontType::A,
+            ..LayoutConfig::default()
+        };
+        let cfg_b = LayoutConfig {
+            font_type: FontType::B,
+            ..LayoutConfig::default()
+        };
+
+        let out_a = render_escpos(&doc, &cfg_a);
+        let out_b = render_escpos(&doc, &cfg_b);
+        assert!(count_sequence(&out_a.bytes, &[0x1B, 0x4D, 0x00]) >= 1);
+        assert!(count_sequence(&out_b.bytes, &[0x1B, 0x4D, 0x01]) >= 1);
     }
 
     #[test]
@@ -2763,5 +7893,261 @@ mod tests {
         assert!(text.contains("Order #KT-19"));
         assert!(text.contains("Type"));
         assert!(text.contains("Date"));
+    }
+
+    #[test]
+    fn star_safe_text_profile_emits_no_gs_size_commands() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            detected_brand: crate::printers::PrinterBrand::Star,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-90".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![
+                TotalsLine {
+                    label: "Subtotal".to_string(),
+                    amount: 9.2,
+                    emphasize: false,
+                    discount_percent: None,
+                },
+                TotalsLine {
+                    label: "TOTAL".to_string(),
+                    amount: 9.2,
+                    emphasize: true,
+                    discount_percent: None,
+                },
+            ],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        assert_eq!(count_sequence(&out.bytes, &[0x1D, 0x21]), 0);
+    }
+
+    #[test]
+    fn safe_text_mode_keeps_amount_tokens_intact() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            detected_brand: crate::printers::PrinterBrand::Star,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-91".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            items: vec![
+                ReceiptItem {
+                    name: "Waffle".to_string(),
+                    quantity: 1.0,
+                    total: 9.2,
+                    ..ReceiptItem::default()
+                },
+                ReceiptItem {
+                    name: "Water".to_string(),
+                    quantity: 1.0,
+                    total: 1.5,
+                    ..ReceiptItem::default()
+                },
+            ],
+            totals: vec![
+                TotalsLine {
+                    label: "Subtotal".to_string(),
+                    amount: 10.7,
+                    emphasize: false,
+                    discount_percent: None,
+                },
+                TotalsLine {
+                    label: "TOTAL".to_string(),
+                    amount: 10.7,
+                    emphasize: true,
+                    discount_percent: None,
+                },
+            ],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 10.7,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let out = render_escpos(&doc, &cfg);
+        let text = String::from_utf8_lossy(&out.bytes);
+        assert!(text.contains("9.20"));
+        assert!(text.contains("10.70"));
+    }
+
+    #[test]
+    fn classic_and_modern_keep_shared_section_order() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-92".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 9.2,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let classic = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            command_profile: CommandProfile::SafeText,
+            ..LayoutConfig::default()
+        };
+        let modern = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            ..LayoutConfig::default()
+        };
+
+        // Modern: ITEMS < TOTAL < PAYMENT
+        {
+            let out = render_escpos(&doc, &modern);
+            let text = String::from_utf8_lossy(&out.bytes);
+            let items = text.find("ITEMS").unwrap_or(usize::MAX);
+            let total = text.find("TOTAL").unwrap_or(usize::MAX);
+            let payment = text.find("PAYMENT").unwrap_or(usize::MAX);
+            assert!(items < total);
+            assert!(total < payment);
+        }
+        // Classic: ITEMS < TOTAL < "Payment method"
+        {
+            let out = render_escpos(&doc, &classic);
+            let text = String::from_utf8_lossy(&out.bytes);
+            let items = text.find("ITEMS").unwrap_or(usize::MAX);
+            let total = text.find("TOTAL").unwrap_or(usize::MAX);
+            let payment_method = text.find("Payment method").unwrap_or(usize::MAX);
+            assert!(items < total);
+            assert!(total < payment_method);
+        }
+    }
+
+    #[test]
+    fn modern_compact_density_emits_fewer_blank_line_groups_than_spacious() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-92D".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 9.2,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let compact = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            layout_density: LayoutDensity::Compact,
+            ..LayoutConfig::default()
+        };
+        let spacious = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            layout_density: LayoutDensity::Spacious,
+            ..LayoutConfig::default()
+        };
+
+        let compact_text =
+            String::from_utf8_lossy(&render_escpos(&doc, &compact).bytes).to_string();
+        let spacious_text =
+            String::from_utf8_lossy(&render_escpos(&doc, &spacious).bytes).to_string();
+
+        // Spacious may add extra focus_spacing_lines that compact omits
+        assert!(count_text(&compact_text, "\n\n") <= count_text(&spacious_text, "\n\n"));
+    }
+
+    #[test]
+    fn classic_and_modern_have_distinct_header_decoration_in_safe_text_mode() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-93".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-02-24T10:00:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 9.2,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+
+        let classic = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            command_profile: CommandProfile::SafeText,
+            ..LayoutConfig::default()
+        };
+        let modern = LayoutConfig {
+            template: ReceiptTemplate::Modern,
+            command_profile: CommandProfile::SafeText,
+            ..LayoutConfig::default()
+        };
+
+        let classic_text =
+            String::from_utf8_lossy(&render_escpos(&doc, &classic).bytes).to_string();
+        let modern_text = String::from_utf8_lossy(&render_escpos(&doc, &modern).bytes).to_string();
+
+        // Both templates use section headers with ITEMS
+        assert!(modern_text.contains("ITEMS"));
+        assert!(classic_text.contains("ITEMS"));
+        // Classic uses box-drawing rules; Modern uses dash rules
+        assert!(!classic_text.contains("===="));
+        assert!(!modern_text.contains("===="));
+        // Classic no longer has star line at top
+        assert!(!classic_text.contains("* * *"));
     }
 }

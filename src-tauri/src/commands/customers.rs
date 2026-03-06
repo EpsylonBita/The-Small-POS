@@ -315,6 +315,266 @@ fn parse_customer_resolve_conflict_payload(
     })
 }
 
+fn trim_to_option(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn value_f64_any(source: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(value) = source.get(*key) {
+            if let Some(number) = value.as_f64() {
+                return Some(number);
+            }
+            if let Some(number) = value.as_i64() {
+                return Some(number as f64);
+            }
+            if let Some(raw) = value.as_str() {
+                if let Ok(parsed) = raw.trim().parse::<f64>() {
+                    return Some(parsed);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn value_bool_any(source: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        if let Some(value) = source.get(*key) {
+            if let Some(flag) = value.as_bool() {
+                return Some(flag);
+            }
+            if let Some(number) = value.as_i64() {
+                return Some(number != 0);
+            }
+            if let Some(raw) = value.as_str() {
+                let normalized = raw.trim().to_ascii_lowercase();
+                if normalized == "true" || normalized == "1" || normalized == "yes" {
+                    return Some(true);
+                }
+                if normalized == "false" || normalized == "0" || normalized == "no" {
+                    return Some(false);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn first_address_entry(source: &serde_json::Value) -> Option<&serde_json::Value> {
+    source
+        .get("addresses")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+}
+
+fn string_field(source: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    trim_to_option(value_str(source, keys))
+}
+
+fn customer_body_field(
+    source: &serde_json::Value,
+    top_keys: &[&str],
+    address_keys: &[&str],
+) -> Option<String> {
+    string_field(source, top_keys).or_else(|| {
+        first_address_entry(source).and_then(|address| string_field(address, address_keys))
+    })
+}
+
+fn build_remote_customer_create_body(source: &serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+
+    if let Some(name) = customer_body_field(source, &["name", "fullName"], &["name", "fullName"]) {
+        body.insert("name".to_string(), serde_json::json!(name));
+    }
+    if let Some(phone) = customer_body_field(
+        source,
+        &["phone", "customerPhone", "mobile", "telephone"],
+        &["phone"],
+    ) {
+        body.insert("phone".to_string(), serde_json::json!(phone));
+    }
+    if let Some(email) = customer_body_field(source, &["email", "customerEmail"], &["email"]) {
+        body.insert("email".to_string(), serde_json::json!(email));
+    }
+    if let Some(address) = customer_body_field(
+        source,
+        &["address", "street", "street_address", "deliveryAddress"],
+        &["address", "street", "street_address"],
+    ) {
+        body.insert("address".to_string(), serde_json::json!(address));
+    }
+    if let Some(city) = customer_body_field(source, &["city", "deliveryCity"], &["city"]) {
+        body.insert("city".to_string(), serde_json::json!(city));
+    }
+    if let Some(postal_code) = customer_body_field(
+        source,
+        &["postal_code", "postalCode", "deliveryPostalCode"],
+        &["postal_code", "postalCode"],
+    ) {
+        body.insert("postal_code".to_string(), serde_json::json!(postal_code));
+    }
+    if let Some(floor_number) = customer_body_field(
+        source,
+        &["floor_number", "floorNumber", "deliveryFloor"],
+        &["floor_number", "floorNumber", "floor"],
+    ) {
+        body.insert("floor_number".to_string(), serde_json::json!(floor_number));
+    }
+    if let Some(notes) = customer_body_field(
+        source,
+        &["notes", "delivery_notes"],
+        &["notes", "delivery_notes"],
+    ) {
+        body.insert("notes".to_string(), serde_json::json!(notes));
+    }
+    if let Some(name_on_ringer) = customer_body_field(
+        source,
+        &["name_on_ringer", "nameOnRinger"],
+        &["name_on_ringer", "nameOnRinger"],
+    ) {
+        body.insert(
+            "name_on_ringer".to_string(),
+            serde_json::json!(name_on_ringer),
+        );
+    }
+    if let Some(branch_id) = string_field(source, &["branch_id", "branchId"]) {
+        body.insert("branch_id".to_string(), serde_json::json!(branch_id));
+    }
+
+    if let Some(coords) = source.get("coordinates") {
+        body.insert("coordinates".to_string(), coords.clone());
+    }
+    if let Some(latitude) = value_f64_any(source, &["latitude"]) {
+        body.insert("latitude".to_string(), serde_json::json!(latitude));
+    }
+    if let Some(longitude) = value_f64_any(source, &["longitude"]) {
+        body.insert("longitude".to_string(), serde_json::json!(longitude));
+    }
+
+    serde_json::Value::Object(body)
+}
+
+fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+
+    if let Some(street) = string_field(source, &["street_address", "street", "address"]) {
+        body.insert("street_address".to_string(), serde_json::json!(street));
+    }
+    if let Some(city) = string_field(source, &["city"]) {
+        body.insert("city".to_string(), serde_json::json!(city));
+    }
+    if let Some(postal_code) = string_field(source, &["postal_code", "postalCode"]) {
+        body.insert("postal_code".to_string(), serde_json::json!(postal_code));
+    }
+    if let Some(floor_number) = string_field(source, &["floor_number", "floorNumber", "floor"]) {
+        body.insert("floor_number".to_string(), serde_json::json!(floor_number));
+    }
+    if let Some(notes) = string_field(source, &["notes", "delivery_notes"]) {
+        body.insert("notes".to_string(), serde_json::json!(notes));
+    }
+    if let Some(name_on_ringer) = string_field(source, &["name_on_ringer", "nameOnRinger"]) {
+        body.insert(
+            "name_on_ringer".to_string(),
+            serde_json::json!(name_on_ringer),
+        );
+    }
+    if let Some(address_type) = string_field(source, &["address_type", "addressType"]) {
+        body.insert("address_type".to_string(), serde_json::json!(address_type));
+    }
+    if let Some(is_default) = value_bool_any(source, &["is_default", "isDefault"]) {
+        body.insert("is_default".to_string(), serde_json::json!(is_default));
+    }
+    if let Some(coords) = source.get("coordinates") {
+        body.insert("coordinates".to_string(), coords.clone());
+    }
+    if let Some(latitude) = value_f64_any(source, &["latitude"]) {
+        body.insert("latitude".to_string(), serde_json::json!(latitude));
+    }
+    if let Some(longitude) = value_f64_any(source, &["longitude"]) {
+        body.insert("longitude".to_string(), serde_json::json!(longitude));
+    }
+
+    serde_json::Value::Object(body)
+}
+
+fn normalize_customer_for_cache(mut customer: serde_json::Value) -> serde_json::Value {
+    let now = Utc::now().to_rfc3339();
+    if let Some(obj) = customer.as_object_mut() {
+        if !obj.contains_key("id") {
+            let generated = format!("cust-{}", uuid::Uuid::new_v4());
+            obj.insert("id".to_string(), serde_json::json!(generated));
+        }
+        if !obj.contains_key("version") {
+            obj.insert("version".to_string(), serde_json::json!(1));
+        }
+
+        let created_at = obj
+            .get("createdAt")
+            .cloned()
+            .or_else(|| obj.get("created_at").cloned())
+            .unwrap_or_else(|| serde_json::json!(now.clone()));
+        let updated_at = obj
+            .get("updatedAt")
+            .cloned()
+            .or_else(|| obj.get("updated_at").cloned())
+            .unwrap_or_else(|| serde_json::json!(now.clone()));
+        obj.insert("createdAt".to_string(), created_at);
+        obj.insert("updatedAt".to_string(), updated_at);
+        obj.entry("addresses".to_string())
+            .or_insert(serde_json::json!([]));
+    }
+    customer
+}
+
+async fn sync_customer_create_remote(
+    db: &db::DbState,
+    customer: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = build_remote_customer_create_body(customer);
+    let name = string_field(&body, &["name"]).ok_or("Missing customer name")?;
+    let phone = string_field(&body, &["phone"]).ok_or("Missing customer phone")?;
+    if name.is_empty() || phone.is_empty() {
+        return Err("Missing customer name or phone".into());
+    }
+
+    let response = crate::admin_fetch(Some(db), "/api/pos/customers", "POST", Some(body)).await?;
+    let remote_customer = response
+        .get("data")
+        .cloned()
+        .or_else(|| response.get("customer").cloned())
+        .ok_or("Customer API response missing data")?;
+    Ok(remote_customer)
+}
+
+async fn sync_customer_address_remote(
+    db: &db::DbState,
+    customer_id: &str,
+    address: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = build_remote_address_body(address);
+    let street = string_field(&body, &["street_address"]).ok_or("Missing address street")?;
+    if street.is_empty() {
+        return Err("Missing address street".into());
+    }
+
+    let path = format!("/api/pos/customers/{customer_id}/addresses");
+    let response = crate::admin_fetch(Some(db), &path, "POST", Some(body)).await?;
+    let remote_address = response
+        .get("address")
+        .cloned()
+        .ok_or("Address API response missing address")?;
+    Ok(remote_address)
+}
+
 #[tauri::command]
 pub async fn customer_get_cache_stats(
     db: tauri::State<'_, db::DbState>,
@@ -462,22 +722,10 @@ pub async fn customer_create(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let mut customer = payload;
-    let customer_id = value_str(&customer, &["id", "customerId"])
-        .unwrap_or_else(|| format!("cust-{}", uuid::Uuid::new_v4()));
-    if let Some(obj) = customer.as_object_mut() {
-        obj.insert("id".to_string(), serde_json::json!(customer_id));
-        obj.entry("version".to_string())
-            .or_insert(serde_json::json!(1));
-        obj.entry("createdAt".to_string())
-            .or_insert(serde_json::json!(Utc::now().to_rfc3339()));
-        obj.insert(
-            "updatedAt".to_string(),
-            serde_json::json!(Utc::now().to_rfc3339()),
-        );
-        obj.entry("addresses".to_string())
-            .or_insert(serde_json::json!([]));
-    }
+    let remote_customer = sync_customer_create_remote(&db, &payload).await?;
+    let customer = normalize_customer_for_cache(remote_customer);
+    let customer_id =
+        value_str(&customer, &["id", "customerId"]).ok_or("Customer create returned missing id")?;
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
     cache.retain(|entry| {
         value_str(entry, &["id", "customerId"])
@@ -594,7 +842,8 @@ pub async fn customer_add_address(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_customer_address_payload(arg0, arg1)?;
     let customer_id = payload.customer_id;
-    let mut address = payload.address;
+    let remote_address = sync_customer_address_remote(&db, &customer_id, &payload.address).await?;
+    let mut address = remote_address;
     if let Some(obj) = address.as_object_mut() {
         obj.entry("id".to_string())
             .or_insert_with(|| serde_json::json!(format!("addr-{}", uuid::Uuid::new_v4())));
@@ -831,5 +1080,75 @@ mod dto_tests {
             parsed.data.get("name").and_then(|v| v.as_str()),
             Some("Merged")
         );
+    }
+
+    #[test]
+    fn build_remote_customer_create_body_prefers_street_only_address_fields() {
+        let source = serde_json::json!({
+            "name": "Endrit Bashi",
+            "phone": "6948128474",
+            "addresses": [{
+                "street_address": "Xenofontos 28",
+                "city": "Thessaloniki",
+                "postal_code": "54641",
+                "floor_number": "2",
+                "name_on_ringer": "Bashi"
+            }]
+        });
+
+        let body = build_remote_customer_create_body(&source);
+        assert_eq!(
+            body.get("name").and_then(|v| v.as_str()),
+            Some("Endrit Bashi")
+        );
+        assert_eq!(
+            body.get("phone").and_then(|v| v.as_str()),
+            Some("6948128474")
+        );
+        assert_eq!(
+            body.get("address").and_then(|v| v.as_str()),
+            Some("Xenofontos 28")
+        );
+        assert_eq!(
+            body.get("city").and_then(|v| v.as_str()),
+            Some("Thessaloniki")
+        );
+        assert_eq!(
+            body.get("postal_code").and_then(|v| v.as_str()),
+            Some("54641")
+        );
+        assert_eq!(body.get("floor_number").and_then(|v| v.as_str()), Some("2"));
+    }
+
+    #[test]
+    fn build_remote_address_body_maps_known_aliases() {
+        let source = serde_json::json!({
+            "street": "Xenofontos 28",
+            "city": "Thessaloniki",
+            "postalCode": "54641",
+            "floor": "2",
+            "nameOnRinger": "Bashi",
+            "isDefault": true
+        });
+
+        let body = build_remote_address_body(&source);
+        assert_eq!(
+            body.get("street_address").and_then(|v| v.as_str()),
+            Some("Xenofontos 28")
+        );
+        assert_eq!(
+            body.get("city").and_then(|v| v.as_str()),
+            Some("Thessaloniki")
+        );
+        assert_eq!(
+            body.get("postal_code").and_then(|v| v.as_str()),
+            Some("54641")
+        );
+        assert_eq!(body.get("floor_number").and_then(|v| v.as_str()), Some("2"));
+        assert_eq!(
+            body.get("name_on_ringer").and_then(|v| v.as_str()),
+            Some("Bashi")
+        );
+        assert_eq!(body.get("is_default").and_then(|v| v.as_bool()), Some(true));
     }
 }

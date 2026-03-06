@@ -22,7 +22,7 @@ struct SyncFailedFinancialItemsPayload {
 #[serde(rename_all = "camelCase")]
 struct SyncRetryFinancialItemPayload {
     #[serde(alias = "sync_id", alias = "id")]
-    sync_id: String,
+    sync_id: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +100,20 @@ fn parse_failed_financial_items_limit(arg0: Option<serde_json::Value>) -> i64 {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
-fn parse_retry_financial_item_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
+const ACTIONABLE_FINANCIAL_QUEUE_STATUSES_SQL: &str =
+    "'failed', 'pending', 'in_progress', 'deferred', 'queued_remote'";
+const ACTIONABLE_FINANCIAL_ENTITY_TYPES_SQL: &str =
+    "'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings'";
+
+fn parse_retry_financial_queue_id(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Number(num) => num.as_i64(),
+        serde_json::Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_retry_financial_item_payload(arg0: Option<serde_json::Value>) -> Result<i64, String> {
     let payload = match arg0 {
         Some(serde_json::Value::String(sync_id)) => serde_json::json!({
             "syncId": sync_id
@@ -110,13 +123,72 @@ fn parse_retry_financial_item_payload(arg0: Option<serde_json::Value>) -> Result
         None => serde_json::json!({}),
     };
 
-    let mut parsed: SyncRetryFinancialItemPayload = serde_json::from_value(payload)
+    let parsed: SyncRetryFinancialItemPayload = serde_json::from_value(payload.clone())
         .map_err(|e| format!("Invalid retry financial payload: {e}"))?;
-    parsed.sync_id = parsed.sync_id.trim().to_string();
-    if parsed.sync_id.is_empty() {
-        return Err("Missing sync item id".into());
-    }
-    Ok(parsed.sync_id)
+
+    parse_retry_financial_queue_id(&parsed.sync_id)
+        .or_else(|| value_i64(&payload, &["syncId", "sync_id", "id"]))
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "Missing sync item id".into())
+}
+
+fn query_financial_queue_items(limit: i64, db: &db::DbState) -> Result<serde_json::Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT id, entity_type, entity_id, operation, payload, status, last_error, retry_count, created_at
+             FROM sync_queue
+             WHERE status IN ({ACTIONABLE_FINANCIAL_QUEUE_STATUSES_SQL})
+               AND entity_type IN ({ACTIONABLE_FINANCIAL_ENTITY_TYPES_SQL})
+             ORDER BY
+               CASE status
+                 WHEN 'failed' THEN 0
+                 WHEN 'pending' THEN 1
+                 WHEN 'deferred' THEN 2
+                 WHEN 'queued_remote' THEN 3
+                 WHEN 'in_progress' THEN 4
+                 ELSE 9
+               END,
+               datetime(created_at) DESC,
+               id DESC
+             LIMIT ?1"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([limit], |row| {
+            let queue_id = row.get::<_, i64>(0)?;
+            let entity_type = row.get::<_, String>(1)?;
+            let entity_id = row.get::<_, String>(2)?;
+            let operation = row.get::<_, String>(3)?;
+            let payload = row.get::<_, String>(4)?;
+            let status = row.get::<_, String>(5)?;
+            let last_error = row.get::<_, Option<String>>(6)?;
+            let retry_count = row.get::<_, i64>(7)?;
+            let created_at = row.get::<_, String>(8)?;
+
+            Ok(serde_json::json!({
+                "queueId": queue_id,
+                "entityType": entity_type,
+                "entityId": entity_id,
+                "operation": operation,
+                "payload": payload,
+                "status": status,
+                "lastError": last_error,
+                "retryCount": retry_count,
+                "createdAt": created_at,
+                // Compatibility aliases for legacy renderer fields
+                "id": queue_id,
+                "table_name": entity_type,
+                "record_id": entity_id,
+                "data": payload,
+                "attempts": retry_count,
+                "error_message": last_error,
+                "created_at": created_at,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+    Ok(serde_json::json!({ "items": items }))
 }
 
 fn parse_update_room_status_payload(
@@ -281,40 +353,16 @@ pub async fn sync_get_failed_financial_items(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let limit = parse_failed_financial_items_limit(arg0);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, entity_type, entity_id, operation, payload, status, last_error, retry_count, created_at
-             FROM sync_queue
-             WHERE status = 'failed'
-               AND entity_type IN ('payment', 'order_payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
-             ORDER BY created_at DESC LIMIT ?1",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([limit], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "entityType": row.get::<_, String>(1)?,
-                "entityId": row.get::<_, String>(2)?,
-                "operation": row.get::<_, String>(3)?,
-                "payload": row.get::<_, String>(4)?,
-                "status": row.get::<_, String>(5)?,
-                "lastError": row.get::<_, Option<String>>(6)?,
-                "retryCount": row.get::<_, i64>(7)?,
-                "createdAt": row.get::<_, String>(8)?,
-                // Compatibility aliases for legacy renderer fields
-                "table_name": row.get::<_, String>(1)?,
-                "record_id": row.get::<_, String>(2)?,
-                "data": row.get::<_, String>(4)?,
-                "attempts": row.get::<_, i64>(7)?,
-                "error_message": row.get::<_, Option<String>>(6)?,
-                "created_at": row.get::<_, String>(8)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
-    Ok(serde_json::json!({ "items": items }))
+    query_financial_queue_items(limit, &db)
+}
+
+#[tauri::command]
+pub async fn sync_get_financial_queue_items(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let limit = parse_failed_financial_items_limit(arg0);
+    query_financial_queue_items(limit, &db)
 }
 
 #[tauri::command]
@@ -329,7 +377,7 @@ pub async fn sync_retry_financial_item(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE sync_queue SET status = 'pending', retry_count = 0, last_error = NULL WHERE id = ?1",
-            [&id],
+            rusqlite::params![id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -350,7 +398,7 @@ pub async fn sync_retry_all_failed_financial(
         conn.execute(
             "UPDATE sync_queue SET status = 'pending', retry_count = 0, last_error = NULL
              WHERE status = 'failed'
-               AND entity_type IN ('payment', 'order_payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+               AND entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
             [],
         )
         .map_err(|e| e.to_string())?
@@ -373,7 +421,7 @@ pub async fn sync_get_unsynced_financial_summary(
         .query_row(
             "SELECT COUNT(*) FROM sync_queue
              WHERE status != 'synced'
-               AND entity_type IN ('payment', 'order_payment', 'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+               AND entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
             [],
             |row| row.get(0),
         )
@@ -771,6 +819,8 @@ pub async fn appointments_get_today_metrics() -> Result<serde_json::Value, Strin
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+    use crate::db;
+    use rusqlite::params;
 
     #[test]
     fn parse_remove_invalid_orders_supports_array_payload() {
@@ -796,14 +846,54 @@ mod dto_tests {
     }
 
     #[test]
-    fn parse_retry_financial_item_supports_string_and_object() {
-        let from_string = parse_retry_financial_item_payload(Some(serde_json::json!("sync-1")))
+    fn parse_retry_financial_item_supports_string_number_and_object() {
+        let from_string = parse_retry_financial_item_payload(Some(serde_json::json!("41")))
             .expect("string payload should parse");
         let from_object =
-            parse_retry_financial_item_payload(Some(serde_json::json!({ "syncId": "sync-2" })))
+            parse_retry_financial_item_payload(Some(serde_json::json!({ "syncId": "42" })))
                 .expect("object payload should parse");
-        assert_eq!(from_string, "sync-1");
-        assert_eq!(from_object, "sync-2");
+        let from_number =
+            parse_retry_financial_item_payload(Some(serde_json::json!({ "syncId": 43 })))
+                .expect("numeric payload should parse");
+        assert_eq!(from_string, 41);
+        assert_eq!(from_object, 42);
+        assert_eq!(from_number, 43);
+    }
+
+    #[test]
+    fn query_financial_queue_items_returns_numeric_queue_ids() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES ('driver_earning', 'earning-1', 'create', '{}', 'idem-1', 'failed')",
+            params![],
+        )
+        .expect("insert financial queue row");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = query_financial_queue_items(10, &db).expect("query financial queue");
+        let items = response
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("items array");
+        let queue_id = items
+            .first()
+            .and_then(|item| item.get("queueId"))
+            .and_then(serde_json::Value::as_i64)
+            .expect("numeric queue id");
+
+        assert!(queue_id > 0, "queue id should remain numeric");
     }
 
     #[test]

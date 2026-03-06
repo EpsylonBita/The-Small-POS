@@ -16,7 +16,8 @@ const resolveLocale = (locale?: string): string => {
 
 export function formatCurrency(amount: number, currency: string = 'EUR', locale?: string): string {
   const resolvedLocale = resolveLocale(locale)
-  const safe = Number.isFinite(amount) ? amount : 0
+  const raw = Number.isFinite(amount) ? amount : 0
+  const safe = Object.is(raw, -0) ? 0 : raw
   try {
     return new Intl.NumberFormat(resolvedLocale, {
       style: 'currency',

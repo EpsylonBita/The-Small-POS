@@ -6,6 +6,7 @@ import { liquidGlassModalButton } from '../../styles/designSystem'
 import { discoverBluetoothPrinters, getBluetoothStatus } from '../../utils/web-bluetooth-printer-discovery'
 import { Activity, AlertTriangle, ChefHat, Info, Pencil, Printer, Receipt, Tag, Trash2, Wine } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
+import PrinterSetupWizard from './PrinterSetupWizard'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
@@ -14,6 +15,11 @@ type PrinterState = 'online' | 'offline' | 'error' | 'busy'
 type PaperSize = '58mm' | '80mm' | '112mm'
 type GreekRenderMode = 'text' | 'bitmap'
 type ReceiptTemplate = 'classic' | 'modern'
+type FontType = 'a' | 'b'
+type LayoutDensity = 'compact' | 'balanced' | 'spacious'
+type HeaderEmphasis = 'normal' | 'strong'
+type ClassicRenderMode = 'text' | 'raster_exact'
+type EmulationMode = 'auto' | 'escpos' | 'star_line'
 
 interface ConnectionDetails {
   type: string
@@ -27,6 +33,11 @@ interface ConnectionDetails {
   productId?: number
   systemName?: string
   path?: string
+  render_mode?: ClassicRenderMode
+  emulation?: EmulationMode
+  printable_width_dots?: number
+  left_margin_dots?: number
+  threshold?: number
 }
 
 interface PrinterConfig {
@@ -39,6 +50,9 @@ interface PrinterConfig {
   greekRenderMode?: GreekRenderMode
   escposCodePage?: number | null
   receiptTemplate?: ReceiptTemplate
+  fontType?: FontType
+  layoutDensity?: LayoutDensity
+  headerEmphasis?: HeaderEmphasis
   role: PrinterRole
   isDefault: boolean
   fallbackPrinterId?: string
@@ -84,6 +98,8 @@ interface PrinterDiagnostics {
 interface Props {
   isOpen: boolean
   onClose: () => void
+  initialMode?: SetupMode
+  autoStartWizard?: boolean
 }
 
 const PRINTER_TYPES: PrinterType[] = ['network', 'bluetooth', 'usb', 'wifi', 'system']
@@ -163,7 +179,8 @@ const asTrimmedString = (value: unknown): string => {
 }
 
 // View modes for the modal
-type ViewMode = 'list' | 'add' | 'edit' | 'discover' | 'diagnostics'
+type SetupMode = 'quick' | 'expert'
+type ViewMode = 'list' | 'add' | 'edit' | 'discover' | 'diagnostics' | 'wizard'
 
 // Status indicator component
 const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
@@ -178,7 +195,12 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
   )
 }
 
-const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
+const PrinterSettingsModal: React.FC<Props> = ({
+  isOpen,
+  onClose,
+  initialMode = 'quick',
+  autoStartWizard = false,
+}) => {
   const { t } = useTranslation()
   const bridge = getBridge()
   const api = useMemo(() => {
@@ -246,6 +268,7 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   // State
   const [viewMode, setViewMode] = useState<ViewMode>('list')
+  const [setupMode, setSetupMode] = useState<SetupMode>(initialMode)
   const [printers, setPrinters] = useState<PrinterConfig[]>([])
   const [statuses, setStatuses] = useState<Record<string, PrinterStatus>>({})
   const [discoveredPrinters, setDiscoveredPrinters] = useState<DiscoveredPrinter[]>([])
@@ -284,6 +307,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     greekRenderMode: 'text' as GreekRenderMode,
     escposCodePage: '' as string,
     receiptTemplate: 'modern' as ReceiptTemplate,
+    fontType: 'a' as FontType,
+    layoutDensity: 'compact' as LayoutDensity,
+    headerEmphasis: 'strong' as HeaderEmphasis,
+    classicRenderMode: 'text' as ClassicRenderMode,
+    emulationMode: 'auto' as EmulationMode,
+    printableWidthDots: '',
+    leftMarginDots: '',
+    rasterThreshold: '',
     role: 'receipt' as PrinterRole,
     isDefault: false,
     fallbackPrinterId: '',
@@ -389,6 +420,17 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     loadReceiptLogoSettings()
     return
   }, [isOpen, loadPrinters, loadStatuses, loadReceiptLogoSettings])
+
+  useEffect(() => {
+    if (!isOpen) return
+    setSetupMode(initialMode)
+    if (autoStartWizard) {
+      setSelectedPrinter(null)
+      setViewMode('wizard')
+    } else {
+      setViewMode('list')
+    }
+  }, [autoStartWizard, initialMode, isOpen])
 
   // Listen for real-time status changes
   useEffect(() => {
@@ -579,6 +621,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       greekRenderMode: 'text',
       escposCodePage: '',
       receiptTemplate: 'modern',
+      fontType: 'a',
+      layoutDensity: 'compact',
+      headerEmphasis: 'strong',
+      classicRenderMode: 'text',
+      emulationMode: 'auto',
+      printableWidthDots: '',
+      leftMarginDots: '',
+      rasterThreshold: '',
       role: 'receipt',
       isDefault: printers.length === 0,
       fallbackPrinterId: '',
@@ -589,36 +639,53 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   // Build connection details from form
   const buildConnectionDetails = (): ConnectionDetails => {
+    const details: ConnectionDetails = { type: formData.type }
     switch (formData.type) {
       case 'network':
       case 'wifi':
-        return {
-          type: formData.type,
-          ip: formData.ip,
-          port: formData.port,
-        }
+        details.ip = formData.ip
+        details.port = formData.port
+        break
       case 'bluetooth':
-        return {
-          type: 'bluetooth',
-          address: formData.bluetoothAddress,
-          channel: formData.bluetoothChannel,
-        }
+        details.type = 'bluetooth'
+        details.address = formData.bluetoothAddress
+        details.channel = formData.bluetoothChannel
+        break
       case 'usb':
-        return {
-          type: 'usb',
-          vendorId: formData.usbVendorId,
-          productId: formData.usbProductId,
-          systemName: formData.usbSystemName,
-          path: formData.usbPath,
-        }
+        details.type = 'usb'
+        details.vendorId = formData.usbVendorId
+        details.productId = formData.usbProductId
+        details.systemName = formData.usbSystemName
+        details.path = formData.usbPath
+        break
       case 'system':
-        return {
-          type: 'system',
-          systemName: formData.systemPrinterName,
-        }
+        details.type = 'system'
+        details.systemName = formData.systemPrinterName
+        break
       default:
-        return { type: formData.type }
+        break
     }
+    details.render_mode = formData.classicRenderMode
+    details.emulation = formData.emulationMode
+    if (formData.printableWidthDots.trim()) {
+      const value = Number.parseInt(formData.printableWidthDots, 10)
+      if (Number.isFinite(value) && value > 0) {
+        details.printable_width_dots = value
+      }
+    }
+    if (formData.leftMarginDots.trim()) {
+      const value = Number.parseInt(formData.leftMarginDots, 10)
+      if (Number.isFinite(value) && value >= 0) {
+        details.left_margin_dots = value
+      }
+    }
+    if (formData.rasterThreshold.trim()) {
+      const value = Number.parseInt(formData.rasterThreshold, 10)
+      if (Number.isFinite(value) && value > 0) {
+        details.threshold = value
+      }
+    }
+    return details
   }
 
   // Save printer (add or update)
@@ -651,6 +718,9 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         greekRenderMode: formData.greekRenderMode,
         escposCodePage: formData.escposCodePage ? parseInt(formData.escposCodePage, 10) : null,
         receiptTemplate: formData.receiptTemplate,
+        fontType: formData.fontType,
+        layoutDensity: formData.layoutDensity,
+        headerEmphasis: formData.headerEmphasis,
         role: formData.role,
         isDefault: formData.isDefault,
         fallbackPrinterId: formData.fallbackPrinterId || undefined,
@@ -808,6 +878,19 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       escposCodePage: printer.escposCodePage != null ? String(printer.escposCodePage) : '',
       receiptTemplate:
         printer.receiptTemplate || ((printer.role === 'receipt' || printer.role === 'kitchen') ? 'modern' : 'classic'),
+      fontType: printer.fontType || 'a',
+      layoutDensity: printer.layoutDensity || 'compact',
+      headerEmphasis: printer.headerEmphasis || 'strong',
+      classicRenderMode:
+        ((conn.render_mode as ClassicRenderMode | undefined) || 'text'),
+      emulationMode:
+        ((conn.emulation as EmulationMode | undefined) || 'auto'),
+      printableWidthDots:
+        conn.printable_width_dots != null ? String(conn.printable_width_dots) : '',
+      leftMarginDots:
+        conn.left_margin_dots != null ? String(conn.left_margin_dots) : '',
+      rasterThreshold:
+        conn.threshold != null ? String(conn.threshold) : '',
       role: printer.role,
       isDefault: printer.isDefault,
       fallbackPrinterId: printer.fallbackPrinterId || '',
@@ -847,6 +930,14 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       greekRenderMode: 'text',
       escposCodePage: '',
       receiptTemplate: 'modern',
+      fontType: 'a',
+      layoutDensity: 'compact',
+      headerEmphasis: 'strong',
+      classicRenderMode: 'text',
+      emulationMode: 'auto',
+      printableWidthDots: '',
+      leftMarginDots: '',
+      rasterThreshold: '',
       role: 'receipt',
       isDefault: false,
       fallbackPrinterId: '',
@@ -928,13 +1019,39 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   // Render printer list view
   const renderListView = () => (
     <div className="space-y-4">
+      <div className="inline-flex rounded-lg bg-white/5 border border-white/10 p-1">
+        <button
+          onClick={() => setSetupMode('quick')}
+          className={`px-3 py-1.5 text-xs rounded-md transition ${
+            setupMode === 'quick' ? 'bg-blue-500/20 text-blue-200' : 'liquid-glass-modal-text-muted'
+          }`}
+          type="button"
+        >
+          {t('settings.printer.quickSetup', 'Quick Setup')}
+        </button>
+        <button
+          onClick={() => setSetupMode('expert')}
+          className={`px-3 py-1.5 text-xs rounded-md transition ${
+            setupMode === 'expert' ? 'bg-blue-500/20 text-blue-200' : 'liquid-glass-modal-text-muted'
+          }`}
+          type="button"
+        >
+          {t('settings.printer.expertSettings', 'Expert Settings')}
+        </button>
+      </div>
+
       {/* Action buttons */}
       <div className="flex gap-2 flex-wrap">
         <button
-          onClick={() => { resetForm(); setViewMode('add') }}
+          onClick={() => {
+            resetForm()
+            setViewMode(setupMode === 'quick' ? 'wizard' : 'add')
+          }}
           className={liquidGlassModalButton('primary', 'sm')}
         >
-          {t('settings.printer.addPrinter')}
+          {setupMode === 'quick'
+            ? t('settings.printer.startQuickSetup', 'Start Quick Setup')
+            : t('settings.printer.addPrinter')}
         </button>
         <button
           onClick={() => handleDiscover()}
@@ -1419,6 +1536,142 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
       )}
 
+      {(formData.role === 'receipt' || formData.role === 'kitchen') && (
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('settings.printer.fontType', 'Font Type')}
+            </label>
+            <select
+              value={formData.fontType}
+              onChange={e => setFormData(prev => ({ ...prev, fontType: e.target.value as FontType }))}
+              className="liquid-glass-modal-input"
+            >
+              <option value="a">{t('settings.printer.fontTypeA', 'A (Larger)')}</option>
+              <option value="b">{t('settings.printer.fontTypeB', 'B (Compact)')}</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('settings.printer.layoutDensity', 'Layout Density')}
+            </label>
+            <select
+              value={formData.layoutDensity}
+              onChange={e => setFormData(prev => ({ ...prev, layoutDensity: e.target.value as LayoutDensity }))}
+              className="liquid-glass-modal-input"
+            >
+              <option value="compact">{t('settings.printer.layoutDensityCompact', 'Compact')}</option>
+              <option value="balanced">{t('settings.printer.layoutDensityBalanced', 'Balanced')}</option>
+              <option value="spacious">{t('settings.printer.layoutDensitySpacious', 'Spacious')}</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('settings.printer.headerEmphasis', 'Header Emphasis')}
+            </label>
+            <select
+              value={formData.headerEmphasis}
+              onChange={e => setFormData(prev => ({ ...prev, headerEmphasis: e.target.value as HeaderEmphasis }))}
+              className="liquid-glass-modal-input"
+            >
+              <option value="strong">{t('settings.printer.headerEmphasisStrong', 'Strong')}</option>
+              <option value="normal">{t('settings.printer.headerEmphasisNormal', 'Normal')}</option>
+            </select>
+          </div>
+
+          <p className="text-xs text-gray-400">
+            {t('settings.printer.safeTypographyHint', 'Star-safe mode avoids risky size commands. Use Font A/B and density/emphasis presets for reliable readability.')}
+          </p>
+        </div>
+      )}
+
+      {formData.role === 'receipt' && formData.receiptTemplate === 'classic' && (
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('settings.printer.classicRenderMode', 'Classic Customer Render Mode')}
+            </label>
+            <select
+              value={formData.classicRenderMode}
+              onChange={e => setFormData(prev => ({ ...prev, classicRenderMode: e.target.value as ClassicRenderMode }))}
+              className="liquid-glass-modal-input"
+            >
+              <option value="text">{t('settings.printer.classicRenderModeText', 'Text (ESC/POS font)')}</option>
+              <option value="raster_exact">{t('settings.printer.classicRenderModeRasterExact', 'Raster Exact (screenshot-like)')}</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+              {t('settings.printer.classicEmulationMode', 'Raster Emulation')}
+            </label>
+            <select
+              value={formData.emulationMode}
+              onChange={e => setFormData(prev => ({ ...prev, emulationMode: e.target.value as EmulationMode }))}
+              className="liquid-glass-modal-input"
+            >
+              <option value="auto">{t('settings.printer.classicEmulationAuto', 'Auto (brand detect)')}</option>
+              <option value="escpos">{t('settings.printer.classicEmulationEscpos', 'ESC/POS')}</option>
+              <option value="star_line">{t('settings.printer.classicEmulationStarLine', 'Star Line')}</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.printer.classicPrintableWidthDots', 'Printable Width (dots)')}
+              </label>
+              <input
+                type="number"
+                min={64}
+                max={832}
+                value={formData.printableWidthDots}
+                onChange={e => setFormData(prev => ({ ...prev, printableWidthDots: e.target.value }))}
+                placeholder={t('settings.printer.classicPrintableWidthDotsAuto', 'Auto')}
+                className="liquid-glass-modal-input"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.printer.classicLeftMarginDots', 'Left Margin (dots)')}
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={200}
+                value={formData.leftMarginDots}
+                onChange={e => setFormData(prev => ({ ...prev, leftMarginDots: e.target.value }))}
+                placeholder="0"
+                className="liquid-glass-modal-input"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
+                {t('settings.printer.classicRasterThreshold', 'Threshold (1-255)')}
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={255}
+                value={formData.rasterThreshold}
+                onChange={e => setFormData(prev => ({ ...prev, rasterThreshold: e.target.value }))}
+                placeholder="160"
+                className="liquid-glass-modal-input"
+              />
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-400">
+            {t(
+              'settings.printer.classicRenderModeHint',
+              'Use Raster Exact for screenshot-like classic receipts. 80mm defaults to full width (576 dots). MCP31 first-pass: emulation=star_line, optional left margin=0-8, threshold=145-165. Auto defaults are applied when fields are empty.'
+            )}
+          </p>
+        </div>
+      )}
+
       {/* Role */}
       <div>
         <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
@@ -1659,6 +1912,22 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     )
   }
 
+  const renderWizardView = () => (
+    <PrinterSetupWizard
+      existingPrinters={printers as any}
+      onCancel={() => setViewMode('list')}
+      onOpenExpert={() => {
+        setSetupMode('expert')
+        resetForm()
+        setViewMode('add')
+      }}
+      onSaved={async () => {
+        await loadPrinters()
+        setViewMode('list')
+      }}
+    />
+  )
+
   // Render content based on view mode
   const renderContent = () => {
     switch (viewMode) {
@@ -1671,6 +1940,8 @@ const PrinterSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         return renderFormView()
       case 'diagnostics':
         return renderDiagnosticsView()
+      case 'wizard':
+        return renderWizardView()
       default:
         return renderListView()
     }

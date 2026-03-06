@@ -11,6 +11,7 @@ interface PaymentModalProps {
   onClose: () => void;
   orderTotal: number;
   discountAmount?: number;
+  deliveryFee?: number;
   isProcessing?: boolean;
   orderType?: 'pickup' | 'delivery';
   minimumOrderAmount?: number; // From delivery zone settings in admin dashboard
@@ -31,6 +32,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onClose,
   orderTotal,
   discountAmount = 0,
+  deliveryFee = 0,
   isProcessing = false,
   orderType,
   minimumOrderAmount = 0, // Default to 0 (no minimum) if not provided
@@ -53,7 +55,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     isBelowMinimum ? 'minimum_warning' : 'payment_selection'
   );
 
-  const originalTotal = orderTotal + discountAmount;
+  const showDeliveryFee = orderType === 'delivery';
+  const subtotalBeforeDiscount = Math.max(0, orderTotal + discountAmount - (showDeliveryFee ? deliveryFee : 0));
 
   // Calculate change
   const cashAmount = parseFloat(cashReceived) || 0;
@@ -161,24 +164,36 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       <div>
         {/* Order Total with Discount Breakdown */}
         <div className="text-center mb-8">
-          {discountAmount > 0 && (
+          {(discountAmount > 0 || showDeliveryFee) && (
             <div className="mb-4 space-y-2 p-4 rounded-xl bg-white/5 border border-white/10">
               <div className="flex justify-between text-sm">
                 <span className="liquid-glass-modal-text-muted">
-                  {t('modals.payment.originalTotal')}
+                  {t('payment.fields.subtotal')}
                 </span>
                 <span className="liquid-glass-modal-text font-medium">
-                  €{originalTotal.toFixed(2)}
+                  €{subtotalBeforeDiscount.toFixed(2)}
                 </span>
               </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-green-500 dark:text-green-400 font-medium">
-                  {t('modals.payment.discount')}
-                </span>
-                <span className="text-green-500 dark:text-green-400 font-medium">
-                  -€{discountAmount.toFixed(2)}
-                </span>
-              </div>
+              {discountAmount > 0 && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-green-500 dark:text-green-400 font-medium">
+                    {t('modals.payment.discount')}
+                  </span>
+                  <span className="text-green-500 dark:text-green-400 font-medium">
+                    -€{discountAmount.toFixed(2)}
+                  </span>
+                </div>
+              )}
+              {showDeliveryFee && (
+                <div className="flex justify-between text-sm">
+                  <span className="liquid-glass-modal-text-muted">
+                    {t('payment.fields.deliveryFee')}
+                  </span>
+                  <span className="liquid-glass-modal-text font-medium">
+                    €{deliveryFee.toFixed(2)}
+                  </span>
+                </div>
+              )}
               <div className="border-t border-white/10 pt-2 mt-2"></div>
             </div>
           )}

@@ -168,43 +168,91 @@ pub struct SettlementResult {
 // Protocol trait
 // ---------------------------------------------------------------------------
 
-/// Protocol adapter trait — all ECR protocols implement this.
+/// Protocol adapter trait for ECR (Electronic Cash Register) devices.
 ///
-/// Implementations handle the byte-level protocol encoding/decoding while
-/// the [`DeviceManager`] handles lifecycle and persistence.
+/// Each supported wire protocol (Generic Fiscal STX/ETX, ZVT DLE/STX, PAX
+/// STX/ETX) implements this trait. The trait abstracts the byte-level
+/// encoding/decoding so that higher-level code (commands, UI) can work with
+/// any cash register or payment terminal uniformly.
+///
+/// # Lifecycle
+///
+/// 1. The [`DeviceManager`] creates a protocol instance with a transport.
+/// 2. [`initialize`](EcrProtocol::initialize) performs the device handshake.
+/// 3. The device is ready for [`process_transaction`](EcrProtocol::process_transaction) calls.
+/// 4. [`abort`](EcrProtocol::abort) or [`cancel_transaction`](EcrProtocol::cancel_transaction)
+///    can interrupt in-flight operations.
+/// 5. [`settlement`](EcrProtocol::settlement) performs end-of-day Z-close.
+///
+/// # Thread Safety
+///
+/// Requires `Send` so instances can be held behind `Mutex` in the
+/// `DeviceManager` managed state. `&mut self` on all methods ensures
+/// exclusive access during protocol exchanges.
 pub trait EcrProtocol: Send {
-    /// Protocol name (for logging/display).
+    /// Returns the protocol name (e.g. `"GenericFiscal"`, `"ZVT"`, `"PAX"`).
+    /// Used in log messages, error formatting, and UI display.
     fn name(&self) -> &str;
 
-    /// Initialize the protocol (registration, login, handshake, etc.).
+    /// Perform device initialization (registration, login, or handshake).
+    ///
+    /// Called once after transport connection. Should configure the device
+    /// for transaction processing. Returns `Err` if the handshake fails.
     fn initialize(&mut self) -> Result<(), String>;
 
-    /// Process a transaction (payment, refund, fiscal receipt, etc.).
+    /// Submit a transaction to the device.
+    ///
+    /// Handles all [`TransactionType`] variants: card payments, refunds,
+    /// voids, pre-auths, fiscal receipts, and fiscal Z/X reports.
+    /// The response includes authorization codes, receipt lines, and
+    /// fiscal counters as applicable.
     fn process_transaction(
         &mut self,
         request: &TransactionRequest,
     ) -> Result<TransactionResponse, String>;
 
-    /// Cancel the current in-flight transaction.
+    /// Cancel the current in-flight transaction, if the device supports it.
+    ///
+    /// Sends a protocol-level cancel/abort and waits for acknowledgment.
     fn cancel_transaction(&mut self) -> Result<(), String>;
 
-    /// Query device status.
+    /// Query the device for its current operational status.
+    ///
+    /// Returns connectivity, readiness, firmware version, and fiscal
+    /// counters. Useful for health checks and diagnostics.
     fn get_status(&mut self) -> Result<DeviceStatus, String>;
 
-    /// End-of-day settlement or fiscal Z-close.
+    /// Perform end-of-day settlement or fiscal Z-close.
+    ///
+    /// Finalizes all pending transactions, resets daily counters, and
+    /// returns a summary with transaction count, total amount, and Z-number.
     fn settlement(&mut self) -> Result<SettlementResult, String>;
 
-    /// Fiscal X-report (intermediate report, no close). Optional.
+    /// Generate a fiscal X-report (intermediate totals, no counter reset).
+    ///
+    /// Returns the report text if supported, or `Err` for devices that
+    /// do not implement X-reports. The default implementation returns
+    /// an error.
     fn x_report(&mut self) -> Result<Option<String>, String> {
         Err(format!("{}: X-report not supported", self.name()))
     }
 
-    /// Abort any ongoing operation.
+    /// Abort any ongoing operation immediately.
+    ///
+    /// Unlike [`cancel_transaction`](EcrProtocol::cancel_transaction), this
+    /// is a forceful interrupt that does not wait for a clean response.
     fn abort(&mut self) -> Result<(), String>;
 
-    /// Test connectivity (send a status inquiry and check for a response).
+    /// Test connectivity by sending a status inquiry to the device.
+    ///
+    /// Returns `Ok(true)` if the device responds, `Ok(false)` if it does
+    /// not respond within the timeout, or `Err` on transport failure.
     fn test_connection(&mut self) -> Result<bool, String>;
 
-    /// Send raw bytes directly through the transport (for "POS sends receipt" mode).
+    /// Send raw ESC/POS bytes directly through the transport.
+    ///
+    /// Used in "POS sends receipt" mode where the POS application
+    /// generates the receipt data and the cash register acts as a
+    /// pass-through printer. Returns the number of bytes written.
     fn send_raw(&mut self, data: &[u8]) -> Result<usize, String>;
 }

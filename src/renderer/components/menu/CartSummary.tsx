@@ -256,7 +256,7 @@ export const CartSummary: React.FC<CartSummaryProps> = ({
           <span className="text-gray-600">{t('menu.cart.tax', { percent: taxRatePercentage })}</span>
           <span className="text-gray-900">€{tax.toFixed(2)}</span>
         </div>
-        {deliveryFee > 0 && (
+        {orderType === 'delivery' && (
           <div className="flex justify-between text-sm">
             <span className="text-gray-600">{t('menu.cart.deliveryFee')}</span>
             <span className="text-gray-900">€{deliveryFee.toFixed(2)}</span>

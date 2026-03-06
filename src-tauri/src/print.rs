@@ -24,9 +24,10 @@ use crate::db::DbState;
 use crate::drawer;
 use crate::printers;
 use crate::receipt_renderer::{
-    self, AdjustmentLine, KitchenTicketDoc, LayoutConfig, OrderReceiptDoc, PaymentLine,
-    ReceiptCustomizationLine, ReceiptDocument, ReceiptItem, ReceiptTemplate, ShiftCheckoutDoc,
-    TotalsLine, ZReportDoc,
+    self, AdjustmentLine, ClassicCustomerRenderMode, CommandProfile, DeliverySlipMode, FontType,
+    HeaderEmphasis, KitchenTicketDoc, LayoutConfig, LayoutDensity, OrderReceiptDoc, PaymentLine,
+    ReceiptCustomizationLine, ReceiptDocument, ReceiptEmulationMode, ReceiptItem, ReceiptTemplate,
+    ShiftCheckoutDoc, TotalsLine, ZReportDoc,
 };
 
 // ---------------------------------------------------------------------------
@@ -152,6 +153,8 @@ pub fn list_print_jobs(db: &DbState, status_filter: Option<&str>) -> Result<Valu
         }))
     };
 
+    // SAFETY: `cols` is a hardcoded constant string — no user input reaches
+    // the SQL format string.
     let cols = "id, entity_type, entity_id, entity_payload_json, printer_profile_id, status,
                 output_path, retry_count, max_retries, next_retry_at,
                 last_error, warning_code, warning_message, last_attempt_at,
@@ -318,6 +321,51 @@ fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool 
     matches!(
         raw.to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
+    )
+}
+
+fn resolve_header_sources(conn: &rusqlite::Connection) -> (String, String, String, String) {
+    let brand_source = if setting_text(conn, "organization", "name").is_some() {
+        "organization.name"
+    } else if setting_text(conn, "restaurant", "name").is_some() {
+        "restaurant.name"
+    } else if setting_text(conn, "terminal", "store_name").is_some() {
+        "terminal.store_name"
+    } else {
+        "default"
+    };
+
+    let branch_source = if setting_text(conn, "restaurant", "subtitle").is_some() {
+        "restaurant.subtitle"
+    } else if setting_text(conn, "restaurant", "name").is_some() {
+        "restaurant.name"
+    } else if setting_text(conn, "organization", "subtitle").is_some() {
+        "organization.subtitle"
+    } else {
+        "none"
+    };
+
+    let address_source = if setting_text(conn, "restaurant", "address").is_some() {
+        "restaurant.address"
+    } else if setting_text(conn, "terminal", "store_address").is_some() {
+        "terminal.store_address"
+    } else {
+        "none"
+    };
+
+    let phone_source = if setting_text(conn, "restaurant", "phone").is_some() {
+        "restaurant.phone"
+    } else if setting_text(conn, "terminal", "store_phone").is_some() {
+        "terminal.store_phone"
+    } else {
+        "none"
+    };
+
+    (
+        brand_source.to_string(),
+        branch_source.to_string(),
+        address_source.to_string(),
+        phone_source.to_string(),
     )
 }
 
@@ -516,6 +564,177 @@ fn parse_item_total(item: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Debug, Default, Clone)]
+struct MenuSubcategoryEntry {
+    name: String,
+    category_id: Option<String>,
+    category_name: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct MenuCategoryLookup {
+    categories_by_id: HashMap<String, String>,
+    subcategories_by_id: HashMap<String, MenuSubcategoryEntry>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ReceiptItemCategoryFields {
+    category_name: Option<String>,
+    subcategory_name: Option<String>,
+    category_path: Option<String>,
+}
+
+fn normalized_lookup_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_ascii_lowercase())
+    }
+}
+
+fn parse_cached_menu_section(conn: &rusqlite::Connection, key: &str) -> Vec<Value> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT data FROM menu_cache WHERE cache_key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+}
+
+fn build_menu_category_lookup(conn: &rusqlite::Connection) -> MenuCategoryLookup {
+    let mut lookup = MenuCategoryLookup::default();
+
+    for category in parse_cached_menu_section(conn, "categories") {
+        let id = text_from_keys(&category, &["id", "category_id", "categoryId"]);
+        let name = text_from_keys(&category, &["name", "name_el", "name_en", "title", "label"]);
+        if let (Some(id), Some(name)) = (id, name) {
+            if let Some(key) = normalized_lookup_key(&id) {
+                lookup.categories_by_id.insert(key, name);
+            }
+        }
+    }
+
+    for subcategory in parse_cached_menu_section(conn, "subcategories") {
+        let id = text_from_keys(
+            &subcategory,
+            &["id", "subcategory_id", "subcategoryId", "menu_item_id"],
+        );
+        let name = text_from_keys(
+            &subcategory,
+            &[
+                "name",
+                "name_el",
+                "name_en",
+                "title",
+                "label",
+                "menu_item_name",
+            ],
+        );
+        let category_id = text_from_keys(
+            &subcategory,
+            &[
+                "category_id",
+                "categoryId",
+                "parent_category_id",
+                "menu_category_id",
+            ],
+        );
+        let category_name = text_from_keys(&subcategory, &["category_name", "categoryName"]);
+        if let (Some(id), Some(name)) = (id, name) {
+            if let Some(key) = normalized_lookup_key(&id) {
+                lookup.subcategories_by_id.insert(
+                    key,
+                    MenuSubcategoryEntry {
+                        name,
+                        category_id,
+                        category_name,
+                    },
+                );
+            }
+        }
+    }
+
+    lookup
+}
+
+fn compose_category_path(
+    category_name: Option<&str>,
+    subcategory_name: Option<&str>,
+) -> Option<String> {
+    let category = category_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let subcategory = subcategory_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (category, subcategory) {
+        (Some(category), Some(subcategory)) => {
+            if category.eq_ignore_ascii_case(subcategory) {
+                Some(category.to_string())
+            } else {
+                Some(format!("{category} > {subcategory}"))
+            }
+        }
+        (Some(category), None) => Some(category.to_string()),
+        (None, Some(subcategory)) => Some(subcategory.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn resolve_item_category_fields(
+    item: &Value,
+    lookup: &MenuCategoryLookup,
+) -> ReceiptItemCategoryFields {
+    let mut category_name = text_from_keys(item, &["category_name", "categoryName"]);
+    let mut subcategory_name = text_from_keys(
+        item,
+        &[
+            "subcategory_name",
+            "subcategoryName",
+            "sub_category_name",
+            "subCategoryName",
+            "menu_item_name",
+            "menuItemName",
+        ],
+    );
+    let mut category_path = text_from_keys(item, &["category_path", "categoryPath"]);
+
+    let menu_item_id = text_from_keys(item, &["menu_item_id", "menuItemId"]);
+    if let Some(id) = menu_item_id.and_then(|value| normalized_lookup_key(&value)) {
+        if let Some(entry) = lookup.subcategories_by_id.get(&id) {
+            if subcategory_name.is_none() {
+                subcategory_name = Some(entry.name.clone());
+            }
+            if category_name.is_none() {
+                category_name = entry.category_name.clone();
+            }
+            if category_name.is_none() {
+                if let Some(category_id) =
+                    entry.category_id.as_deref().and_then(normalized_lookup_key)
+                {
+                    category_name = lookup.categories_by_id.get(&category_id).cloned();
+                }
+            }
+        }
+    }
+
+    if category_path.is_none() {
+        category_path =
+            compose_category_path(category_name.as_deref(), subcategory_name.as_deref());
+    }
+
+    ReceiptItemCategoryFields {
+        category_name,
+        subcategory_name,
+        category_path,
+    }
+}
+
 fn extract_last4_digits(input: &str) -> Option<String> {
     let digits: String = input.chars().filter(|ch| ch.is_ascii_digit()).collect();
     if digits.len() >= 4 {
@@ -525,7 +744,62 @@ fn extract_last4_digits(input: &str) -> Option<String> {
     }
 }
 
-fn resolve_layout_config(
+fn extract_masked_card_reference(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let has_mask_marker = trimmed.chars().any(|ch| matches!(ch, '*' | 'x' | 'X'));
+    let has_last4_marker = trimmed.to_ascii_lowercase().contains("last4");
+    if !has_mask_marker && !has_last4_marker {
+        return None;
+    }
+
+    extract_last4_digits(trimmed).map(|last4| format!("****{last4}"))
+}
+
+fn push_unique_trimmed_note(target: &mut Vec<String>, value: Option<&str>) {
+    let Some(trimmed) = value.map(str::trim).filter(|entry| !entry.is_empty()) else {
+        return;
+    };
+    if target
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(trimmed))
+    {
+        return;
+    }
+    target.push(trimmed.to_string());
+}
+
+fn build_item_note_text(item: &Value) -> Option<String> {
+    let mut notes: Vec<String> = Vec::new();
+    push_unique_trimmed_note(
+        &mut notes,
+        item.get("notes")
+            .or_else(|| item.get("note"))
+            .and_then(Value::as_str),
+    );
+    push_unique_trimmed_note(
+        &mut notes,
+        item.get("special_instructions")
+            .or_else(|| item.get("specialInstructions"))
+            .and_then(Value::as_str),
+    );
+    push_unique_trimmed_note(
+        &mut notes,
+        item.get("instructions")
+            .or_else(|| item.get("instruction"))
+            .and_then(Value::as_str),
+    );
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join(" | "))
+    }
+}
+
+pub fn resolve_layout_config(
     db: &DbState,
     profile: &Value,
     entity_type: &str,
@@ -536,32 +810,39 @@ fn resolve_layout_config(
         .or_else(|| profile.get("paper_width_mm"))
         .and_then(Value::as_i64)
         .unwrap_or(80) as i32;
-    let requested_template = profile
+    let profile_template = profile
         .get("receiptTemplate")
         .or_else(|| profile.get("receipt_template"))
         .and_then(Value::as_str);
-    let mut template = ReceiptTemplate::from_value(requested_template);
-    let force_modern_default = matches!(
-        entity_type,
-        "order_receipt" | "delivery_slip" | "kitchen_ticket"
-    );
-    let allow_classic_template = setting_bool(&conn, "receipt", "allow_classic_template");
-    if template == ReceiptTemplate::Classic && force_modern_default && !allow_classic_template {
+    let template_override = setting_text(&conn, "receipt", "template_override");
+    let template = template_override
+        .as_deref()
+        .map(|value| ReceiptTemplate::from_value(Some(value)))
+        .unwrap_or_else(|| ReceiptTemplate::from_value(profile_template));
+    if let Some(override_value) = template_override.as_deref() {
         info!(
             entity_type = %entity_type,
-            requested_template = ?requested_template,
-            "Legacy classic template auto-promoted to modern"
+            template_override = %override_value,
+            profile_template = ?profile_template,
+            "Using explicit receipt template override from local settings"
         );
-        template = ReceiptTemplate::Modern;
     }
-    let organization_name = setting_text(&conn, "organization", "name")
-        .or_else(|| setting_text(&conn, "restaurant", "name"))
-        .or_else(|| setting_text(&conn, "terminal", "store_name"))
+
+    let organization_name_setting = setting_text(&conn, "organization", "name");
+    let restaurant_name_setting = setting_text(&conn, "restaurant", "name");
+    let terminal_store_name_setting = setting_text(&conn, "terminal", "store_name");
+    let organization_name = organization_name_setting
+        .clone()
+        .or_else(|| restaurant_name_setting.clone())
+        .or_else(|| terminal_store_name_setting.clone())
         .unwrap_or_else(|| "The Small".to_string());
-    let restaurant_name = setting_text(&conn, "restaurant", "name");
-    let store_subtitle = setting_text(&conn, "restaurant", "subtitle")
+
+    let restaurant_subtitle_setting = setting_text(&conn, "restaurant", "subtitle");
+    let organization_subtitle_setting = setting_text(&conn, "organization", "subtitle");
+    let store_subtitle = restaurant_subtitle_setting
+        .clone()
         .or_else(|| {
-            restaurant_name.and_then(|name| {
+            restaurant_name_setting.clone().and_then(|name| {
                 if name.trim() != organization_name.trim() {
                     Some(name)
                 } else {
@@ -569,13 +850,21 @@ fn resolve_layout_config(
                 }
             })
         })
-        .or_else(|| setting_text(&conn, "organization", "subtitle"));
+        .or_else(|| organization_subtitle_setting.clone());
     let store_address = setting_text(&conn, "restaurant", "address")
         .or_else(|| setting_text(&conn, "terminal", "store_address"));
     let store_phone = setting_text(&conn, "restaurant", "phone")
         .or_else(|| setting_text(&conn, "terminal", "store_phone"));
     let currency_symbol = setting_text(&conn, "receipt", "currency_symbol")
         .or_else(|| setting_text(&conn, "organization", "currency_symbol"))
+        .or_else(|| {
+            // Default currency symbol based on language when not explicitly set
+            let lang = setting_text(&conn, "general", "language").unwrap_or_default();
+            match lang.as_str() {
+                "el" | "de" | "fr" | "it" | "es" | "pt" | "nl" => Some(" \u{20AC}".to_string()),
+                _ => None,
+            }
+        })
         .unwrap_or_default();
     let vat_number = setting_text(&conn, "organization", "vat_number")
         .or_else(|| setting_text(&conn, "restaurant", "vat_number"));
@@ -603,6 +892,91 @@ fn resolve_layout_config(
         .and_then(Value::as_str)
         .unwrap_or("");
     let detected_brand = printers::detect_printer_brand(printer_name);
+
+    let connection_json_value = profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let connection = connection_json_value.as_ref().and_then(Value::as_object);
+
+    let parse_u16 = |value: Option<&Value>| -> Option<u16> {
+        match value {
+            Some(Value::Number(n)) => n.as_u64().map(|v| v as u16),
+            Some(Value::String(s)) => s.trim().parse::<u16>().ok(),
+            _ => None,
+        }
+    };
+    let parse_u8 = |value: Option<&Value>| -> Option<u8> {
+        match value {
+            Some(Value::Number(n)) => n.as_u64().map(|v| v as u8),
+            Some(Value::String(s)) => s.trim().parse::<u8>().ok(),
+            _ => None,
+        }
+    };
+
+    let setting_render_mode = setting_text(&conn, "receipt", "classic_customer_render_mode");
+    let profile_render_mode = connection
+        .and_then(|obj| obj.get("render_mode"))
+        .and_then(Value::as_str);
+    let classic_customer_render_mode = ClassicCustomerRenderMode::from_value(
+        setting_render_mode.as_deref().or(profile_render_mode),
+    );
+
+    let emulation_mode = ReceiptEmulationMode::from_value(
+        connection
+            .and_then(|obj| obj.get("emulation"))
+            .and_then(Value::as_str),
+    );
+
+    let physical_width_dots = match paper_mm {
+        w if w <= 58 => 384u16,
+        w if w >= 100 => 832u16,
+        _ => 576u16,
+    };
+    let mut printable_width_dots = physical_width_dots;
+    printable_width_dots = parse_u16(connection.and_then(|obj| obj.get("printable_width_dots")))
+        .unwrap_or(printable_width_dots)
+        .clamp(64, physical_width_dots.max(64));
+    let requested_left_margin = parse_u16(connection.and_then(|obj| obj.get("left_margin_dots")))
+        .unwrap_or(0)
+        .min(200);
+    let max_left_margin = physical_width_dots.saturating_sub(printable_width_dots);
+    let left_margin_dots = requested_left_margin.min(max_left_margin);
+    let raster_threshold = parse_u8(connection.and_then(|obj| obj.get("threshold")))
+        .unwrap_or(160)
+        .clamp(40, 240);
+
+    let profile_command_profile = profile
+        .get("commandProfile")
+        .or_else(|| profile.get("command_profile"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let configured_command_profile =
+        setting_text(&conn, "receipt", "command_profile").or(profile_command_profile);
+    let command_profile = configured_command_profile
+        .as_deref()
+        .map(|value| CommandProfile::from_value(Some(value)))
+        .unwrap_or(CommandProfile::FullStyle);
+
+    let font_type = profile
+        .get("fontType")
+        .or_else(|| profile.get("font_type"))
+        .and_then(Value::as_str)
+        .map(|value| FontType::from_value(Some(value)))
+        .unwrap_or(FontType::A);
+    let layout_density = profile
+        .get("layoutDensity")
+        .or_else(|| profile.get("layout_density"))
+        .and_then(Value::as_str)
+        .map(|value| LayoutDensity::from_value(Some(value)))
+        .unwrap_or(LayoutDensity::Compact);
+    let header_emphasis = profile
+        .get("headerEmphasis")
+        .or_else(|| profile.get("header_emphasis"))
+        .and_then(Value::as_str)
+        .map(|value| HeaderEmphasis::from_value(Some(value)))
+        .unwrap_or(HeaderEmphasis::Strong);
 
     let app_language = setting_text(&conn, "general", "language").unwrap_or_default();
     info!(
@@ -667,9 +1041,23 @@ fn resolve_layout_config(
         auto_cp
     };
 
+    let currency_symbol = if template == ReceiptTemplate::Classic
+        && matches!(entity_type, "order_receipt" | "delivery_slip")
+    {
+        receipt_renderer::normalize_currency_symbol_for_layout(
+            &currency_symbol,
+            &character_set,
+            escpos_code_page,
+            detected_brand,
+        )
+    } else {
+        currency_symbol
+    };
+
     Ok(LayoutConfig {
         paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
         template,
+        command_profile,
         organization_name,
         store_address,
         store_phone,
@@ -685,9 +1073,21 @@ fn resolve_layout_config(
         greek_render_mode,
         escpos_code_page,
         detected_brand,
-        language: app_language,
+        language: app_language.clone(),
         store_subtitle,
         currency_symbol,
+        font_type,
+        layout_density,
+        header_emphasis,
+        decimal_comma: matches!(
+            app_language.as_str(),
+            "el" | "de" | "fr" | "it" | "es" | "pt" | "nl"
+        ),
+        classic_customer_render_mode,
+        emulation_mode,
+        printable_width_dots,
+        left_margin_dots,
+        raster_threshold,
     })
 }
 
@@ -696,6 +1096,14 @@ fn paper_logo_max_width_dots(paper: crate::escpos::PaperWidth) -> u32 {
         crate::escpos::PaperWidth::Mm58 => 384,
         crate::escpos::PaperWidth::Mm80 => 576,
         crate::escpos::PaperWidth::Mm112 => 832,
+    }
+}
+
+fn paper_logo_max_height_dots(paper: crate::escpos::PaperWidth) -> u32 {
+    match paper {
+        crate::escpos::PaperWidth::Mm58 => 160,
+        crate::escpos::PaperWidth::Mm80 => 220,
+        crate::escpos::PaperWidth::Mm112 => 280,
     }
 }
 
@@ -838,8 +1246,9 @@ fn rasterize_logo_to_escpos_prefix(
     }
     let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
     // Keep logos compact on thermal paper.
-    if target_h > 220 {
-        target_h = 220;
+    let max_h = paper_logo_max_height_dots(paper);
+    if target_h > max_h {
+        target_h = max_h;
         target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
     }
 
@@ -951,13 +1360,13 @@ fn rasterize_logo_to_escpos_raster(
     let max_width = paper_logo_max_width_dots(paper).max(8);
     let use_star_raster = brand == crate::printers::PrinterBrand::Star;
 
-    // Scale to a reasonable size: max paper width, max 400 dots tall (~50mm).
+    // Scale to a reasonable size: max paper width and a compact height cap per paper size.
     let mut target_w = src_w.min(max_width);
     if target_w == 0 {
         target_w = 1;
     }
     let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
-    let max_h = 400u32;
+    let max_h = paper_logo_max_height_dots(paper);
     if target_h > max_h {
         target_h = max_h;
         target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
@@ -1259,7 +1668,7 @@ fn non_empty_field(value: String) -> Option<String> {
     }
 }
 
-fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
+pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order = conn
         .query_row(
@@ -1267,10 +1676,11 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
                     COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
                     COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0),
                     COALESCE(subtotal, 0), COALESCE(tax_amount, 0), COALESCE(discount_amount, 0),
-                    COALESCE(delivery_fee, 0), COALESCE(tip_amount, 0), COALESCE(delivery_address, ''),
+                    COALESCE(discount_percentage, 0), COALESCE(delivery_fee, 0), COALESCE(tip_amount, 0), COALESCE(delivery_address, ''),
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
-                    COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, '')
+                    COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, ''),
+                    COALESCE(delivery_notes, ''), COALESCE(special_instructions, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -1289,7 +1699,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
                     row.get::<_, f64>(11)?,
                     row.get::<_, f64>(12)?,
                     row.get::<_, f64>(13)?,
-                    row.get::<_, String>(14)?,
+                    row.get::<_, f64>(14)?,
                     row.get::<_, String>(15)?,
                     row.get::<_, String>(16)?,
                     row.get::<_, String>(17)?,
@@ -1297,6 +1707,9 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
                     row.get::<_, String>(19)?,
                     row.get::<_, String>(20)?,
                     row.get::<_, String>(21)?,
+                    row.get::<_, String>(22)?,
+                    row.get::<_, String>(23)?,
+                    row.get::<_, String>(24)?,
                 ))
             },
         )
@@ -1314,6 +1727,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         subtotal,
         tax_amount,
         discount_amount,
+        discount_percentage,
         delivery_fee,
         tip_amount,
         delivery_address,
@@ -1324,44 +1738,68 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         driver_id,
         driver_name,
         staff_id,
+        delivery_notes,
+        special_instructions,
     ) = order;
+    let menu_lookup = build_menu_category_lookup(&conn);
 
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
         .ok()
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
         .into_iter()
-        .map(|item| ReceiptItem {
-            name: item
-                .get("name")
-                .or_else(|| item.get("itemName"))
-                .or_else(|| item.get("menu_item_name"))
-                .or_else(|| item.get("title"))
-                .and_then(Value::as_str)
-                .unwrap_or("Item")
-                .to_string(),
-            quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
-            total: parse_item_total(&item),
-            note: item
-                .get("notes")
-                .or_else(|| item.get("special_instructions"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            customizations: parse_item_customizations(&item),
+        .map(|item| {
+            let category_fields = resolve_item_category_fields(&item, &menu_lookup);
+            ReceiptItem {
+                name: item
+                    .get("name")
+                    .or_else(|| item.get("itemName"))
+                    .or_else(|| item.get("menu_item_name"))
+                    .or_else(|| item.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Item")
+                    .to_string(),
+                quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
+                total: parse_item_total(&item),
+                category_name: category_fields.category_name,
+                subcategory_name: category_fields.subcategory_name,
+                category_path: category_fields.category_path,
+                note: build_item_note_text(&item),
+                customizations: parse_item_customizations(&item),
+            }
         })
         .collect();
+
+    let mut order_notes: Vec<String> = Vec::new();
+    push_unique_trimmed_note(&mut order_notes, Some(&delivery_notes));
+    push_unique_trimmed_note(&mut order_notes, Some(&special_instructions));
+
+    let effective_discount = discount_amount.max(0.0);
+    let computed_subtotal =
+        total_amount - tax_amount - delivery_fee - tip_amount + effective_discount;
+    let display_subtotal = if computed_subtotal.is_finite() && computed_subtotal > 0.0 {
+        computed_subtotal
+    } else {
+        subtotal.max(0.0)
+    };
 
     let mut totals = Vec::new();
     totals.push(TotalsLine {
         label: "Subtotal".to_string(),
-        amount: subtotal,
+        amount: display_subtotal,
         emphasize: false,
+        discount_percent: None,
     });
     if discount_amount > 0.0 {
         totals.push(TotalsLine {
             label: "Discount".to_string(),
             amount: -discount_amount,
             emphasize: false,
+            discount_percent: if discount_percentage > 0.0 {
+                Some(discount_percentage)
+            } else {
+                None
+            },
         });
     }
     if tax_amount > 0.0 {
@@ -1369,6 +1807,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
             label: "Tax".to_string(),
             amount: tax_amount,
             emphasize: false,
+            discount_percent: None,
         });
     }
     if delivery_fee > 0.0 {
@@ -1376,6 +1815,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
             label: "Delivery".to_string(),
             amount: delivery_fee,
             emphasize: false,
+            discount_percent: None,
         });
     }
     if tip_amount > 0.0 {
@@ -1383,12 +1823,14 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
             label: "Tip".to_string(),
             amount: tip_amount,
             emphasize: false,
+            discount_percent: None,
         });
     }
     totals.push(TotalsLine {
         label: "TOTAL".to_string(),
         amount: total_amount,
         emphasize: true,
+        discount_percent: None,
     });
 
     let mut payments_stmt = conn
@@ -1423,20 +1865,18 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
             "card" => "Card",
             _ => "Other",
         };
+        let normalized_amount = if method == "cash" {
+            cash_received
+                .filter(|received| *received > 0.0)
+                .unwrap_or(amount)
+        } else {
+            amount
+        };
         payments.push(PaymentLine {
             label: label.to_string(),
-            amount,
+            amount: normalized_amount,
             detail: None,
         });
-        if let Some(received) = cash_received {
-            if received > 0.0 {
-                payments.push(PaymentLine {
-                    label: "Received".to_string(),
-                    amount: received,
-                    detail: None,
-                });
-            }
-        }
         if let Some(change) = change_given {
             if change > 0.0 {
                 payments.push(PaymentLine {
@@ -1447,8 +1887,7 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
             }
         }
         if masked_card.is_none() && method == "card" {
-            masked_card =
-                extract_last4_digits(&transaction_ref).map(|last4| format!("****{last4}"));
+            masked_card = extract_masked_card_reference(&transaction_ref);
         }
     }
 
@@ -1502,12 +1941,15 @@ fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderReceiptD
         delivery_postal_code: non_empty_field(delivery_postal_code),
         delivery_floor: non_empty_field(delivery_floor),
         name_on_ringer: non_empty_field(name_on_ringer),
+        driver_id: non_empty_field(driver_id),
         driver_name: resolved_driver_name,
+        delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
         items,
         totals,
         payments,
         adjustments,
         masked_card,
+        order_notes,
     })
 }
 
@@ -1561,29 +2003,32 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
             },
         )
         .map_err(|_| format!("Order not found: {order_id}"))?;
+    let menu_lookup = build_menu_category_lookup(&conn);
 
     let items: Vec<ReceiptItem> = serde_json::from_str::<Value>(&items_json)
         .ok()
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default()
         .into_iter()
-        .map(|item| ReceiptItem {
-            name: item
-                .get("name")
-                .or_else(|| item.get("itemName"))
-                .or_else(|| item.get("menu_item_name"))
-                .or_else(|| item.get("title"))
-                .and_then(Value::as_str)
-                .unwrap_or("Item")
-                .to_string(),
-            quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
-            total: parse_item_total(&item),
-            note: item
-                .get("notes")
-                .or_else(|| item.get("special_instructions"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-            customizations: parse_item_customizations(&item),
+        .map(|item| {
+            let category_fields = resolve_item_category_fields(&item, &menu_lookup);
+            ReceiptItem {
+                name: item
+                    .get("name")
+                    .or_else(|| item.get("itemName"))
+                    .or_else(|| item.get("menu_item_name"))
+                    .or_else(|| item.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Item")
+                    .to_string(),
+                quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
+                total: parse_item_total(&item),
+                category_name: category_fields.category_name,
+                subcategory_name: category_fields.subcategory_name,
+                category_path: category_fields.category_path,
+                note: build_item_note_text(&item),
+                customizations: parse_item_customizations(&item),
+            }
         })
         .collect();
 
@@ -1666,7 +2111,7 @@ fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckou
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    Ok(ShiftCheckoutDoc {
+    let mut doc = Ok(ShiftCheckoutDoc {
         shift_id: shift_id.to_string(),
         role_type: shift
             .get("role_type")
@@ -1732,7 +2177,76 @@ fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckou
             .get("variance_amount")
             .or_else(|| cash_drawer.get("varianceAmount"))
             .and_then(Value::as_f64),
-    })
+        driver_deliveries: Vec::new(),
+        total_cash_collected: 0.0,
+        total_card_collected: 0.0,
+        total_delivery_fees: 0.0,
+        total_tips: 0.0,
+        amount_to_return: 0.0,
+    });
+
+    // Populate driver-specific fields
+    let role = doc.as_ref().map(|d| d.role_type.as_str()).unwrap_or("");
+    if role == "driver" {
+        if let Some(deliveries) = summary.get("driverDeliveries").and_then(Value::as_array) {
+            let mut lines = Vec::new();
+            let mut cash_total = 0.0_f64;
+            let mut card_total = 0.0_f64;
+            let mut fees_total = 0.0_f64;
+            let mut tips_total = 0.0_f64;
+
+            for d in deliveries {
+                let cash = d
+                    .get("cash_collected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let card = d.get("card_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let fee = d.get("delivery_fee").and_then(Value::as_f64).unwrap_or(0.0);
+                let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let total = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
+
+                cash_total += cash;
+                card_total += card;
+                fees_total += fee;
+                tips_total += tip;
+
+                lines.push(crate::receipt_renderer::DriverDeliveryLine {
+                    order_number: d
+                        .get("order_number")
+                        .and_then(Value::as_str)
+                        .unwrap_or("N/A")
+                        .to_string(),
+                    total_amount: total,
+                    payment_method: d
+                        .get("payment_method")
+                        .and_then(Value::as_str)
+                        .unwrap_or("cash")
+                        .to_string(),
+                    cash_collected: cash,
+                    delivery_fee: fee,
+                    tip_amount: tip,
+                    status: d
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
+
+            if let Ok(ref mut doc) = doc {
+                let opening = doc.opening_amount;
+                let expenses = doc.total_expenses;
+                doc.driver_deliveries = lines;
+                doc.total_cash_collected = cash_total;
+                doc.total_card_collected = card_total;
+                doc.total_delivery_fees = fees_total;
+                doc.total_tips = tips_total;
+                doc.amount_to_return = opening + cash_total - expenses;
+            }
+        }
+    }
+
+    doc
 }
 
 fn number_from_paths(payload: &Value, paths: &[&str]) -> Option<f64> {
@@ -1835,6 +2349,59 @@ fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportD
     )
     .unwrap_or(0.0);
     let net_sales = gross_sales - discounts_total - refunds_total - voids_total;
+    let tips_total =
+        number_from_paths(payload, &["/tips/total", "/tipsTotal", "/tips_total"]).unwrap_or(0.0);
+    let opening_cash = number_from_paths(
+        payload,
+        &["/cashDrawer/openingTotal", "/openingCash", "/opening_cash"],
+    )
+    .unwrap_or(0.0);
+    let closing_cash = number_from_paths(
+        payload,
+        &["/cashDrawer/closing", "/closingCash", "/closing_cash"],
+    )
+    .unwrap_or(0.0);
+    let expected_cash = number_from_paths(
+        payload,
+        &["/cashDrawer/expected", "/expectedCash", "/expected_cash"],
+    )
+    .unwrap_or(0.0);
+    let cash_drops =
+        number_from_paths(payload, &["/cashDrawer/totalCashDrops", "/cashDrops"]).unwrap_or(0.0);
+    let driver_cash_given = number_from_paths(
+        payload,
+        &["/cashDrawer/driverCashGiven", "/driverCashGiven"],
+    )
+    .unwrap_or(0.0);
+    let driver_cash_returned = number_from_paths(
+        payload,
+        &["/cashDrawer/driverCashReturned", "/driverCashReturned"],
+    )
+    .unwrap_or(0.0);
+    let staff_payments_total = number_from_paths(
+        payload,
+        &[
+            "/staffPayments/total",
+            "/cashDrawer/staffPaymentsTotal",
+            "/staffPaymentsTotal",
+        ],
+    )
+    .unwrap_or(0.0);
+    let dine_in_orders = number_from_paths(payload, &["/sales/dineInOrders", "/dineInOrders"])
+        .unwrap_or(0.0)
+        .round() as i64;
+    let dine_in_sales =
+        number_from_paths(payload, &["/sales/dineInSales", "/dineInSales"]).unwrap_or(0.0);
+    let takeaway_orders = number_from_paths(payload, &["/sales/takeawayOrders", "/takeawayOrders"])
+        .unwrap_or(0.0)
+        .round() as i64;
+    let takeaway_sales =
+        number_from_paths(payload, &["/sales/takeawaySales", "/takeawaySales"]).unwrap_or(0.0);
+    let delivery_orders = number_from_paths(payload, &["/sales/deliveryOrders", "/deliveryOrders"])
+        .unwrap_or(0.0)
+        .round() as i64;
+    let delivery_sales =
+        number_from_paths(payload, &["/sales/deliverySales", "/deliverySales"]).unwrap_or(0.0);
 
     ZReportDoc {
         report_id: entity_id.to_string(),
@@ -1862,6 +2429,20 @@ fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportD
         discounts_total,
         expenses_total,
         cash_variance,
+        tips_total,
+        opening_cash,
+        closing_cash,
+        expected_cash,
+        cash_drops,
+        driver_cash_given,
+        driver_cash_returned,
+        staff_payments_total,
+        dine_in_orders,
+        dine_in_sales,
+        takeaway_orders,
+        takeaway_sales,
+        delivery_orders,
+        delivery_sales,
     }
 }
 
@@ -1871,10 +2452,13 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
         "SELECT id, shift_id, terminal_id, report_date, generated_at,
                 gross_sales, net_sales, total_orders, cash_sales, card_sales,
                 refunds_total, voids_total, discounts_total, expenses_total,
-                cash_variance
+                cash_variance, tips_total, opening_cash, closing_cash, expected_cash,
+                report_json
          FROM z_reports WHERE id = ?1",
         params![z_report_id],
         |row| {
+            let report_json_str: String = row.get(19)?;
+            let rj: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
             Ok(ZReportDoc {
                 report_id: row.get(0)?,
                 shift_ref: row.get(1)?,
@@ -1891,6 +2475,51 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
                 discounts_total: row.get(12)?,
                 expenses_total: row.get(13)?,
                 cash_variance: row.get(14)?,
+                tips_total: row.get::<_, f64>(15).unwrap_or(0.0),
+                opening_cash: row.get::<_, f64>(16).unwrap_or(0.0),
+                closing_cash: row.get::<_, f64>(17).unwrap_or(0.0),
+                expected_cash: row.get::<_, f64>(18).unwrap_or(0.0),
+                cash_drops: rj
+                    .pointer("/cashDrawer/totalCashDrops")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                driver_cash_given: rj
+                    .pointer("/cashDrawer/driverCashGiven")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                driver_cash_returned: rj
+                    .pointer("/cashDrawer/driverCashReturned")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                staff_payments_total: rj
+                    .pointer("/staffPayments/total")
+                    .or_else(|| rj.pointer("/cashDrawer/staffPaymentsTotal"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                dine_in_orders: rj
+                    .pointer("/sales/dineInOrders")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                dine_in_sales: rj
+                    .pointer("/sales/dineInSales")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                takeaway_orders: rj
+                    .pointer("/sales/takeawayOrders")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                takeaway_sales: rj
+                    .pointer("/sales/takeawaySales")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                delivery_orders: rj
+                    .pointer("/sales/deliveryOrders")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                delivery_sales: rj
+                    .pointer("/sales/deliverySales")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
             })
         },
     )
@@ -1903,6 +2532,14 @@ fn build_document_for_job(
     entity_id: &str,
     payload_json: Option<&str>,
 ) -> Result<ReceiptDocument, String> {
+    fn payload_text_field(payload: &Value, keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .find_map(|key| payload.get(*key).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    }
+
     match entity_type {
         "order_receipt" => Ok(ReceiptDocument::OrderReceipt(build_order_receipt_doc(
             db, entity_id,
@@ -1923,9 +2560,29 @@ fn build_document_for_job(
             }
             Ok(ReceiptDocument::ZReport(build_z_report_doc(db, entity_id)?))
         }
-        "delivery_slip" => Ok(ReceiptDocument::DeliverySlip(build_order_receipt_doc(
-            db, entity_id,
-        )?)),
+        "delivery_slip" => {
+            let mut doc = build_order_receipt_doc(db, entity_id)?;
+            if let Some(raw_payload) = payload_json {
+                if let Ok(payload) = serde_json::from_str::<Value>(raw_payload) {
+                    if let Some(mode) = payload_text_field(&payload, &["slip_mode", "slipMode"]) {
+                        doc.delivery_slip_mode = if mode.eq_ignore_ascii_case("assign_driver") {
+                            DeliverySlipMode::AssignDriver
+                        } else {
+                            DeliverySlipMode::DeliveryOrder
+                        };
+                    }
+                    if doc.driver_id.is_none() {
+                        doc.driver_id =
+                            payload_text_field(&payload, &["driverId", "driver_id", "staff_id"]);
+                    }
+                    if doc.driver_name.is_none() {
+                        doc.driver_name =
+                            payload_text_field(&payload, &["driverName", "driver_name"]);
+                    }
+                }
+            }
+            Ok(ReceiptDocument::DeliverySlip(doc))
+        }
         _ => Err(format!("Unknown entity_type: {entity_type}")),
     }
 }
@@ -2033,12 +2690,7 @@ fn generate_kitchen_ticket_file(
             .unwrap_or("Item")
             .trim();
         let qty = item.get("quantity").and_then(Value::as_f64).unwrap_or(1.0);
-        let notes = item
-            .get("notes")
-            .or_else(|| item.get("special_instructions"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("");
+        let notes = build_item_note_text(&item).unwrap_or_default();
         items_html.push_str(&format!(
             "<li><strong>{:.0}x {}</strong>{}</li>",
             qty,
@@ -2046,7 +2698,7 @@ fn generate_kitchen_ticket_file(
             if notes.is_empty() {
                 String::new()
             } else {
-                format!("<br/><small>Note: {}</small>", escape_html(notes))
+                format!("<br/><small>Note: {}</small>", escape_html(&notes))
             }
         ));
     }
@@ -2187,6 +2839,81 @@ fn generate_shift_checkout_file(
         .or_else(|| cash_drawer.get("varianceAmount"))
         .and_then(Value::as_f64);
 
+    // Build driver section HTML if applicable
+    let driver_section = if role_type == "driver" {
+        let deliveries = summary.get("driverDeliveries").and_then(Value::as_array);
+        if let Some(dels) = deliveries {
+            let mut html =
+                String::from("<h2 style=\"font-size:14px;margin:8px 0 4px\">DELIVERIES</h2><hr/>");
+            let mut cash_total = 0.0_f64;
+            let mut card_total = 0.0_f64;
+            let mut fees_total = 0.0_f64;
+            let mut tips_total = 0.0_f64;
+            for d in dels {
+                let order_num = d
+                    .get("order_number")
+                    .and_then(Value::as_str)
+                    .unwrap_or("N/A");
+                let pm = d
+                    .get("payment_method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("cash");
+                let amount = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let cash = d
+                    .get("cash_collected")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let card = d.get("card_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let fee = d.get("delivery_fee").and_then(Value::as_f64).unwrap_or(0.0);
+                let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                cash_total += cash;
+                card_total += card;
+                fees_total += fee;
+                tips_total += tip;
+                html.push_str(&format!(
+                    "<div class=\"line\"><span>#{} {}</span><span>{:.2}</span></div>",
+                    escape_html(order_num),
+                    escape_html(pm),
+                    amount
+                ));
+            }
+            html.push_str("<hr/>");
+            html.push_str("<h2 style=\"font-size:14px;margin:8px 0 4px\">DRIVER SUMMARY</h2><hr/>");
+            html.push_str(&format!(
+                "<div class=\"line\"><span>Cash Collected</span><span>{cash_total:.2}</span></div>"
+            ));
+            html.push_str(&format!(
+                "<div class=\"line\"><span>Card Collected</span><span>{card_total:.2}</span></div>"
+            ));
+            html.push_str(&format!(
+                "<div class=\"line\"><span>Delivery Fees</span><span>{fees_total:.2}</span></div>"
+            ));
+            html.push_str(&format!(
+                "<div class=\"line\"><span>Tips</span><span>{tips_total:.2}</span></div>"
+            ));
+            html.push_str("<hr/>");
+            let to_return = opening + cash_total - total_expenses;
+            html.push_str(&format!(
+                "<div class=\"line\"><span>Starting</span><span>{opening:.2}</span></div>"
+            ));
+            html.push_str(&format!(
+                "<div class=\"line\"><span>+ Cash</span><span>{cash_total:.2}</span></div>"
+            ));
+            if total_expenses > 0.0 {
+                html.push_str(&format!("<div class=\"line\"><span>- Expenses</span><span>{total_expenses:.2}</span></div>"));
+            }
+            html.push_str(&format!(
+                "<div class=\"line\"><b>= To Return</b><b>{to_return:.2}</b></div>"
+            ));
+            html.push_str("<hr/>");
+            html
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let receipt_html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -2220,6 +2947,7 @@ fn generate_shift_checkout_file(
 <div class="line"><span>Closing</span><span>{closing}</span></div>
 <div class="line"><span>Variance</span><span>{variance}</span></div>
 <hr/>
+{driver_section}
 <div>End of Checkout</div>
 </body>
 </html>"#,
@@ -2297,6 +3025,16 @@ fn dispatch_to_printer(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
     let layout = resolve_layout_config(db, &profile, entity_type)?;
+    let (brand_source, branch_source, address_source, phone_source) = match db.conn.lock() {
+        Ok(conn) => resolve_header_sources(&conn),
+        Err(_) => (
+            "unknown".to_string(),
+            "unknown".to_string(),
+            "unknown".to_string(),
+            "unknown".to_string(),
+        ),
+    };
+    let layout_revision = receipt_renderer::layout_revision();
     info!(
         entity_type = %entity_type,
         printer = %printer_name,
@@ -2304,12 +3042,26 @@ fn dispatch_to_printer(
         escpos_code_page = ?layout.escpos_code_page,
         show_logo = layout.show_logo,
         template = ?layout.template,
+        layout_revision = %layout_revision,
+        command_profile = ?layout.command_profile,
+        font_type = ?layout.font_type,
+        layout_density = ?layout.layout_density,
+        header_emphasis = ?layout.header_emphasis,
+        classic_customer_render_mode = ?layout.classic_customer_render_mode,
+        emulation_mode = ?layout.emulation_mode,
+        printable_width_dots = layout.printable_width_dots,
+        left_margin_dots = layout.left_margin_dots,
+        raster_threshold = layout.raster_threshold,
         organization_name = %layout.organization_name,
         store_subtitle = ?layout.store_subtitle,
         store_address = ?layout.store_address,
         store_phone = ?layout.store_phone,
         vat_number = ?layout.vat_number,
         tax_office = ?layout.tax_office,
+        brand_source = %brand_source,
+        branch_source = %branch_source,
+        address_source = %address_source,
+        phone_source = %phone_source,
         "Dispatch: resolved layout config"
     );
     let mut rendered = receipt_renderer::render_escpos(document, &layout);
@@ -2324,18 +3076,17 @@ fn dispatch_to_printer(
                 logo_prefix_bytes = prefix.len(),
                 "Dispatch: logo prefix generated"
             );
-            if rendered.bytes.starts_with(&[0x1B, 0x40]) {
-                let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len());
-                combined.extend_from_slice(&rendered.bytes[..2]);
-                combined.extend_from_slice(&prefix);
-                combined.extend_from_slice(&rendered.bytes[2..]);
-                rendered.bytes = combined;
-            } else {
-                let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len());
-                combined.extend_from_slice(&prefix);
-                combined.extend_from_slice(&rendered.bytes);
-                rendered.bytes = combined;
+            // Prepend logo raster before the receipt body.
+            // The receipt body already starts with ESC @ (init) which resets
+            // all formatting. For Star printers, add an extra LF after raster
+            // exit to ensure the printer fully transitions back to text mode.
+            let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len() + 1);
+            combined.extend_from_slice(&prefix); // logo raster (includes raster enter/exit)
+            if rendered.body_mode != receipt_renderer::EscPosBodyMode::RasterExact {
+                combined.push(0x0A); // LF — flush raster exit, ensure text mode
             }
+            combined.extend_from_slice(&rendered.bytes); // full receipt (ESC @ + body)
+            rendered.bytes = combined;
             info!(
                 total_bytes = rendered.bytes.len(),
                 "Dispatch: total bytes after logo"
@@ -2601,11 +3352,25 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
 /// Start the background print worker loop.
 ///
 /// Runs every `interval_secs` seconds, processes pending print jobs.
-pub fn start_print_worker(db: Arc<DbState>, data_dir: PathBuf, interval_secs: u64) {
+pub fn start_print_worker(
+    db: Arc<DbState>,
+    data_dir: PathBuf,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) {
     tauri::async_runtime::spawn(async move {
         let interval = tokio::time::Duration::from_secs(interval_secs);
         loop {
-            tokio::time::sleep(interval).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                _ = cancel.cancelled() => {
+                    info!("Print worker cancelled");
+                    break;
+                }
+            }
+            if cancel.is_cancelled() {
+                break;
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 process_pending_jobs(&db, &data_dir)
             }));
@@ -2628,7 +3393,7 @@ pub fn start_print_worker(db: Arc<DbState>, data_dir: PathBuf, interval_secs: u6
 mod tests {
     use super::*;
     use crate::db;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use std::sync::Mutex;
 
     fn test_db() -> DbState {
@@ -2644,6 +3409,51 @@ mod tests {
             conn: Mutex::new(conn),
             db_path: PathBuf::from(":memory:"),
         }
+    }
+
+    fn insert_receipt_order(conn: &Connection, order_id: &str, order_number: &str, total: f64) {
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, subtotal, status, order_type,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, '[]', ?3, ?3, 'completed', 'pickup',
+                'pending', datetime('now'), datetime('now')
+             )",
+            params![order_id, order_number, total],
+        )
+        .expect("insert test order");
+    }
+
+    fn insert_order_payment(
+        conn: &Connection,
+        payment_id: &str,
+        order_id: &str,
+        method: &str,
+        amount: f64,
+        cash_received: Option<f64>,
+        change_given: Option<f64>,
+        transaction_ref: Option<&str>,
+    ) {
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, cash_received, change_given,
+                transaction_ref, sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, 'completed', ?5, ?6,
+                ?7, 'pending', datetime('now'), datetime('now')
+             )",
+            params![
+                payment_id,
+                order_id,
+                method,
+                amount,
+                cash_received,
+                change_given,
+                transaction_ref
+            ],
+        )
+        .expect("insert test payment");
     }
 
     #[test]
@@ -2770,6 +3580,8 @@ mod tests {
         assert_eq!(doc.delivery_floor.as_deref(), Some("2"));
         assert_eq!(doc.name_on_ringer.as_deref(), Some("Papadopoulos"));
         assert_eq!(doc.driver_name.as_deref(), Some("Nikos Driver"));
+        assert_eq!(doc.driver_id, None);
+        assert_eq!(doc.delivery_slip_mode, DeliverySlipMode::DeliveryOrder);
     }
 
     #[test]
@@ -2801,6 +3613,286 @@ mod tests {
 
         let doc = build_order_receipt_doc(&db, "ord-delivery-fallback").unwrap();
         assert_eq!(doc.driver_name.as_deref(), Some("Shift Driver"));
+        assert_eq!(doc.driver_id.as_deref(), Some("driver-1"));
+        assert_eq!(doc.delivery_slip_mode, DeliverySlipMode::DeliveryOrder);
+    }
+
+    #[test]
+    fn test_build_document_for_job_delivery_slip_defaults_to_delivery_order_mode() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    customer_name, customer_phone, delivery_address, delivery_city,
+                    delivery_postal_code, delivery_floor, name_on_ringer, driver_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-slip-default', 'ORD-DSL-1', '[]', 10.0, 10.0, 'pending', 'delivery',
+                    'Customer One', '2100000000', 'Main St 42', 'Athens', '10558', '2', 'Papadopoulos',
+                    'drv-22', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_document_for_job(&db, "delivery_slip", "ord-slip-default", None).unwrap();
+        match doc {
+            ReceiptDocument::DeliverySlip(doc) => {
+                assert_eq!(doc.delivery_slip_mode, DeliverySlipMode::DeliveryOrder);
+                assert_eq!(doc.driver_id.as_deref(), Some("drv-22"));
+            }
+            _ => panic!("expected delivery slip document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_delivery_slip_applies_assign_payload_and_driver_fallbacks() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    customer_name, customer_phone, delivery_address, delivery_city,
+                    delivery_postal_code, delivery_floor, name_on_ringer,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-slip-assign', 'ORD-DSL-2', '[]', 12.0, 12.0, 'pending', 'delivery',
+                    'Customer Two', '2100000001', 'Second St 10', 'Athens', '10559', '1', 'Kostas',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+        let payload = serde_json::json!({
+            "slip_mode": "assign_driver",
+            "driverId": "drv-99",
+            "driverName": "Assigned Driver"
+        });
+        let raw_payload = payload.to_string();
+        let doc = build_document_for_job(
+            &db,
+            "delivery_slip",
+            "ord-slip-assign",
+            Some(raw_payload.as_str()),
+        )
+        .unwrap();
+        match doc {
+            ReceiptDocument::DeliverySlip(doc) => {
+                assert_eq!(doc.delivery_slip_mode, DeliverySlipMode::AssignDriver);
+                assert_eq!(doc.driver_id.as_deref(), Some("drv-99"));
+                assert_eq!(doc.driver_name.as_deref(), Some("Assigned Driver"));
+            }
+            _ => panic!("expected delivery slip document"),
+        }
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_cash_uses_received_amount_and_change_only() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-cash-received", "ORD-CASH-1", 17.70);
+            insert_order_payment(
+                &conn,
+                "pay-cash-received",
+                "ord-cash-received",
+                "cash",
+                17.70,
+                Some(20.00),
+                Some(2.30),
+                None,
+            );
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-cash-received").unwrap();
+        assert_eq!(doc.payments.len(), 2);
+        assert_eq!(doc.payments[0].label, "Cash");
+        assert!((doc.payments[0].amount - 20.00).abs() < 0.001);
+        assert_eq!(doc.payments[1].label, "Change");
+        assert!((doc.payments[1].amount - 2.30).abs() < 0.001);
+        assert!(!doc.payments.iter().any(|line| line.label == "Received"));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_cash_falls_back_to_amount_without_received() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-cash-fallback", "ORD-CASH-2", 17.70);
+            insert_order_payment(
+                &conn,
+                "pay-cash-fallback",
+                "ord-cash-fallback",
+                "cash",
+                17.70,
+                None,
+                None,
+                None,
+            );
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-cash-fallback").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Cash");
+        assert!((doc.payments[0].amount - 17.70).abs() < 0.001);
+        assert!(!doc.payments.iter().any(|line| line.label == "Received"));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_card_keeps_amount_and_masked_card() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-card", "ORD-CARD-1", 17.70);
+            insert_order_payment(
+                &conn,
+                "pay-card",
+                "ord-card",
+                "card",
+                17.70,
+                None,
+                None,
+                Some("txn-auth-****1234"),
+            );
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-card").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Card");
+        assert!((doc.payments[0].amount - 17.70).abs() < 0.001);
+        assert_eq!(doc.masked_card.as_deref(), Some("****1234"));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_card_skips_mock_transaction_ref() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_receipt_order(&conn, "ord-card-mock", "ORD-CARD-2", 12.60);
+            insert_order_payment(
+                &conn,
+                "pay-card-mock",
+                "ord-card-mock",
+                "card",
+                12.60,
+                None,
+                None,
+                Some("mock-0215"),
+            );
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-card-mock").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Card");
+        assert!(doc.masked_card.is_none());
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_includes_discount_percentage_metadata() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    discount_amount, discount_percentage, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-discount-percent', 'ORD-DISC-1', '[]', 12.60, 14.00, 'completed', 'pickup',
+                    1.40, 10.0, 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-discount-percent").unwrap();
+        let subtotal_line = doc
+            .totals
+            .iter()
+            .find(|line| line.label == "Subtotal")
+            .expect("subtotal line");
+        assert!((subtotal_line.amount - 14.00).abs() < 0.001);
+        let discount_line = doc
+            .totals
+            .iter()
+            .find(|line| line.label == "Discount")
+            .expect("discount total line");
+        assert!((discount_line.amount + 1.40).abs() < 0.001);
+        assert_eq!(discount_line.discount_percent, Some(10.0));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_collects_item_and_order_notes() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    delivery_notes, special_instructions, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-notes', 'ORD-NOTES-1',
+                    '[{\"name\":\"Waffle\",\"quantity\":1,\"total\":8.8,\"notes\":\"Well done\",\"special_instructions\":\"No sugar\"}]',
+                    8.80, 8.80, 'completed', 'pickup',
+                    'Use side door', 'Call on arrival', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-notes").unwrap();
+        assert_eq!(doc.order_notes, vec!["Use side door", "Call on arrival"]);
+        assert_eq!(
+            doc.items.first().and_then(|item| item.note.as_deref()),
+            Some("Well done | No sugar")
+        );
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_backfills_category_path_from_menu_cache() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO menu_cache (cache_key, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                params![
+                    "categories",
+                    r#"[{"id":"cat-sweet","name":"ΓΛΥΚΑ"}]"#
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO menu_cache (cache_key, data, updated_at) VALUES (?1, ?2, datetime('now'))",
+                params![
+                    "subcategories",
+                    r#"[{"id":"sub-waffle","name":"Βάφλα","category_id":"cat-sweet"}]"#
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-category-backfill', 'ORD-CAT-1', ?1, 8.80, 8.80, 'completed', 'pickup',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                params![r#"[{"menu_item_id":"sub-waffle","name":"Βάφλα","quantity":1,"total_price":8.8}]"#],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-category-backfill").unwrap();
+        let first_item = doc.items.first().expect("order should include item");
+        assert_eq!(first_item.category_name.as_deref(), Some("ΓΛΥΚΑ"));
+        assert_eq!(first_item.subcategory_name.as_deref(), Some("Βάφλα"));
+        assert_eq!(first_item.category_path.as_deref(), Some("ΓΛΥΚΑ > Βάφλα"));
     }
 
     #[test]
@@ -2845,26 +3937,8 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_layout_config_auto_promotes_legacy_classic_template() {
+    fn test_resolve_layout_config_respects_profile_template() {
         let db = test_db();
-        let profile = serde_json::json!({
-            "paperWidthMm": 80,
-            "receiptTemplate": "classic"
-        });
-        let layout =
-            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
-
-        assert_eq!(layout.template, ReceiptTemplate::Modern);
-    }
-
-    #[test]
-    fn test_resolve_layout_config_honors_classic_opt_in_setting() {
-        let db = test_db();
-        {
-            let conn = db.conn.lock().unwrap();
-            db::set_setting(&conn, "receipt", "allow_classic_template", "true").unwrap();
-        }
-
         let profile = serde_json::json!({
             "paperWidthMm": 80,
             "receiptTemplate": "classic"
@@ -2873,6 +3947,146 @@ mod tests {
             resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
 
         assert_eq!(layout.template, ReceiptTemplate::Classic);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_honors_template_override_setting() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "receipt", "template_override", "classic").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "modern"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Classic);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_defaults_to_full_style_for_star() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "printerName": "Star MCP31"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.command_profile, CommandProfile::FullStyle);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_honors_command_profile_override() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "receipt", "command_profile", "full_style").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "modern",
+            "printerName": "Star MCP31"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.command_profile, CommandProfile::FullStyle);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_reads_printer_typography_settings() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "modern",
+            "fontType": "b",
+            "layoutDensity": "spacious",
+            "headerEmphasis": "normal",
+            "printerName": "Star MCP31"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.font_type, FontType::B);
+        assert_eq!(layout.layout_density, LayoutDensity::Spacious);
+        assert_eq!(layout.header_emphasis, HeaderEmphasis::Normal);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_classic_receipt_normalizes_unsupported_euro_symbol() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "general", "language", "el").unwrap();
+        }
+
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "characterSet": "CP66_GREEK",
+            "escposCodePage": 66,
+            "printerName": "Generic Thermal Printer"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.currency_symbol, " EUR");
+    }
+
+    #[test]
+    fn test_resolve_layout_config_reads_exact_mode_and_calibration_from_connection_json() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "printerName": "Star MCP31",
+            "connectionJson": "{\"render_mode\":\"raster_exact\",\"emulation\":\"star_line\",\"printable_width_dots\":510,\"left_margin_dots\":12,\"threshold\":150}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::RasterExact
+        );
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::StarLine);
+        assert_eq!(layout.printable_width_dots, 510);
+        assert_eq!(layout.left_margin_dots, 12);
+        assert_eq!(layout.raster_threshold, 150);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_uses_full_80mm_width_for_mcp31_by_default() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "printerName": "Star MCP31L"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+        assert_eq!(layout.printable_width_dots, 576);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_clamps_left_margin_when_width_is_full() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "connectionJson": "{\"render_mode\":\"raster_exact\",\"printable_width_dots\":576,\"left_margin_dots\":12}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+        assert_eq!(layout.printable_width_dots, 576);
+        assert_eq!(layout.left_margin_dots, 0);
     }
 
     #[test]

@@ -82,6 +82,32 @@ export interface SyncRemoveInvalidOrdersResponse {
   order_ids?: string[];
 }
 
+export type SyncFinancialQueueStatus =
+  | 'failed'
+  | 'pending'
+  | 'in_progress'
+  | 'deferred'
+  | 'queued_remote'
+  | 'synced'
+  | 'applied'
+  | string;
+
+export interface SyncFinancialQueueItem {
+  queueId: number;
+  entityType: string;
+  entityId: string;
+  operation: string;
+  status: SyncFinancialQueueStatus;
+  retryCount: number;
+  lastError: string | null;
+  createdAt: string;
+  payload: string;
+}
+
+export interface SyncFinancialQueueItemsResponse {
+  items: SyncFinancialQueueItem[];
+}
+
 // -- Screen Capture ----------------------------------------------------------
 
 export interface ScreenCaptureGetSourcesRequest {

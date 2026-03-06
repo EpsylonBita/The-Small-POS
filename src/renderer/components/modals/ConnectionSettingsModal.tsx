@@ -75,6 +75,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showPinSettings, setShowPinSettings] = useState(false)
   const [editingPin, setEditingPin] = useState(false)
   const [showPrinterSettingsModal, setShowPrinterSettingsModal] = useState(false)
+  const [printerSettingsInitialMode, setPrinterSettingsInitialMode] = useState<'quick' | 'expert'>('quick')
+  const [printerSettingsAutoStartWizard, setPrinterSettingsAutoStartWizard] = useState(false)
   const [showPaymentTerminalsSection, setShowPaymentTerminalsSection] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
@@ -205,6 +207,37 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
     loadSecuritySettings()
   }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen) return
+    let cancelled = false
+    const maybeOpenPrinterQuickSetup = async () => {
+      try {
+        const result: any = await bridge.printer.getAll()
+        const printers = Array.isArray(result)
+          ? result
+          : Array.isArray(result?.printers)
+            ? result.printers
+            : []
+        const hasReceiptPrinter = printers.some((printer: any) => {
+          const enabled = printer?.enabled !== false
+          const role = typeof printer?.role === 'string' ? printer.role : 'receipt'
+          return enabled && role === 'receipt'
+        })
+        if (!hasReceiptPrinter && !cancelled) {
+          setPrinterSettingsInitialMode('quick')
+          setPrinterSettingsAutoStartWizard(true)
+          setShowPrinterSettingsModal(true)
+        }
+      } catch (error) {
+        console.warn('[ConnectionSettings] failed to evaluate receipt printer onboarding state', error)
+      }
+    }
+    void maybeOpenPrinterQuickSetup()
+    return () => {
+      cancelled = true
+    }
+  }, [bridge.printer, isOpen])
 
   const handleSaveConnection = async () => {
     if (!terminalId || !apiKey) {
@@ -1174,7 +1207,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                             } else {
                               await bridge.invoke('scale_connect', { port: scalePort, baud_rate: Number(scaleBaudRate), protocol: scaleProtocol })
                             }
-                          } catch (e) { console.error('Scale action failed:', e) }
+                          } catch (e) { console.error('Scale action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
                           hardwareStatus?.scale?.connected
@@ -1253,7 +1286,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                                 baud_rate: displayConnectionType === 'serial' ? Number(displayBaudRate) : null,
                               })
                             }
-                          } catch (e) { console.error('Display action failed:', e) }
+                          } catch (e) { console.error('Display action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
                           hardwareStatus?.customerDisplay?.connected
@@ -1313,7 +1346,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                             } else {
                               await bridge.invoke('scanner_serial_start', { port: scannerPort, baud_rate: Number(scannerBaudRate) })
                             }
-                          } catch (e) { console.error('Scanner action failed:', e) }
+                          } catch (e) { console.error('Scanner action failed:', e); toast.error(t('settings.peripherals.actionFailed', 'Action failed')) }
                         }}
                         className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
                           hardwareStatus?.serialScanner?.connected
@@ -1421,7 +1454,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               </div>
             </div>
             <button
-              onClick={() => setShowPrinterSettingsModal(true)}
+              onClick={() => {
+                setPrinterSettingsInitialMode('quick')
+                setPrinterSettingsAutoStartWizard(false)
+                setShowPrinterSettingsModal(true)
+              }}
               className={liquidGlassModalButton('primary', 'md')}
             >
               {t('settings.printer.configureButton')}
@@ -1456,7 +1493,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     {showPrinterSettingsModal && (
       <PrinterSettingsModal
         isOpen={showPrinterSettingsModal}
-        onClose={() => setShowPrinterSettingsModal(false)}
+        initialMode={printerSettingsInitialMode}
+        autoStartWizard={printerSettingsAutoStartWizard}
+        onClose={() => {
+          setShowPrinterSettingsModal(false)
+          setPrinterSettingsAutoStartWizard(false)
+        }}
       />
     )}
 

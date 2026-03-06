@@ -10,6 +10,7 @@
 use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -70,12 +71,19 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        let responsible_cashier_shift_id = if role_returns_cash(&role_type) {
+            find_active_cashier_assignment(&conn, &branch_id, &terminal_id)?
+                .map(|(cashier_shift_id, _)| cashier_shift_id)
+        } else {
+            None
+        };
+
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
                 check_in_time, opening_cash_amount, status, calculation_version,
-                sync_status, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 2, 'pending', ?9, ?9)",
+                transferred_to_cashier_shift_id, sync_status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 2, ?9, 'pending', ?10, ?10)",
             params![
                 shift_id,
                 staff_id,
@@ -85,6 +93,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 role_type,
                 now,
                 opening_cash,
+                responsible_cashier_shift_id,
                 now,
             ],
         )
@@ -113,46 +122,25 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
             // Inherit transferred driver shifts from previous cashier.
             // These are drivers with is_transfer_pending = 1 who haven't checked out yet.
-            let total_inherited =
-                claim_transferred_drivers(&conn, &branch_id, &terminal_id, &shift_id, &now)?;
+            let claimed_count =
+                claim_transferred_cash_staff(&conn, &branch_id, &terminal_id, &shift_id, &now)?;
 
-            if total_inherited > 0.0 {
-                conn.execute(
-                    "UPDATE cash_drawer_sessions SET
-                        driver_cash_given = COALESCE(driver_cash_given, 0) + ?1,
-                        updated_at = ?2
-                     WHERE id = ?3",
-                    params![total_inherited, now, drawer_id],
-                )
-                .map_err(|e| format!("update drawer for inherited drivers: {e}"))?;
+            if claimed_count > 0 {
                 info!(
                     cashier_shift = %shift_id,
-                    inherited_driver_cash = %total_inherited,
-                    "Inherited transferred driver starting amounts"
+                    claimed_staff = claimed_count,
+                    "Claimed transferred cash-return staff for cashier handoff"
                 );
             }
         }
 
-        // Driver starting amount: deduct from active cashier's drawer
-        if role_type == "driver" && opening_cash > 0.0 {
-            let cashier_drawer_id: Option<String> = conn
-                .query_row(
-                    "SELECT cds.id
-                     FROM cash_drawer_sessions cds
-                     INNER JOIN staff_shifts ss ON cds.staff_shift_id = ss.id
-                     WHERE cds.branch_id = ?1
-                       AND cds.terminal_id = ?2
-                       AND ss.status = 'active'
-                       AND ss.role_type = 'cashier'
-                       AND cds.closed_at IS NULL
-                     LIMIT 1",
-                    params![branch_id, terminal_id],
-                    |row| row.get(0),
-                )
-                .ok();
+        // Driver/server starting amount: deduct from the responsible cashier drawer.
+        if role_returns_cash(&role_type) && opening_cash > 0.0 {
+            let cashier_assignment =
+                find_active_cashier_assignment(&conn, &branch_id, &terminal_id)?;
 
-            match cashier_drawer_id {
-                Some(drawer_id) => {
+            match cashier_assignment {
+                Some((_cashier_shift_id, drawer_id)) => {
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
                             driver_cash_given = COALESCE(driver_cash_given, 0) + ?1,
@@ -160,19 +148,18 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                          WHERE id = ?3",
                         params![opening_cash, now, drawer_id],
                     )
-                    .map_err(|e| {
-                        format!("update cashier drawer for driver starting amount: {e}")
-                    })?;
+                    .map_err(|e| format!("update cashier drawer for staff starting amount: {e}"))?;
                     info!(
-                        driver_shift = %shift_id,
+                        staff_shift = %shift_id,
                         cashier_drawer = %drawer_id,
                         amount = %opening_cash,
-                        "Driver starting amount deducted from cashier drawer"
+                        role = %role_type,
+                        "Cash-return staff starting amount deducted from cashier drawer"
                     );
                 }
                 None => {
                     return Err(
-                        "No active cashier found. A cashier must be checked in before drivers can take starting amounts.".to_string()
+                        "No active cashier found. A cashier must be checked in before staff can take starting amounts.".to_string()
                     );
                 }
             }
@@ -219,11 +206,12 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 /// Close an active shift. Calculates expected cash and variance.
 ///
 /// For cashier/manager: expected = opening + cash_sales - refunds - expenses
-///   - drops - driver_cash_given + driver_cash_returned
+///   - drops - driver_cash_given + driver_cash_returned - cashier_payout
 ///     For driver/server: expected = opening + cash_collected - expenses
 ///
 /// Uses calculation_version to decide whether staff_payments are deducted (V1)
-/// or informational only (V2).
+/// or informational only (V2). Cashier checkout payout is always handled separately
+/// via payment_amount on close.
 pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -241,7 +229,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let shift = conn
         .query_row(
             "SELECT id, staff_id, role_type, opening_cash_amount, calculation_version,
-                    branch_id, terminal_id
+                    branch_id, terminal_id, check_in_time
              FROM staff_shifts WHERE id = ?1 AND status = 'active'",
             params![shift_id],
             |row| {
@@ -253,13 +241,22 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     row.get::<_, Option<i32>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         )
         .map_err(|_| format!("No active shift found with id {shift_id}"))?;
 
-    let (_id, _staff_id, role_type, opening_cash, calc_version, shift_branch_id, shift_terminal_id) =
-        shift;
+    let (
+        _id,
+        _staff_id,
+        role_type,
+        opening_cash,
+        calc_version,
+        shift_branch_id,
+        shift_terminal_id,
+        shift_check_in_time,
+    ) = shift;
     let calc_version = calc_version.unwrap_or(1);
     let shift_branch_id = shift_branch_id.unwrap_or_default();
     let shift_terminal_id = shift_terminal_id.unwrap_or_default();
@@ -271,8 +268,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         // Transfer active driver shifts to the next cashier BEFORE calculating expected.
         // This marks them as transferred and removes their starting amounts from driverCashGiven
         // so the closing cashier is not held liable for cash given to drivers who haven't returned.
-        let transferred_driver_starting_total =
-            transfer_active_drivers(&conn, &shift_branch_id, &shift_terminal_id, &shift_id, &now)?;
+        let transferred_driver_starting_total = transfer_active_cash_staff(
+            &conn,
+            &shift_branch_id,
+            &shift_terminal_id,
+            &shift_id,
+            &now,
+        )?;
 
         if transferred_driver_starting_total > 0.0 {
             // Subtract transferred driver starting amounts from driver_cash_given
@@ -384,11 +386,17 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         let (cash_sales, refunds, expenses, drops, driver_given, driver_returned, staff_payments) =
             drawer;
+        let cashier_payout = payment_amount.unwrap_or(0.0);
+        let deducted_staff_payments = if calc_version >= 2 {
+            0.0
+        } else {
+            staff_payments
+        };
 
         // Inherited driver expected returns: drivers transferred TO this cashier shift
         // who are still active. Their expected cash return is added to the cashier's expected.
         let inherited_driver_expected_returns =
-            compute_inherited_driver_expected_returns(&conn, &shift_id)?;
+            compute_inherited_cash_staff_expected_returns(&conn, &shift_id, &shift_check_in_time)?;
 
         if inherited_driver_expected_returns != 0.0 {
             info!(
@@ -398,44 +406,19 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             );
         }
 
-        // V2: staff_payments are informational, not deducted
-        // V1: staff_payments deducted from expected
-        expected = if calc_version >= 2 {
-            opening_cash + cash_sales - refunds - expenses - drops - driver_given
-                + driver_returned
-                + inherited_driver_expected_returns
-        } else {
-            opening_cash + cash_sales - refunds - expenses - drops - driver_given
-                + driver_returned
-                + inherited_driver_expected_returns
-                - staff_payments
-        };
+        expected = opening_cash + cash_sales - refunds - expenses - deducted_staff_payments - drops
+            - driver_given
+            + driver_returned
+            + inherited_driver_expected_returns
+            - cashier_payout;
     } else {
-        // Driver / server / kitchen: expected = opening + cash_collected - expenses
-        // For drivers, cash_collected comes from driver_earnings table.
-        let cash_collected: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cash_collected), 0) FROM driver_earnings WHERE staff_shift_id = ?1",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
+        // Driver / server / kitchen: expected = opening + cash collected - expenses
+        let cash_collected = compute_shift_cash_collected(&conn, &shift_id, &role_type)?;
 
         // Sum expenses for this shift
-        let expenses: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        if calc_version >= 2 {
-            expected = opening_cash + cash_collected - expenses;
-        } else {
-            let pmt = payment_amount.unwrap_or(0.0);
-            expected = opening_cash + cash_collected - expenses - pmt;
-        }
+        let expenses = compute_shift_expenses_total(&conn, &shift_id);
+        let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
+        expected = opening_cash + cash_collected - expenses;
     }
 
     let variance = closing_cash - expected;
@@ -457,52 +440,37 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             .map_err(|e| format!("update cash drawer: {e}"))?;
         }
 
-        // Driver cash return: update active cashier's drawer with the expected return amount.
-        // Uses `expected` (formula-derived) not `closingCash` (self-reported) to match Electron behavior.
-        // For V2: also record driver's payment_amount in total_staff_payments (informational only).
-        if role_type == "driver" {
-            let pmt = payment_amount.unwrap_or(0.0);
-            let staff_payment_to_add = if calc_version >= 2 { pmt } else { 0.0 };
-
-            let cashier_drawer_id: Option<String> = conn
-                .query_row(
-                    "SELECT cds.id
-                     FROM cash_drawer_sessions cds
-                     INNER JOIN staff_shifts ss ON cds.staff_shift_id = ss.id
-                     WHERE cds.branch_id = ?1
-                       AND ss.status = 'active'
-                       AND (ss.role_type = 'cashier' OR ss.role_type = 'manager')
-                       AND cds.closed_at IS NULL
-                     LIMIT 1",
-                    params![shift_branch_id],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            match cashier_drawer_id {
-                Some(drawer_id) => {
+        if role_returns_cash(&role_type) {
+            match resolve_cashier_drawer_for_staff_return(
+                &conn,
+                &shift_id,
+                &shift_branch_id,
+                &shift_terminal_id,
+            )? {
+                Some((cashier_shift_id, drawer_id)) => {
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
                             driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
-                            total_staff_payments = COALESCE(total_staff_payments, 0) + ?2,
-                            updated_at = ?3
-                         WHERE id = ?4",
-                        params![expected, staff_payment_to_add, now, drawer_id],
+                            updated_at = ?2
+                         WHERE id = ?3",
+                        params![closing_cash, now, drawer_id],
                     )
-                    .map_err(|e| format!("update cashier drawer for driver return: {e}"))?;
+                    .map_err(|e| format!("update cashier drawer for staff return: {e}"))?;
                     info!(
-                        driver_shift = %shift_id,
+                        staff_shift = %shift_id,
+                        cashier_shift = %cashier_shift_id,
                         cashier_drawer = %drawer_id,
-                        expected_return = %expected,
-                        staff_payment = %staff_payment_to_add,
-                        "Driver cash return recorded on cashier drawer"
+                        actual_return = %closing_cash,
+                        role = %role_type,
+                        "Cash-return staff checkout recorded on cashier drawer"
                     );
                 }
                 None => {
                     warn!(
-                        driver_shift = %shift_id,
+                        staff_shift = %shift_id,
                         branch_id = %shift_branch_id,
-                        "No active cashier found for driver cash return — cash returned physically"
+                        role = %role_type,
+                        "No active cashier drawer found for staff cash return"
                     );
                 }
             }
@@ -711,6 +679,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         })?;
 
     // --- 2. Cash drawer session (all roles may have one) ---
+    let cashier_check_out_time = shift.get("check_out_time").and_then(Value::as_str);
+
     let cash_drawer: Value = conn
         .query_row(
             "SELECT id, opening_amount, closing_amount, expected_amount, variance_amount,
@@ -743,16 +713,21 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         .unwrap_or(Value::Null);
 
     // --- 3. Sales breakdown by order_type × payment_method ---
+    let breakdown_sql = format!(
+        "SELECT COALESCE(o.order_type, 'dine-in'), op.method,
+                COUNT(DISTINCT o.id), COALESCE(SUM(op.amount), 0)
+         FROM order_payments op
+         JOIN orders o ON o.id = op.order_id
+         WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+           AND op.status = 'completed'
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           {}
+         GROUP BY COALESCE(o.order_type, 'dine-in'), op.method",
+        role_order_type_filter_sql(&role_type, "o")
+    );
     let mut breakdown_stmt = conn
-        .prepare(
-            "SELECT COALESCE(order_type, 'dine-in'), COALESCE(payment_method, 'cash'),
-                    COUNT(*), COALESCE(SUM(total_amount), 0)
-             FROM orders
-             WHERE staff_shift_id = ?1
-               AND COALESCE(is_ghost, 0) = 0
-               AND status NOT IN ('cancelled', 'canceled')
-             GROUP BY order_type, payment_method",
-        )
+        .prepare(&breakdown_sql)
         .map_err(|e| format!("prepare breakdown: {e}"))?;
 
     let rows: Vec<(String, String, i64, f64)> = breakdown_stmt
@@ -802,15 +777,18 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     });
 
     // --- 4. Canceled orders breakdown ---
+    let canceled_sql = format!(
+        "SELECT COALESCE(payment_method, 'cash'), COUNT(*), COALESCE(SUM(total_amount), 0)
+         FROM orders
+         WHERE staff_shift_id = ?1
+           AND COALESCE(is_ghost, 0) = 0
+           AND status IN ('cancelled', 'canceled', 'refunded')
+           {}
+         GROUP BY payment_method",
+        role_order_type_filter_sql(&role_type, "orders")
+    );
     let mut canceled_stmt = conn
-        .prepare(
-            "SELECT COALESCE(payment_method, 'cash'), COUNT(*), COALESCE(SUM(total_amount), 0)
-             FROM orders
-             WHERE staff_shift_id = ?1
-               AND COALESCE(is_ghost, 0) = 0
-               AND status IN ('cancelled', 'canceled', 'refunded')
-             GROUP BY payment_method",
-        )
+        .prepare(&canceled_sql)
         .map_err(|e| format!("prepare canceled: {e}"))?;
 
     let canceled_rows: Vec<(String, i64, f64)> = canceled_stmt
@@ -838,11 +816,14 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     // --- 5. Cash refunds ---
     let cash_refunds: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(total_amount), 0) FROM orders
-             WHERE staff_shift_id = ?1
-               AND COALESCE(is_ghost, 0) = 0
-               AND status = 'refunded'
-               AND payment_method = 'cash'",
+            "SELECT COALESCE(SUM(pa.amount), 0)
+             FROM payment_adjustments pa
+             JOIN order_payments op ON op.id = pa.payment_id
+             JOIN orders o ON o.id = op.order_id
+             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+               AND pa.adjustment_type = 'refund'
+               AND op.method = 'cash'
+               AND COALESCE(o.is_ghost, 0) = 0",
             params![shift_id],
             |row| row.get(0),
         )
@@ -881,98 +862,96 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     // --- 7. Driver data (role-dependent) ---
     let mut driver_deliveries: Vec<Value> = Vec::new();
     let mut transferred_drivers: Vec<Value> = Vec::new();
+    let mut transferred_waiters: Vec<Value> = Vec::new();
+    let mut waiter_tables: Vec<Value> = Vec::new();
+    let mut staff_payments: Vec<Value> = Vec::new();
 
     if role_type == "cashier" || role_type == "manager" {
-        // For cashier checkout: get closed driver shifts from same terminal/day
-        let start_of_day = if let Some(date_part) = check_in_time.get(..10) {
-            format!("{date_part}T00:00:00")
-        } else {
-            check_in_time.clone()
-        };
-        let end_of_day = if let Some(date_part) = check_in_time.get(..10) {
-            format!("{date_part}T23:59:59")
-        } else {
-            check_in_time.clone()
-        };
-
-        let mut drv_stmt = conn
-            .prepare(
-                "SELECT ds.id, ds.staff_id, ds.staff_name, ds.opening_cash_amount,
-                        ds.payment_amount, ds.check_in_time, ds.check_out_time
-                 FROM staff_shifts ds
-                 WHERE ds.check_in_time >= ?1 AND ds.check_in_time <= ?2
-                   AND ds.branch_id = ?3 AND ds.terminal_id = ?4
-                   AND ds.role_type = 'driver' AND ds.status = 'closed'
-                   AND ds.is_transfer_pending = 0
-                   AND ds.transferred_to_cashier_shift_id IS NULL
-                 ORDER BY ds.check_in_time ASC",
-            )
-            .map_err(|e| format!("prepare driver shifts: {e}"))?;
-
-        #[allow(clippy::type_complexity)]
-        let drv_shifts: Vec<(String, String, Option<String>, f64, Option<f64>)> = drv_stmt
-            .query_map(
-                params![start_of_day, end_of_day, branch_id, terminal_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,         // id
-                        row.get::<_, String>(1)?,         // staff_id
-                        row.get::<_, Option<String>>(2)?, // staff_name
-                        row.get::<_, f64>(3)?,            // opening_cash
-                        row.get::<_, Option<f64>>(4)?,    // payment_amount
-                    ))
-                },
-            )
-            .map_err(|e| format!("query driver shifts: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for (ds_id, ds_staff_id, ds_name, ds_opening, ds_payment) in &drv_shifts {
-            let drv_expenses: f64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
-                     WHERE staff_shift_id = ?1 AND expense_type != 'staff_payment'",
-                    params![ds_id],
-                    |row| row.get(0),
+        driver_deliveries = build_cashier_staff_checkout_rows(
+            &conn,
+            shift_id,
+            &branch_id,
+            &terminal_id,
+            &check_in_time,
+            cashier_check_out_time,
+        )?;
+        transferred_drivers =
+            build_inherited_cash_staff_rows(&conn, shift_id, &check_in_time, "driver")?;
+        transferred_waiters =
+            build_inherited_cash_staff_rows(&conn, shift_id, &check_in_time, "server")?;
+        staff_payments = load_cashier_staff_payments(&conn, shift_id)?;
+    } else if role_type == "driver" {
+        // Backfill: create missing driver_earnings from orders assigned to this driver
+        let driver_staff_id = shift["staff_id"].as_str().unwrap_or("");
+        if !driver_staff_id.is_empty() {
+            let mut missing_stmt = conn
+                .prepare(
+                    "SELECT o.id, o.total_amount, o.payment_method, o.delivery_fee, o.branch_id
+                     FROM orders o
+                     WHERE (o.driver_id = ?1 OR o.staff_shift_id = ?2)
+                       AND o.order_type = 'delivery'
+                       AND COALESCE(o.is_ghost, 0) = 0
+                       AND o.created_at >= ?3
+                       AND NOT EXISTS (SELECT 1 FROM driver_earnings de WHERE de.order_id = o.id)",
                 )
-                .unwrap_or(0.0);
+                .map_err(|e| format!("prepare backfill: {e}"))?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let backfill_rows: Vec<(String, f64, String, f64, String)> = missing_stmt
+                .query_map(params![driver_staff_id, shift_id, check_in_time], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1).unwrap_or(0.0),
+                        row.get::<_, String>(2)
+                            .unwrap_or_else(|_| "cash".to_string()),
+                        row.get::<_, f64>(3).unwrap_or(0.0),
+                        row.get::<_, String>(4).unwrap_or_default(),
+                    ))
+                })
+                .map_err(|e| format!("backfill query: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
 
-            driver_deliveries.push(serde_json::json!({
-                "driver_id": ds_staff_id,
-                "driver_name": ds_name.as_deref().unwrap_or(ds_staff_id),
-                "starting_amount": ds_opening,
-                "driver_payment": ds_payment.unwrap_or(0.0),
-                "expenses": drv_expenses,
-                "shift_id": ds_id,
-                "role": "driver",
-            }));
+            for (oid, total, pm, del_fee, bid) in &backfill_rows {
+                let pm_lower = pm.to_lowercase();
+                let (_, cash, card, _total_paid) =
+                    compute_shift_payment_totals_for_order(&conn, oid, *total, &pm_lower)?;
+                let payment_method = if cash > 0.0 && card > 0.0 {
+                    "mixed".to_string()
+                } else if card > 0.0 {
+                    "card".to_string()
+                } else {
+                    "cash".to_string()
+                };
+                let eid = uuid::Uuid::new_v4().to_string();
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO driver_earnings (
+                        id, driver_id, staff_shift_id, order_id, branch_id,
+                        delivery_fee, tip_amount, total_earning,
+                        payment_method, cash_collected, card_amount, cash_to_return,
+                        settled, created_at, updated_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?6, ?7, ?8, ?9, ?8, 0, ?10, ?10)",
+                    params![
+                        eid,
+                        driver_staff_id,
+                        shift_id,
+                        oid,
+                        bid,
+                        del_fee,
+                        payment_method,
+                        cash,
+                        card,
+                        now
+                    ],
+                );
+            }
+            if !backfill_rows.is_empty() {
+                info!(
+                    "Backfilled {} driver_earnings for shift {shift_id}",
+                    backfill_rows.len()
+                );
+            }
         }
 
-        // Transferred drivers (inherited from previous cashier)
-        let mut tr_stmt = conn
-            .prepare(
-                "SELECT ds.id, ds.staff_id, ds.staff_name, ds.opening_cash_amount, ds.check_in_time
-                 FROM staff_shifts ds
-                 WHERE ds.transferred_to_cashier_shift_id = ?1
-                   AND ds.role_type = 'driver' AND ds.status = 'active'
-                 ORDER BY ds.check_in_time ASC",
-            )
-            .map_err(|e| format!("prepare transferred drivers: {e}"))?;
-
-        transferred_drivers = tr_stmt
-            .query_map(params![shift_id], |row| {
-                Ok(serde_json::json!({
-                    "shift_id": row.get::<_, String>(0)?,
-                    "driver_id": row.get::<_, String>(1)?,
-                    "driver_name": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    "starting_amount": row.get::<_, f64>(3)?,
-                    "check_in_time": row.get::<_, String>(4)?,
-                }))
-            })
-            .map_err(|e| format!("query transferred drivers: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
-    } else if role_type == "driver" {
         // For driver checkout: get individual delivery records
         let mut de_stmt = conn
             .prepare(
@@ -985,6 +964,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
                  LEFT JOIN orders o ON de.order_id = o.id
                  WHERE de.staff_shift_id = ?1
                    AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
+                   AND (o.id IS NULL OR o.order_type = 'delivery')
                  ORDER BY de.created_at DESC",
             )
             .map_err(|e| format!("prepare driver earnings: {e}"))?;
@@ -1014,6 +994,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
             .map_err(|e| format!("query driver earnings: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
+    } else if role_type == "server" {
+        waiter_tables = build_waiter_tables(&conn, shift_id)?;
     }
 
     // --- Build response matching Electron POS shape ---
@@ -1030,13 +1012,18 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         "canceledOrders": canceled_orders,
         "cashRefunds": cash_refunds,
         "driverDeliveries": driver_deliveries,
-        "staffPayments": [],
+        "waiterTables": waiter_tables,
+        "staffPayments": staff_payments,
         "ordersCount": orders_count,
         "salesAmount": sales_amount,
     });
 
     if !transferred_drivers.is_empty() {
         result["transferredDrivers"] = serde_json::json!(transferred_drivers);
+    }
+
+    if !transferred_waiters.is_empty() {
+        result["transferredWaiters"] = serde_json::json!(transferred_waiters);
     }
 
     Ok(result)
@@ -1206,48 +1193,217 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Driver transfer helpers
+// Cash-return staff helpers
 // ---------------------------------------------------------------------------
 
-/// Transfer active (non-pending) drivers on this branch/terminal when a cashier closes.
-///
-/// Marks each driver shift as `is_transfer_pending = 1` and enqueues a sync entry.
-/// Returns the sum of their opening_cash_amount (to be subtracted from driver_cash_given).
-fn transfer_active_drivers(
+fn role_returns_cash(role_type: &str) -> bool {
+    matches!(role_type, "driver" | "server")
+}
+
+fn find_active_cashier_assignment(
     conn: &rusqlite::Connection,
     branch_id: &str,
     terminal_id: &str,
-    _closing_cashier_shift_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let assignment = conn
+        .query_row(
+            "SELECT ss.id, cds.id
+         FROM cash_drawer_sessions cds
+         INNER JOIN staff_shifts ss ON cds.staff_shift_id = ss.id
+         WHERE cds.branch_id = ?1
+           AND ss.status = 'active'
+           AND ss.role_type IN ('cashier', 'manager')
+           AND cds.closed_at IS NULL
+         ORDER BY
+           CASE WHEN cds.terminal_id = ?2 THEN 0 ELSE 1 END,
+           ss.check_in_time ASC
+         LIMIT 1",
+            params![branch_id, terminal_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok();
+
+    Ok(assignment)
+}
+
+fn compute_shift_expenses_total(conn: &rusqlite::Connection, shift_id: &str) -> f64 {
+    conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
+        params![shift_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(0.0)
+}
+
+fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
+    match role_type {
+        "driver" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') = 'delivery'"),
+        "server" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') != 'delivery'"),
+        _ => String::new(),
+    }
+}
+
+fn compute_shift_payment_totals(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    role_type: &str,
+) -> Result<(i64, f64, f64, f64), String> {
+    let sql = format!(
+        "SELECT
+            COUNT(DISTINCT o.id),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN op.status = 'completed' THEN op.amount ELSE 0 END), 0)
+         FROM orders o
+         LEFT JOIN order_payments op ON op.order_id = o.id
+         WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+           {}",
+        role_order_type_filter_sql(role_type, "o")
+    );
+    conn.query_row(&sql, params![shift_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })
+    .map_err(|e| format!("query shift payment totals: {e}"))
+}
+
+fn compute_shift_payment_totals_for_order(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    fallback_total: f64,
+    fallback_method: &str,
+) -> Result<(i64, f64, f64, f64), String> {
+    let totals = conn
+        .query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'cash' THEN amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'card' THEN amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0)
+             FROM order_payments
+             WHERE order_id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| format!("query order payment totals: {e}"))?;
+
+    if totals.0 > 0 {
+        Ok(totals)
+    } else {
+        let (cash, card) = match fallback_method {
+            "card" => (0.0, fallback_total),
+            "mixed" => (fallback_total, fallback_total),
+            _ => (fallback_total, 0.0),
+        };
+        Ok((0, cash, card, fallback_total))
+    }
+}
+
+fn compute_shift_cash_collected(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    role_type: &str,
+) -> Result<f64, String> {
+    let (_, cash_collected, _, _) = compute_shift_payment_totals(conn, shift_id, role_type)?;
+    if cash_collected > 0.0 || role_type != "driver" {
+        return Ok(cash_collected);
+    }
+
+    conn.query_row(
+        "SELECT COALESCE(SUM(de.cash_collected), 0)
+         FROM driver_earnings de
+         LEFT JOIN orders o ON o.id = de.order_id
+         WHERE de.staff_shift_id = ?1
+           AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
+           AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))",
+        params![shift_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("query driver cash collected: {e}"))
+}
+
+fn resolve_cashier_drawer_for_staff_return(
+    conn: &rusqlite::Connection,
+    staff_shift_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let assigned_cashier_shift_id: Option<String> = conn
+        .query_row(
+            "SELECT transferred_to_cashier_shift_id FROM staff_shifts WHERE id = ?1",
+            params![staff_shift_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    if let Some(cashier_shift_id) = assigned_cashier_shift_id {
+        let assigned_drawer = conn
+            .query_row(
+                "SELECT id FROM cash_drawer_sessions
+                 WHERE staff_shift_id = ?1
+                   AND closed_at IS NULL
+                 LIMIT 1",
+                params![cashier_shift_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+
+        if let Some(drawer_id) = assigned_drawer {
+            return Ok(Some((cashier_shift_id, drawer_id)));
+        }
+    }
+
+    find_active_cashier_assignment(conn, branch_id, terminal_id)
+}
+
+/// Transfer active driver/server shifts currently assigned to this cashier.
+///
+/// Marks each shift as transfer-pending and returns the opening cash total so the
+/// closing cashier is no longer charged for float that has not yet come back.
+fn transfer_active_cash_staff(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    terminal_id: &str,
+    closing_cashier_shift_id: &str,
     now: &str,
 ) -> Result<f64, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, opening_cash_amount
              FROM staff_shifts
-             WHERE branch_id = ?1
-               AND terminal_id = ?2
-               AND role_type = 'driver'
+             WHERE role_type IN ('driver', 'server')
                AND status = 'active'
-               AND COALESCE(is_transfer_pending, 0) = 0
-               AND transferred_to_cashier_shift_id IS NULL",
+                AND COALESCE(is_transfer_pending, 0) = 0
+               AND (
+                    transferred_to_cashier_shift_id = ?1
+                    OR (
+                        transferred_to_cashier_shift_id IS NULL
+                        AND branch_id = ?2
+                        AND terminal_id = ?3
+                    )
+               )",
         )
-        .map_err(|e| format!("prepare transfer drivers query: {e}"))?;
+        .map_err(|e| format!("prepare transfer staff query: {e}"))?;
 
     let drivers: Vec<(String, f64)> = stmt
-        .query_map(params![branch_id, terminal_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1).unwrap_or(0.0),
-            ))
-        })
-        .map_err(|e| format!("query active drivers: {e}"))?
+        .query_map(
+            params![closing_cashier_shift_id, branch_id, terminal_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1).unwrap_or(0.0),
+                ))
+            },
+        )
+        .map_err(|e| format!("query active cash staff: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
     let mut total_starting = 0.0;
 
     for (driver_shift_id, opening_cash) in &drivers {
-        // Mark driver as transfer pending
         conn.execute(
             "UPDATE staff_shifts SET
                 is_transfer_pending = 1,
@@ -1256,9 +1412,8 @@ fn transfer_active_drivers(
              WHERE id = ?2",
             params![now, driver_shift_id],
         )
-        .map_err(|e| format!("mark driver transfer pending: {e}"))?;
+        .map_err(|e| format!("mark staff transfer pending: {e}"))?;
 
-        // Mark driver earnings as transferred
         conn.execute(
             "UPDATE driver_earnings SET
                 is_transferred = 1,
@@ -1268,7 +1423,6 @@ fn transfer_active_drivers(
         )
         .map_err(|e| format!("mark driver earnings transferred: {e}"))?;
 
-        // Enqueue sync for the driver shift
         let idempotency_key = format!(
             "shift:transfer:{driver_shift_id}:{}",
             Utc::now().timestamp_millis()
@@ -1285,7 +1439,7 @@ fn transfer_active_drivers(
              VALUES ('shift', ?1, 'update', ?2, ?3)",
             params![driver_shift_id, sync_payload, idempotency_key],
         )
-        .map_err(|e| format!("enqueue driver transfer sync: {e}"))?;
+        .map_err(|e| format!("enqueue staff transfer sync: {e}"))?;
 
         total_starting += opening_cash;
         info!(
@@ -1299,50 +1453,47 @@ fn transfer_active_drivers(
         info!(
             count = drivers.len(),
             total_starting = %total_starting,
-            "Transferred active driver shifts to next cashier"
+            "Transferred active cash-return staff to next cashier"
         );
     }
 
     Ok(total_starting)
 }
 
-/// Claim transferred drivers (is_transfer_pending = 1) when a new cashier opens.
+/// Claim transfer-pending driver/server shifts for a new cashier.
 ///
-/// Sets `transferred_to_cashier_shift_id` to the new cashier's shift and clears pending flag.
-/// Returns the sum of their opening_cash_amount (to be added to new cashier's driver_cash_given).
-fn claim_transferred_drivers(
+/// The receiving cashier becomes responsible for the eventual return, but does not
+/// inherit a new negative float because the money was already given by the previous cashier.
+fn claim_transferred_cash_staff(
     conn: &rusqlite::Connection,
     branch_id: &str,
     terminal_id: &str,
     new_cashier_shift_id: &str,
     now: &str,
-) -> Result<f64, String> {
+) -> Result<usize, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, opening_cash_amount
+            "SELECT id
              FROM staff_shifts
              WHERE branch_id = ?1
-               AND terminal_id = ?2
-               AND role_type = 'driver'
-               AND status = 'active'
-               AND is_transfer_pending = 1",
+               AND role_type IN ('driver', 'server')
+                AND status = 'active'
+               AND is_transfer_pending = 1
+             ORDER BY
+               CASE WHEN terminal_id = ?2 THEN 0 ELSE 1 END,
+               check_in_time ASC",
         )
-        .map_err(|e| format!("prepare claim transferred drivers query: {e}"))?;
+        .map_err(|e| format!("prepare claim transferred staff query: {e}"))?;
 
-    let drivers: Vec<(String, f64)> = stmt
+    let drivers: Vec<String> = stmt
         .query_map(params![branch_id, terminal_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1).unwrap_or(0.0),
-            ))
+            row.get::<_, String>(0)
         })
-        .map_err(|e| format!("query transferred drivers: {e}"))?
+        .map_err(|e| format!("query transferred staff: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut total_inherited = 0.0;
-
-    for (driver_shift_id, opening_cash) in &drivers {
+    for driver_shift_id in &drivers {
         conn.execute(
             "UPDATE staff_shifts SET
                 transferred_to_cashier_shift_id = ?1,
@@ -1351,9 +1502,8 @@ fn claim_transferred_drivers(
              WHERE id = ?3",
             params![new_cashier_shift_id, now, driver_shift_id],
         )
-        .map_err(|e| format!("claim transferred driver: {e}"))?;
+        .map_err(|e| format!("claim transferred staff: {e}"))?;
 
-        // Enqueue sync for the driver shift update
         let idempotency_key = format!(
             "shift:claim:{driver_shift_id}:{}",
             Utc::now().timestamp_millis()
@@ -1370,73 +1520,413 @@ fn claim_transferred_drivers(
              VALUES ('shift', ?1, 'update', ?2, ?3)",
             params![driver_shift_id, sync_payload, idempotency_key],
         )
-        .map_err(|e| format!("enqueue driver claim sync: {e}"))?;
-
-        total_inherited += opening_cash;
+        .map_err(|e| format!("enqueue staff claim sync: {e}"))?;
         info!(
-            driver_shift = %driver_shift_id,
+            staff_shift = %driver_shift_id,
             new_cashier = %new_cashier_shift_id,
-            opening_cash = %opening_cash,
-            "Transferred driver claimed by new cashier"
+            "Transferred staff claimed by new cashier"
         );
     }
 
-    Ok(total_inherited)
+    Ok(drivers.len())
 }
 
-/// Compute the expected cash returns from drivers inherited by this cashier shift.
+/// Compute the expected cash returns from inherited driver/server shifts.
 ///
-/// For each active driver with `transferred_to_cashier_shift_id = this_shift`,
-/// computes `opening + cash_collected - expenses` and returns the sum.
-fn compute_inherited_driver_expected_returns(
+/// These are active staff assigned to this cashier whose shift started before the
+/// cashier checked in, which means the current drawer did not originally issue the float.
+fn compute_inherited_cash_staff_expected_returns(
     conn: &rusqlite::Connection,
     cashier_shift_id: &str,
+    cashier_check_in_time: &str,
 ) -> Result<f64, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT
-                ss.id,
-                ss.opening_cash_amount,
-                ss.payment_amount,
-                ss.calculation_version,
-                (SELECT COALESCE(SUM(cash_collected), 0) FROM driver_earnings WHERE staff_shift_id = ss.id) AS cash_collected,
-                (SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ss.id) AS expenses
+            "SELECT ss.id, ss.role_type, ss.opening_cash_amount
              FROM staff_shifts ss
              WHERE ss.transferred_to_cashier_shift_id = ?1
                AND ss.status = 'active'
-               AND ss.role_type = 'driver'",
+               AND ss.role_type IN ('driver', 'server')
+               AND ss.check_in_time < ?2",
         )
-        .map_err(|e| format!("prepare inherited drivers query: {e}"))?;
+        .map_err(|e| format!("prepare inherited staff query: {e}"))?;
 
-    let drivers: Vec<(String, f64, f64, i32, f64, f64)> = stmt
-        .query_map(params![cashier_shift_id], |row| {
+    let drivers: Vec<(String, String, f64)> = stmt
+        .query_map(params![cashier_shift_id, cashier_check_in_time], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, f64>(1).unwrap_or(0.0),
+                row.get::<_, String>(1)?,
                 row.get::<_, f64>(2).unwrap_or(0.0),
-                row.get::<_, i32>(3).unwrap_or(1),
-                row.get::<_, f64>(4).unwrap_or(0.0),
-                row.get::<_, f64>(5).unwrap_or(0.0),
             ))
         })
-        .map_err(|e| format!("query inherited drivers: {e}"))?
+        .map_err(|e| format!("query inherited staff: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
     let mut total = 0.0;
 
-    for (_id, opening, payment, version, cash_collected, expenses) in &drivers {
-        let driver_expected = if *version >= 2 {
-            // V2: payment NOT deducted from driver expected return
-            opening + cash_collected - expenses
-        } else {
-            // V1: payment IS deducted from driver expected return
-            opening + cash_collected - expenses - payment
-        };
-        total += driver_expected;
+    for (staff_shift_id, role_type, opening) in &drivers {
+        let cash_collected = compute_shift_cash_collected(conn, staff_shift_id, role_type)?;
+        let expenses = compute_shift_expenses_total(conn, staff_shift_id);
+        total += opening + cash_collected - expenses;
     }
 
     Ok(total)
+}
+
+pub(crate) fn build_cashier_staff_checkout_rows(
+    conn: &rusqlite::Connection,
+    cashier_shift_id: &str,
+    branch_id: &str,
+    terminal_id: &str,
+    cashier_check_in_time: &str,
+    cashier_check_out_time: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ss.id, ss.staff_id, ss.staff_name, ss.role_type, ss.status,
+                    ss.opening_cash_amount, ss.check_in_time, ss.check_out_time
+             FROM staff_shifts ss
+             WHERE ss.role_type IN ('driver', 'server')
+               AND ss.status IN ('active', 'closed')
+               AND COALESCE(ss.is_transfer_pending, 0) = 0
+               AND (
+                    ss.transferred_to_cashier_shift_id = ?1
+                    OR (
+                        ss.transferred_to_cashier_shift_id IS NULL
+                        AND ss.branch_id = ?2
+                        AND ss.terminal_id = ?3
+                        AND ss.check_in_time >= ?4
+                        AND (?5 IS NULL OR ss.check_in_time <= ?5)
+                    )
+               )
+             ORDER BY ss.check_in_time ASC",
+        )
+        .map_err(|e| format!("prepare cashier staff rows: {e}"))?;
+
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        f64,
+        String,
+        Option<String>,
+    )> = stmt
+        .query_map(
+            params![
+                cashier_shift_id,
+                branch_id,
+                terminal_id,
+                cashier_check_in_time,
+                cashier_check_out_time
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5).unwrap_or(0.0),
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("query cashier staff rows: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut result = Vec::new();
+    for (
+        staff_shift_id,
+        staff_id,
+        staff_name,
+        role_type,
+        status,
+        opening_cash_amount,
+        check_in_time,
+        check_out_time,
+    ) in rows
+    {
+        let (order_count, cash_collected, card_amount, total_amount) =
+            compute_shift_payment_totals(conn, &staff_shift_id, &role_type)?;
+        let expenses = compute_shift_expenses_total(conn, &staff_shift_id);
+        let amount_to_return = opening_cash_amount + cash_collected - expenses;
+        let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
+
+        result.push(serde_json::json!({
+            "shift_id": staff_shift_id,
+            "driver_id": staff_id,
+            "driver_name": display_name,
+            "staff_id": staff_id,
+            "staff_name": staff_name,
+            "role": role_type,
+            "role_type": role_type,
+            "status": status,
+            "starting_amount": opening_cash_amount,
+            "cash_collected": cash_collected,
+            "card_amount": card_amount,
+            "total_amount": total_amount,
+            "order_count": order_count,
+            "expenses": expenses,
+            "amount_to_return": amount_to_return,
+            "check_in_time": check_in_time,
+            "check_out_time": check_out_time,
+        }));
+    }
+
+    Ok(result)
+}
+
+fn build_inherited_cash_staff_rows(
+    conn: &rusqlite::Connection,
+    cashier_shift_id: &str,
+    cashier_check_in_time: &str,
+    role_type: &str,
+) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ss.id, ss.staff_id, ss.staff_name, ss.opening_cash_amount, ss.check_in_time
+             FROM staff_shifts ss
+             WHERE ss.transferred_to_cashier_shift_id = ?1
+               AND ss.role_type = ?2
+               AND ss.status = 'active'
+               AND ss.check_in_time < ?3
+             ORDER BY ss.check_in_time ASC",
+        )
+        .map_err(|e| format!("prepare inherited staff rows: {e}"))?;
+
+    let rows: Vec<(String, String, Option<String>, f64, String)> = stmt
+        .query_map(
+            params![cashier_shift_id, role_type, cashier_check_in_time],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, f64>(3).unwrap_or(0.0),
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("query inherited staff rows: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut result = Vec::new();
+    for (staff_shift_id, staff_id, staff_name, opening_amount, check_in_time) in rows {
+        let (_, cash_collected, card_amount, total_amount) =
+            compute_shift_payment_totals(conn, &staff_shift_id, role_type)?;
+        let expenses = compute_shift_expenses_total(conn, &staff_shift_id);
+        let net_cash_amount = opening_amount + cash_collected - expenses;
+        let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
+
+        result.push(serde_json::json!({
+            "shift_id": staff_shift_id,
+            "driver_id": staff_id,
+            "driver_name": display_name,
+            "staff_id": staff_id,
+            "staff_name": staff_name,
+            "role_type": role_type,
+            "starting_amount": opening_amount,
+            "check_in_time": check_in_time,
+            "cash_collected": cash_collected,
+            "card_amount": card_amount,
+            "total_amount": total_amount,
+            "expenses": expenses,
+            "net_cash_amount": net_cash_amount,
+        }));
+    }
+
+    Ok(result)
+}
+
+fn load_cashier_staff_payments(
+    conn: &rusqlite::Connection,
+    cashier_shift_id: &str,
+) -> Result<Vec<Value>, String> {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS staff_payments (
+            id TEXT PRIMARY KEY,
+            cashier_shift_id TEXT NOT NULL,
+            paid_to_staff_id TEXT NOT NULL,
+            amount REAL NOT NULL,
+            payment_type TEXT NOT NULL DEFAULT 'wage',
+            notes TEXT,
+            created_at TEXT NOT NULL
+        );",
+    );
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT sp.id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+                    (SELECT ss.staff_name
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS staff_name,
+                    (SELECT ss.role_type
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS role_type,
+                    (SELECT ss.check_in_time
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS check_in_time,
+                    (SELECT ss.check_out_time
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS check_out_time
+             FROM staff_payments sp
+             WHERE sp.cashier_shift_id = ?1
+             ORDER BY sp.created_at DESC",
+        )
+        .map_err(|e| format!("prepare staff payments: {e}"))?;
+
+    let payments = stmt
+        .query_map(params![cashier_shift_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "staff_id": row.get::<_, String>(1)?,
+                "staff_name": row.get::<_, Option<String>>(6)?,
+                "role_type": row.get::<_, Option<String>>(7)?,
+                "amount": row.get::<_, f64>(2)?,
+                "payment_type": row.get::<_, String>(3)?,
+                "description": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                "created_at": row.get::<_, String>(5)?,
+                "check_in_time": row.get::<_, Option<String>>(8)?,
+                "check_out_time": row.get::<_, Option<String>>(9)?,
+            }))
+        })
+        .map_err(|e| format!("query staff payments: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<Value>>();
+
+    Ok(payments)
+}
+
+fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT o.id, o.order_number, COALESCE(o.table_number, 'Mobile POS') AS table_number,
+                    COALESCE(o.total_amount, 0), COALESCE(o.payment_method, 'cash'), o.status,
+                    COALESCE((
+                        SELECT SUM(op.amount)
+                        FROM order_payments op
+                        WHERE op.order_id = o.id
+                          AND op.status = 'completed'
+                          AND op.method = 'cash'
+                    ), 0) AS cash_amount,
+                    COALESCE((
+                        SELECT SUM(op.amount)
+                        FROM order_payments op
+                        WHERE op.order_id = o.id
+                          AND op.status = 'completed'
+                          AND op.method = 'card'
+                    ), 0) AS card_amount
+             FROM orders o
+             WHERE o.staff_shift_id = ?1
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND COALESCE(o.order_type, 'dine-in') != 'delivery'
+               AND o.status NOT IN ('cancelled', 'canceled')
+             ORDER BY table_number ASC, o.created_at ASC",
+        )
+        .map_err(|e| format!("prepare waiter tables: {e}"))?;
+
+    let orders: Vec<(
+        String,
+        Option<String>,
+        String,
+        f64,
+        String,
+        String,
+        f64,
+        f64,
+    )> = stmt
+        .query_map(params![shift_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3).unwrap_or(0.0),
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6).unwrap_or(0.0),
+                row.get::<_, f64>(7).unwrap_or(0.0),
+            ))
+        })
+        .map_err(|e| format!("query waiter tables: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut tables: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for (
+        order_id,
+        order_number,
+        table_number,
+        total_amount,
+        payment_method,
+        status,
+        cash_amount,
+        card_amount,
+    ) in orders
+    {
+        tables
+            .entry(table_number.clone())
+            .or_default()
+            .push(serde_json::json!({
+                "id": order_id,
+                "order_id": order_id,
+                "order_number": order_number,
+                "total_amount": total_amount,
+                "payment_method": payment_method,
+                "status": status,
+                "cash_amount": cash_amount,
+                "card_amount": card_amount,
+            }));
+    }
+
+    let mut result = Vec::new();
+    for (table_number, orders) in tables {
+        let order_count = orders.len() as i64;
+        let total_amount: f64 = orders
+            .iter()
+            .map(|order| order["total_amount"].as_f64().unwrap_or(0.0))
+            .sum();
+        let cash_amount: f64 = orders
+            .iter()
+            .map(|order| order["cash_amount"].as_f64().unwrap_or(0.0))
+            .sum();
+        let card_amount: f64 = orders
+            .iter()
+            .map(|order| order["card_amount"].as_f64().unwrap_or(0.0))
+            .sum();
+        let payment_method = if cash_amount > 0.0 && card_amount > 0.0 {
+            "mixed"
+        } else if card_amount > 0.0 {
+            "card"
+        } else {
+            "cash"
+        };
+
+        result.push(serde_json::json!({
+            "table_number": table_number,
+            "order_count": order_count,
+            "total_amount": total_amount,
+            "cash_amount": cash_amount,
+            "card_amount": card_amount,
+            "payment_method": payment_method,
+            "orders": orders,
+        }));
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1805,7 +2295,7 @@ mod tests {
         );
         assert_eq!(pending, 0, "is_transfer_pending should be cleared");
 
-        // Verify cashier2's drawer has driver_cash_given = 60 (inherited)
+        // Verify cashier2 does not inherit a new negative float.
         let dcg2: f64 = conn
             .query_row(
                 "SELECT driver_cash_given FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
@@ -1814,8 +2304,208 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            dcg2, 60.0,
-            "cashier2 driver_cash_given should be 60 (inherited)"
+            dcg2, 0.0,
+            "cashier2 should not inherit driver_cash_given from the previous cashier"
         );
+    }
+
+    #[test]
+    fn test_driver_summary_excludes_pickup_orders_from_driver_totals() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let now = "2026-03-05T10:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                created_at, updated_at
+            ) VALUES (
+                'driver-shift', 'driver-1', 'Driver One', 'driver', 'branch-1', 'term-1',
+                ?1, 20.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+            ) VALUES (
+                'order-delivery', '#D1', '[]', 30.0, 'completed', 'delivery',
+                'paid', 'cash', 'driver-shift', 'pending', ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+            ) VALUES (
+                'order-pickup', '#P1', '[]', 50.0, 'completed', 'pickup',
+                'paid', 'cash', 'driver-shift', 'pending', ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+            ) VALUES (
+                'pay-delivery', 'order-delivery', 'cash', 30.0, 'completed', 'driver-shift', 'EUR', ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+            ) VALUES (
+                'pay-pickup', 'order-pickup', 'cash', 50.0, 'completed', 'driver-shift', 'EUR', ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO driver_earnings (
+                id, driver_id, staff_shift_id, order_id, branch_id,
+                delivery_fee, tip_amount, total_earning, payment_method,
+                cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+            ) VALUES (
+                'earning-1', 'driver-1', 'driver-shift', 'order-delivery', 'branch-1',
+                0.0, 0.0, 0.0, 'cash',
+                30.0, 0.0, 30.0, 0, ?1, ?1
+            )",
+            params![now],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = get_shift_summary(&db, "driver-shift").unwrap();
+
+        assert_eq!(summary["breakdown"]["overall"]["totalAmount"], 30.0);
+        assert_eq!(summary["breakdown"]["overall"]["totalCount"], 1);
+        assert_eq!(summary["breakdown"]["delivery"]["cashTotal"], 30.0);
+        assert_eq!(summary["breakdown"]["instore"]["cashTotal"], 0.0);
+        assert_eq!(
+            summary["driverDeliveries"]
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or_default(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_cashier_summary_excludes_previous_terminal_staff_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cashier_in = "2026-03-05T10:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                created_at, updated_at
+            ) VALUES (
+                'cashier-shift', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                ?1, 100.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![cashier_in],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-1', 'cashier-shift', 'cashier-1', 'branch-1', 'term-1',
+                100.0, ?1, ?1, ?1
+            )",
+            params![cashier_in],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, check_out_time, opening_cash_amount, status, calculation_version,
+                sync_status, created_at, updated_at
+            ) VALUES (
+                'driver-old', 'driver-old', 'Old Driver', 'driver', 'branch-1', 'term-1',
+                '2026-03-05T08:00:00Z', '2026-03-05T09:00:00Z', 15.0, 'closed', 2,
+                'pending', '2026-03-05T08:00:00Z', '2026-03-05T09:00:00Z'
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                created_at, updated_at
+            ) VALUES (
+                'driver-current', 'driver-current', 'Current Driver', 'driver', 'branch-1', 'term-1',
+                '2026-03-05T10:30:00Z', 20.0, 'active', 2, 'pending',
+                '2026-03-05T10:30:00Z', '2026-03-05T10:30:00Z'
+            )",
+            [],
+        )
+        .unwrap();
+
+        for (order_id, shift_id, total_amount, created_at) in [
+            ("order-old", "driver-old", 25.0, "2026-03-05T08:30:00Z"),
+            (
+                "order-current",
+                "driver-current",
+                40.0,
+                "2026-03-05T10:45:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, status, order_type,
+                    payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+                ) VALUES (?1, ?1, '[]', ?2, 'completed', 'delivery',
+                    'paid', 'cash', ?3, 'pending', ?4, ?4)",
+                params![order_id, total_amount, shift_id, created_at],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                ) VALUES (?1, ?2, 'cash', ?3, 'completed', ?4, 'EUR', ?5, ?5)",
+                params![
+                    format!("pay-{order_id}"),
+                    order_id,
+                    total_amount,
+                    shift_id,
+                    created_at
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let summary = get_shift_summary(&db, "cashier-shift").unwrap();
+        let rows = summary["driverDeliveries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "only current cashier-period staff should appear"
+        );
+        assert_eq!(rows[0]["driver_name"], "Current Driver");
+        assert_eq!(rows[0]["starting_amount"], 20.0);
+        assert_eq!(rows[0]["cash_collected"], 40.0);
     }
 }

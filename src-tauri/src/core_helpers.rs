@@ -71,9 +71,23 @@ pub(crate) fn validate_admin_api_path(path: &str) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err("Missing API path".into());
     }
-    if path.contains("..") {
+
+    // Reject null bytes, backslashes, and control characters.
+    if path.bytes().any(|b| b == 0 || b == b'\\' || b < 0x20) {
+        return Err("Invalid characters in API path".into());
+    }
+
+    // Decode percent-encoded sequences and re-validate against traversal.
+    // Manual decode to avoid adding a crate dependency.
+    let decoded = percent_decode_simple(path);
+
+    if decoded.contains("..") {
         return Err("Invalid API path".into());
     }
+    if decoded.bytes().any(|b| b == 0 || b == b'\\' || b < 0x20) {
+        return Err("Invalid characters in API path (encoded)".into());
+    }
+
     if path.starts_with("http://") || path.starts_with("https://") {
         return Err("Absolute URLs are not allowed".into());
     }
@@ -85,6 +99,35 @@ pub(crate) fn validate_admin_api_path(path: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("Path is outside the POS/admin allowlist".into())
+}
+
+/// Simple percent-decode: replaces `%XX` sequences with the decoded byte.
+/// Does not handle `+` as space (not needed for path validation).
+fn percent_decode_simple(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn normalize_status_for_storage(status: &str) -> String {

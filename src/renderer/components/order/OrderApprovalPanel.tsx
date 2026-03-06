@@ -270,7 +270,7 @@ export function OrderApprovalPanel({
     return uniqueItems.map((item: any) => {
       // Extract customizations/ingredients - handle both array and object formats
       // Requirements: 2.2 - Display customizations as sub-items with prices
-      let customizationsList: { name: string; price: number; isWithout?: boolean; categoryName?: string }[] = [];
+      let customizationsList: { name: string; price: number; isWithout?: boolean; isLittle?: boolean; categoryName?: string }[] = [];
       const rawCustomizations = item.customizations || item.modifiers || item.ingredients || item.selectedIngredients;
 
       // Helper to extract price from ingredient object - check all possible price fields
@@ -335,6 +335,42 @@ export function OrderApprovalPanel({
       const isWithoutItem = (c: any): boolean => {
         return c.isWithout === true || c.is_without === true || c.without === true;
       };
+      const isLittleItem = (c: any): boolean => {
+        return c.isLittle === true || c.is_little === true || c.little === true;
+      };
+
+      const resolveCategoryPath = (rawItem: any): string | null => {
+        const explicitPath =
+          (typeof rawItem?.category_path === 'string' && rawItem.category_path.trim()) ||
+          (typeof rawItem?.categoryPath === 'string' && rawItem.categoryPath.trim()) ||
+          '';
+        if (explicitPath) {
+          const [primary] = explicitPath.split('>');
+          const normalizedPrimary = typeof primary === 'string' ? primary.trim() : '';
+          if (normalizedPrimary) return normalizedPrimary;
+          return explicitPath;
+        }
+
+        const category =
+          rawItem?.categoryName ||
+          rawItem?.category_name ||
+          rawItem?.category?.name ||
+          rawItem?.menu_item?.category_name ||
+          rawItem?.menu_item?.categoryName ||
+          '';
+        const normalizedCategory = typeof category === 'string' ? category.trim() : '';
+        if (normalizedCategory) return normalizedCategory;
+
+        const fallbackSubcategory =
+          rawItem?.subcategory_name ||
+          rawItem?.subcategoryName ||
+          rawItem?.sub_category_name ||
+          rawItem?.subCategoryName ||
+          '';
+        const normalizedSubcategory =
+          typeof fallbackSubcategory === 'string' ? fallbackSubcategory.trim() : '';
+        return normalizedSubcategory || null;
+      };
 
       if (rawCustomizations) {
         if (Array.isArray(rawCustomizations)) {
@@ -344,6 +380,7 @@ export function OrderApprovalPanel({
               name: extractName(c),
               price: extractPrice(c),
               isWithout: isWithoutItem(c),
+              isLittle: isLittleItem(c),
               categoryName: extractCategoryName(c)
             }));
         } else if (typeof rawCustomizations === 'object' && rawCustomizations !== null) {
@@ -354,6 +391,7 @@ export function OrderApprovalPanel({
               name: extractName(c),
               price: extractPrice(c),
               isWithout: isWithoutItem(c),
+              isLittle: isLittleItem(c),
               categoryName: extractCategoryName(c)
             }));
         }
@@ -363,17 +401,32 @@ export function OrderApprovalPanel({
       const unitPrice = typeof item.unit_price === 'number' ? item.unit_price :
                         typeof item.price === 'number' ? item.price : 0;
 
+      const itemNotes = [
+        item.special_instructions,
+        item.specialInstructions,
+        item.notes,
+        item.instructions
+      ]
+        .map((value: any) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value: string) => Boolean(value))
+        .filter(
+          (value: string, index: number, array: string[]) =>
+            array.findIndex((existing: string) => existing.toLowerCase() === value.toLowerCase()) === index
+        )
+        .join(' | ');
+
       return {
         name: item.name || item.menu_item_name || item.menuItemName || item.title || item.product_name || 'Item',
         quantity: item.quantity || 1,
         price: unitPrice,
         total_price: item.total_price || item.totalPrice || (unitPrice * (item.quantity || 1)),
-        special_instructions: item.special_instructions || item.notes || item.instructions || undefined,
+        special_instructions: itemNotes || undefined,
         customizations: customizationsList,
-        categoryName: item.categoryName || item.category_name || null // Main category (e.g., "Crepes")
+        categoryName: item.categoryName || item.category_name || null, // Main category (e.g., "Crepes")
+        categoryPath: resolveCategoryPath(item),
       };
     });
-  }, [fullOrder, order]);
+  }, [fullOrder, order, t]);
 
   // Calculate subtotal from items using total_price values
   // Requirements: 2.3, 6.1, 6.3
@@ -385,7 +438,7 @@ export function OrderApprovalPanel({
     })));
   }, [normalizedItems]);
   const taxAmount = (order as any).tax_amount || (order as any).taxAmount || 0;
-  const deliveryFee = (order as any).delivery_fee || (order as any).deliveryFee || 0;
+  const deliveryFee = (order as any).delivery_fee ?? (order as any).deliveryFee ?? 0;
   const discountAmount = (order as any).discount_amount || (order as any).discountAmount || 0;
   const discountPercentage = (order as any).discount_percentage || (order as any).discountPercentage || 0;
   const totalAmount = (order as any).total_amount || order.totalAmount || subtotal;
@@ -705,7 +758,7 @@ export function OrderApprovalPanel({
                     </div>
                   ) : normalizedItems.length > 0 ? (
                     <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
-                      {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null }, idx: number) => (
+                      {normalizedItems.map((item: { name: string; quantity: number; price: number; total_price: number; special_instructions?: string; customizations?: any[]; categoryName?: string | null; categoryPath?: string | null }, idx: number) => (
                         <div
                           key={idx}
                           className="flex items-start justify-between p-3 bg-white/5 dark:bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
@@ -716,9 +769,9 @@ export function OrderApprovalPanel({
                             </div>
                             <div className="flex-1">
                               {/* Category label */}
-                              {item.categoryName && (
+                              {(item.categoryPath || item.categoryName) && (
                                 <div className="text-[10px] uppercase tracking-wider font-medium mb-0.5 liquid-glass-modal-text-muted">
-                                  {item.categoryName}
+                                  {item.categoryPath || item.categoryName}
                                 </div>
                               )}
                               {/* Item name (subcategory) */}
@@ -733,9 +786,9 @@ export function OrderApprovalPanel({
                               {item.customizations && item.customizations.length > 0 && (
                                 <div className="mt-2 space-y-1">
                                   {/* Added ingredients */}
-                                  {item.customizations.filter((c: any) => !c.isWithout).map((c: { name: string; price: number }, i: number) => (
+                                  {item.customizations.filter((c: any) => !c.isWithout).map((c: { name: string; price: number; isLittle?: boolean }, i: number) => (
                                     <div key={`add-${i}`} className="flex justify-between text-xs liquid-glass-modal-text-muted">
-                                      <span>+ {c.name}</span>
+                                      <span>+ {c.name}{c.isLittle ? ` (${t('menu.itemModal.little', { defaultValue: 'Little' })})` : ''}</span>
                                       {c.price > 0 && (
                                         <span>{formatCurrency(c.price)}</span>
                                       )}
@@ -744,6 +797,9 @@ export function OrderApprovalPanel({
                                   {/* Without ingredients */}
                                   {item.customizations.filter((c: any) => c.isWithout).length > 0 && (
                                     <div className="mt-1 pt-1 border-t border-red-500/20">
+                                      <div className="text-[11px] text-red-300 mb-1">
+                                        {t('menu.itemModal.without', { defaultValue: 'Without' })}
+                                      </div>
                                       {item.customizations.filter((c: any) => c.isWithout).map((c: { name: string }, i: number) => (
                                         <div key={`without-${i}`} className="flex justify-between text-xs text-red-400">
                                           <span className="line-through inline-flex items-center gap-1">

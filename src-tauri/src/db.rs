@@ -17,7 +17,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 24;
+const CURRENT_SCHEMA_VERSION: i32 = 25;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -95,7 +95,13 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
         )
         .unwrap_or(0);
 
-    if current >= CURRENT_SCHEMA_VERSION {
+    if current > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "Database schema version ({current}) is newer than this application supports ({CURRENT_SCHEMA_VERSION}). \
+             Please update the application or restore a backup."
+        ));
+    }
+    if current == CURRENT_SCHEMA_VERSION {
         info!("Database schema up to date (v{current})");
         return Ok(());
     }
@@ -173,6 +179,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 24 {
         migrate_v24(conn)?;
+    }
+    if current < 25 {
+        migrate_v25(conn)?;
     }
 
     Ok(())
@@ -1600,6 +1609,42 @@ fn migrate_v24(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v25: add receipt typography controls to printer_profiles.
+fn migrate_v25(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "printer_profiles", "font_type")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles
+             ADD COLUMN font_type TEXT NOT NULL DEFAULT 'a'
+             CHECK (font_type IN ('a', 'b'));",
+        )
+        .map_err(|e| format!("migration v25 add printer_profiles.font_type: {e}"))?;
+    }
+
+    if !column_exists(conn, "printer_profiles", "layout_density")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles
+             ADD COLUMN layout_density TEXT NOT NULL DEFAULT 'compact'
+             CHECK (layout_density IN ('compact', 'balanced', 'spacious'));",
+        )
+        .map_err(|e| format!("migration v25 add printer_profiles.layout_density: {e}"))?;
+    }
+
+    if !column_exists(conn, "printer_profiles", "header_emphasis")? {
+        conn.execute_batch(
+            "ALTER TABLE printer_profiles
+             ADD COLUMN header_emphasis TEXT NOT NULL DEFAULT 'strong'
+             CHECK (header_emphasis IN ('normal', 'strong'));",
+        )
+        .map_err(|e| format!("migration v25 add printer_profiles.header_emphasis: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (25)", [])
+        .map_err(|e| format!("migration v25 mark schema version: {e}"))?;
+
+    info!("Applied migration v25 (printer_profiles typography controls)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -1713,6 +1758,10 @@ pub fn ecr_update_device(
     }
 
     sets.push("updated_at = datetime('now')".to_string());
+    // SAFETY: `sets` is built exclusively from hardcoded column names via the
+    // maybe_set!/maybe_set_bool!/maybe_set_json! macros above. No user input
+    // reaches the format string — only parameterised `?` placeholders carry
+    // user-supplied values.
     let sql = format!("UPDATE ecr_devices SET {} WHERE id = ?", sets.join(", "));
     values.push(Box::new(id.to_string()));
 
