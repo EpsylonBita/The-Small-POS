@@ -5,6 +5,7 @@ import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
 import { formatCurrency } from '../../utils/format';
+import type { DeliveryFeeStatus } from '../../utils/delivery-fee';
 import { getBridge } from '../../../lib';
 import toast from 'react-hot-toast';
 
@@ -65,7 +66,7 @@ interface MenuCartProps {
   orderType?: 'pickup' | 'delivery'; // Order type for minimum order validation
   minimumOrderAmount?: number; // Minimum order amount for delivery zones
   deliveryFee?: number;
-  deliveryFeeResolved?: boolean;
+  deliveryFeeStatus?: DeliveryFeeStatus;
   // Coupon props
   appliedCoupon?: AppliedCoupon | null;
   onApplyCoupon?: (code: string) => void;
@@ -95,7 +96,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   orderType,
   minimumOrderAmount = 0,
   deliveryFee = 0,
-  deliveryFeeResolved = true,
+  deliveryFeeStatus = 'resolved',
   appliedCoupon,
   onApplyCoupon,
   onRemoveCoupon,
@@ -547,16 +548,26 @@ export const MenuCart: React.FC<MenuCartProps> = ({
 
   // Minimum order validation for delivery orders
   const isDeliveryOrder = orderType === 'delivery';
-  const appliedDeliveryFee = isDeliveryOrder && deliveryFeeResolved ? deliveryFee : 0;
+  const appliedDeliveryFee = isDeliveryOrder && deliveryFeeStatus === 'resolved' ? deliveryFee : 0;
   const totalWithDeliveryFee = totalAfterDiscount + appliedDeliveryFee;
   const isBelowMinimum = isDeliveryOrder && minimumOrderAmount > 0 && totalAfterDiscount < minimumOrderAmount;
   const shortfall = isBelowMinimum ? minimumOrderAmount - totalAfterDiscount : 0;
+  const deliveryFeeDisplay =
+    deliveryFeeStatus === 'resolved'
+      ? formatCurrency(appliedDeliveryFee)
+      : deliveryFeeStatus === 'requires_selection'
+        ? t('menu.cart.deliveryFeeNeedsExactAddress')
+        : deliveryFeeStatus === 'out_of_zone'
+          ? t('menu.cart.deliveryFeeOutOfZone')
+          : deliveryFeeStatus === 'unavailable'
+            ? t('menu.cart.deliveryFeeUnavailable')
+            : t('menu.cart.calculatingDeliveryFee');
   const isCheckoutBlocked =
     uniqueCartItems.length === 0 ||
     isAppliedDiscountOverMax ||
     isSaving ||
     (isBelowMinimum && !editMode) ||
-    (isDeliveryOrder && !deliveryFeeResolved);
+    (isDeliveryOrder && deliveryFeeStatus !== 'resolved');
 
   return (
     <div
@@ -997,9 +1008,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               {t('menu.cart.deliveryFee')}
             </span>
             <span className="liquid-glass-modal-text">
-              {deliveryFeeResolved
-                ? formatCurrency(appliedDeliveryFee)
-                : t('menu.cart.calculatingDeliveryFee')}
+              {deliveryFeeDisplay}
             </span>
           </div>
         )}

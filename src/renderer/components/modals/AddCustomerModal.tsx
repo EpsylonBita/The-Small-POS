@@ -73,6 +73,25 @@ interface AddressSelectionDetails {
   fromSuggestion?: boolean;
 }
 
+const extractErrorMessage = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+  if (error && typeof error === 'object') {
+    const candidate = (error as { error?: unknown; message?: unknown });
+    if (typeof candidate.error === 'string' && candidate.error.trim()) {
+      return candidate.error;
+    }
+    if (typeof candidate.message === 'string' && candidate.message.trim()) {
+      return candidate.message;
+    }
+  }
+  return fallback;
+};
+
 const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   value,
   onChange,
@@ -837,7 +856,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             throw new Error(result?.error || 'Failed to add address');
           }
         } catch (err: any) {
-          throw new Error(err.message || 'Failed to add address');
+          throw new Error(extractErrorMessage(err, 'Failed to add address'));
         }
         return;
       }
@@ -853,9 +872,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
+            name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
             coordinates: persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
+            customer_id: initialCustomer.id,
             ...validationMetadata,
           };
 
@@ -863,7 +884,9 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           const addressToEdit = initialCustomer.addresses?.find(
             (addr: any) => addr.id === initialCustomer.editAddressId
           );
-          const currentVersion = addressToEdit?.version || 1;
+          const currentVersion = Number.isFinite(Number(addressToEdit?.version))
+            ? Number(addressToEdit.version)
+            : -1;
 
           // Use customerService to update the address
           const result = await customerService.updateCustomerAddress(
@@ -892,7 +915,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             throw new Error(result?.error || 'Failed to update address');
           }
         } catch (err: any) {
-          throw new Error(err.message || 'Failed to update address');
+          throw new Error(extractErrorMessage(err, 'Failed to update address'));
         }
         return;
       }
@@ -990,7 +1013,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             throw new Error(result?.error || 'Failed to update customer');
           }
         } catch (err: any) {
-          throw new Error(err.message || 'Failed to update customer');
+          throw new Error(extractErrorMessage(err, 'Failed to update customer'));
         }
         return;
       }

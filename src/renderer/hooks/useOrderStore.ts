@@ -1271,7 +1271,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       get()._setLoading(operation, true);
       try {
         const result = await bridge.orders.assignDriver(orderId, driverId, notes);
-        const driverName = (result as any)?.driverName || (result as any)?.data?.driverName || driverId;
+        const driverName = String((result as any)?.driverName || (result as any)?.data?.driverName || '').trim();
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
@@ -1284,7 +1284,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                   ...order,
                   status: isCancelled ? order.status : 'completed',
                   driverId,
-                  driverName,
+                  driverName: driverName || order.driverName || '',
                   updatedAt: new Date().toISOString(),
                   sync_status: 'pending',
                   syncStatus: 'pending'
@@ -1327,7 +1327,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           }
 
           get()._invalidateCache();
-          toast.success(`Driver assigned: ${driverName}`);
+          toast.success(driverName ? `Driver assigned: ${driverName}` : 'Driver assigned');
           return true;
         }
         throw new Error(result?.error || 'Failed to assign driver');

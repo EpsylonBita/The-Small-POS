@@ -455,6 +455,11 @@ pub fn run() {
             app.manage(ecr::DeviceManager::new());
             app.manage(commands::runtime::ScreenCaptureSignalPollingState::default());
 
+            let updater_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::updates::reconcile_update_state_on_startup(updater_app).await;
+            });
+
             // Sync state (shared between commands and background loop)
             let sync_state = Arc::new(sync::SyncState::new());
             app.manage(sync_state.clone());
@@ -975,6 +980,7 @@ pub fn run() {
             commands::updates::update_download,
             commands::updates::update_cancel_download,
             commands::updates::update_install,
+            commands::updates::update_schedule_install,
             commands::updates::update_set_channel,
             // API proxy
             commands::api_bridge::api_fetch_from_admin,

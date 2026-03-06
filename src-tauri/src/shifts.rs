@@ -406,7 +406,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             );
         }
 
-        expected = opening_cash + cash_sales - refunds - expenses - deducted_staff_payments - drops
+        expected = opening_cash + cash_sales
+            - refunds
+            - expenses
+            - deducted_staff_payments
+            - drops
             - driver_given
             + driver_returned
             + inherited_driver_expected_returns

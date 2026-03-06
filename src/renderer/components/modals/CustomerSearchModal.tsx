@@ -19,9 +19,16 @@ interface CustomerAddress {
   postal_code?: string;
   floor_number?: string;
   notes?: string;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
+  latitude?: number | null;
+  longitude?: number | null;
   address_type: string;
   is_default: boolean;
   created_at: string;
+  updated_at?: string;
+  version?: number;
 }
 
 interface Customer {
@@ -34,6 +41,11 @@ interface Customer {
   floor_number?: string;
   notes?: string;
   name_on_ringer?: string;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
+  latitude?: number | null;
+  longitude?: number | null;
   version?: number;
   addresses?: CustomerAddress[];
   is_banned?: boolean;
@@ -65,6 +77,11 @@ const resolveAddressStreet = (address?: Partial<CustomerAddress> | null): string
 
 const normalizeCustomerAddress = (address: any): CustomerAddress => {
   const normalizedStreet = resolveAddressStreet(address);
+  const coordinates =
+    address?.coordinates ||
+    (Number.isFinite(Number(address?.latitude)) && Number.isFinite(Number(address?.longitude))
+      ? { lat: Number(address.latitude), lng: Number(address.longitude) }
+      : undefined);
   return {
     ...address,
     id: address?.id ?? '',
@@ -72,6 +89,9 @@ const normalizeCustomerAddress = (address: any): CustomerAddress => {
     street: normalizedStreet,
     street_address: normalizedStreet,
     notes: address?.notes ?? address?.delivery_notes,
+    coordinates,
+    latitude: address?.latitude ?? null,
+    longitude: address?.longitude ?? null,
     address_type: typeof address?.address_type === 'string' ? address.address_type : 'delivery',
     is_default: Boolean(address?.is_default),
     created_at: typeof address?.created_at === 'string' ? address.created_at : '',
@@ -211,6 +231,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           floor_number: c.floor_number,
           notes: c.notes,
           name_on_ringer: c.name_on_ringer,
+          coordinates: c.coordinates ||
+            (Number.isFinite(Number(c.latitude)) && Number.isFinite(Number(c.longitude))
+              ? { lat: Number(c.latitude), lng: Number(c.longitude) }
+              : undefined),
+          latitude: c.latitude ?? null,
+          longitude: c.longitude ?? null,
           version: c.version,
           addresses: normalizeCustomerAddresses(c.addresses),
           is_banned: c.is_banned,
@@ -232,6 +258,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
           floor_number: payload.customer.floor_number,
           notes: payload.customer.notes,
           name_on_ringer: payload.customer.name_on_ringer,
+          coordinates: payload.customer.coordinates ||
+            (Number.isFinite(Number(payload.customer.latitude)) &&
+              Number.isFinite(Number(payload.customer.longitude))
+              ? { lat: Number(payload.customer.latitude), lng: Number(payload.customer.longitude) }
+              : undefined),
+          latitude: payload.customer.latitude ?? null,
+          longitude: payload.customer.longitude ?? null,
           version: payload.customer.version,
           addresses: normalizeCustomerAddresses(payload.customer.addresses),
           is_banned: payload.customer.is_banned,
@@ -328,6 +361,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
             postal_code: selectedAddr.postal_code,
             floor_number: selectedAddr.floor_number,
             notes: selectedAddr.notes || customer.notes,
+            coordinates: selectedAddr.coordinates ?? customer.coordinates,
+            latitude: selectedAddr.latitude ?? customer.latitude ?? null,
+            longitude: selectedAddr.longitude ?? customer.longitude ?? null,
             selected_address_id: selectedAddr.id
           };
           console.log('[CustomerSearch] Passing to OrderFlow:', {
@@ -447,17 +483,16 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     }
   }, [isOpen, searchTimeout]);
 
-  // Autofocus and select search input when modal opens
+  // Keep the search field focused when the modal opens so keyboard input can start immediately.
   useEffect(() => {
     if (isOpen) {
-      // Use a slightly longer timeout to ensure modal animation completes
       const timer = setTimeout(() => {
         const el = searchInputRef.current;
         if (el) {
           el.focus();
           el.select();
         }
-      }, 100);
+      }, 120);
       return () => clearTimeout(timer);
     }
   }, [isOpen]);
@@ -532,6 +567,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       className="!max-w-md"
       closeOnBackdrop={true}
       closeOnEscape={true}
+      initialFocusRef={searchInputRef}
     >
       {/* Search Input */}
       <div className="mb-6">

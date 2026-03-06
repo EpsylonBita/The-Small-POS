@@ -268,12 +268,16 @@ export class CustomerSyncService {
             if (coords.type === 'Point' && Array.isArray(coords.coordinates)) {
               // Already GeoJSON format
               addressPayload.coordinates = coords
+              addressPayload.longitude = coords.coordinates[0]
+              addressPayload.latitude = coords.coordinates[1]
             } else if (coords.lat !== undefined && coords.lng !== undefined) {
               // Convert { lat, lng } to GeoJSON Point (note: GeoJSON is [lng, lat] order)
               addressPayload.coordinates = {
                 type: 'Point',
                 coordinates: [coords.lng, coords.lat]
               }
+              addressPayload.latitude = coords.lat
+              addressPayload.longitude = coords.lng
             }
           }
 
@@ -467,11 +471,28 @@ export class CustomerSyncService {
       if ((address as any).floor_number !== undefined) addressData.floor_number = (address as any).floor_number
       if ((address as any).address_type !== undefined) addressData.address_type = (address as any).address_type
       if ((address as any).is_default !== undefined) addressData.is_default = (address as any).is_default
+      if ((address as any).latitude !== undefined) addressData.latitude = (address as any).latitude
+      if ((address as any).longitude !== undefined) addressData.longitude = (address as any).longitude
       // Notes field - DB column is 'notes' (not 'delivery_notes')
       if ((address as any).notes !== undefined || (address as any).delivery_notes !== undefined) {
         addressData.notes = (address as any).notes !== undefined 
           ? (address as any).notes 
           : (address as any).delivery_notes
+      }
+      if ((address as any).coordinates) {
+        const coordinates = (address as any).coordinates
+        if (coordinates.type === 'Point' && Array.isArray(coordinates.coordinates)) {
+          addressData.coordinates = coordinates
+          if (addressData.longitude === undefined) addressData.longitude = coordinates.coordinates[0]
+          if (addressData.latitude === undefined) addressData.latitude = coordinates.coordinates[1]
+        } else if (coordinates.lat !== undefined && coordinates.lng !== undefined) {
+          addressData.coordinates = {
+            type: 'Point',
+            coordinates: [coordinates.lng, coordinates.lat]
+          }
+          if (addressData.latitude === undefined) addressData.latitude = coordinates.lat
+          if (addressData.longitude === undefined) addressData.longitude = coordinates.lng
+        }
       }
 
       const { data: created, error } = await this.supabase
@@ -512,11 +533,28 @@ export class CustomerSyncService {
       if ((updates as any).floor_number !== undefined) updateData.floor_number = (updates as any).floor_number
       if ((updates as any).address_type !== undefined) updateData.address_type = (updates as any).address_type
       if ((updates as any).is_default !== undefined) updateData.is_default = (updates as any).is_default
+      if ((updates as any).latitude !== undefined) updateData.latitude = (updates as any).latitude
+      if ((updates as any).longitude !== undefined) updateData.longitude = (updates as any).longitude
       // Notes field - DB column is 'notes' (not 'delivery_notes')
       if ((updates as any).notes !== undefined || (updates as any).delivery_notes !== undefined) {
         updateData.notes = (updates as any).notes !== undefined 
           ? (updates as any).notes 
           : (updates as any).delivery_notes
+      }
+      if ((updates as any).coordinates !== undefined) {
+        const coordinates = (updates as any).coordinates
+        if (coordinates?.type === 'Point' && Array.isArray(coordinates.coordinates)) {
+          updateData.coordinates = coordinates
+          if (updateData.longitude === undefined) updateData.longitude = coordinates.coordinates[0]
+          if (updateData.latitude === undefined) updateData.latitude = coordinates.coordinates[1]
+        } else if (coordinates?.lat !== undefined && coordinates?.lng !== undefined) {
+          updateData.coordinates = {
+            type: 'Point',
+            coordinates: [coordinates.lng, coordinates.lat]
+          }
+          if (updateData.latitude === undefined) updateData.latitude = coordinates.lat
+          if (updateData.longitude === undefined) updateData.longitude = coordinates.lng
+        }
       }
 
       // Remove undefined values
@@ -857,6 +895,9 @@ export class CustomerSyncService {
       total_orders: data.total_orders || 0,
       last_order_date: data.last_order_date,
       addresses: data.customer_addresses?.map(this.normalizeAddressData) || [],
+      coordinates: data.coordinates ?? null,
+      latitude: data.latitude ?? null,
+      longitude: data.longitude ?? null,
       version: data.version,
       updated_by: data.updated_by,
       last_synced_at: data.last_synced_at,
@@ -872,7 +913,7 @@ export class CustomerSyncService {
     return {
       id: data.id,
       customer_id: data.customer_id,
-      street: data.street,
+      street: data.street || data.street_address || '',
       street_address: data.street_address || data.street,
       city: data.city,
       postal_code: data.postal_code,
@@ -883,6 +924,9 @@ export class CustomerSyncService {
       delivery_notes: data.delivery_notes !== undefined ? data.delivery_notes : (data.notes !== undefined ? data.notes : null),
       notes: data.notes !== undefined ? data.notes : (data.delivery_notes !== undefined ? data.delivery_notes : null),
       name_on_ringer: data.name_on_ringer,
+      coordinates: data.coordinates ?? null,
+      latitude: data.latitude ?? null,
+      longitude: data.longitude ?? null,
       version: data.version,
       created_at: data.created_at,
       updated_at: data.updated_at

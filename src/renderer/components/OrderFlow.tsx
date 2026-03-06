@@ -44,21 +44,33 @@ interface Customer {
   name: string;
   email?: string;
   address?: string;
+  city?: string;
   postal_code?: string;
   floor_number?: string;
   notes?: string;
   name_on_ringer?: string;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
+  latitude?: number | null;
+  longitude?: number | null;
   version?: number;
   editAddressId?: string; // ID of address being edited
   addresses?: Array<{
     id: string;
     street_address: string;
+    street?: string;
     city: string;
     postal_code?: string;
     floor_number?: string;
     notes?: string;
     delivery_notes?: string;
     name_on_ringer?: string;
+    coordinates?:
+      | { lat: number; lng: number }
+      | { type: 'Point'; coordinates: [number, number] };
+    latitude?: number | null;
+    longitude?: number | null;
     address_type: string;
     is_default: boolean;
     created_at: string;
@@ -340,12 +352,28 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
   const handleAddressAdded = useCallback((customer: Customer) => {
     // Address was added via AddCustomerModal - customer now has new address data
+    const selectedAddressId = (customer as any).selected_address_id;
+    const nextAddress =
+      (selectedAddressId && customer.addresses?.find((address) => address.id === selectedAddressId)) ||
+      customer.addresses?.find((address) => address.is_default) ||
+      customer.addresses?.[0];
+
     setSelectedCustomer(customer);
     setSelectedAddress({
-      street_address: customer.address,
-      postal_code: customer.postal_code,
-      floor_number: customer.floor_number,
-      notes: customer.notes,
+      street_address: nextAddress?.street_address || nextAddress?.street || customer.address || '',
+      city: nextAddress?.city || customer.city || '',
+      postal_code: nextAddress?.postal_code || customer.postal_code,
+      floor_number: nextAddress?.floor_number || customer.floor_number,
+      notes: nextAddress?.notes || nextAddress?.delivery_notes || customer.notes,
+      name_on_ringer: nextAddress?.name_on_ringer || customer.name_on_ringer,
+      coordinates:
+        nextAddress?.coordinates ||
+        customer.coordinates ||
+        (Number.isFinite(customer.latitude) && Number.isFinite(customer.longitude)
+          ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
+          : undefined),
+      latitude: nextAddress?.latitude ?? customer.latitude ?? null,
+      longitude: nextAddress?.longitude ?? customer.longitude ?? null,
     });
     setCustomerToEdit(null);
     setCustomerModalMode('new');

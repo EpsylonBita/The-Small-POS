@@ -239,14 +239,57 @@ fn default_update_state() -> serde_json::Value {
         "error": serde_json::Value::Null,
         "progress": 0,
         "updateInfo": serde_json::Value::Null,
+        "downloadedVersion": serde_json::Value::Null,
+        "downloadedArtifactPath": serde_json::Value::Null,
+        "installPending": false,
+        "installingVersion": serde_json::Value::Null,
     })
+}
+
+pub(crate) fn normalize_update_state(state: &serde_json::Value) -> serde_json::Value {
+    let mut normalized = default_update_state();
+
+    if let (Some(source), Some(target)) = (state.as_object(), normalized.as_object_mut()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+
+    let downloaded_version = normalized
+        .get("downloadedVersion")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if normalized
+        .get("updateInfo")
+        .and_then(|value| value.get("version"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        if let Some(version) = downloaded_version {
+            if let Some(target) = normalized.as_object_mut() {
+                target.insert(
+                    "updateInfo".to_string(),
+                    serde_json::json!({
+                        "version": version,
+                    }),
+                );
+            }
+        }
+    }
+
+    normalized
 }
 
 pub(crate) fn read_update_state(db: &db::DbState) -> Result<serde_json::Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     if let Some(raw) = db::get_setting(&conn, "local", "updater_state") {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
-            return Ok(parsed);
+            return Ok(normalize_update_state(&parsed));
         }
     }
     Ok(default_update_state())
@@ -257,7 +300,8 @@ pub(crate) fn write_update_state(
     state: &serde_json::Value,
 ) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    db::set_setting(&conn, "local", "updater_state", &state.to_string())
+    let normalized = normalize_update_state(state);
+    db::set_setting(&conn, "local", "updater_state", &normalized.to_string())
 }
 
 pub(crate) fn update_info_from_release(update: &tauri_plugin_updater::Update) -> serde_json::Value {

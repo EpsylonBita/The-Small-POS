@@ -321,7 +321,7 @@ import type { UpdateStatus } from "./components/UpdateDialog";
 function getUpdateStatus(autoUpdater: ReturnType<typeof useAutoUpdater>): UpdateStatus {
   if (autoUpdater.checking) return 'checking';
   if (autoUpdater.downloading) return 'downloading';
-  if (autoUpdater.ready) return 'downloaded';
+  if (autoUpdater.ready && autoUpdater.updateInfo?.version) return 'downloaded';
   if (autoUpdater.error) return 'error';
   if (autoUpdater.available) return 'available';
   return 'not-available';
@@ -337,6 +337,15 @@ function AppContent() {
 
   // Auto-check for updates on app startup
   useEffect(() => {
+    if (
+      !autoUpdater.hydrated ||
+      autoUpdater.ready ||
+      autoUpdater.installPending ||
+      !!autoUpdater.installingVersion
+    ) {
+      return;
+    }
+
     // Wait 5 seconds after app starts to check for updates
     const checkUpdatesTimer = setTimeout(() => {
       console.log('[App] Auto-checking for updates on startup');
@@ -344,7 +353,13 @@ function AppContent() {
     }, 5000);
 
     return () => clearTimeout(checkUpdatesTimer);
-  }, []); // Only run once on mount
+  }, [
+    autoUpdater.checkForUpdates,
+    autoUpdater.hydrated,
+    autoUpdater.installPending,
+    autoUpdater.installingVersion,
+    autoUpdater.ready,
+  ]);
 
   // Use custom hook for app events
   const { isShuttingDown } = useAppEvents({
@@ -635,8 +650,8 @@ function AppContent() {
 
             {/* Unified Update Dialog - handles all update states */}
             <UpdateDialog
-              isOpen={autoUpdater.updateDialogOpen || autoUpdater.showNotification || autoUpdater.downloading || autoUpdater.ready}
-              onClose={autoUpdater.updateDialogOpen ? autoUpdater.closeUpdateDialog : autoUpdater.dismissUpdate}
+              isOpen={autoUpdater.updateDialogOpen}
+              onClose={autoUpdater.closeUpdateDialog}
               status={getUpdateStatus(autoUpdater)}
               updateInfo={autoUpdater.updateInfo}
               progress={autoUpdater.progress}
@@ -645,6 +660,7 @@ function AppContent() {
               onDownload={autoUpdater.downloadUpdate}
               onCancel={autoUpdater.cancelDownload}
               onInstall={autoUpdater.installUpdate}
+              onInstallLater={autoUpdater.scheduleInstallOnNextRestart}
               onRetry={autoUpdater.checkForUpdates}
             />
           </FullscreenAwareLayout>

@@ -1500,10 +1500,6 @@ fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, S
     let mut lines = Vec::new();
     if doc.delivery_slip_mode == DeliverySlipMode::AssignDriver {
         lines.push((
-            receipt_label(lang, "Driver ID").to_string(),
-            delivery_value_or_dash(doc.driver_id.as_deref()),
-        ));
-        lines.push((
             receipt_label(lang, "Driver").to_string(),
             delivery_value_or_dash(doc.driver_name.as_deref()),
         ));
@@ -7537,7 +7533,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_slip_info_lines_assign_driver_starts_with_driver_id_and_driver_name() {
+    fn delivery_slip_info_lines_assign_driver_starts_with_driver_name() {
         let doc = OrderReceiptDoc {
             delivery_slip_mode: DeliverySlipMode::AssignDriver,
             driver_id: Some("DRV-42".to_string()),
@@ -7546,10 +7542,9 @@ mod tests {
             ..OrderReceiptDoc::default()
         };
         let lines = delivery_slip_info_lines(&doc, "en");
-        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Driver ID"));
-        assert_eq!(lines.first().map(|(_, v)| v.as_str()), Some("DRV-42"));
-        assert_eq!(lines.get(1).map(|(k, _)| k.as_str()), Some("Driver"));
-        assert_eq!(lines.get(1).map(|(_, v)| v.as_str()), Some("Nikos Driver"));
+        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Driver"));
+        assert_eq!(lines.first().map(|(_, v)| v.as_str()), Some("Nikos Driver"));
+        assert!(lines.iter().all(|(label, _)| label != "Driver ID"));
     }
 
     #[test]
@@ -7589,7 +7584,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_slip_escpos_assign_driver_prints_driver_id_before_address() {
+    fn delivery_slip_escpos_assign_driver_prints_driver_name_without_driver_id() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             footer_text: None,
@@ -7613,10 +7608,12 @@ mod tests {
         });
 
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
-        let driver_id_idx = text.find("Driver ID").unwrap_or(usize::MAX);
+        let driver_name_idx = text.find("Driver").unwrap_or(usize::MAX);
         let address_idx = text.find("Address").unwrap_or(usize::MAX);
-        assert!(driver_id_idx < address_idx);
-        assert!(text.contains("DRV-99"));
+        assert!(driver_name_idx < address_idx);
+        assert!(text.contains("Nikos Driver"));
+        assert!(!text.contains("Driver ID"));
+        assert!(!text.contains("DRV-99"));
     }
 
     #[test]

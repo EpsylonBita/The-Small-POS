@@ -39,6 +39,7 @@ export interface UpdateDialogProps {
   onDownload: () => void;
   onCancel: () => void;
   onInstall: () => void;
+  onInstallLater: () => void;
   onRetry: () => void;
 }
 
@@ -53,6 +54,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
   onDownload,
   onCancel,
   onInstall,
+  onInstallLater,
   onRetry,
 }) => {
   const { t } = useI18n();
@@ -101,7 +103,7 @@ export const UpdateDialog: React.FC<UpdateDialogProps> = ({
           <DownloadedState
             updateInfo={updateInfo}
             onInstall={onInstall}
-            onClose={onClose}
+            onInstallLater={onInstallLater}
           />
         );
       case 'error':
@@ -295,16 +297,18 @@ const DownloadingState: React.FC<DownloadingStateProps> = ({
 interface DownloadedStateProps {
   updateInfo?: UpdateInfo | null;
   onInstall: () => void;
-  onClose: () => void;
+  onInstallLater: () => void;
 }
 
 const DownloadedState: React.FC<DownloadedStateProps> = ({
   updateInfo,
   onInstall,
-  onClose
+  onInstallLater
 }) => {
   const { t } = useI18n();
-  const version = updateInfo?.version || 'New Version';
+  const readyTitle = updateInfo?.version
+    ? t('updates.downloaded.ready', { version: updateInfo.version })
+    : t('updates.downloaded.readyGeneric', 'The downloaded update is ready!');
 
   const handleInstall = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -321,8 +325,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
   const handleClose = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    console.log('[UpdateDialog] Install Later button clicked - calling onClose');
-    onClose();
+    onInstallLater();
   };
 
   return (
@@ -341,7 +344,7 @@ const DownloadedState: React.FC<DownloadedStateProps> = ({
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white">{t('updates.downloaded.ready', { version })}</h3>
+      <h3 className="text-xl font-bold text-white">{readyTitle}</h3>
 
       <p className="text-gray-300">
         {t('updates.downloaded.description')}

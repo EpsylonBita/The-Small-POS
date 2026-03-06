@@ -385,7 +385,7 @@ export const OrderCard = memo<OrderCardProps>(({
                         <circle cx="17" cy="18" r="2" />
                         <circle cx="7" cy="18" r="2" />
                       </svg>
-                      {driverNameNormalized || (driverIdNormalized ? `Driver ${String(driverIdNormalized).slice(-6)}` : t('orderCard.driverAssigned', 'Driver Assigned'))}
+                      {driverNameNormalized || t('orderCard.driverAssigned', 'Driver Assigned')}
                     </span>
                   </div>
                 )}

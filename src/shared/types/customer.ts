@@ -23,6 +23,12 @@ export interface CustomerAddress {
   delivery_notes?: string;
   notes?: string; // Alias for delivery_notes (Supabase field name)
   name_on_ringer?: string; // Name to display on delivery ringer
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null;
+  latitude?: number | null;
+  longitude?: number | null;
   created_at?: string;
   updated_at?: string;
   // Sync metadata
@@ -63,6 +69,12 @@ export interface Customer {
   // Ringer name - name displayed on doorbell for delivery
   name_on_ringer?: string;
   ringer_name?: string; // Alias for name_on_ringer (Supabase field name)
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null;
+  latitude?: number | null;
+  longitude?: number | null;
   // Branch association
   branch_id?: string;
   // Sync metadata

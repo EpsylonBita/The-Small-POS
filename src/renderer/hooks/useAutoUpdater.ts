@@ -5,284 +5,397 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import type { UpdateState as BridgeUpdateState } from '../../lib';
 
 interface UpdateState {
-    checking: boolean;
-    available: boolean;
-    downloading: boolean;
-    ready: boolean;
-    error: string | null;
-    updateInfo: UpdateInfo | null;
-    progress: ProgressInfo | undefined;
+  checking: boolean;
+  available: boolean;
+  downloading: boolean;
+  ready: boolean;
+  error: string | null;
+  updateInfo: UpdateInfo | null;
+  progress: ProgressInfo | undefined;
+  downloadedVersion: string | null;
+  downloadedArtifactPath: string | null;
+  installPending: boolean;
+  installingVersion: string | null;
 }
 
-function normalizeProgress(progress: BridgeUpdateState['progress'] | ProgressInfo | undefined): ProgressInfo | undefined {
-    if (progress === undefined || progress === null) {
-        return undefined;
-    }
+function normalizeProgress(
+  progress: BridgeUpdateState['progress'] | ProgressInfo | undefined
+): ProgressInfo | undefined {
+  if (progress === undefined || progress === null) {
+    return undefined;
+  }
 
-    if (typeof progress === 'number') {
-        return {
-            percent: progress,
-            bytesPerSecond: 0,
-            transferred: 0,
-            total: 0,
-            delta: 0,
-        } as ProgressInfo;
-    }
+  if (typeof progress === 'number') {
+    return {
+      percent: progress,
+      bytesPerSecond: 0,
+      transferred: 0,
+      total: 0,
+      delta: 0,
+    } as ProgressInfo;
+  }
 
-    return progress as ProgressInfo;
+  return progress as ProgressInfo;
+}
+
+function normalizeUpdateInfo(
+  updateInfo: BridgeUpdateState['updateInfo'],
+  downloadedVersion?: string | null
+): UpdateInfo | null {
+  if (
+    updateInfo &&
+    typeof updateInfo === 'object' &&
+    typeof (updateInfo as UpdateInfo).version === 'string' &&
+    (updateInfo as UpdateInfo).version.trim()
+  ) {
+    return updateInfo as UpdateInfo;
+  }
+
+  if (downloadedVersion && downloadedVersion.trim()) {
+    return {
+      version: downloadedVersion.trim(),
+    };
+  }
+
+  return null;
 }
 
 export function useAutoUpdater() {
-    const bridge = getBridge();
-    const [state, setState] = useState<UpdateState>({
-        checking: false,
-        available: false,
-        downloading: false,
-        ready: false,
-        error: null,
-        updateInfo: null,
-        progress: undefined
+  const bridge = getBridge();
+  const [state, setState] = useState<UpdateState>({
+    checking: false,
+    available: false,
+    downloading: false,
+    ready: false,
+    error: null,
+    updateInfo: null,
+    progress: undefined,
+    downloadedVersion: null,
+    downloadedArtifactPath: null,
+    installPending: false,
+    installingVersion: null,
+  });
+  const [hydrated, setHydrated] = useState(false);
+
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(() => {
+    return localStorage.getItem('dismissedUpdateVersion');
+  });
+
+  const [currentVersion, setCurrentVersion] = useState<string>('');
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+
+  const checkingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const receivedResponseRef = useRef<boolean>(false);
+  const notifiedVersionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const listeners = {
+      'update-checking': () => {
+        receivedResponseRef.current = false;
+        setState((s) => ({
+          ...s,
+          checking: true,
+          error: null,
+          available: false,
+          ready: false,
+          installPending: false,
+          installingVersion: null,
+          progress: undefined,
+        }));
+
+        if (checkingTimeoutRef.current) {
+          clearTimeout(checkingTimeoutRef.current);
+        }
+        checkingTimeoutRef.current = setTimeout(() => {
+          if (!receivedResponseRef.current) {
+            setState((s) => {
+              if (s.checking && !s.available && !s.error) {
+                return {
+                  ...s,
+                  checking: false,
+                  error: 'Update check timed out. Please try again.',
+                };
+              }
+              return s;
+            });
+          }
+        }, 30000);
+      },
+      'update-available': (info: UpdateInfo) => {
+        receivedResponseRef.current = true;
+        if (checkingTimeoutRef.current) {
+          clearTimeout(checkingTimeoutRef.current);
+          checkingTimeoutRef.current = null;
+        }
+        setState((s) => ({
+          ...s,
+          checking: false,
+          available: true,
+          downloading: false,
+          ready: false,
+          error: null,
+          updateInfo: info,
+          progress: undefined,
+          installPending: false,
+          installingVersion: null,
+        }));
+      },
+      'update-not-available': (info: UpdateInfo) => {
+        receivedResponseRef.current = true;
+        if (checkingTimeoutRef.current) {
+          clearTimeout(checkingTimeoutRef.current);
+          checkingTimeoutRef.current = null;
+        }
+        setState((s) => ({
+          ...s,
+          checking: false,
+          available: false,
+          downloading: false,
+          ready: false,
+          error: null,
+          updateInfo: info?.version ? info : null,
+          progress: undefined,
+          installPending: false,
+          installingVersion: null,
+        }));
+      },
+      'download-progress': (progress: ProgressInfo) => {
+        setState((s) => ({
+          ...s,
+          downloading: true,
+          ready: false,
+          progress: normalizeProgress(progress),
+          installPending: false,
+          installingVersion: null,
+        }));
+      },
+      'update-downloaded': (info: UpdateInfo) => {
+        setState((s) => ({
+          ...s,
+          downloading: false,
+          ready: true,
+          available: true,
+          error: null,
+          updateInfo: info,
+          downloadedVersion: info?.version ?? s.downloadedVersion,
+          progress: undefined,
+          installPending: false,
+          installingVersion: null,
+        }));
+        if (info?.version) {
+          setUpdateDialogOpen(true);
+        }
+      },
+      'update-error': (err: any) => {
+        receivedResponseRef.current = true;
+        if (checkingTimeoutRef.current) {
+          clearTimeout(checkingTimeoutRef.current);
+          checkingTimeoutRef.current = null;
+        }
+        const message = err?.message || 'Update failed';
+        const isNonCritical =
+          message.includes('404') ||
+          message.includes('net::') ||
+          message.includes('ENOTFOUND');
+
+        if (isNonCritical) {
+          setState((s) => ({
+            ...s,
+            checking: false,
+            downloading: false,
+          }));
+          return;
+        }
+
+        setState((s) => ({
+          ...s,
+          checking: false,
+          downloading: false,
+          error: message,
+        }));
+      },
+    } as const;
+
+    Object.entries(listeners).forEach(([channel, listener]) => {
+      onEvent(channel, listener);
     });
 
-    const [dismissedVersion, setDismissedVersion] = useState<string | null>(() => {
-        return localStorage.getItem('dismissedUpdateVersion');
-    });
+    bridge.updates
+      .getState()
+      .then((initialState: Partial<BridgeUpdateState>) => {
+        const downloadedVersion = initialState.downloadedVersion ?? null;
+        const installPending = initialState.installPending ?? false;
+        const installingVersion = initialState.installingVersion ?? null;
+        const updateInfo = normalizeUpdateInfo(initialState.updateInfo, downloadedVersion);
 
-    // Current app version
-    const [currentVersion, setCurrentVersion] = useState<string>('');
+        setState((s) => ({
+          ...s,
+          checking: initialState.checking ?? s.checking,
+          available: initialState.available ?? s.available,
+          downloading: initialState.downloading ?? s.downloading,
+          ready: initialState.ready ?? s.ready,
+          error: initialState.error ?? s.error,
+          updateInfo,
+          progress:
+            initialState.progress !== undefined
+              ? normalizeProgress(initialState.progress)
+              : s.progress,
+          downloadedVersion,
+          downloadedArtifactPath: initialState.downloadedArtifactPath ?? null,
+          installPending,
+          installingVersion,
+        }));
 
-    // State for UpdateDialog visibility (triggered by menu)
-    const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-
-    // Timeout ref for checking state
-    const checkingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    // Ref to track if we received a response (to prevent timeout from firing after response)
-    const receivedResponseRef = useRef<boolean>(false);
-
-    useEffect(() => {
-        // Listen for IPC events
-        const listeners = {
-            'update-checking': () => {
-                console.log('[useAutoUpdater] Received update-checking event');
-                receivedResponseRef.current = false; // Reset on new check
-                setState(s => ({ ...s, checking: true, error: null }));
-                // Set a timeout to prevent stuck "checking" state (30 seconds)
-                if (checkingTimeoutRef.current) {
-                    clearTimeout(checkingTimeoutRef.current);
-                }
-                checkingTimeoutRef.current = setTimeout(() => {
-                    // Check the ref value at timeout execution time
-                    console.log('[useAutoUpdater] Timeout fired, receivedResponse:', receivedResponseRef.current);
-                    if (!receivedResponseRef.current) {
-                        console.warn('[useAutoUpdater] Check timed out after 30s');
-                        setState(s => {
-                            // Double-check we're still in checking state
-                            if (s.checking && !s.available && !s.error) {
-                                return { ...s, checking: false, error: 'Update check timed out. Please try again.' };
-                            }
-                            return s;
-                        });
-                    }
-                }, 30000);
-            },
-            'update-available': (info: UpdateInfo) => {
-                console.log('[useAutoUpdater] Received update-available event:', info?.version);
-                receivedResponseRef.current = true; // Mark that we received a response
-                if (checkingTimeoutRef.current) {
-                    clearTimeout(checkingTimeoutRef.current);
-                    checkingTimeoutRef.current = null;
-                }
-                setState(s => ({ ...s, checking: false, available: true, updateInfo: info, error: null }));
-            },
-            'update-not-available': (info: UpdateInfo) => {
-                console.log('[useAutoUpdater] Received update-not-available event');
-                receivedResponseRef.current = true; // Mark that we received a response
-                if (checkingTimeoutRef.current) {
-                    clearTimeout(checkingTimeoutRef.current);
-                    checkingTimeoutRef.current = null;
-                }
-                setState(s => ({ ...s, checking: false, available: false, updateInfo: info, error: null }));
-            },
-            'download-progress': (progress: ProgressInfo) => {
-                setState(s => ({ ...s, downloading: true, progress }));
-            },
-            'update-downloaded': (info: UpdateInfo) => {
-                console.log('[useAutoUpdater] Received update-downloaded event');
-                setState(s => ({ ...s, downloading: false, ready: true, updateInfo: info, progress: undefined }));
-            },
-            'update-error': (err: any) => {
-                console.log('[useAutoUpdater] Received update-error event:', err);
-                receivedResponseRef.current = true; // Mark that we received a response
-                if (checkingTimeoutRef.current) {
-                    clearTimeout(checkingTimeoutRef.current);
-                    checkingTimeoutRef.current = null;
-                }
-                const message = err?.message || 'Update failed';
-                // Don't treat 404 (no releases) or network errors as real errors
-                const isNonCritical = message.includes('404') || 
-                                      message.includes('net::') ||
-                                      message.includes('ENOTFOUND');
-                if (isNonCritical) {
-                    // Just reset checking state, don't set error
-                    setState(s => ({ ...s, checking: false, downloading: false }));
-                } else {
-                    setState(s => ({ ...s, checking: false, downloading: false, error: message }));
-                }
-            }
-        };
-
-        // Register listeners
-        console.log('[useAutoUpdater] Registering listeners via event bridge');
-        Object.entries(listeners).forEach(([channel, listener]) => {
-            console.log(`[useAutoUpdater] Registering listener for ${channel}`);
-            onEvent(channel, listener);
-        });
-
-        // Initialize state check (optional, but good)
-        bridge.updates.getState().then((initialState: Partial<BridgeUpdateState>) => {
-            if (initialState) {
-                setState((s) => ({
-                    ...s,
-                    checking: initialState.checking ?? s.checking,
-                    available: initialState.available ?? s.available,
-                    downloading: initialState.downloading ?? s.downloading,
-                    ready: initialState.ready ?? s.ready,
-                    error: initialState.error ?? s.error,
-                    updateInfo: (initialState.updateInfo as UpdateInfo | undefined) ?? s.updateInfo,
-                    progress: initialState.progress !== undefined ? normalizeProgress(initialState.progress) : s.progress,
-                }));
-            }
-        }).catch(() => { });
-
-        return () => {
-            // Cleanup
-            Object.entries(listeners).forEach(([channel, listener]) => {
-                offEvent(channel, listener);
-            });
-            // Clear timeout on cleanup
-            if (checkingTimeoutRef.current) {
-                clearTimeout(checkingTimeoutRef.current);
-                checkingTimeoutRef.current = null;
-            }
-        };
-    }, [bridge.updates]);
-
-    // Fetch current app version on mount
-    useEffect(() => {
-        bridge.system.getInfo().then((info: any) => {
-            if (info?.version) {
-                setCurrentVersion(info.version);
-            }
-        }).catch(() => {
-            // Fallback: try to get from package.json or env
-            setCurrentVersion('Unknown');
-        });
-    }, [bridge.system]);
-
-    // Listen for menu-triggered update check event (Requirements: 2.1)
-    useEffect(() => {
-        const handleMenuCheckForUpdates = () => {
-            // Open the update dialog and trigger a check
-            setUpdateDialogOpen(true);
-            // Trigger update check
-            void bridge.updates.check();
-        };
-
-        onEvent('menu:check-for-updates', handleMenuCheckForUpdates);
-
-        return () => {
-            offEvent('menu:check-for-updates', handleMenuCheckForUpdates);
-        };
-    }, [bridge.updates]);
-
-    // Track if we've shown a notification for the current version to avoid duplicates
-    const notifiedVersionRef = useRef<string | null>(null);
-
-    // Show background update notification when update is available (Requirements: 3.3, 3.4)
-    useEffect(() => {
-        // Only show notification if:
-        // 1. Update is available
-        // 2. Not currently downloading or ready
-        // 3. Dialog is not already open (user triggered check)
-        // 4. Version hasn't been dismissed
-        // 5. We haven't already notified for this version in this session
-        if (
-            state.available &&
-            !state.downloading &&
-            !state.ready &&
-            !updateDialogOpen &&
-            state.updateInfo?.version &&
-            state.updateInfo.version !== dismissedVersion &&
-            state.updateInfo.version !== notifiedVersionRef.current
-        ) {
-            // Mark this version as notified
-            notifiedVersionRef.current = state.updateInfo.version;
-
-            // Show clickable toast notification that opens UpdateDialog when clicked
-            showUpdateToast(state.updateInfo.version, () => {
-                setUpdateDialogOpen(true);
-            });
+        if ((initialState.ready ?? false) && !installPending && updateInfo?.version) {
+          setUpdateDialogOpen(true);
         }
-    }, [state.available, state.downloading, state.ready, state.updateInfo?.version, dismissedVersion, updateDialogOpen]);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        setHydrated(true);
+      });
 
-    const checkForUpdates = useCallback(() => {
-        void bridge.updates.check();
-    }, [bridge.updates]);
-
-    const downloadUpdate = useCallback(() => {
-        void bridge.updates.download();
-    }, [bridge.updates]);
-
-    const cancelDownload = useCallback(() => {
-        void bridge.updates.cancelDownload();
-    }, [bridge.updates]);
-
-    const installUpdate = useCallback(() => {
-        console.log('[useAutoUpdater] installUpdate called, state.ready:', state.ready);
-        bridge.updates.install().then(() => {
-            console.log('[useAutoUpdater] update:install invoke completed');
-        }).catch((err: any) => {
-            console.error('[useAutoUpdater] update:install error:', err);
-        });
-    }, [bridge.updates, state.ready]);
-
-    const dismissUpdate = useCallback(() => {
-        if (state.updateInfo?.version) {
-            setDismissedVersion(state.updateInfo.version);
-            localStorage.setItem('dismissedUpdateVersion', state.updateInfo.version);
-        }
-        // Also close the dialog when dismissing
-        setUpdateDialogOpen(false);
-    }, [state.updateInfo]);
-
-    // Derived state: should we show the notification?
-    const showNotification = state.available && !state.downloading && !state.ready && (state.updateInfo?.version !== dismissedVersion);
-
-    // Open the update dialog (for manual triggering)
-    const openUpdateDialog = useCallback(() => {
-        setUpdateDialogOpen(true);
-        // Trigger update check when opening dialog
-        void bridge.updates.check();
-    }, [bridge.updates]);
-
-    // Close the update dialog
-    const closeUpdateDialog = useCallback(() => {
-        setUpdateDialogOpen(false);
-    }, []);
-
-    return {
-        ...state,
-        currentVersion,
-        checkForUpdates,
-        downloadUpdate,
-        cancelDownload,
-        installUpdate,
-        dismissUpdate,
-        showNotification,
-        // Dialog state and handlers (Requirements: 2.1)
-        updateDialogOpen,
-        openUpdateDialog,
-        closeUpdateDialog,
+    return () => {
+      Object.entries(listeners).forEach(([channel, listener]) => {
+        offEvent(channel, listener);
+      });
+      if (checkingTimeoutRef.current) {
+        clearTimeout(checkingTimeoutRef.current);
+        checkingTimeoutRef.current = null;
+      }
     };
-}
+  }, [bridge.updates]);
 
+  useEffect(() => {
+    bridge.system
+      .getInfo()
+      .then((info: any) => {
+        if (info?.version) {
+          setCurrentVersion(info.version);
+        }
+      })
+      .catch(() => {
+        setCurrentVersion('Unknown');
+      });
+  }, [bridge.system]);
+
+  useEffect(() => {
+    const handleMenuCheckForUpdates = () => {
+      setUpdateDialogOpen(true);
+      if (!state.ready && !state.installPending && !state.installingVersion && !state.downloading) {
+        void bridge.updates.check();
+      }
+    };
+
+    onEvent('menu:check-for-updates', handleMenuCheckForUpdates);
+
+    return () => {
+      offEvent('menu:check-for-updates', handleMenuCheckForUpdates);
+    };
+  }, [bridge.updates, state.downloading, state.installPending, state.installingVersion, state.ready]);
+
+  useEffect(() => {
+    if (
+      state.available &&
+      !state.downloading &&
+      !state.ready &&
+      !updateDialogOpen &&
+      state.updateInfo?.version &&
+      state.updateInfo.version !== dismissedVersion &&
+      state.updateInfo.version !== notifiedVersionRef.current
+    ) {
+      notifiedVersionRef.current = state.updateInfo.version;
+      showUpdateToast(state.updateInfo.version, () => {
+        setUpdateDialogOpen(true);
+      });
+    }
+  }, [
+    state.available,
+    state.downloading,
+    state.ready,
+    state.updateInfo?.version,
+    dismissedVersion,
+    updateDialogOpen,
+  ]);
+
+  const checkForUpdates = useCallback(() => {
+    void bridge.updates.check();
+  }, [bridge.updates]);
+
+  const downloadUpdate = useCallback(() => {
+    void bridge.updates.download();
+  }, [bridge.updates]);
+
+  const cancelDownload = useCallback(() => {
+    void bridge.updates.cancelDownload();
+  }, [bridge.updates]);
+
+  const installUpdate = useCallback(() => {
+    bridge.updates.install().catch((err: any) => {
+      console.error('[useAutoUpdater] update:install error:', err);
+    });
+  }, [bridge.updates]);
+
+  const scheduleInstallOnNextRestart = useCallback(() => {
+    bridge.updates
+      .scheduleInstall()
+      .then(() => {
+        setState((s) => ({
+          ...s,
+          installPending: true,
+          error: null,
+        }));
+        setUpdateDialogOpen(false);
+      })
+      .catch((err: any) => {
+        console.error('[useAutoUpdater] update:schedule-install error:', err);
+      });
+  }, [bridge.updates]);
+
+  const dismissUpdate = useCallback(() => {
+    if (state.updateInfo?.version) {
+      setDismissedVersion(state.updateInfo.version);
+      localStorage.setItem('dismissedUpdateVersion', state.updateInfo.version);
+    }
+    setUpdateDialogOpen(false);
+  }, [state.updateInfo]);
+
+  const showNotification =
+    state.available &&
+    !state.downloading &&
+    !state.ready &&
+    state.updateInfo?.version !== dismissedVersion;
+
+  const openUpdateDialog = useCallback(() => {
+    setUpdateDialogOpen(true);
+    if (!state.ready && !state.installPending && !state.installingVersion && !state.downloading) {
+      void bridge.updates.check();
+    }
+  }, [
+    bridge.updates,
+    state.downloading,
+    state.installPending,
+    state.installingVersion,
+    state.ready,
+  ]);
+
+  const closeUpdateDialog = useCallback(() => {
+    setUpdateDialogOpen(false);
+  }, []);
+
+  return {
+    ...state,
+    hydrated,
+    currentVersion,
+    checkForUpdates,
+    downloadUpdate,
+    cancelDownload,
+    installUpdate,
+    scheduleInstallOnNextRestart,
+    dismissUpdate,
+    showNotification,
+    updateDialogOpen,
+    openUpdateDialog,
+    closeUpdateDialog,
+  };
+}

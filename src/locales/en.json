@@ -478,6 +478,9 @@
       "tax": "Tax ({{percent}}%):",
       "deliveryFee": "Delivery Fee:",
       "calculatingDeliveryFee": "Calculating...",
+      "deliveryFeeNeedsExactAddress": "Select exact address",
+      "deliveryFeeOutOfZone": "Out of delivery zone",
+      "deliveryFeeUnavailable": "Delivery fee unavailable",
       "total": "Total:",
       "completeOrder": "Complete Order",
       "qty": "Qty:",
@@ -2290,6 +2293,7 @@
       "deliveryAddress": "Delivery Address",
       "deliveredBy": "Delivered By",
       "delivered": "Delivered",
+      "unknownDriver": "Unknown Driver",
       "orderItems": "Items",
       "category": "Category",
       "notes": "Note",
@@ -3971,6 +3975,7 @@
     },
     "downloaded": {
       "ready": "Version {{version}} is ready!",
+      "readyGeneric": "The downloaded update is ready!",
       "description": "The update has been downloaded successfully. You can install it now (requires restart) or it will be installed automatically the next time you restart the app.",
       "warning": "⚠️ Note: The app will restart immediately if you choose \"Install Now\"."
     },

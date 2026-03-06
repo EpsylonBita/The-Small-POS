@@ -23,6 +23,14 @@ interface Customer {
   name: string;
   phone?: string;
   email?: string;
+  address?: any;
+  city?: string;
+  postal_code?: string;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
+  latitude?: number | null;
+  longitude?: number | null;
   version?: number;
 }
 
@@ -151,7 +159,11 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         street: defaultAddress.street_address || defaultAddress.street || '',
         city: defaultAddress.city || '',
         postalCode: defaultAddress.postal_code || '',
-        coordinates: defaultAddress.coordinates || undefined,
+        coordinates:
+          defaultAddress.coordinates ||
+          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : undefined),
       };
     } else if (customer.address) {
       // Fallback to legacy customer.address field
@@ -169,7 +181,15 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           street: customer.address.street_address || customer.address.street || '',
           city: customer.address.city || '',
           postalCode: customer.address.postal_code || customer.address.postalCode || '',
-          coordinates: customer.address.coordinates || undefined,
+          coordinates:
+            customer.address.coordinates ||
+            (Number.isFinite(customer.address.latitude) &&
+            Number.isFinite(customer.address.longitude)
+              ? {
+                  lat: Number(customer.address.latitude),
+                  lng: Number(customer.address.longitude),
+                }
+              : undefined),
         };
       }
     }
@@ -250,12 +270,21 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         street: defaultAddress.street_address || customer.address || '',
         city: defaultAddress.city || customer.city || '',
         postalCode: defaultAddress.postal_code || customer.postal_code || '',
-        coordinates: defaultAddress.coordinates || customer.coordinates || undefined,
+        coordinates:
+          defaultAddress.coordinates ||
+          customer.coordinates ||
+          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : undefined),
       } : {
         street: customer.address || '',
         city: customer.city || '',
         postalCode: customer.postal_code || '',
-        coordinates: customer.coordinates || undefined,
+        coordinates:
+          customer.coordinates ||
+          (Number.isFinite(customer.latitude) && Number.isFinite(customer.longitude)
+            ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
+            : undefined),
       }
     });
 

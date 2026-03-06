@@ -12,17 +12,23 @@ import { useTheme } from '../../contexts/theme-context';
 import { useModules } from '../../contexts/module-context';
 import { useProductCatalog } from '../../hooks/useProductCatalog';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barcode-scanner-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { PaymentModal } from './PaymentModal';
 import type { Product, ProductFilters } from '../../services/ProductCatalogService';
 import type { DeliveryBoundaryValidationResponse } from '../../../shared/types/delivery-validation';
-import { offEvent, onEvent } from '../../../lib';
+import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../services/terminal-credentials';
-import { hasResolvedDeliveryFee, resolveDeliveryFee } from '../../utils/delivery-fee';
+import { getDeliveryFeeStatus, resolveDeliveryFee } from '../../utils/delivery-fee';
+import {
+  buildSavedAddressQuery,
+  extractSavedAddressCoordinates,
+  resolveSavedAddressCoordinates,
+} from '../../utils/saved-address-geolocation';
 
 // Debounce hook for search input
 function useDebounce<T>(value: T, delay: number): T {
@@ -93,10 +99,21 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
+  const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] =
+    useState<DeliveryBoundaryValidationResponse | null>(null);
+  const [resolvedSelectedAddressCoordinates, setResolvedSelectedAddressCoordinates] =
+    useState<{ lat: number; lng: number } | null>(null);
+  const [isResolvingSelectedAddressCoordinates, setIsResolvingSelectedAddressCoordinates] =
+    useState(false);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const {
+    validateAddress: validateDeliveryAddress,
+    isValidating: isValidatingDeliveryFee,
+  } = useDeliveryValidation({ debounceMs: 0 });
 
   // Debounce search term to avoid excessive API calls (300ms delay)
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
+  const bridge = getBridge();
 
   useEffect(() => {
     let disposed = false;
@@ -155,6 +172,128 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     filters,
     enableRealtime: true,
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveCoordinates = async () => {
+      if (!isOpen || orderType !== 'delivery' || !selectedAddress) {
+        setResolvedSelectedAddressCoordinates(null);
+        setIsResolvingSelectedAddressCoordinates(false);
+        return;
+      }
+
+      const existingCoordinates = extractSavedAddressCoordinates(selectedAddress);
+      if (existingCoordinates) {
+        setResolvedSelectedAddressCoordinates(existingCoordinates);
+        setIsResolvingSelectedAddressCoordinates(false);
+        return;
+      }
+
+      setResolvedSelectedAddressCoordinates(null);
+      setIsResolvingSelectedAddressCoordinates(true);
+
+      try {
+        const refreshed = await refreshTerminalCredentialCache();
+        const resolved = await resolveSavedAddressCoordinates(
+          selectedAddress,
+          branchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!resolved?.coordinates) {
+          setResolvedSelectedAddressCoordinates(null);
+          return;
+        }
+
+        setResolvedSelectedAddressCoordinates(resolved.coordinates);
+
+        const addressVersion = Number((selectedAddress as any)?.version);
+        const customerId =
+          typeof selectedCustomer?.id === 'string'
+            ? selectedCustomer.id
+            : typeof (selectedAddress as any)?.customer_id === 'string'
+              ? (selectedAddress as any).customer_id
+              : null;
+        if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
+          try {
+            await bridge.customers.updateAddress(
+              (selectedAddress as any).id,
+              {
+                customer_id: customerId,
+                coordinates: resolved.coordinates,
+                latitude: resolved.coordinates.lat,
+                longitude: resolved.coordinates.lng,
+              },
+              Number.isFinite(addressVersion) ? addressVersion : -1
+            );
+          } catch (error) {
+            console.warn('[ProductCatalogModal] Failed to persist resolved address coordinates:', error);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[ProductCatalogModal] Failed to resolve saved address coordinates:', error);
+          setResolvedSelectedAddressCoordinates(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsResolvingSelectedAddressCoordinates(false);
+        }
+      }
+    };
+
+    void resolveCoordinates();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [branchId, bridge.customers, isOpen, orderType, selectedAddress, selectedCustomer?.id]);
+
+  useEffect(() => {
+    if (!isOpen || orderType !== 'delivery') {
+      setLocalDeliveryZoneInfo(null);
+      return;
+    }
+
+    if (deliveryZoneInfo) {
+      setLocalDeliveryZoneInfo(null);
+      return;
+    }
+
+      const exactCoordinates =
+        resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(selectedAddress);
+
+      if (!exactCoordinates) {
+        setLocalDeliveryZoneInfo(null);
+        return;
+      }
+
+    let cancelled = false;
+
+      const validate = async () => {
+        try {
+          const result = await validateDeliveryAddress(exactCoordinates, 0);
+          if (!cancelled) {
+            setLocalDeliveryZoneInfo(result);
+          }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[ProductCatalogModal] Delivery validation failed:', error);
+          setLocalDeliveryZoneInfo(null);
+        }
+      }
+    };
+
+    void validate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deliveryZoneInfo, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Focus barcode input when modal opens
   useEffect(() => {
@@ -222,13 +361,57 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
   const subtotal = cartItems.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
   const discountAmount = subtotal * (discountPercentage / 100);
-  const deliveryFee = orderType === 'delivery' ? resolveDeliveryFee(deliveryZoneInfo) : 0;
-  const deliveryFeeResolved = hasResolvedDeliveryFee(orderType, deliveryZoneInfo);
+  const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
+  const exactDeliveryCoordinates =
+    resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(selectedAddress);
+  const deliveryValidationTarget =
+    exactDeliveryCoordinates || buildSavedAddressQuery(selectedAddress) || null;
+  const hasExactDeliveryCoordinates = !!exactDeliveryCoordinates;
+  const deliveryFeeStatus =
+      orderType !== 'delivery'
+        ? 'resolved'
+        : !deliveryValidationTarget
+          ? 'requires_selection'
+          : !hasExactDeliveryCoordinates
+            ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
+         : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+  const deliveryFee =
+    orderType === 'delivery' && deliveryFeeStatus === 'resolved'
+      ? resolveDeliveryFee(effectiveDeliveryZoneInfo)
+      : 0;
   const subtotalAfterDiscount = subtotal - discountAmount;
   const total = subtotalAfterDiscount + deliveryFee;
+  const deliveryFeeText =
+    deliveryFeeStatus === 'resolved'
+      ? `€${deliveryFee.toFixed(2)}`
+      : deliveryFeeStatus === 'requires_selection'
+        ? t('menu.cart.deliveryFeeNeedsExactAddress')
+        : deliveryFeeStatus === 'out_of_zone'
+          ? t('menu.cart.deliveryFeeOutOfZone')
+          : deliveryFeeStatus === 'unavailable'
+            ? t('menu.cart.deliveryFeeUnavailable')
+            : t('menu.cart.calculatingDeliveryFee');
 
-  const handleCheckout = () => {
-    if (cartItems.length === 0 || (orderType === 'delivery' && !deliveryFeeResolved)) return;
+  const handleCheckout = async () => {
+    if (cartItems.length === 0) return;
+
+    if (orderType === 'delivery' && deliveryFeeStatus !== 'resolved') {
+        if (!deliveryValidationTarget || !hasExactDeliveryCoordinates) {
+          return;
+        }
+
+      try {
+        const result = await validateDeliveryAddress(exactDeliveryCoordinates, subtotalAfterDiscount);
+        setLocalDeliveryZoneInfo(result);
+        if (getDeliveryFeeStatus(orderType, result, false) !== 'resolved') {
+          return;
+        }
+      } catch (error) {
+        console.error('[ProductCatalogModal] Failed to validate delivery fee before checkout:', error);
+        return;
+      }
+    }
+
     setShowPaymentModal(true);
   };
 
@@ -253,7 +436,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       discountPercentage,
       discountAmount,
       deliveryFee,
-      deliveryZoneInfo,
+      deliveryZoneInfo: effectiveDeliveryZoneInfo,
     });
     setCartItems([]);
     setDiscountPercentage(0);
@@ -471,11 +654,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
               {orderType === 'delivery' && (
                 <div className="flex justify-between text-gray-400 mb-1">
                   <span>{t('menu.cart.deliveryFee')}</span>
-                  <span>
-                    {deliveryFeeResolved
-                      ? `€${deliveryFee.toFixed(2)}`
-                      : t('menu.cart.calculatingDeliveryFee')}
-                  </span>
+                  <span>{deliveryFeeText}</span>
                 </div>
               )}
               <div className="flex justify-between text-white text-xl font-bold mt-2">
@@ -485,8 +664,12 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
             </div>
             {/* Checkout Button */}
             <button
-              onClick={handleCheckout}
-              disabled={cartItems.length === 0 || isProcessingOrder || (orderType === 'delivery' && !deliveryFeeResolved)}
+              onClick={() => void handleCheckout()}
+              disabled={
+                cartItems.length === 0 ||
+                isProcessingOrder ||
+                (orderType === 'delivery' && deliveryFeeStatus !== 'resolved')
+              }
               className="mt-4 w-full py-3 rounded-xl bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-semibold flex items-center justify-center gap-2 transition"
             >
               <DollarSign className="w-5 h-5" />

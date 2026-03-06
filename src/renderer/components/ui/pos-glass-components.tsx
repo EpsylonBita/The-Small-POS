@@ -504,6 +504,12 @@ interface LiquidGlassModalProps {
    * @default true
    */
   closeOnEscape?: boolean;
+
+  /**
+   * Optional element ref that should receive focus when the modal opens.
+   * Falls back to the first focusable element when not provided.
+   */
+  initialFocusRef?: React.RefObject<HTMLElement | null>;
 }
 
 // Helper function to get focusable elements
@@ -537,6 +543,7 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   size = 'md',
   closeOnBackdrop = true,
   closeOnEscape = true,
+  initialFocusRef,
   ariaLabel
 }) => {
   const { t } = useI18n()
@@ -599,6 +606,12 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
 
       // Focus first focusable element after a brief delay
       const focusTimer = setTimeout(() => {
+        const preferredFocus = initialFocusRef?.current
+        if (preferredFocus && preferredFocus.offsetParent !== null) {
+          preferredFocus.focus()
+          return
+        }
+
         if (containerRef.current) {
           const focusableElements = getFocusableElements(containerRef.current)
           if (focusableElements.length > 0) {
@@ -683,10 +696,18 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
         document.body.style.overflow = previousOverflowRef.current
       }
     } else if (!mounted) {
-      // Restore focus to previous element
-      previousActiveElementRef.current?.focus()
+      const activeElement = document.activeElement as HTMLElement | null
+      const focusAlreadyInsideDialog =
+        activeElement instanceof Element && Boolean(activeElement.closest('[role="dialog"]'))
+      const anotherDialogIsOpen =
+        document.querySelectorAll('[role="dialog"]').length > 0
+
+      // Do not steal focus from another modal that is already open and focused.
+      if (!focusAlreadyInsideDialog && !anotherDialogIsOpen) {
+        previousActiveElementRef.current?.focus()
+      }
     }
-  }, [mounted, isClosing, closeOnEscape, handleClose])
+  }, [mounted, isClosing, closeOnEscape, handleClose, initialFocusRef])
 
   // Early return if not mounted
   if (!mounted) return null

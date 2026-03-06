@@ -20,7 +20,15 @@ import type { MenuCombo } from '@shared/types/combo';
 import { getComboPrice } from '@shared/types/combo';
 import { Pencil, Search, X, User, UserPlus } from 'lucide-react';
 import { formatCurrency } from '../../utils/format';
-import { hasResolvedDeliveryFee, resolveDeliveryFee } from '../../utils/delivery-fee';
+import {
+  getDeliveryFeeStatus,
+  resolveDeliveryFee,
+} from '../../utils/delivery-fee';
+import {
+  buildSavedAddressQuery,
+  extractSavedAddressCoordinates,
+  resolveSavedAddressCoordinates,
+} from '../../utils/saved-address-geolocation';
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
@@ -90,7 +98,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   const { t } = useTranslation();
   const { maxDiscountPercentage } = useDiscountSettings();
-  const { validateAddress: validateDeliveryAddress } = useDeliveryValidation({ debounceMs: 0 });
+  const {
+    validateAddress: validateDeliveryAddress,
+    isValidating: isValidatingDeliveryFee,
+  } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
   const bridge = getBridge();
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
@@ -160,6 +171,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
   // State for locally fetched delivery zone info (when not provided via props)
   const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] = useState<DeliveryBoundaryValidationResponse | null>(null);
+  const [resolvedSelectedAddressCoordinates, setResolvedSelectedAddressCoordinates] =
+    useState<{ lat: number; lng: number } | null>(null);
+  const [isResolvingSelectedAddressCoordinates, setIsResolvingSelectedAddressCoordinates] =
+    useState(false);
 
   // State for default minimum order amount (from delivery zones)
   const [defaultMinimumOrderAmount, setDefaultMinimumOrderAmount] = useState<number>(0);
@@ -193,18 +208,96 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const effectiveMinimumOrderAmount = effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? defaultMinimumOrderAmount;
 
   const buildSelectedAddressString = useCallback(() => {
-    if (!selectedAddress) {
-      return '';
-    }
-
-    return [
-      selectedAddress.street_address || selectedAddress.street || '',
-      selectedAddress.city || '',
-      selectedAddress.postal_code || selectedAddress.postalCode || '',
-    ]
-      .filter(Boolean)
-      .join(', ');
+    return buildSavedAddressQuery(selectedAddress);
   }, [selectedAddress]);
+
+  const getSelectedAddressCoordinates = useCallback(() => {
+    return extractSavedAddressCoordinates(selectedAddress) ?? undefined;
+  }, [selectedAddress]);
+
+  const getSelectedAddressValidationTarget = useCallback(() => {
+    return (resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates()) ?? buildSelectedAddressString();
+  }, [buildSelectedAddressString, getSelectedAddressCoordinates, resolvedSelectedAddressCoordinates]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const resolveCoordinates = async () => {
+      if (!isOpen || orderType !== 'delivery' || !selectedAddress) {
+        setResolvedSelectedAddressCoordinates(null);
+        setIsResolvingSelectedAddressCoordinates(false);
+        return;
+      }
+
+      const existingCoordinates = getSelectedAddressCoordinates();
+      if (existingCoordinates) {
+        setResolvedSelectedAddressCoordinates(existingCoordinates);
+        setIsResolvingSelectedAddressCoordinates(false);
+        return;
+      }
+
+      setResolvedSelectedAddressCoordinates(null);
+      setIsResolvingSelectedAddressCoordinates(true);
+
+      try {
+        const refreshed = await refreshTerminalCredentialCache();
+        const resolved = await resolveSavedAddressCoordinates(
+          selectedAddress,
+          staff?.branchId || refreshed.branchId || getCachedTerminalCredentials().branchId || undefined
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!resolved?.coordinates) {
+          setResolvedSelectedAddressCoordinates(null);
+          return;
+        }
+
+        setResolvedSelectedAddressCoordinates(resolved.coordinates);
+
+        const addressVersion = Number((selectedAddress as any)?.version);
+        const customerId =
+          typeof selectedCustomer?.id === 'string'
+            ? selectedCustomer.id
+            : typeof (selectedAddress as any)?.customer_id === 'string'
+              ? (selectedAddress as any).customer_id
+              : null;
+        if (typeof (selectedAddress as any)?.id === 'string' && customerId) {
+          try {
+            await bridge.customers.updateAddress(
+              (selectedAddress as any).id,
+              {
+                customer_id: customerId,
+                coordinates: resolved.coordinates,
+                latitude: resolved.coordinates.lat,
+                longitude: resolved.coordinates.lng,
+              },
+              Number.isFinite(addressVersion) ? addressVersion : -1
+            );
+          } catch (error) {
+            console.warn('[MenuModal] Failed to persist resolved address coordinates:', error);
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[MenuModal] Failed to resolve saved address coordinates:', error);
+          setResolvedSelectedAddressCoordinates(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsResolvingSelectedAddressCoordinates(false);
+        }
+      }
+    };
+
+    void resolveCoordinates();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge.customers, getSelectedAddressCoordinates, isOpen, orderType, selectedAddress, selectedCustomer?.id, staff?.branchId]);
 
   // Fetch order items from backend
   const fetchOrderItems = useCallback(async (orderId: string, supabaseId?: string): Promise<any[]> => {
@@ -288,17 +381,35 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   useEffect(() => {
     const fetchDeliveryZoneInfo = async () => {
       // Only fetch if: modal is open, order type is delivery, no zone info provided, has address, not in edit mode
-      if (!isOpen || orderType !== 'delivery' || deliveryZoneInfo || editMode || !selectedAddress) {
+      if (!isOpen || orderType !== 'delivery' || editMode) {
+        setLocalDeliveryZoneInfo(null);
         return;
       }
 
-      const addressString = buildSelectedAddressString();
-      if (!addressString) {
+      if (deliveryZoneInfo) {
+        setLocalDeliveryZoneInfo(null);
         return;
       }
+
+      if (!selectedAddress) {
+        setLocalDeliveryZoneInfo(null);
+        return;
+      }
+
+        const exactCoordinates = resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
+        if (!exactCoordinates) {
+          setLocalDeliveryZoneInfo(null);
+          return;
+        }
+
+        const validationTarget = exactCoordinates;
+        if (!validationTarget) {
+          setLocalDeliveryZoneInfo(null);
+          return;
+        }
 
       try {
-        const result = await validateDeliveryAddress(addressString, 0);
+        const result = await validateDeliveryAddress(validationTarget, 0);
         if (result) {
           setLocalDeliveryZoneInfo(result);
         }
@@ -308,7 +419,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-  }, [buildSelectedAddressString, isOpen, orderType, deliveryZoneInfo, editMode, selectedAddress, validateDeliveryAddress]);
+    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
@@ -761,8 +872,20 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     return Math.min(appliedCoupon.discount_value, afterManualDiscount);
   };
 
-  const resolvedDeliveryFee = orderType === 'delivery' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0;
-  const deliveryFeeResolved = hasResolvedDeliveryFee(orderType, effectiveDeliveryZoneInfo);
+  const selectedAddressCoordinates =
+    resolvedSelectedAddressCoordinates ?? getSelectedAddressCoordinates();
+  const selectedAddressValidationTarget = selectedAddressCoordinates ?? getSelectedAddressValidationTarget();
+  const resolvedDeliveryFee =
+    orderType === 'delivery' ? resolveDeliveryFee(effectiveDeliveryZoneInfo) : 0;
+  const deliveryFeeStatus =
+      orderType !== 'delivery'
+        ? 'resolved'
+        : !selectedAddressValidationTarget
+          ? 'requires_selection'
+          : !selectedAddressCoordinates
+            ? (isResolvingSelectedAddressCoordinates ? 'loading' : 'requires_selection')
+         : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
+  const deliveryFeeResolved = deliveryFeeStatus === 'resolved';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
   const {
     discountAmount: currentManualDiscountAmount,
@@ -900,27 +1023,27 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return effectiveDeliveryZoneInfo;
     }
 
-    const addressString = buildSelectedAddressString();
-    if (!addressString) {
-      return null;
-    }
+      if (!selectedAddressCoordinates) {
+        return null;
+      }
 
-    try {
-      const result = await validateDeliveryAddress(addressString, discountedSubtotal);
-      setLocalDeliveryZoneInfo(result);
-      return result;
-    } catch (error) {
+      try {
+        const result = await validateDeliveryAddress(selectedAddressCoordinates, discountedSubtotal);
+        setLocalDeliveryZoneInfo(result);
+        return result;
+      } catch (error) {
       console.error('[MenuModal] Failed to refresh delivery validation before checkout:', error);
       return null;
     }
   }, [
-    buildSelectedAddressString,
-    deliveryFeeResolved,
-    discountedSubtotal,
-    effectiveDeliveryZoneInfo,
-    orderType,
-    validateDeliveryAddress,
-  ]);
+      deliveryFeeResolved,
+      discountedSubtotal,
+      effectiveDeliveryZoneInfo,
+      orderType,
+      resolvedSelectedAddressCoordinates,
+      selectedAddressCoordinates,
+      validateDeliveryAddress,
+    ]);
 
   const handleCheckout = async () => {
     if (cartItems.length === 0) {
@@ -980,11 +1103,15 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
-    if (orderType === 'delivery') {
-      const validationResult = await ensureDeliveryValidationForCheckout();
-      if (!hasResolvedDeliveryFee(orderType, validationResult)) {
-        toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
-        return;
+      if (orderType === 'delivery') {
+        const validationResult = await ensureDeliveryValidationForCheckout();
+        if (!selectedAddressCoordinates) {
+          toast.error(t('menu.cart.deliveryFeeNeedsExactAddress'));
+          return;
+        }
+        if (getDeliveryFeeStatus(orderType, validationResult, false) !== 'resolved') {
+          toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
+          return;
       }
     }
 
@@ -1273,7 +1400,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               orderType={orderType}
               minimumOrderAmount={effectiveMinimumOrderAmount}
               deliveryFee={resolvedDeliveryFee}
-              deliveryFeeResolved={deliveryFeeResolved}
+              deliveryFeeStatus={deliveryFeeStatus}
               appliedCoupon={appliedCoupon}
               onApplyCoupon={editMode ? undefined : handleApplyCoupon}
               onRemoveCoupon={handleRemoveCoupon}

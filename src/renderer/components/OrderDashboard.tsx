@@ -774,9 +774,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           defaultAddress?.city || customer.city || '',
           defaultAddress?.postal_code || customer.postal_code || ''
         ].filter(Boolean).join(', ');
+        const addressCoordinates =
+          defaultAddress?.coordinates
+          || (Number.isFinite(defaultAddress?.latitude) && Number.isFinite(defaultAddress?.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : undefined);
 
-        if (addressString) {
-          const validationResult = await validateDeliveryAddress(addressString, 0);
+        if (addressCoordinates || addressString) {
+          const validationResult = await validateDeliveryAddress(addressCoordinates || addressString, 0);
           if (validationResult) {
             setDeliveryZoneInfo(validationResult);
           }
@@ -800,7 +805,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         street: defaultAddress.street_address || customer.address || '',
         city: defaultAddress.city || '',
         postalCode: defaultAddress.postal_code || customer.postal_code || '',
-        coordinates: defaultAddress.coordinates || undefined,
+        coordinates:
+          defaultAddress.coordinates ||
+          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : undefined),
       } : {
         street: customer.address || '',
         city: customer.city || '',
@@ -879,9 +888,17 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           defaultAddress?.city || customer.city || '',
           defaultAddress?.postal_code || customer.postal_code || ''
         ].filter(Boolean).join(', ');
+        const addressCoordinates =
+          defaultAddress?.coordinates
+          || customer.coordinates
+          || (Number.isFinite(defaultAddress?.latitude) && Number.isFinite(defaultAddress?.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : Number.isFinite(customer?.latitude) && Number.isFinite(customer?.longitude)
+              ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
+            : undefined);
 
-        if (addressString) {
-          const validationResult = await validateDeliveryAddress(addressString, 0);
+        if (addressCoordinates || addressString) {
+          const validationResult = await validateDeliveryAddress(addressCoordinates || addressString, 0);
           if (validationResult) {
             setDeliveryZoneInfo(validationResult);
           }
@@ -907,12 +924,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         street: defaultAddress.street_address || customer.address || '',
         city: defaultAddress.city || customer.city || '',
         postalCode: defaultAddress.postal_code || customer.postal_code || '',
-        coordinates: defaultAddress.coordinates || customer.coordinates || undefined,
+        coordinates:
+          defaultAddress.coordinates ||
+          customer.coordinates ||
+          (Number.isFinite(defaultAddress.latitude) && Number.isFinite(defaultAddress.longitude)
+            ? { lat: Number(defaultAddress.latitude), lng: Number(defaultAddress.longitude) }
+            : undefined),
       } : {
         street: customer.address || '',
         city: customer.city || '',
         postalCode: customer.postal_code || '',
-        coordinates: customer.coordinates || undefined,
+        coordinates:
+          customer.coordinates ||
+          (Number.isFinite(customer.latitude) && Number.isFinite(customer.longitude)
+            ? { lat: Number(customer.latitude), lng: Number(customer.longitude) }
+            : undefined),
       },
       notes: defaultAddress?.notes || customer.notes || '',
     };
@@ -1056,9 +1082,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           street_address: streetValue, // Include both for compatibility
           city: defaultAddress.city,
           postalCode: defaultAddress.postal_code,
+          postal_code: defaultAddress.postal_code,
           floor: defaultAddress.floor_number,
+          floor_number: defaultAddress.floor_number,
           notes: defaultAddress.delivery_notes || defaultAddress.notes,
-          nameOnRinger: defaultAddress.name_on_ringer
+          nameOnRinger: defaultAddress.name_on_ringer,
+          name_on_ringer: defaultAddress.name_on_ringer,
+          coordinates: defaultAddress.coordinates,
+          latitude: defaultAddress.latitude ?? null,
+          longitude: defaultAddress.longitude ?? null,
         };
       }
     }
@@ -1073,9 +1105,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           street_address: streetValue,
           city: '',
           postalCode: existingCustomer.postal_code || '',
+          postal_code: existingCustomer.postal_code || '',
           floor: '',
+          floor_number: '',
           notes: '',
-          nameOnRinger: existingCustomer.name_on_ringer || ''
+          nameOnRinger: existingCustomer.name_on_ringer || '',
+          name_on_ringer: existingCustomer.name_on_ringer || '',
+          coordinates: existingCustomer.coordinates,
+          latitude: existingCustomer.latitude ?? null,
+          longitude: existingCustomer.longitude ?? null,
         };
       }
     }
@@ -1089,9 +1127,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           street_address: streetValue,
           city: customerInfo.address.city,
           postalCode: customerInfo.address.postalCode,
+          postal_code: customerInfo.address.postalCode,
           floor: '',
+          floor_number: '',
           notes: customerInfo.notes,
-          nameOnRinger: ''
+          nameOnRinger: '',
+          name_on_ringer: '',
+          coordinates: customerInfo.address.coordinates,
+          latitude: null,
+          longitude: null,
         };
       }
     }

@@ -384,6 +384,11 @@ export interface Customer {
   phone?: string;
   email?: string;
   addresses?: CustomerAddress[];
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
+  latitude?: number | null;
+  longitude?: number | null;
   total_orders?: number;
   total_spent?: number;
   is_banned?: boolean;
@@ -393,12 +398,21 @@ export interface Customer {
 
 export interface CustomerAddress {
   id: string;
+  customer_id?: string;
   address: string;
+  street?: string;
+  street_address?: string;
   city?: string;
   postal_code?: string;
   lat?: number;
   lng?: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  coordinates?:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] };
   is_default?: boolean;
+  version?: number;
 }
 
 // -- Payments ----------------------------------------------------------------
@@ -513,6 +527,10 @@ export interface UpdateState {
   error: string | null;
   progress: number;
   updateInfo: any;
+  downloadedVersion?: string | null;
+  downloadedArtifactPath?: string | null;
+  installPending?: boolean;
+  installingVersion?: string | null;
 }
 
 // -- Printer -----------------------------------------------------------------
@@ -891,6 +909,7 @@ export interface PlatformBridge {
     download(): Promise<void>;
     cancelDownload(): Promise<void>;
     install(): Promise<void>;
+    scheduleInstall(): Promise<void>;
     getState(): Promise<Partial<UpdateState>>;
     setChannel(channel: 'stable' | 'beta'): Promise<IpcResult>;
   };
@@ -1297,6 +1316,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'update:download': 'updates.download',
   'update:cancel-download': 'updates.cancelDownload',
   'update:install': 'updates.install',
+  'update:schedule-install': 'updates.scheduleInstall',
   'update:get-state': 'updates.getState',
   'update:set-channel': 'updates.setChannel',
 
@@ -1741,6 +1761,7 @@ export class TauriBridge implements PlatformBridge {
     download: () => this.inv('update:download'),
     cancelDownload: () => this.inv('update:cancel-download'),
     install: () => this.inv('update:install'),
+    scheduleInstall: () => this.inv('update:schedule-install'),
     getState: () => this.inv('update:get-state'),
     setChannel: (ch: 'stable' | 'beta') => this.inv('update:set-channel', ch),
   };
