@@ -29,6 +29,11 @@ export default defineConfig({
     },
   },
 
+  // Strip console.* and debugger from production builds
+  esbuild: {
+    drop: process.env.TAURI_ENV_DEBUG ? [] : ['console', 'debugger'],
+  },
+
   // Build options
   build: {
     // Tauri v2 uses modern Chromium (supports ES2022+)

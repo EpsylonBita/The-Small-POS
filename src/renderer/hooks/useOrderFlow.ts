@@ -118,7 +118,7 @@ export const useOrderFlow = () => {
              phone: customer.phone,
              email: customer.email || '',
              address: defaultAddress ? {
-               street: defaultAddress.street,
+               street: defaultAddress.street_address || defaultAddress.street || '',
                city: defaultAddress.city,
                postalCode: defaultAddress.postal_code,
                coordinates: undefined

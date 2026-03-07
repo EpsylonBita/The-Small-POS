@@ -3,17 +3,20 @@
 
 /**
  * CustomerAddress - Address information for a customer
- * 
+ *
  * Maps to Supabase customer_addresses table:
- * - street maps to street_address in DB
+ * - street_address is the canonical field (matches DB column)
+ * - street is a deprecated alias kept for backward compatibility
  * - customer_id is the foreign key to customers table
  * - address_type: 'delivery' | 'home' | 'work' | 'other'
  */
 export interface CustomerAddress {
   id: string;
   customer_id?: string;
-  street: string; // Maps to street_address in Supabase
-  street_address?: string; // Supabase field name
+  /** Canonical field matching the Supabase `street_address` column. */
+  street_address: string;
+  /** @deprecated Use `street_address` instead. Kept as alias for backward compatibility. */
+  street?: string;
   city: string;
   postal_code: string;
   country?: string;
@@ -109,6 +112,20 @@ export interface CustomerSearchHistory {
   phone: string;
   timestamp: string;
   found: boolean;
+}
+
+/**
+ * Normalize a raw address object so that `street_address` is always populated.
+ * Maps the legacy `street` field into `street_address` when the canonical field
+ * is missing or empty. Use at sync/API boundaries.
+ */
+export function normalizeCustomerAddressFields<
+  T extends Partial<Pick<CustomerAddress, 'street' | 'street_address'>>,
+>(address: T): T & { street_address: string } {
+  const streetAddress =
+    (address.street_address ?? '').trim() ||
+    (address.street ?? '').trim();
+  return { ...address, street_address: streetAddress, street: streetAddress };
 }
 
 // Re-export commonly used customer types

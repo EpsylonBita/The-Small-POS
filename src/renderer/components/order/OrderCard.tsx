@@ -17,6 +17,7 @@ interface OrderCardProps {
   onDoubleClick?: (id: string) => void;
   onStatusChange?: (orderId: string, newStatus: OrderStatus) => Promise<void>;
   onDriverAssign?: (orderId: string) => void;
+  onConvertToPickup?: (orderId: string) => void;
   showQuickActions?: boolean;
   orderIndex?: number; // Deprecated - order number now comes from order.order_number
 }
@@ -28,6 +29,7 @@ export const OrderCard = memo<OrderCardProps>(({
   onDoubleClick,
   onStatusChange,
   onDriverAssign,
+  onConvertToPickup,
   showQuickActions = false,
   // orderIndex is deprecated, using order.order_number instead
 }) => {
@@ -467,6 +469,7 @@ export const OrderCard = memo<OrderCardProps>(({
             order={order}
             onStatusChange={onStatusChange}
             onDriverAssign={onDriverAssign}
+            onConvertToPickup={onConvertToPickup}
             disabled={false}
           />
         </div>

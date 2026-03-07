@@ -25,6 +25,11 @@ function downloadCSV(csvString: string, filename: string) {
 export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-report') {
   if (!zReport) return;
   const rows: Record<string, any>[] = [];
+  const driverEarnings = zReport.driverEarnings ?? {
+    totalDeliveries: 0,
+    totalEarnings: 0,
+    unsettledCount: 0,
+  };
 
   rows.push({ Section: 'Shifts', Metric: 'Total', Value: zReport.shifts.total });
   rows.push({ Section: 'Shifts', Metric: 'Cashier', Value: zReport.shifts.cashier });
@@ -42,9 +47,9 @@ export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-r
   rows.push({ Section: 'Expenses', Metric: 'Total', Value: zReport.expenses.total });
   rows.push({ Section: 'Expenses', Metric: 'Pending Count', Value: zReport.expenses.pendingCount });
 
-  rows.push({ Section: 'Driver Earnings', Metric: 'Total Deliveries', Value: zReport.driverEarnings.totalDeliveries });
-  rows.push({ Section: 'Driver Earnings', Metric: 'Total Earnings', Value: zReport.driverEarnings.totalEarnings });
-  rows.push({ Section: 'Driver Earnings', Metric: 'Unsettled Count', Value: zReport.driverEarnings.unsettledCount });
+  rows.push({ Section: 'Driver Earnings', Metric: 'Total Deliveries', Value: driverEarnings.totalDeliveries });
+  rows.push({ Section: 'Driver Earnings', Metric: 'Total Earnings', Value: driverEarnings.totalEarnings });
+  rows.push({ Section: 'Driver Earnings', Metric: 'Unsettled Count', Value: driverEarnings.unsettledCount });
 
   const headers = Object.keys(rows[0]);
   const csv = [headers.join(','), ...rows.map(r => headers.map(h => JSON.stringify(r[h] ?? '')).join(','))].join('\n');

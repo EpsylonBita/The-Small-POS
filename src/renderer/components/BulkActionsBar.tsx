@@ -144,6 +144,7 @@ const BulkActionsBar: React.FC<BulkActionsBarProps> = React.memo(({
             <>
               <button className={getButtonStyles('primary')} onClick={(e) => { e.preventDefault(); onBulkAction('assign'); }}>{t('bulkActions.driver')}</button>
               <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('pickup'); }}>{t('bulkActions.pickup')}</button>
+              <button className={getButtonStyles('warning')} onClick={(e) => { e.preventDefault(); onBulkAction('delivered'); }}>{t('bulkActions.delivered')}</button>
               <button className={getButtonStyles('secondary')} onClick={(e) => { e.preventDefault(); onBulkAction('edit'); }}>{t('bulkActions.edit')}</button>
               <button className={getButtonStyles('danger')} onClick={(e) => { e.preventDefault(); onBulkAction('cancel'); }}>{t('bulkActions.cancel')}</button>
               <button className={`${getButtonStyles('secondary')} ${resolvedTheme === 'light' ? 'bg-black/80 hover:bg-black/90 text-white' : 'bg-white/80 hover:bg-white/90 text-black'}`} onClick={(e) => { e.preventDefault(); onBulkAction('map'); }}>{t('bulkActions.map')}</button>

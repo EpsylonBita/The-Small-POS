@@ -1,4 +1,5 @@
 use tauri::Emitter;
+use zeroize::Zeroizing;
 
 use crate::{api, db, storage, value_str};
 
@@ -215,8 +216,13 @@ pub async fn sync_test_parent_connection(
     crate::hydrate_terminal_credentials_from_local_settings(&db);
     let admin_url = storage::get_credential("admin_dashboard_url")
         .ok_or("Terminal not configured: missing admin URL")?;
-    let api_key =
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?;
+    let raw_api_key = Zeroizing::new(
+        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+    );
+    let api_key = Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    );
 
     let result = api::test_connectivity(&admin_url, &api_key).await;
     serde_json::to_value(&result).map_err(|e| e.to_string())

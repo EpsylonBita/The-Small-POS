@@ -3349,17 +3349,26 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     Ok(count)
 }
 
+/// Threshold of consecutive failures before emitting an alert event.
+const PRINT_WORKER_FAILURE_ALERT_THRESHOLD: u32 = 10;
+
 /// Start the background print worker loop.
 ///
 /// Runs every `interval_secs` seconds, processes pending print jobs.
+/// Emits a `print-worker-alert` Tauri event when consecutive failures exceed
+/// the threshold, and resets the counter on any successful tick.
 pub fn start_print_worker(
     db: Arc<DbState>,
+    app_handle: tauri::AppHandle,
     data_dir: PathBuf,
     interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
 ) {
+    use tauri::Emitter;
+
     tauri::async_runtime::spawn(async move {
         let interval = tokio::time::Duration::from_secs(interval_secs);
+        let mut consecutive_failures: u32 = 0;
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
@@ -3375,9 +3384,41 @@ pub fn start_print_worker(
                 process_pending_jobs(&db, &data_dir)
             }));
             match result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => error!("Print worker error: {e}"),
-                Err(_) => error!("Print worker panicked, will retry next tick"),
+                Ok(Ok(processed)) => {
+                    if processed > 0 {
+                        consecutive_failures = 0;
+                    }
+                }
+                Ok(Err(e)) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    error!(
+                        consecutive_failures = consecutive_failures,
+                        "Print worker error: {e}"
+                    );
+                }
+                Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    error!(
+                        consecutive_failures = consecutive_failures,
+                        "Print worker panicked, will retry next tick"
+                    );
+                }
+            }
+            if consecutive_failures >= PRINT_WORKER_FAILURE_ALERT_THRESHOLD
+                && consecutive_failures % PRINT_WORKER_FAILURE_ALERT_THRESHOLD == 0
+            {
+                warn!(
+                    consecutive_failures = consecutive_failures,
+                    "Print worker has failed {} consecutive times", consecutive_failures
+                );
+                let _ = app_handle.emit(
+                    "print-worker-alert",
+                    serde_json::json!({
+                        "type": "consecutive_failures",
+                        "count": consecutive_failures,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
             }
         }
     });

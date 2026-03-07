@@ -108,6 +108,26 @@ export interface SyncFinancialQueueItemsResponse {
   items: SyncFinancialQueueItem[];
 }
 
+export type ZReportSyncState =
+  | 'pending'
+  | 'syncing'
+  | 'applied'
+  | 'failed'
+  | string;
+
+export interface ZReportSubmitResponse {
+  success: boolean;
+  data?: unknown;
+  cleanup?: Record<string, number>;
+  lastZReportTimestamp?: string;
+  zReportId?: string | null;
+  localDayClosed?: boolean;
+  syncQueued?: boolean;
+  syncState?: ZReportSyncState | null;
+  message?: string;
+  error?: string;
+}
+
 // -- Screen Capture ----------------------------------------------------------
 
 export interface ScreenCaptureGetSourcesRequest {

@@ -166,7 +166,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
 
         // Enqueue for sync
-        let idempotency_key = format!("shift:open:{shift_id}:{}", Utc::now().timestamp_millis());
+        let idempotency_key = format!("shift:open:{shift_id}:{}", Uuid::new_v4());
         let sync_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
 
         conn.execute(
@@ -262,176 +262,189 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let shift_terminal_id = shift_terminal_id.unwrap_or_default();
 
     let now = Utc::now().to_rfc3339();
-    let expected: f64;
 
-    if role_type == "cashier" || role_type == "manager" {
-        // Transfer active driver shifts to the next cashier BEFORE calculating expected.
-        // This marks them as transferred and removes their starting amounts from driverCashGiven
-        // so the closing cashier is not held liable for cash given to drivers who haven't returned.
-        let transferred_driver_starting_total = transfer_active_cash_staff(
-            &conn,
-            &shift_branch_id,
-            &shift_terminal_id,
-            &shift_id,
-            &now,
-        )?;
+    // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
+    // that no order/payment can be inserted between the aggregate SELECTs and the
+    // subsequent UPDATEs, which would cause an incorrect cash variance.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
 
-        if transferred_driver_starting_total > 0.0 {
-            // Subtract transferred driver starting amounts from driver_cash_given
-            conn.execute(
-                "UPDATE cash_drawer_sessions SET
+    let result = (|| -> Result<(f64, f64), String> {
+        let expected: f64;
+
+        if role_type == "cashier" || role_type == "manager" {
+            // Transfer active driver shifts to the next cashier BEFORE calculating expected.
+            // This marks them as transferred and removes their starting amounts from driverCashGiven
+            // so the closing cashier is not held liable for cash given to drivers who haven't returned.
+            let transferred_driver_starting_total = transfer_active_cash_staff(
+                &conn,
+                &shift_branch_id,
+                &shift_terminal_id,
+                &shift_id,
+                &now,
+            )?;
+
+            if transferred_driver_starting_total > 0.0 {
+                // Subtract transferred driver starting amounts from driver_cash_given
+                conn.execute(
+                    "UPDATE cash_drawer_sessions SET
                     driver_cash_given = COALESCE(driver_cash_given, 0) - ?1,
                     updated_at = ?2
                  WHERE staff_shift_id = ?3",
-                params![transferred_driver_starting_total, now, shift_id],
-            )
-            .map_err(|e| format!("adjust driver_cash_given for transfers: {e}"))?;
-            info!(
-                shift_id = %shift_id,
-                total_deducted = %transferred_driver_starting_total,
-                "Subtracted transferred driver starting amounts from driver_cash_given"
-            );
-        }
+                    params![transferred_driver_starting_total, now, shift_id],
+                )
+                .map_err(|e| format!("adjust driver_cash_given for transfers: {e}"))?;
+                info!(
+                    shift_id = %shift_id,
+                    total_deducted = %transferred_driver_starting_total,
+                    "Subtracted transferred driver starting amounts from driver_cash_given"
+                );
+            }
 
-        // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
-        // This catches any missed incremental updates during the shift.
-        let reconciled_cash_sales: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(op.amount), 0)
+            // Reconcile-at-close: re-derive drawer totals from source-of-truth tables.
+            // This catches any missed incremental updates during the shift.
+            let reconciled_cash_sales: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(op.amount), 0)
                  FROM order_payments op
                  JOIN orders o ON o.id = op.order_id
                  WHERE o.staff_shift_id = ?1
                    AND op.method = 'cash'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-        let reconciled_card_sales: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(op.amount), 0)
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            let reconciled_card_sales: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(op.amount), 0)
                  FROM order_payments op
                  JOIN orders o ON o.id = op.order_id
                  WHERE o.staff_shift_id = ?1
                    AND op.method = 'card'
                    AND op.status = 'completed'
                    AND COALESCE(o.is_ghost, 0) = 0",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-        let reconciled_refunds: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(pa.amount), 0)
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            let reconciled_refunds: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(pa.amount), 0)
                  FROM payment_adjustments pa
                  JOIN orders o ON o.id = pa.order_id
                  WHERE o.staff_shift_id = ?1
                    AND pa.adjustment_type = 'refund'
                    AND COALESCE(o.is_ghost, 0) = 0",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-        let reconciled_expenses: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount), 0)
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
+            let reconciled_expenses: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(amount), 0)
                  FROM shift_expenses WHERE staff_shift_id = ?1",
-                params![shift_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
 
-        // Write reconciled values to cash_drawer_sessions
-        conn.execute(
-            "UPDATE cash_drawer_sessions SET
+            // Write reconciled values to cash_drawer_sessions
+            conn.execute(
+                "UPDATE cash_drawer_sessions SET
                 total_cash_sales = ?1,
                 total_card_sales = ?2,
                 total_refunds = ?3,
                 total_expenses = ?4,
                 updated_at = ?5
              WHERE staff_shift_id = ?6",
-            params![
-                reconciled_cash_sales,
-                reconciled_card_sales,
-                reconciled_refunds,
-                reconciled_expenses,
-                now,
-                shift_id,
-            ],
-        )
-        .map_err(|e| format!("reconcile drawer totals: {e}"))?;
+                params![
+                    reconciled_cash_sales,
+                    reconciled_card_sales,
+                    reconciled_refunds,
+                    reconciled_expenses,
+                    now,
+                    shift_id,
+                ],
+            )
+            .map_err(|e| format!("reconcile drawer totals: {e}"))?;
 
-        // Fetch cash drawer session totals (now reconciled)
-        let drawer = conn
-            .query_row(
-                "SELECT total_cash_sales, total_refunds, total_expenses,
+            // Fetch cash drawer session totals (now reconciled)
+            let drawer = conn
+                .query_row(
+                    "SELECT total_cash_sales, total_refunds, total_expenses,
                         cash_drops, driver_cash_given, driver_cash_returned,
                         total_staff_payments
                  FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
-                params![shift_id],
-                |row| {
-                    Ok((
-                        row.get::<_, f64>(0).unwrap_or(0.0),
-                        row.get::<_, f64>(1).unwrap_or(0.0),
-                        row.get::<_, f64>(2).unwrap_or(0.0),
-                        row.get::<_, f64>(3).unwrap_or(0.0),
-                        row.get::<_, f64>(4).unwrap_or(0.0),
-                        row.get::<_, f64>(5).unwrap_or(0.0),
-                        row.get::<_, f64>(6).unwrap_or(0.0),
-                    ))
-                },
-            )
-            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+                    params![shift_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, f64>(0).unwrap_or(0.0),
+                            row.get::<_, f64>(1).unwrap_or(0.0),
+                            row.get::<_, f64>(2).unwrap_or(0.0),
+                            row.get::<_, f64>(3).unwrap_or(0.0),
+                            row.get::<_, f64>(4).unwrap_or(0.0),
+                            row.get::<_, f64>(5).unwrap_or(0.0),
+                            row.get::<_, f64>(6).unwrap_or(0.0),
+                        ))
+                    },
+                )
+                .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 
-        let (cash_sales, refunds, expenses, drops, driver_given, driver_returned, staff_payments) =
-            drawer;
-        let cashier_payout = payment_amount.unwrap_or(0.0);
-        let deducted_staff_payments = if calc_version >= 2 {
-            0.0
+            let (
+                cash_sales,
+                refunds,
+                expenses,
+                drops,
+                driver_given,
+                driver_returned,
+                staff_payments,
+            ) = drawer;
+            let cashier_payout = payment_amount.unwrap_or(0.0);
+            let deducted_staff_payments = if calc_version >= 2 {
+                0.0
+            } else {
+                staff_payments
+            };
+
+            // Inherited driver expected returns: drivers transferred TO this cashier shift
+            // who are still active. Their expected cash return is added to the cashier's expected.
+            let inherited_driver_expected_returns = compute_inherited_cash_staff_expected_returns(
+                &conn,
+                &shift_id,
+                &shift_check_in_time,
+            )?;
+
+            if inherited_driver_expected_returns != 0.0 {
+                info!(
+                    shift_id = %shift_id,
+                    inherited = %inherited_driver_expected_returns,
+                    "Including inherited driver expected returns in cashier formula"
+                );
+            }
+
+            expected = opening_cash + cash_sales
+                - refunds
+                - expenses
+                - deducted_staff_payments
+                - drops
+                - driver_given
+                + driver_returned
+                + inherited_driver_expected_returns
+                - cashier_payout;
         } else {
-            staff_payments
-        };
+            // Driver / server / kitchen: expected = opening + cash collected - expenses
+            let cash_collected = compute_shift_cash_collected(&conn, &shift_id, &role_type)?;
 
-        // Inherited driver expected returns: drivers transferred TO this cashier shift
-        // who are still active. Their expected cash return is added to the cashier's expected.
-        let inherited_driver_expected_returns =
-            compute_inherited_cash_staff_expected_returns(&conn, &shift_id, &shift_check_in_time)?;
-
-        if inherited_driver_expected_returns != 0.0 {
-            info!(
-                shift_id = %shift_id,
-                inherited = %inherited_driver_expected_returns,
-                "Including inherited driver expected returns in cashier formula"
-            );
+            // Sum expenses for this shift
+            let expenses = compute_shift_expenses_total(&conn, &shift_id);
+            let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
+            expected = opening_cash + cash_collected - expenses;
         }
 
-        expected = opening_cash + cash_sales
-            - refunds
-            - expenses
-            - deducted_staff_payments
-            - drops
-            - driver_given
-            + driver_returned
-            + inherited_driver_expected_returns
-            - cashier_payout;
-    } else {
-        // Driver / server / kitchen: expected = opening + cash collected - expenses
-        let cash_collected = compute_shift_cash_collected(&conn, &shift_id, &role_type)?;
+        let variance = closing_cash - expected;
 
-        // Sum expenses for this shift
-        let expenses = compute_shift_expenses_total(&conn, &shift_id);
-        let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
-        expected = opening_cash + cash_collected - expenses;
-    }
-
-    let variance = closing_cash - expected;
-
-    // Wrap all writes in a transaction for atomicity
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin transaction: {e}"))?;
-
-    let result = (|| -> Result<(), String> {
         // Update cash drawer session (if cashier/manager)
         if role_type == "cashier" || role_type == "manager" {
             conn.execute(
@@ -524,7 +537,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("close shift: {e}"))?;
 
         // Enqueue for sync
-        let idempotency_key = format!("shift:close:{shift_id}:{}", Utc::now().timestamp_millis());
+        let idempotency_key = format!("shift:close:{shift_id}:{}", Uuid::new_v4());
         let sync_payload = serde_json::json!({
             "shiftId": shift_id,
             "closingCash": closing_cash,
@@ -542,29 +555,29 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         )
         .map_err(|e| format!("enqueue shift close sync: {e}"))?;
 
-        Ok(())
+        Ok((expected, variance))
     })();
 
     match result {
-        Ok(()) => {
+        Ok((expected, variance)) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
+
+            info!(shift_id = %shift_id, variance = %variance, "Shift closed");
+
+            Ok(serde_json::json!({
+                "success": true,
+                "variance": variance,
+                "expected": expected,
+                "closing": closing_cash,
+                "message": format!("Shift closed. Variance: {:.2}", variance)
+            }))
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
+            Err(e)
         }
     }
-
-    info!(shift_id = %shift_id, variance = %variance, "Shift closed");
-
-    Ok(serde_json::json!({
-        "success": true,
-        "variance": variance,
-        "expected": expected,
-        "closing": closing_cash,
-        "message": format!("Shift closed. Variance: {:.2}", variance)
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,7 +1118,7 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("update drawer expenses: {e}"))?;
 
         // Enqueue for sync
-        let idempotency_key = format!("expense:{expense_id}:{}", Utc::now().timestamp_millis());
+        let idempotency_key = format!("expense:{expense_id}:{}", Uuid::new_v4());
         let sync_payload = serde_json::json!({
             "expenseId": expense_id,
             "shiftId": shift_id,
@@ -1427,10 +1440,7 @@ fn transfer_active_cash_staff(
         )
         .map_err(|e| format!("mark driver earnings transferred: {e}"))?;
 
-        let idempotency_key = format!(
-            "shift:transfer:{driver_shift_id}:{}",
-            Utc::now().timestamp_millis()
-        );
+        let idempotency_key = format!("shift:transfer:{driver_shift_id}:{}", Uuid::new_v4());
         let sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "isTransferPending": true,
@@ -1508,10 +1518,7 @@ fn claim_transferred_cash_staff(
         )
         .map_err(|e| format!("claim transferred staff: {e}"))?;
 
-        let idempotency_key = format!(
-            "shift:claim:{driver_shift_id}:{}",
-            Utc::now().timestamp_millis()
-        );
+        let idempotency_key = format!("shift:claim:{driver_shift_id}:{}", Uuid::new_v4());
         let sync_payload = serde_json::json!({
             "shiftId": driver_shift_id,
             "transferredToCashierShiftId": new_cashier_shift_id,

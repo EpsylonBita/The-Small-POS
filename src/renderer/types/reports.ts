@@ -179,9 +179,27 @@ export interface ZReportData {
       createdAt: string;
     }>;
     ordersTruncated?: boolean;
-    payments: { staffPayments: number };
-    expenses: { total: number };
-    driver: {
+    payments?: {
+      staffPayments: number;
+      list?: Array<{
+        id: string;
+        amount: number;
+        type?: string;
+        notes?: string;
+        createdAt?: string;
+      }>;
+    };
+    expenses?: {
+      total: number;
+      items?: Array<{
+        id: string;
+        amount: number;
+        description: string;
+        expenseType?: string;
+        createdAt?: string;
+      }>;
+    };
+    driver?: {
       deliveries: number;
       completedDeliveries?: number;
       cancelledDeliveries?: number;
@@ -190,8 +208,18 @@ export interface ZReportData {
       cardAmount: number;
       cashToReturn: number;
     };
-    drawer?: { opening: number; expected?: number; closing?: number; variance?: number; cashSales?: number; cardSales?: number; drops?: number; driverCashReturned?: number; driverCashGiven?: number };
-    returnedToDrawerAmount: number;
+    drawer?: {
+      opening: number;
+      expected?: number;
+      closing?: number;
+      variance?: number;
+      cashSales?: number;
+      cardSales?: number;
+      drops?: number;
+      driverCashReturned?: number;
+      driverCashGiven?: number;
+    };
+    returnedToDrawerAmount?: number;
   }>;
   /**
    * RECOMMENDED: Detailed staff payment analytics from staff_payments table.
@@ -219,4 +247,3 @@ export interface ZReportData {
   daySummary?: { cashTotal: number; cardTotal: number; total: number; totalOrders: number };
   periodStart?: string;
 }
-

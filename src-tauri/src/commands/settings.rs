@@ -1,6 +1,7 @@
 use rusqlite::params;
 use serde_json::Value;
 use tauri::Emitter;
+use zeroize::Zeroizing;
 
 use crate::{api, db, menu, storage};
 
@@ -209,11 +210,14 @@ fn parse_terminal_config_get_setting_payload(
 }
 
 async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), String> {
-    let raw_api_key =
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?;
-    let api_key = api::extract_api_key_from_connection_string(&raw_api_key)
-        .unwrap_or_else(|| raw_api_key.clone());
-    if api_key != raw_api_key {
+    let raw_api_key = Zeroizing::new(
+        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+    );
+    let api_key = Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    );
+    if *api_key != *raw_api_key {
         let _ = storage::set_credential("pos_api_key", api_key.trim());
     }
 

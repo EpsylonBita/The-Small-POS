@@ -111,17 +111,28 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
-        let (resolved_shift_id, resolved_staff_id) = order_ownership::resolve_order_owner(
-            &conn,
-            &order_type,
-            &branch_id,
-            &terminal_id,
-            driver_id.as_deref(),
-            requested_staff_shift_id
+        let keep_delivery_unassigned = order_type.eq_ignore_ascii_case("delivery")
+            && driver_id
                 .as_deref()
-                .or(order_staff_shift_id.as_deref()),
-            requested_staff_id.as_deref().or(order_staff_id.as_deref()),
-        )?;
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none();
+
+        let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
+            (None, None)
+        } else {
+            order_ownership::resolve_order_owner(
+                &conn,
+                &order_type,
+                &branch_id,
+                &terminal_id,
+                driver_id.as_deref(),
+                requested_staff_shift_id
+                    .as_deref()
+                    .or(order_staff_shift_id.as_deref()),
+                requested_staff_id.as_deref().or(order_staff_id.as_deref()),
+            )?
+        };
 
         if resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id {
             conn.execute(
@@ -859,6 +870,88 @@ mod tests {
 
         assert_eq!(order_shift_id, "driver-shift-2");
         assert_eq!(payment_shift_id, "driver-shift-2");
+        assert_eq!(cashier_cash_sales, 0.0);
+    }
+
+    #[test]
+    fn test_record_unassigned_delivery_payment_stays_neutral_until_dispatch_choice() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'cash-shift-neutral', 'cashier-neutral', 'Cashier Neutral', 'branch-neutral', 'terminal-neutral', 'cashier',
+                datetime('now'), 100.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-neutral', 'cash-shift-neutral', 'cashier-neutral', 'branch-neutral', 'terminal-neutral',
+                100.0, datetime('now'), datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, order_type, sync_status,
+                branch_id, terminal_id, created_at, updated_at
+            ) VALUES (
+                'delivery-neutral-order', '[]', 19.0, 'pending', 'delivery', 'pending',
+                'branch-neutral', 'terminal-neutral', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "delivery-neutral-order",
+                "method": "cash",
+                "amount": 19.0,
+                "staffShiftId": "cash-shift-neutral",
+                "staffId": "cashier-neutral",
+            }),
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (order_shift_id, order_staff_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT staff_shift_id, staff_id FROM orders WHERE id = 'delivery-neutral-order'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (payment_shift_id, payment_staff_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT staff_shift_id, staff_id FROM order_payments WHERE order_id = 'delivery-neutral-order'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let cashier_cash_sales: f64 = conn
+            .query_row(
+                "SELECT total_cash_sales FROM cash_drawer_sessions WHERE staff_shift_id = 'cash-shift-neutral'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(order_shift_id, None);
+        assert_eq!(order_staff_id, None);
+        assert_eq!(payment_shift_id, None);
+        assert_eq!(payment_staff_id, None);
         assert_eq!(cashier_cash_sales, 0.0);
     }
 }

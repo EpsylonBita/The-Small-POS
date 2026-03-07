@@ -121,6 +121,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchDisposedRef = useRef(false);
+  const searchRequestSeqRef = useRef(0);
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -132,6 +134,14 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
     return { posKey, termId };
   }, []);
+
+  const nextSearchRequestId = () => {
+    searchRequestSeqRef.current += 1;
+    return searchRequestSeqRef.current;
+  };
+
+  const isSearchRequestStale = (requestId: number) =>
+    searchDisposedRef.current || requestId !== searchRequestSeqRef.current;
 
   // Set customer from initialCustomer prop when modal opens
   useEffect(() => {
@@ -160,12 +170,15 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
   // Debounced search function - now supports phone or name
   const searchCustomer = useCallback(async (query: string) => {
     if (!query.trim() || query.length < 3) {
+      nextSearchRequestId();
       setCustomer(null);
       setCustomers([]);
       setError(null);
+      setIsSearching(false);
       return;
     }
 
+    const requestId = nextSearchRequestId();
     setIsSearching(true);
     setError(null);
     setCustomer(null);
@@ -173,6 +186,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
     try {
       const { posKey, termId } = await resolvePosCredentials();
+      if (isSearchRequestStale(requestId)) return;
 
       // Check if we have credentials before making the request
       if (!posKey && !termId) {
@@ -206,6 +220,8 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         headers,
         credentials: 'omit', // Don't send cookies for POS endpoint
       });
+
+      if (isSearchRequestStale(requestId)) return;
 
       if (!result.success) {
         if (result.status === 401) {
@@ -282,10 +298,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
         }
       }
     } catch (err) {
+      if (isSearchRequestStale(requestId)) return;
       console.error('Error searching customer:', err);
       setError(t('modals.customerSearch.searchError'));
     } finally {
-      setIsSearching(false);
+      if (!isSearchRequestStale(requestId)) {
+        setIsSearching(false);
+      }
     }
   }, [resolvePosCredentials, t]);
 
@@ -468,9 +487,13 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
     }
   };
 
-  // Reset state when modal closes
+  // Reset state when modal closes; mark disposed to cancel in-flight searches
   useEffect(() => {
-    if (!isOpen) {
+    if (isOpen) {
+      searchDisposedRef.current = false;
+    } else {
+      searchDisposedRef.current = true;
+      searchRequestSeqRef.current += 1;
       setSearchQuery('');
       setCustomer(null);
       setCustomers([]);
@@ -499,10 +522,12 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
   // Helper to select a customer from the list - fetch fresh data with addresses
   const handleSelectFromList = async (selectedCustomer: Customer) => {
+    const requestId = nextSearchRequestId();
     setIsSearching(true);
     try {
       // Fetch fresh customer data with addresses using the customer's phone
       const { posKey, termId } = await resolvePosCredentials();
+      if (isSearchRequestStale(requestId)) return;
 
       // Fetch by exact phone to get full customer data with addresses
       const endpoint = `pos/customers?phone=${encodeURIComponent(selectedCustomer.phone)}`;
@@ -511,6 +536,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       if (termId) headers['x-terminal-id'] = String(termId);
 
       const result = await posApiGet<any>(endpoint, { headers, credentials: 'omit' });
+      if (isSearchRequestStale(requestId)) return;
       const payload = result.success ? result.data : null;
 
       if (result.success && payload?.success && payload.customer) {
@@ -549,12 +575,15 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
       setCustomer(selectedCustomer);
       setCustomers([]);
     } catch (err) {
+      if (isSearchRequestStale(requestId)) return;
       console.error('Error fetching customer details:', err);
       // Fallback to using the selected customer from list
       setCustomer(selectedCustomer);
       setCustomers([]);
     } finally {
-      setIsSearching(false);
+      if (!isSearchRequestStale(requestId)) {
+        setIsSearching(false);
+      }
     }
   };
 

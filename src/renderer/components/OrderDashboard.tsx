@@ -1466,12 +1466,18 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           if (isGhostOrder) {
             bridge.payments.printReceipt(result.orderId)
               .then((printResult: any) => console.log('[OrderDashboard] Ghost receipt print result:', printResult))
-              .catch((printError: any) => console.error('[OrderDashboard] Ghost receipt print error:', printError));
+              .catch((printError: any) => {
+                console.error('[OrderDashboard] Ghost receipt print error:', printError);
+                toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
+              });
           } else {
             // Cash register / fiscal print (fire-and-forget, non-blocking)
             bridge.ecr.fiscalPrint(result.orderId)
               .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
-              .catch((e: any) => console.warn('[OrderDashboard] Cash register print error (non-blocking):', e));
+              .catch((e: any) => {
+                console.warn('[OrderDashboard] Cash register print error (non-blocking):', e);
+                toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+              });
           }
 
           // Auto-earn loyalty points (fire-and-forget, non-blocking)
@@ -1485,7 +1491,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
               if (res?.success && res?.pointsEarned > 0) {
                 toast.success(t('loyalty.pointsEarned', { points: res.pointsEarned, defaultValue: '+{{points}} loyalty points earned' }));
               }
-            }).catch(() => {}); // Non-blocking
+            }).catch((err: any) => {
+              console.warn('[OrderDashboard] Loyalty points earn failed:', err);
+            });
           }
         } else {
           console.warn('[OrderDashboard] No orderId in result, skipping auto-print');
@@ -1585,6 +1593,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // Separate delivery orders from pickup orders
         const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
         const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
+        const deliveryOrdersInTransit = deliveryOrders.filter(order => {
+          const status = String(order.status || '').toLowerCase();
+          return status === 'out_for_delivery';
+        });
+        const deliveryOrdersNeedingDispatch = deliveryOrders.filter(order => {
+          const status = String(order.status || '').toLowerCase();
+          return status !== 'out_for_delivery' && status !== 'delivered' && status !== 'completed';
+        });
 
         // Handle pickup orders immediately (mark as completed)
         if (pickupOrders.length > 0) {
@@ -1598,10 +1614,29 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           toast.success(t('orderDashboard.pickupDelivered', { count: pickupOrders.length }));
         }
 
-        // Handle delivery orders - ask for driver assignment first
-        if (deliveryOrders.length > 0) {
-          setPendingDeliveryOrders(deliveryOrders.map(order => order.id));
-          setShowDriverModal(true);
+        if (deliveryOrdersNeedingDispatch.length > 0) {
+          toast.error(
+            t('orderDashboard.dispatchDeliveryBeforeComplete', {
+              defaultValue: 'Assign a driver or convert delivery orders to pickup before completing them.',
+            })
+          );
+          return;
+        }
+
+        if (deliveryOrdersInTransit.length > 0) {
+          for (const order of deliveryOrdersInTransit) {
+            const success = await updateOrderStatus(order.id, 'delivered');
+            if (!success) {
+              toast.error(t('orderDashboard.markDeliveredFailed', { orderNumber: order.orderNumber }));
+              return;
+            }
+          }
+          toast.success(
+            t('orderDashboard.deliveriesCompleted', {
+              count: deliveryOrdersInTransit.length,
+              defaultValue: 'Completed {{count}} delivery order(s)',
+            })
+          );
         } else if (pickupOrders.length > 0) {
           // If only pickup orders, clear selection
           setSelectedOrders([]);

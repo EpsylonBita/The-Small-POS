@@ -728,7 +728,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   // =========================================================================
 
   return (
-    <div className={`relative ${className}`}>
+    <div className={`relative flex items-center gap-1.5 ${className}`}>
       {/* Heart Icon Status Indicator */}
       <button
         className="group relative p-2 rounded-full hover:bg-white/10 transition-all duration-200"
@@ -752,6 +752,24 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
           <span className="absolute inset-0 rounded-full ring-2 ring-green-400/70 animate-[ping_1s_ease-out_2]" />
         )}
       </button>
+
+      {/* Offline Mode Indicator — visible in collapsed view */}
+      {!syncStatus.isOnline && (
+        <div className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1 text-xs font-semibold text-red-500 dark:text-red-400">
+            <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
+            {t('sync.labels.offline')}
+          </span>
+          <button
+            onClick={handleForceSync}
+            disabled={syncStatus.syncInProgress}
+            className="p-1 rounded-md text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+            title={t('sync.actions.retry', { defaultValue: 'Retry sync' })}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+      )}
 
       {/* ================================================================= */}
       {/* Detail Modal                                                       */}

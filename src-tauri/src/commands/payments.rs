@@ -162,7 +162,7 @@ pub async fn payment_update_payment_status(
     let idem = format!(
         "order:update-payment-method:{}:{}",
         order_id,
-        Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4()
     );
     let _ = conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)

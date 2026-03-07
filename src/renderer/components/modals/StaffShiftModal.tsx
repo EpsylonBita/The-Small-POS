@@ -16,6 +16,20 @@ import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
 import { SUPABASE_CONFIG } from '../../../shared/supabase-config';
 import { getBridge } from '../../../lib';
 
+// IPC result shapes from bridge calls
+interface SettingsResult {
+  [key: string]: unknown;
+  terminal?: { branch_id?: string; terminal_id?: string };
+}
+
+interface ShiftIpcResult {
+  success: boolean;
+  shiftId?: string;
+  variance?: number;
+  error?: string;
+  data?: { shiftId?: string; id?: string; variance?: number };
+}
+
 interface StaffShiftModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -497,7 +511,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // 2b) Try local settings store (legacy SettingsService)
       if (!branchId) {
         try {
-          const local = (await bridge.settings.get()) as any;
+          const local = (await bridge.settings.get()) as unknown as SettingsResult;
           const flat = local?.['terminal.branch_id'] ?? local?.terminal?.branch_id;
           if (flat) branchId = flat as string;
         } catch (e) {
@@ -898,9 +912,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       let terminalId: string | undefined = getSetting?.('terminal', 'terminal_id') as string | undefined;
       if (!branchId || !terminalId) {
         try {
-          const local = (await bridge.settings.get()) as any;
-          branchId = branchId || (local?.['terminal.branch_id'] ?? local?.terminal?.branch_id);
-          terminalId = terminalId || (local?.['terminal.terminal_id'] ?? local?.terminal?.terminal_id);
+          const local = (await bridge.settings.get()) as unknown as SettingsResult;
+          branchId = branchId || ((local?.['terminal.branch_id'] as string | undefined) ?? local?.terminal?.branch_id);
+          terminalId = terminalId || ((local?.['terminal.terminal_id'] as string | undefined) ?? local?.terminal?.terminal_id);
         } catch { }
       }
       if (!branchId) {
@@ -1209,7 +1223,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         ...(roleType === 'driver' || roleType === 'server'
           ? { startingAmount: usedStartingAmount }
           : { openingCash: usedOpeningCash }),
-      }) as any;
+      }) as unknown as ShiftIpcResult;
 
       if (result.success) {
         const shiftId = result?.shiftId || result?.data?.shiftId || result?.data?.id;
@@ -1493,7 +1507,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         closingCash: closingAmount,
         closedBy: staff.staffId,
         paymentAmount: isDriver ? driverPaymentAmount : cashierPaymentAmount
-      }) as any;
+      }) as unknown as ShiftIpcResult;
       console.log('closeShift result:', result);
 
       if (result.success) {
@@ -2044,7 +2058,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         .map((role, idx) => (
                           <button
                             key={idx}
-                            onClick={() => handleRoleSelect(role.role_name as any)}
+                            onClick={() => handleRoleSelect(role.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server')}
                             className={`group relative w-full overflow-hidden rounded-2xl border p-4 text-left shadow-lg transition-all duration-300 hover:scale-[1.01] active:scale-[0.99] ${role.is_primary
                               ? 'border-blue-500/30 bg-gradient-to-r from-blue-600/20 to-slate-600/20 shadow-blue-500/5'
                               : 'border-white/10 bg-white/5 hover:bg-white/10'
@@ -2085,7 +2099,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     ) : (
                       // Fallback to single role if roles array is empty
                       <button
-                        onClick={() => handleRoleSelect(selectedStaff.role_name as any)}
+                        onClick={() => handleRoleSelect(selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server')}
                         className="group relative w-full overflow-hidden rounded-2xl border border-blue-500/30 bg-gradient-to-r from-blue-600/20 to-slate-600/20 p-4 text-left shadow-lg shadow-blue-500/5 transition-all duration-300 hover:scale-[1.01] active:scale-[0.99]"
                       >
                         <div className="flex items-center gap-5">
@@ -2554,7 +2568,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     <div className={liquidGlassModalCard() + ' space-y-3 mb-4'}>
                       <select
                         value={expenseType}
-                        onChange={(e) => setExpenseType(e.target.value as any)}
+                        onChange={(e) => setExpenseType(e.target.value as 'supplies' | 'maintenance' | 'petty_cash' | 'refund' | 'other')}
                         className="liquid-glass-modal-input text-sm"
                       >
                         <option value="supplies">{t('expense.categories.supplies')}</option>

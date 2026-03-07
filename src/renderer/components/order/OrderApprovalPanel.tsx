@@ -62,7 +62,7 @@ function parseItemsFromJson(items: any): any[] {
  */
 async function fetchOrderItems(order: Order): Promise<any[]> {
   // 1. Check local order first - handle JSON string format
-  const localItems = order.items || (order as any).order_items || (order as any).orderItems;
+  const localItems = order.items;
   const parsedLocalItems = parseItemsFromJson(localItems);
 
   if (parsedLocalItems.length > 0) {
@@ -97,7 +97,7 @@ async function fetchOrderItems(order: Order): Promise<any[]> {
 
   // 3. Fetch from Supabase using supabase_id
   try {
-    const supabaseId = order.supabase_id || (order as any).supabaseId || order.id;
+    const supabaseId = order.supabase_id || order.id;
     console.log('[OrderApprovalPanel] Fetching from Supabase for order:', supabaseId);
 
     const response: any = await bridge.orders.fetchItemsFromSupabase(supabaseId);
@@ -142,20 +142,20 @@ export function OrderApprovalPanel({
   const orderType = (order.order_type || order.orderType || '').toString();
   const createdAtRaw = order.created_at || order.createdAt;
   const createdAt = createdAtRaw ? new Date(createdAtRaw) : null;
-  const deliveryAddressRaw = order.delivery_address || order.address || (order as any).deliveryAddress || '';
+  const deliveryAddressRaw = order.delivery_address || order.address || '';
   const [deliveryAddress, setDeliveryAddress] = React.useState<string>(deliveryAddressRaw);
-  const [fullOrder, setFullOrder] = React.useState<any>(order);
+  const [fullOrder, setFullOrder] = React.useState<Order>(order);
 
-  // Additional delivery fields (snake_case from normalized data, camelCase from Rust backend)
-  const deliveryCity = (order as any).delivery_city || (order as any).deliveryCity || '';
-  const deliveryPostalCode = (order as any).delivery_postal_code || (order as any).deliveryPostalCode || '';
-  const deliveryFloor = (order as any).delivery_floor || (order as any).deliveryFloor || '';
-  const deliveryNotes = (order as any).delivery_notes || (order as any).deliveryNotes || '';
-  const nameOnRinger = (order as any).name_on_ringer || (order as any).nameOnRinger || '';
+  // Additional delivery fields (snake_case from normalized data)
+  const deliveryCity = order.delivery_city || '';
+  const deliveryPostalCode = order.delivery_postal_code || '';
+  const deliveryFloor = order.delivery_floor || '';
+  const deliveryNotes = order.delivery_notes || '';
+  const nameOnRinger = order.name_on_ringer || '';
 
   // Log payment method for debugging
-  console.log('[OrderApprovalPanel] order.payment_method:', (order as any).payment_method);
-  console.log('[OrderApprovalPanel] order.paymentMethod:', (order as any).paymentMethod);
+  console.log('[OrderApprovalPanel] order.payment_method:', order.payment_method);
+  console.log('[OrderApprovalPanel] order.paymentMethod:', order.paymentMethod);
   console.log('[OrderApprovalPanel] full order object:', order);
 
   // Fetch full order details if items are missing
@@ -163,7 +163,7 @@ export function OrderApprovalPanel({
   React.useEffect(() => {
     const loadOrderItems = async () => {
       // Check if items are missing or empty using the parse function
-      const currentItems = parseItemsFromJson(order.items || (order as any).order_items || (order as any).orderItems);
+      const currentItems = parseItemsFromJson(order.items);
 
       if (currentItems.length > 0) {
         // Items already present, update fullOrder
@@ -249,7 +249,7 @@ export function OrderApprovalPanel({
     const orderToUse = fullOrder || order;
 
     // Parse items using the helper function
-    const items = parseItemsFromJson(orderToUse.items || (orderToUse as any).order_items || (orderToUse as any).orderItems);
+    const items = parseItemsFromJson(orderToUse.items);
 
     console.log('[OrderApprovalPanel] Normalizing items:', items.length);
 
@@ -437,11 +437,11 @@ export function OrderApprovalPanel({
       quantity: item.quantity
     })));
   }, [normalizedItems]);
-  const taxAmount = (order as any).tax_amount || (order as any).taxAmount || 0;
-  const deliveryFee = (order as any).delivery_fee ?? (order as any).deliveryFee ?? 0;
-  const discountAmount = (order as any).discount_amount || (order as any).discountAmount || 0;
-  const discountPercentage = (order as any).discount_percentage || (order as any).discountPercentage || 0;
-  const totalAmount = (order as any).total_amount || order.totalAmount || subtotal;
+  const taxAmount = order.tax_amount || order.taxAmount || 0;
+  const deliveryFee = order.deliveryFee ?? 0;
+  const discountAmount = order.discount_amount || 0;
+  const discountPercentage = order.discount_percentage || 0;
+  const totalAmount = order.total_amount || order.totalAmount || subtotal;
 
   const handleApprove = useCallback(async () => {
     if (!estimatedTime) {
@@ -706,7 +706,7 @@ export function OrderApprovalPanel({
                   <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5">
                     <div className="flex items-center justify-between">
                       {(() => {
-                        const paymentMethod = (order as any).payment_method || (order as any).paymentMethod;
+                        const paymentMethod = order.payment_method || order.paymentMethod;
                         if (paymentMethod === 'card') {
                           return (
                             <>

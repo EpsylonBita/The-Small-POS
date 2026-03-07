@@ -11,6 +11,7 @@ interface OrderStatusControlsProps {
   order: Order;
   onStatusChange: (orderId: string, newStatus: OrderStatus) => Promise<void>;
   onDriverAssign: (orderId: string) => void;
+  onConvertToPickup?: (orderId: string) => void;
   disabled?: boolean;
 }
 
@@ -27,6 +28,7 @@ export function OrderStatusControls({
   order,
   onStatusChange,
   onDriverAssign,
+  onConvertToPickup,
   disabled = false,
 }: OrderStatusControlsProps) {
   const bridge = getBridge();
@@ -221,6 +223,17 @@ export function OrderStatusControls({
               >
                 {t('orders.actions.assignDriver')}
               </button>
+              <button
+                onClick={() => onConvertToPickup?.(order.id)}
+                disabled={disabled || !onConvertToPickup}
+                className={`w-full ${baseButtonClass} ${
+                  theme === 'dark'
+                    ? 'bg-amber-900 hover:bg-amber-800 text-amber-100'
+                    : 'bg-amber-500 hover:bg-amber-600 text-white'
+                }`}
+              >
+                {t('orders.actions.setAsPickup', 'Set as Pickup')}
+              </button>
               {/* Notify Platform Ready button for external platform delivery orders */}
               {isPlatformOrder && (
                 <button
@@ -293,4 +306,3 @@ export function OrderStatusControls({
 
   return <div className="flex flex-col gap-2">{renderButtons()}</div>;
 }
-

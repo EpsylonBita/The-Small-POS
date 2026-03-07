@@ -1,6 +1,6 @@
 [package]
 name = "the-small-pos"
-version = "1.3.4"
+version = "1.3.5"
 description = "The Small POS - Desktop point-of-sale (Tauri v2)"
 authors = ["The Small Team <dev@thesmall.app>"]
 edition = "2021"
@@ -63,6 +63,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Serial port (scales, serial barcode scanners, customer displays)
 serialport = "4"
+
+# Secure memory clearing for secrets
+zeroize = "1"
 
 # Error handling
 thiserror = "2"

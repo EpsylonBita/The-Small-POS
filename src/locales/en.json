@@ -359,6 +359,7 @@
       "startPreparing": "Start Preparing",
       "markReady": "Mark Ready",
       "assignDriver": "Assign Driver",
+      "setAsPickup": "Set as Pickup",
       "completeOrder": "Complete Order",
       "markDelivered": "Mark Delivered",
       "processing": "Processing...",
@@ -2588,7 +2589,9 @@
       "print": "Print",
       "submitToAdmin": "Submit to Admin",
       "submitting": "Submitting…",
-      "submitSuccess": "Submitted successfully. Completing end-of-day and logging out…",
+      "submitSuccess": "Day closed locally. Completing end-of-day and logging out…",
+      "submitSuccessQueued": "Day closed locally. Z-report queued for admin sync. Logging out…",
+      "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Failed: {{error}}",
       "unknownError": "Unknown error",
       "submissionFailed": "Submission failed",
@@ -3126,6 +3129,8 @@
     "orderCreated": "Order created successfully!",
     "markDeliveredFailed": "Failed to mark order {{orderNumber}} as delivered",
     "pickupDelivered": "{{count}} pickup order(s) marked as delivered",
+    "deliveriesCompleted": "Completed {{count}} delivery order(s)",
+    "dispatchDeliveryBeforeComplete": "Assign a driver or convert delivery orders to pickup before completing them.",
     "noOrdersForCancel": "No orders selected for cancellation",
     "noOrdersForEdit": "No orders selected for editing",
     "cancelOrderFailed": "Failed to cancel order {{orderNumber}}",
@@ -3144,7 +3149,10 @@
     "bulkDeliveryDisabled": "Cannot select in bulk different order types",
     "bulkPickupDisabled": "Cannot select in bulk different order types",
     "noDeliveryOrdersSelected": "Select delivery orders to assign a driver",
-    "noCancelledOrdersSelected": "No cancelled orders selected"
+    "noCancelledOrdersSelected": "No cancelled orders selected",
+    "printFailed": "Receipt print failed",
+    "fiscalPrintFailed": "Cash register print failed",
+    "orderCreateFailed": "Failed to create order"
   },
   "bulkActions": {
     "driver": "Driver",
@@ -4346,5 +4354,11 @@
     "routingAll": "All terminals",
     "routingLoading": "Loading terminals...",
     "routingEmpty": "No terminals found for this branch."
+  },
+  "errorBoundary": {
+    "whatCanYouDo": "What can you do?",
+    "tryRetry": "Click the \"Retry\" button to try again",
+    "refreshPage": "Refresh the page to restart the application",
+    "contactSupport": "If the problem persists, contact support"
   }
 }

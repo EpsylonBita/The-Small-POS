@@ -643,8 +643,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         name_on_ringer: selectedCustomer?.name_on_ringer || selectedAddress?.name_on_ringer || null,
         notes: orderData.notes || null,
 
-        // Driver assignment for delivery orders
-        driver_id: orderData.paymentData?.driverId || null,
+        // Delivery orders stay neutral until explicitly assigned later
+        driver_id: undefined,
 
         // Delivery zone metadata
         delivery_zone_id: deliveryZoneId,
@@ -668,8 +668,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         updatedAt: new Date().toISOString(),
 
         // Shift-related fields
-        staff_shift_id: activeShift?.id || null,
-        staff_id: staff?.staffId || null
+        staff_shift_id: selectedOrderType === 'delivery' ? undefined : (activeShift?.id || null),
+        staff_id: selectedOrderType === 'delivery' ? undefined : (staff?.staffId || null)
       };
 
       // Ensure a cashier shift is active before allowing order creation
@@ -714,8 +714,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               cashReceived: orderData.paymentData.cashReceived,
               changeGiven: orderData.paymentData.change,
               transactionRef: orderData.paymentData.transactionId,
-              staffId: staff?.staffId,
-              staffShiftId: activeShift?.id,
+              staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
+              staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
             });
           } catch (payErr) {
             console.error('Failed to record payment:', payErr);
@@ -728,35 +728,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             bridge.ecr.fiscalPrint(result.orderId)
               .catch((e: any) => console.warn('[OrderFlow] Cash register print error (non-blocking):', e));
           } catch {}
-        }
-
-        // Record driver earnings for delivery orders
-        if (selectedOrderType === 'delivery' && orderData.paymentData?.driverId && activeShift?.id) {
-          try {
-            const paymentMethod = orderData.paymentData.method;
-            const cashCollected = paymentMethod === 'cash' ? (orderData.paymentData.cashReceived || total_amount) : 0;
-            const cardAmount = paymentMethod === 'card' ? total_amount : 0;
-
-            const earningResult = await bridge.drivers.recordEarning({
-              driverId: orderData.paymentData.driverId,
-              shiftId: activeShift.id,
-              orderId: (result.orderId || displayOrderNumber),
-              deliveryFee: deliveryFee,
-              tipAmount: 0, // Could be enhanced to collect tips
-              paymentMethod: paymentMethod,
-              cashCollected: cashCollected,
-              cardAmount: cardAmount
-            });
-
-            if (!earningResult.success) {
-              console.error('Failed to record driver earning:', earningResult.error);
-              // Don't fail the order, just log the error
-              toast.error(t('orderFlow.driverEarningFailed'));
-            }
-          } catch (earningError) {
-            console.error('Error recording driver earning:', earningError);
-            // Don't fail the order, just log the error
-          }
         }
 
         // Additional success feedback for delivery orders

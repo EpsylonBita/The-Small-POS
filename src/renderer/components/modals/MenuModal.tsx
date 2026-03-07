@@ -116,6 +116,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
+  const [isLocalProcessing, setIsLocalProcessing] = useState(false);
+  const effectiveProcessing = isProcessingOrder || isLocalProcessing;
   const [menuSearchQuery, setMenuSearchQuery] = useState('');
   const menuSearchRef = useRef<HTMLInputElement>(null);
 
@@ -1162,6 +1164,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handlePaymentComplete = async (paymentData: any) => {
+    setIsLocalProcessing(true);
     const isGhostOrder = shouldBypassPaymentWithGhostMode;
     const ghostMetadata = isGhostOrder
       ? {
@@ -1227,11 +1230,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
       setShowPaymentModal(false);
+      setIsLocalProcessing(false);
       onClose();
     } catch (error) {
       console.error('Error completing order:', error);
       toast.error(t('modals.menu.orderFailed'));
       setShowPaymentModal(false);
+      setIsLocalProcessing(false);
     }
   };
 
@@ -1455,7 +1460,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           orderType={orderType}
           minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0}
           onPaymentComplete={handlePaymentComplete}
-          isProcessing={isProcessingOrder}
+          isProcessing={effectiveProcessing}
         />
       )}
 
@@ -1526,7 +1531,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       )}
 
       {/* Processing Overlay */}
-      {isOpen && isProcessingOrder && (
+      {isOpen && effectiveProcessing && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1100]">
           <div className="rounded-2xl p-8 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border backdrop-blur-xl">
             <div className="flex flex-col items-center space-y-4">

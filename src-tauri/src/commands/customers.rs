@@ -463,6 +463,46 @@ fn build_remote_customer_create_body(source: &serde_json::Value) -> serde_json::
     serde_json::Value::Object(body)
 }
 
+fn build_remote_customer_update_body(source: &serde_json::Value) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+
+    if let Some(name) = string_field(source, &["name", "fullName"]) {
+        body.insert("name".to_string(), serde_json::json!(name));
+    }
+    if let Some(phone) = string_field(source, &["phone", "customerPhone", "mobile", "telephone"]) {
+        body.insert("phone".to_string(), serde_json::json!(phone));
+    }
+    if source.get("email").is_some() {
+        let email = string_field(source, &["email"]);
+        body.insert(
+            "email".to_string(),
+            email
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if source.get("notes").is_some() {
+        let notes = string_field(source, &["notes"]);
+        body.insert(
+            "notes".to_string(),
+            notes
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(loyalty_points) = value_i64(source, &["loyalty_points", "loyaltyPoints"]) {
+        body.insert(
+            "loyalty_points".to_string(),
+            serde_json::json!(loyalty_points),
+        );
+    }
+    if let Some(is_active) = value_bool_any(source, &["is_active", "isActive"]) {
+        body.insert("is_active".to_string(), serde_json::json!(is_active));
+    }
+
+    serde_json::Value::Object(body)
+}
+
 fn build_remote_address_body(source: &serde_json::Value) -> serde_json::Value {
     let mut body = serde_json::Map::new();
 
@@ -535,6 +575,58 @@ fn normalize_customer_for_cache(mut customer: serde_json::Value) -> serde_json::
     customer
 }
 
+fn customer_has_addresses(customer: &serde_json::Value) -> bool {
+    customer
+        .get("addresses")
+        .and_then(|value| value.as_array())
+        .map(|addresses| !addresses.is_empty())
+        .unwrap_or(false)
+}
+
+fn upsert_customer_cache_entry(
+    cache: &mut Vec<serde_json::Value>,
+    customer: serde_json::Value,
+) -> serde_json::Value {
+    let mut normalized = normalize_customer_for_cache(customer);
+    let customer_id = value_str(&normalized, &["id", "customerId"]).unwrap_or_default();
+    if customer_id.is_empty() {
+        return normalized;
+    }
+
+    let existing = cache.iter().find(|entry| {
+        value_str(entry, &["id", "customerId"])
+            .map(|id| id == customer_id)
+            .unwrap_or(false)
+    });
+
+    if let (Some(existing_entry), Some(obj)) = (existing, normalized.as_object_mut()) {
+        if !customer_has_addresses(&serde_json::Value::Object(obj.clone())) {
+            if let Some(addresses) = existing_entry.get("addresses") {
+                obj.insert("addresses".to_string(), addresses.clone());
+            }
+        }
+        if !obj.contains_key("selected_address_id") {
+            if let Some(selected_address_id) = value_str(
+                existing_entry,
+                &["selected_address_id", "selectedAddressId"],
+            ) {
+                obj.insert(
+                    "selected_address_id".to_string(),
+                    serde_json::json!(selected_address_id),
+                );
+            }
+        }
+    }
+
+    cache.retain(|entry| {
+        value_str(entry, &["id", "customerId"])
+            .map(|id| id != customer_id)
+            .unwrap_or(true)
+    });
+    cache.push(normalized.clone());
+    normalized
+}
+
 fn normalize_address_for_cache(mut address: serde_json::Value) -> serde_json::Value {
     let now = Utc::now().to_rfc3339();
     if let Some(obj) = address.as_object_mut() {
@@ -584,6 +676,28 @@ fn normalize_address_for_cache(mut address: serde_json::Value) -> serde_json::Va
     address
 }
 
+fn percent_encode_component(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for b in input.bytes() {
+        let is_unreserved =
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~';
+        if is_unreserved {
+            encoded.push(b as char);
+        } else {
+            encoded.push_str(&format!("%{b:02X}"));
+        }
+    }
+    encoded
+}
+
+fn is_not_found_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("http 404")
+        || lower.contains("status 404")
+        || lower.contains("customer not found")
+        || lower.contains("address not found")
+}
+
 async fn sync_customer_create_remote(
     db: &db::DbState,
     customer: &serde_json::Value,
@@ -602,6 +716,80 @@ async fn sync_customer_create_remote(
         .or_else(|| response.get("customer").cloned())
         .ok_or("Customer API response missing data")?;
     Ok(remote_customer)
+}
+
+async fn sync_customer_update_remote(
+    db: &db::DbState,
+    customer_id: &str,
+    updates: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body = build_remote_customer_update_body(updates);
+    if body.as_object().map(|obj| obj.is_empty()).unwrap_or(true) {
+        return Err("Missing customer updates".into());
+    }
+
+    let path = format!("/api/pos/customers/{customer_id}");
+    let response = crate::admin_fetch(Some(db), &path, "PATCH", Some(body)).await?;
+    let remote_customer = response
+        .get("customer")
+        .cloned()
+        .or_else(|| response.get("data").cloned())
+        .ok_or("Customer API response missing customer")?;
+    Ok(remote_customer)
+}
+
+async fn sync_customer_fetch_remote_by_id(
+    db: &db::DbState,
+    customer_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let path = format!("/api/pos/customers/{customer_id}");
+    match crate::admin_fetch(Some(db), &path, "GET", None).await {
+        Ok(response) => Ok(response
+            .get("customer")
+            .cloned()
+            .or_else(|| response.get("data").cloned())),
+        Err(error) if is_not_found_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+async fn sync_customer_fetch_remote_by_phone(
+    db: &db::DbState,
+    phone: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let normalized_phone = normalize_phone(phone);
+    if normalized_phone.is_empty() {
+        return Ok(None);
+    }
+
+    let path = format!(
+        "/api/pos/customers?phone={}",
+        percent_encode_component(&normalized_phone)
+    );
+    match crate::admin_fetch(Some(db), &path, "GET", None).await {
+        Ok(response) => {
+            if response
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .is_some_and(|success| !success)
+            {
+                return Ok(None);
+            }
+
+            Ok(response
+                .get("customer")
+                .cloned()
+                .or_else(|| {
+                    response
+                        .get("customers")
+                        .and_then(|value| value.as_array())
+                        .and_then(|customers| customers.first().cloned())
+                })
+                .or_else(|| response.get("data").cloned()))
+        }
+        Err(error) if is_not_found_error(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn sync_customer_address_remote(
@@ -714,6 +902,13 @@ pub async fn customer_lookup_by_phone(
         return Ok(found);
     }
 
+    if let Some(remote_customer) = sync_customer_fetch_remote_by_phone(&db, &phone).await? {
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        return Ok(customer);
+    }
+
     // Fallback from local orders history.
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let row = conn
@@ -753,7 +948,18 @@ pub async fn customer_lookup_by_id(
             .map(|id| id == customer_id)
             .unwrap_or(false)
     });
-    Ok(found.unwrap_or(serde_json::Value::Null))
+    if let Some(found) = found {
+        return Ok(found);
+    }
+
+    if let Some(remote_customer) = sync_customer_fetch_remote_by_id(&db, &customer_id).await? {
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        return Ok(customer);
+    }
+
+    Ok(serde_json::Value::Null)
 }
 
 #[tauri::command]
@@ -792,16 +998,8 @@ pub async fn customer_create(
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
     let remote_customer = sync_customer_create_remote(&db, &payload).await?;
-    let customer = normalize_customer_for_cache(remote_customer);
-    let customer_id =
-        value_str(&customer, &["id", "customerId"]).ok_or("Customer create returned missing id")?;
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
-    cache.retain(|entry| {
-        value_str(entry, &["id", "customerId"])
-            .map(|id| id != customer_id)
-            .unwrap_or(true)
-    });
-    cache.push(customer.clone());
+    let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
     write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
     let _ = app.emit("customer_created", customer.clone());
     let _ = app.emit("customer_realtime_update", customer.clone());
@@ -820,6 +1018,22 @@ pub async fn customer_update(
     let customer_id = payload.customer_id;
     let updates = payload.updates;
     let expected_version = payload.expected_version;
+    let remote_updates = build_remote_customer_update_body(&updates);
+
+    if remote_updates
+        .as_object()
+        .map(|obj| !obj.is_empty())
+        .unwrap_or(false)
+    {
+        let remote_customer = sync_customer_update_remote(&db, &customer_id, &updates).await?;
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        let _ = app.emit("customer_updated", customer.clone());
+        let _ = app.emit("customer_realtime_update", customer.clone());
+        return Ok(serde_json::json!({ "success": true, "data": customer }));
+    }
+
     let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
 
     let mut updated_customer: Option<serde_json::Value> = None;
@@ -939,8 +1153,21 @@ pub async fn customer_add_address(
         break;
     }
 
-    if let Some(customer) = updated.clone() {
+    let customer = if let Some(customer) = updated.clone() {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        Some(customer)
+    } else if let Some(remote_customer) =
+        sync_customer_fetch_remote_by_id(&db, &customer_id).await?
+    {
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        Some(customer)
+    } else {
+        None
+    };
+
+    if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
         return Ok(serde_json::json!({ "success": true, "data": address, "customer": customer }));
@@ -1032,10 +1259,21 @@ pub async fn customer_update_address(
         break;
     }
 
-    if cache_touched {
+    let customer = if cache_touched {
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
-    }
-    if let Some(customer) = updated_customer.clone() {
+        updated_customer.clone()
+    } else if let Some(remote_customer) =
+        sync_customer_fetch_remote_by_id(&db, &customer_id).await?
+    {
+        let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
+        let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
+        write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;
+        Some(customer)
+    } else {
+        updated_customer.clone()
+    };
+
+    if let Some(customer) = customer.clone() {
         let _ = app.emit("customer_updated", customer.clone());
         let _ = app.emit("customer_realtime_update", customer.clone());
     }
@@ -1043,7 +1281,7 @@ pub async fn customer_update_address(
     Ok(serde_json::json!({
         "success": true,
         "data": address,
-        "customer": updated_customer
+        "customer": customer
     }))
 }
 

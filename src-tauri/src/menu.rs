@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tracing::{error, trace, warn};
+use zeroize::Zeroizing;
 
 use crate::api;
 use crate::db::DbState;
@@ -26,7 +27,7 @@ pub struct MenuVersionDigest {
 
 #[derive(Debug, Clone)]
 struct MenuSyncCredentials {
-    api_key: String,
+    api_key: Zeroizing<String>,
     terminal_id: String,
     admin_url: String,
 }
@@ -234,10 +235,13 @@ fn build_menu_version_token(
 }
 
 fn resolve_menu_sync_credentials() -> Result<MenuSyncCredentials, String> {
-    let raw_api_key =
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?;
-    let api_key = api::extract_api_key_from_connection_string(&raw_api_key)
-        .unwrap_or_else(|| raw_api_key.clone());
+    let raw_api_key = Zeroizing::new(
+        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+    );
+    let api_key = Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    );
     let terminal_id = storage::get_credential("terminal_id")
         .or_else(|| api::extract_terminal_id_from_connection_string(&raw_api_key))
         .ok_or("Terminal not configured: missing terminal ID")?;
@@ -251,7 +255,7 @@ fn resolve_menu_sync_credentials() -> Result<MenuSyncCredentials, String> {
     if storage::get_credential("admin_dashboard_url").is_none() {
         let _ = storage::set_credential("admin_dashboard_url", admin_url.trim());
     }
-    if api_key != raw_api_key {
+    if *api_key != *raw_api_key {
         let _ = storage::set_credential("pos_api_key", api_key.trim());
     }
 

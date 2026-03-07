@@ -721,6 +721,8 @@ fn migrate_v10(conn: &Connection) -> Result<(), String> {
 fn migrate_v11(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
+        BEGIN;
+
         -- z_reports: per-shift end-of-day financial snapshots
         CREATE TABLE IF NOT EXISTS z_reports (
             id TEXT PRIMARY KEY,
@@ -801,6 +803,8 @@ fn migrate_v11(conn: &Connection) -> Result<(), String> {
 
         -- Record migration
         INSERT INTO schema_version (version) VALUES (11);
+
+        COMMIT;
         ",
     )
     .map_err(|e| {
@@ -1026,6 +1030,8 @@ fn migrate_v15(conn: &Connection) -> Result<(), String> {
 fn migrate_v16(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
+        BEGIN;
+
         CREATE TABLE printer_profiles_new (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -1073,6 +1079,8 @@ fn migrate_v16(conn: &Connection) -> Result<(), String> {
             ON printer_profiles(printer_name);
 
         INSERT INTO schema_version (version) VALUES (16);
+
+        COMMIT;
         ",
     )
     .map_err(|e| {
@@ -1251,6 +1259,8 @@ fn migrate_v17(conn: &Connection) -> Result<(), String> {
 fn migrate_v18(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
+        BEGIN;
+
         CREATE TABLE IF NOT EXISTS print_jobs_v18 (
             id TEXT PRIMARY KEY,
             entity_type TEXT NOT NULL
@@ -1283,6 +1293,8 @@ fn migrate_v18(conn: &Connection) -> Result<(), String> {
             ON print_jobs(entity_type, entity_id);
 
         INSERT INTO schema_version (version) VALUES (18);
+
+        COMMIT;
         ",
     )
     .map_err(|e| {
@@ -1344,6 +1356,8 @@ fn migrate_v20(conn: &Connection) -> Result<(), String> {
     // modern template default for new rows.
     conn.execute_batch(
         "
+        BEGIN;
+
         CREATE TABLE printer_profiles_v20 (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -1388,6 +1402,8 @@ fn migrate_v20(conn: &Connection) -> Result<(), String> {
 
         CREATE INDEX IF NOT EXISTS idx_printer_profiles_name
             ON printer_profiles(printer_name);
+
+        COMMIT;
         ",
     )
     .map_err(|e| format!("migration v20 rebuild printer_profiles: {e}"))?;
@@ -1560,6 +1576,8 @@ fn migrate_v23(conn: &Connection) -> Result<(), String> {
 fn migrate_v24(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
+        BEGIN;
+
         DROP TABLE IF EXISTS print_jobs_v24;
         CREATE TABLE print_jobs_v24 (
             id TEXT PRIMARY KEY,
@@ -1598,6 +1616,8 @@ fn migrate_v24(conn: &Connection) -> Result<(), String> {
             ON print_jobs(entity_type, entity_id);
 
         INSERT INTO schema_version (version) VALUES (24);
+
+        COMMIT;
         ",
     )
     .map_err(|e| {

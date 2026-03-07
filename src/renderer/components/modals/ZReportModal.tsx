@@ -6,11 +6,13 @@ import type { ZReportData } from '../../types/reports';
 import { exportZReportToCSV, exportArrayToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
 import { formatDate, formatTime } from '../../utils/format';
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
+import { clearBusinessDayStorage } from '../../utils/session-utils';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { Banknote, CheckCircle, Circle, CreditCard, XCircle } from 'lucide-react';
 import { getBridge } from '../../../lib';
+import type { ZReportSubmitResponse } from '../../../lib/ipc-contracts';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -220,9 +222,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
 
         {!loading && !error && activeTab === 'summary' && zReport && (() => {
           // Safe accessors for nested properties that may be missing
-          const sales = zReport.sales || { totalOrders: 0, totalSales: 0, cashSales: 0, cardSales: 0, byType: {} };
+          const sales = zReport.sales || { totalOrders: 0, totalSales: 0, cashSales: 0, cardSales: 0 };
           const cashDrawer: ZReportData['cashDrawer'] = zReport.cashDrawer || { totalVariance: 0, totalCashDrops: 0, unreconciledCount: 0, openingTotal: 0, driverCashGiven: 0, driverCashReturned: 0 };
-          const expenses = zReport.expenses || { total: 0, staffPaymentsTotal: 0, pendingCount: 0, items: [] };
+          const expenses: Partial<ZReportData['expenses']> = zReport.expenses || { total: 0, items: [] };
+          const hasSalesByType = Boolean(sales.byType && (sales.byType.instore || sales.byType.delivery));
 
           return (
           <div className="space-y-4">
@@ -259,35 +262,37 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             </div>
 
             {/* SALES BREAKDOWN - Glass with dark text */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="rounded-lg p-4 border border-purple-500/30 bg-purple-500/10 dark:bg-purple-900/20">
-                <h3 className="font-extrabold mb-3 text-purple-900 dark:text-purple-200 text-sm uppercase tracking-wide">{t('modals.zReport.instore')}</h3>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="font-bold text-black dark:text-white">{t('modals.zReport.cash')} ({sales.byType?.instore?.cash?.count ?? 0})</span>
-                    <span className="text-purple-900 dark:text-purple-200 font-extrabold">${(sales.byType?.instore?.cash?.total ?? 0).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-bold text-black dark:text-white">{t('modals.zReport.card')} ({sales.byType?.instore?.card?.count ?? 0})</span>
-                    <span className="text-purple-900 dark:text-purple-200 font-extrabold">${(sales.byType?.instore?.card?.total ?? 0).toFixed(2)}</span>
+            {hasSalesByType && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-lg p-4 border border-purple-500/30 bg-purple-500/10 dark:bg-purple-900/20">
+                  <h3 className="font-extrabold mb-3 text-purple-900 dark:text-purple-200 text-sm uppercase tracking-wide">{t('modals.zReport.instore')}</h3>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="font-bold text-black dark:text-white">{t('modals.zReport.cash')} ({sales.byType?.instore?.cash?.count ?? 0})</span>
+                      <span className="text-purple-900 dark:text-purple-200 font-extrabold">${(sales.byType?.instore?.cash?.total ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="font-bold text-black dark:text-white">{t('modals.zReport.card')} ({sales.byType?.instore?.card?.count ?? 0})</span>
+                      <span className="text-purple-900 dark:text-purple-200 font-extrabold">${(sales.byType?.instore?.card?.total ?? 0).toFixed(2)}</span>
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              <div className="rounded-lg p-4 border border-orange-500/30 bg-orange-500/10 dark:bg-orange-900/20">
-                <h3 className="font-extrabold mb-3 text-orange-900 dark:text-orange-200 text-sm uppercase tracking-wide">{t('modals.zReport.delivery')}</h3>
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="font-bold text-black dark:text-white">{t('modals.zReport.cash')} ({sales.byType?.delivery?.cash?.count ?? 0})</span>
-                    <span className="text-orange-900 dark:text-orange-200 font-extrabold">${(sales.byType?.delivery?.cash?.total ?? 0).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-bold text-black dark:text-white">{t('modals.zReport.card')} ({sales.byType?.delivery?.card?.count ?? 0})</span>
-                    <span className="text-orange-900 dark:text-orange-200 font-extrabold">${(sales.byType?.delivery?.card?.total ?? 0).toFixed(2)}</span>
+                <div className="rounded-lg p-4 border border-orange-500/30 bg-orange-500/10 dark:bg-orange-900/20">
+                  <h3 className="font-extrabold mb-3 text-orange-900 dark:text-orange-200 text-sm uppercase tracking-wide">{t('modals.zReport.delivery')}</h3>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="font-bold text-black dark:text-white">{t('modals.zReport.cash')} ({sales.byType?.delivery?.cash?.count ?? 0})</span>
+                      <span className="text-orange-900 dark:text-orange-200 font-extrabold">${(sales.byType?.delivery?.cash?.total ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="font-bold text-black dark:text-white">{t('modals.zReport.card')} ({sales.byType?.delivery?.card?.count ?? 0})</span>
+                      <span className="text-orange-900 dark:text-orange-200 font-extrabold">${(sales.byType?.delivery?.card?.total ?? 0).toFixed(2)}</span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* CASH DRAWER - Glass with dark text */}
             <div className="rounded-lg p-4 border border-yellow-500/30 bg-yellow-500/10 dark:bg-yellow-900/20">
@@ -417,14 +422,18 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.totalExpenses')}</div>
                   <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">${(expenses.total ?? 0).toFixed(2)}</div>
                 </div>
-                <div>
-                  <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.staffPaymentsTotal')}</div>
-                  <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">${(expenses.staffPaymentsTotal ?? 0).toFixed(2)}</div>
-                </div>
-                <div>
-                  <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.pendingCount')}</div>
-                  <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">{expenses.pendingCount ?? 0}</div>
-                </div>
+                {expenses.staffPaymentsTotal !== undefined && (
+                  <div>
+                    <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.staffPaymentsTotal')}</div>
+                    <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">${expenses.staffPaymentsTotal.toFixed(2)}</div>
+                  </div>
+                )}
+                {expenses.pendingCount !== undefined && (
+                  <div>
+                    <div className="font-bold text-black dark:text-white text-xs">{t('modals.zReport.pendingCount')}</div>
+                    <div className="text-rose-900 dark:text-rose-200 font-extrabold text-lg">{expenses.pendingCount}</div>
+                  </div>
+                )}
               </div>
               {/* Staff Payments Note */}
               <div className="mt-3 pt-2 border-t border-rose-500/20">
@@ -455,6 +464,43 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                   {zReport.staffReports.map((staff) => {
                     const isCashier = String(staff.role).toLowerCase() === 'cashier';
                     const isDriver = String(staff.role).toLowerCase() === 'driver';
+                    const driverBreakdown = Array.isArray(cashDrawer.driverCashBreakdown)
+                      ? cashDrawer.driverCashBreakdown.find((row) => row.driverShiftId === staff.staffShiftId)
+                      : undefined;
+                    const legacyDeliveryCount = Array.isArray(staff.ordersDetails)
+                      ? staff.ordersDetails.filter((order) =>
+                        order?.orderType === 'delivery' &&
+                        !['cancelled', 'canceled', 'refunded'].includes(String(order?.status || '').toLowerCase())
+                      ).length
+                      : undefined;
+                    const driverMetrics = isDriver ? {
+                      deliveries: staff.driver?.deliveries ?? legacyDeliveryCount,
+                      earnings: staff.driver?.earnings,
+                      cashCollected: staff.driver?.cashCollected ?? driverBreakdown?.cashCollected,
+                      cardAmount: staff.driver?.cardAmount ?? driverBreakdown?.cardAmount,
+                      cashToReturn: staff.driver?.cashToReturn ?? driverBreakdown?.cashToReturn,
+                    } : undefined;
+                    const hasCashierOrderMetrics =
+                      staff.orders?.count !== undefined ||
+                      staff.orders?.cashAmount !== undefined ||
+                      staff.orders?.cardAmount !== undefined;
+                    const cashierReturnAmount = staff.returnedToDrawerAmount ?? staff.drawer?.expected;
+                    const hasCashierFinancials =
+                      staff.payments?.staffPayments !== undefined ||
+                      staff.expenses?.total !== undefined ||
+                      cashierReturnAmount !== undefined;
+                    const hasDriverPrimaryMetrics =
+                      driverMetrics &&
+                      (
+                        driverMetrics.deliveries !== undefined ||
+                        driverMetrics.earnings !== undefined ||
+                        driverMetrics.cashCollected !== undefined ||
+                        driverMetrics.cardAmount !== undefined
+                      );
+                    const hasDriverFinancials =
+                      staff.payments?.staffPayments !== undefined ||
+                      staff.expenses?.total !== undefined ||
+                      driverMetrics?.cashToReturn !== undefined;
 
                     return (
                       <div key={staff.staffShiftId} className="p-4 rounded-lg border border-slate-400/30 bg-white/30 dark:bg-slate-800/30">
@@ -476,36 +522,46 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                         {isCashier && (
                           <div className="space-y-3">
                             {/* Sales */}
-                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.orders')}</div>
-                                <div className="text-green-700 dark:text-green-400 font-bold">{staff.orders?.count || 0}</div>
+                            {hasCashierOrderMetrics && (
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                                <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                  <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.orders')}</div>
+                                  <div className="text-green-700 dark:text-green-400 font-bold">{staff.orders?.count ?? 0}</div>
+                                </div>
+                                <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                  <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashSales')}</div>
+                                  <div className="text-emerald-700 dark:text-emerald-400 font-bold">${(staff.orders?.cashAmount ?? 0).toFixed(2)}</div>
+                                </div>
+                                <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                  <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cardSales')}</div>
+                                  <div className="text-blue-700 dark:text-blue-400 font-bold">${(staff.orders?.cardAmount ?? 0).toFixed(2)}</div>
+                                </div>
                               </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashSales')}</div>
-                                <div className="text-emerald-700 dark:text-emerald-400 font-bold">${(staff.orders?.cashAmount || 0).toFixed(2)}</div>
-                              </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cardSales')}</div>
-                                <div className="text-blue-700 dark:text-blue-400 font-bold">${(staff.orders?.cardAmount || 0).toFixed(2)}</div>
-                              </div>
-                            </div>
+                            )}
 
                             {/* Payments & Expenses */}
-                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.staffPayments')}</div>
-                                <div className="text-rose-700 dark:text-rose-400 font-bold">${(staff.payments?.staffPayments || 0).toFixed(2)}</div>
+                            {hasCashierFinancials && (
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                                {staff.payments?.staffPayments !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.staffPayments')}</div>
+                                    <div className="text-rose-700 dark:text-rose-400 font-bold">${staff.payments.staffPayments.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {staff.expenses?.total !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.expensesShort')}</div>
+                                    <div className="text-rose-700 dark:text-rose-400 font-bold">${staff.expenses.total.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {cashierReturnAmount !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashToReturn')}</div>
+                                    <div className="text-yellow-700 dark:text-yellow-400 font-bold">${cashierReturnAmount.toFixed(2)}</div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.expensesShort')}</div>
-                                <div className="text-rose-700 dark:text-rose-400 font-bold">${(staff.expenses?.total || 0).toFixed(2)}</div>
-                              </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashToReturn')}</div>
-                                <div className="text-yellow-700 dark:text-yellow-400 font-bold">${(staff.returnedToDrawerAmount || 0).toFixed(2)}</div>
-                              </div>
-                            </div>
+                            )}
                           </div>
                         )}
 
@@ -513,40 +569,58 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                         {isDriver && (
                           <div className="space-y-3">
                             {/* Deliveries & Earnings */}
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.deliveries')}</div>
-                                <div className="text-indigo-700 dark:text-indigo-400 font-bold">{staff.driver?.deliveries || 0}</div>
+                            {hasDriverPrimaryMetrics && (
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                {driverMetrics?.deliveries !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.deliveries')}</div>
+                                    <div className="text-indigo-700 dark:text-indigo-400 font-bold">{driverMetrics.deliveries}</div>
+                                  </div>
+                                )}
+                                {driverMetrics?.earnings !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.totalEarnings')}</div>
+                                    <div className="text-indigo-700 dark:text-indigo-400 font-bold">${driverMetrics.earnings.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {driverMetrics?.cashCollected !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashCollected')}</div>
+                                    <div className="text-indigo-700 dark:text-indigo-400 font-bold">${driverMetrics.cashCollected.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {driverMetrics?.cardAmount !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cardAmount')}</div>
+                                    <div className="text-indigo-700 dark:text-indigo-400 font-bold">${driverMetrics.cardAmount.toFixed(2)}</div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.totalEarnings')}</div>
-                                <div className="text-indigo-700 dark:text-indigo-400 font-bold">${(staff.driver?.earnings || 0).toFixed(2)}</div>
-                              </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashCollected')}</div>
-                                <div className="text-indigo-700 dark:text-indigo-400 font-bold">${(staff.driver?.cashCollected || 0).toFixed(2)}</div>
-                              </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cardAmount')}</div>
-                                <div className="text-indigo-700 dark:text-indigo-400 font-bold">${(staff.driver?.cardAmount || 0).toFixed(2)}</div>
-                              </div>
-                            </div>
+                            )}
 
                             {/* Driver Payment & Expenses */}
-                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.staffPayments')}</div>
-                                <div className="text-rose-700 dark:text-rose-400 font-bold">${(staff.payments?.staffPayments || 0).toFixed(2)}</div>
+                            {hasDriverFinancials && (
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                                {staff.payments?.staffPayments !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.staffPayments')}</div>
+                                    <div className="text-rose-700 dark:text-rose-400 font-bold">${staff.payments.staffPayments.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {staff.expenses?.total !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.expensesShort')}</div>
+                                    <div className="text-rose-700 dark:text-rose-400 font-bold">${staff.expenses.total.toFixed(2)}</div>
+                                  </div>
+                                )}
+                                {driverMetrics?.cashToReturn !== undefined && (
+                                  <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
+                                    <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashToReturn')}</div>
+                                    <div className="text-indigo-700 dark:text-indigo-400 font-bold">${driverMetrics.cashToReturn.toFixed(2)}</div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.expensesShort')}</div>
-                                <div className="text-rose-700 dark:text-rose-400 font-bold">${(staff.expenses?.total || 0).toFixed(2)}</div>
-                              </div>
-                              <div className="p-2 rounded-lg bg-white/20 dark:bg-slate-700/30 border border-slate-400/20">
-                                <div className="font-medium text-slate-600 dark:text-slate-300">{t('modals.zReport.cashToReturn')}</div>
-                                <div className="text-indigo-700 dark:text-indigo-400 font-bold">${(staff.driver?.cashToReturn || 0).toFixed(2)}</div>
-                              </div>
-                            </div>
+                            )}
                           </div>
                         )}
 
@@ -648,7 +722,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
 
         {!loading && !error && activeTab === 'details' && zReport && (() => {
           // Safe accessors for nested properties that may be missing
-          const detailsExpenses = zReport.expenses || { total: 0, staffPaymentsTotal: 0, pendingCount: 0, items: [] };
+          const detailsExpenses: Partial<ZReportData['expenses']> = zReport.expenses || { total: 0, items: [] };
 
           return (
           <div className="space-y-4 text-sm">
@@ -793,7 +867,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               setSubmitting(true);
               try {
                 console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
-                const res: any = await bridge.reports.submitZReport({ branchId, date: selectedDate });
+                const res: ZReportSubmitResponse = await bridge.reports.submitZReport({ branchId, date: selectedDate });
                 
                 // Check for IPC wrapper error (success === false)
                 if (res?.success === false) {
@@ -805,20 +879,27 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                 }
                 
                 // Check for actual success response
-                if (res?.success || res?.id) {
-                  console.log('[ZReportModal] Z-Report submitted successfully:', { id: res?.id, cleanup: res?.cleanup });
-                  setSubmitResult(t('modals.zReport.submitSuccess'));
+                if (res?.success && res?.localDayClosed) {
+                  console.log('[ZReportModal] Z-Report submitted successfully:', {
+                    id: res?.zReportId,
+                    cleanup: res?.cleanup,
+                    syncState: res?.syncState,
+                  });
 
-                  // Close the modal immediately
-                  onClose();
+                  const successMessage =
+                    res?.syncState === 'applied'
+                      ? t('modals.zReport.submitSuccessSynced')
+                      : t('modals.zReport.submitSuccessQueued');
+                  setSubmitResult(successMessage);
 
-                  // Clear all data and logout
+                  // Clear only business-day state and logout.
                   try { await bridge.auth.logout(); } catch { }
-                  try { localStorage.clear(); } catch { }
+                  try { clearBusinessDayStorage(); } catch { }
                   try { clearShift(); } catch { }
 
-                  // Reload after a short delay to show success message
-                  setTimeout(() => { window.location.reload(); }, 600);
+                  // Reload after a short delay so the operator can read the
+                  // local-close message before the login screen appears.
+                  setTimeout(() => { window.location.reload(); }, 900);
                 } else {
                   // Unexpected response format - extract any available error info
                   const errorMessage = res?.error || res?.message || t('modals.zReport.unknownError');

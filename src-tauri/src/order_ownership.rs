@@ -11,6 +11,26 @@ pub struct DriverOwnershipAssignment {
     pub card_amount: f64,
 }
 
+#[allow(dead_code)]
+pub struct OrderAttributionSnapshot {
+    pub shift_id: Option<String>,
+    pub staff_id: Option<String>,
+    pub driver_id: Option<String>,
+    pub driver_name: Option<String>,
+    pub branch_id: String,
+    pub terminal_id: String,
+    pub delivery_fee: f64,
+    pub tip_amount: f64,
+    pub status: String,
+    pub order_type: String,
+    pub payment_method: String,
+    pub cash_collected: f64,
+    pub card_amount: f64,
+    pub total_paid: f64,
+    pub recorded_cash_collected: f64,
+    pub recorded_card_amount: f64,
+}
+
 fn normalize_opt_text(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -45,30 +65,6 @@ fn resolve_shift_context(
         .ok();
 
     Ok(shift_context)
-}
-
-fn resolve_active_driver_assignment_for_shift(
-    conn: &Connection,
-    requested_shift_id: Option<&str>,
-) -> Result<Option<(String, String)>, String> {
-    let Some(shift_id) = normalize_opt_text(requested_shift_id) else {
-        return Ok(None);
-    };
-
-    let assignment = conn
-        .query_row(
-            "SELECT id, staff_id
-             FROM staff_shifts
-             WHERE id = ?1
-               AND role_type = 'driver'
-               AND status = 'active'
-             LIMIT 1",
-            params![shift_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .ok();
-
-    Ok(assignment)
 }
 
 pub fn resolve_active_cashier_assignment(
@@ -109,7 +105,7 @@ pub fn resolve_order_owner(
     requested_staff_id: Option<&str>,
 ) -> Result<(Option<String>, Option<String>), String> {
     let normalized_order_type = order_type.trim().to_ascii_lowercase();
-    let mut normalized_driver_id = normalize_opt_text(driver_id);
+    let normalized_driver_id = normalize_opt_text(driver_id);
     let normalized_shift_id = normalize_opt_text(requested_shift_id);
     let mut normalized_staff_id = normalize_opt_text(requested_staff_id);
     let mut effective_branch_id = normalize_opt_text(Some(branch_id));
@@ -128,12 +124,7 @@ pub fn resolve_order_owner(
             if normalized_staff_id.is_none() {
                 normalized_staff_id = Some(shift_staff_id.clone());
             }
-            if normalized_order_type == "delivery"
-                && normalized_driver_id.is_none()
-                && shift_role == "driver"
-            {
-                normalized_driver_id = Some(shift_staff_id);
-            }
+            let _ = shift_role;
         }
     }
 
@@ -146,11 +137,7 @@ pub fn resolve_order_owner(
             }
         }
 
-        if let Some((shift_id, staff_id)) =
-            resolve_active_driver_assignment_for_shift(conn, normalized_shift_id.as_deref())?
-        {
-            return Ok((Some(shift_id), Some(staff_id)));
-        }
+        return Ok((None, None));
     }
 
     if let (Some(branch_id_value), Some(terminal_id_value)) = (
@@ -223,83 +210,32 @@ pub fn assign_order_to_driver_shift(
     driver_shift_id: &str,
     now: &str,
 ) -> Result<DriverOwnershipAssignment, String> {
-    let (old_shift_id, _old_staff_id, branch_id, delivery_fee, tip_amount): (
-        Option<String>,
-        Option<String>,
-        String,
-        f64,
-        f64,
-    ) = conn
-        .query_row(
-            "SELECT staff_shift_id, staff_id, COALESCE(branch_id, ''), COALESCE(delivery_fee, 0), COALESCE(tip_amount, 0)
-             FROM orders
-             WHERE id = ?1",
-            params![order_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, f64>(3).unwrap_or(0.0),
-                    row.get::<_, f64>(4).unwrap_or(0.0),
-                ))
-            },
-        )
-        .map_err(|e| format!("load order ownership: {e}"))?;
-
-    let (payment_method, cash_collected, card_amount, _paid_total) =
-        get_order_payment_totals(conn, order_id)?;
-
-    if old_shift_id.as_deref() != Some(driver_shift_id) {
-        adjust_drawer_totals(
-            conn,
-            old_shift_id.as_deref(),
-            -cash_collected,
-            -card_amount,
-            now,
-        )?;
-        adjust_drawer_totals(
-            conn,
-            Some(driver_shift_id),
-            cash_collected,
-            card_amount,
-            now,
-        )?;
-    }
-
-    conn.execute(
-        "UPDATE orders
-         SET staff_id = ?1,
-             driver_id = ?1,
-             driver_name = ?2,
-             staff_shift_id = ?3,
-             sync_status = 'pending',
-             updated_at = ?4
-         WHERE id = ?5",
-        params![driver_id, driver_name, driver_shift_id, now, order_id],
-    )
-    .map_err(|e| format!("assign order ownership: {e}"))?;
-
-    conn.execute(
-        "UPDATE order_payments
-         SET staff_id = ?1,
-             staff_shift_id = ?2,
-             sync_status = 'pending',
-             updated_at = ?3
-         WHERE order_id = ?4
-           AND status = 'completed'",
-        params![driver_id, driver_shift_id, now, order_id],
-    )
-    .map_err(|e| format!("reassign order payments: {e}"))?;
+    let current = load_order_attribution_snapshot(conn, order_id)?;
+    let target_status = if is_final_order_status(&current.status) {
+        None
+    } else {
+        Some("out_for_delivery")
+    };
+    let applied = apply_order_attribution(
+        conn,
+        order_id,
+        Some(driver_shift_id),
+        Some(driver_id),
+        Some(driver_id),
+        driver_name,
+        Some("delivery"),
+        target_status,
+        now,
+    )?;
 
     Ok(DriverOwnershipAssignment {
         driver_shift_id: driver_shift_id.to_string(),
-        branch_id,
-        delivery_fee,
-        tip_amount,
-        payment_method,
-        cash_collected,
-        card_amount,
+        branch_id: applied.branch_id,
+        delivery_fee: applied.delivery_fee,
+        tip_amount: applied.tip_amount,
+        payment_method: applied.payment_method,
+        cash_collected: applied.cash_collected,
+        card_amount: applied.card_amount,
     })
 }
 
@@ -439,6 +375,269 @@ pub fn get_order_payment_totals(
     };
 
     Ok((payment_method, cash_collected, card_amount, total_paid))
+}
+
+pub fn is_final_order_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "delivered" | "completed" | "cancelled" | "canceled" | "refunded"
+    )
+}
+
+pub fn is_cancelled_order_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "cancelled" | "canceled" | "refunded"
+    )
+}
+
+pub fn load_order_attribution_snapshot(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<OrderAttributionSnapshot, String> {
+    let (
+        shift_id,
+        staff_id,
+        driver_id,
+        driver_name,
+        branch_id,
+        terminal_id,
+        delivery_fee,
+        tip_amount,
+        status,
+        order_type,
+    ): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        f64,
+        f64,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT
+                staff_shift_id,
+                staff_id,
+                driver_id,
+                driver_name,
+                COALESCE(branch_id, ''),
+                COALESCE(terminal_id, ''),
+                COALESCE(delivery_fee, 0),
+                COALESCE(tip_amount, 0),
+                COALESCE(status, 'pending'),
+                COALESCE(order_type, 'pickup')
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get::<_, f64>(6).unwrap_or(0.0),
+                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load order attribution snapshot: {e}"))?;
+
+    let (payment_method, cash_collected, card_amount, total_paid) =
+        get_order_payment_totals(conn, order_id)?;
+    let (recorded_cash_collected, recorded_card_amount, _) =
+        get_recorded_order_payment_totals(conn, order_id)?;
+
+    Ok(OrderAttributionSnapshot {
+        shift_id,
+        staff_id,
+        driver_id,
+        driver_name,
+        branch_id,
+        terminal_id,
+        delivery_fee,
+        tip_amount,
+        status,
+        order_type,
+        payment_method,
+        cash_collected,
+        card_amount,
+        total_paid,
+        recorded_cash_collected,
+        recorded_card_amount,
+    })
+}
+
+pub fn apply_order_attribution(
+    conn: &Connection,
+    order_id: &str,
+    target_shift_id: Option<&str>,
+    target_staff_id: Option<&str>,
+    target_driver_id: Option<&str>,
+    target_driver_name: Option<&str>,
+    target_order_type: Option<&str>,
+    target_status: Option<&str>,
+    now: &str,
+) -> Result<OrderAttributionSnapshot, String> {
+    let current = load_order_attribution_snapshot(conn, order_id)?;
+    let normalized_shift_id = normalize_opt_text(target_shift_id);
+    let normalized_staff_id = normalize_opt_text(target_staff_id);
+    let normalized_driver_id = normalize_opt_text(target_driver_id);
+    let normalized_driver_name = normalize_opt_text(target_driver_name);
+    let normalized_order_type = target_order_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| current.order_type.clone());
+    let normalized_status = target_status
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| current.status.clone());
+
+    if current.shift_id != normalized_shift_id {
+        adjust_drawer_totals(
+            conn,
+            current.shift_id.as_deref(),
+            -current.recorded_cash_collected,
+            -current.recorded_card_amount,
+            now,
+        )?;
+        adjust_drawer_totals(
+            conn,
+            normalized_shift_id.as_deref(),
+            current.recorded_cash_collected,
+            current.recorded_card_amount,
+            now,
+        )?;
+    }
+
+    conn.execute(
+        "UPDATE orders
+         SET staff_id = ?1,
+             staff_shift_id = ?2,
+             driver_id = ?3,
+             driver_name = ?4,
+             order_type = ?5,
+             status = ?6,
+             sync_status = 'pending',
+             updated_at = ?7
+         WHERE id = ?8",
+        params![
+            normalized_staff_id,
+            normalized_shift_id,
+            normalized_driver_id,
+            normalized_driver_name,
+            normalized_order_type,
+            normalized_status,
+            now,
+            order_id
+        ],
+    )
+    .map_err(|e| format!("apply order attribution: {e}"))?;
+
+    conn.execute(
+        "UPDATE order_payments
+         SET staff_id = ?1,
+             staff_shift_id = ?2,
+             sync_status = 'pending',
+             updated_at = ?3
+         WHERE order_id = ?4
+           AND status = 'completed'",
+        params![normalized_staff_id, normalized_shift_id, now, order_id],
+    )
+    .map_err(|e| format!("reassign order payments: {e}"))?;
+
+    Ok(OrderAttributionSnapshot {
+        shift_id: normalized_shift_id,
+        staff_id: normalized_staff_id,
+        driver_id: normalized_driver_id,
+        driver_name: normalized_driver_name,
+        branch_id: current.branch_id,
+        terminal_id: current.terminal_id,
+        delivery_fee: current.delivery_fee,
+        tip_amount: current.tip_amount,
+        status: normalized_status,
+        order_type: normalized_order_type,
+        payment_method: current.payment_method,
+        cash_collected: current.cash_collected,
+        card_amount: current.card_amount,
+        total_paid: current.total_paid,
+        recorded_cash_collected: current.recorded_cash_collected,
+        recorded_card_amount: current.recorded_card_amount,
+    })
+}
+
+pub fn reverse_order_drawer_attribution(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<OrderAttributionSnapshot, String> {
+    let current = load_order_attribution_snapshot(conn, order_id)?;
+    adjust_drawer_totals(
+        conn,
+        current.shift_id.as_deref(),
+        -current.recorded_cash_collected,
+        -current.recorded_card_amount,
+        now,
+    )?;
+    Ok(current)
+}
+
+pub fn assign_order_to_cashier_pickup(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<OrderAttributionSnapshot, String> {
+    let current = load_order_attribution_snapshot(conn, order_id)?;
+    let (cashier_shift_id, cashier_staff_id) = resolve_active_cashier_assignment(
+        conn,
+        current.branch_id.as_str(),
+        current.terminal_id.as_str(),
+    )?
+    .ok_or_else(|| "No active cashier shift available for pickup attribution".to_string())?;
+
+    let target_status = if current.status.eq_ignore_ascii_case("out_for_delivery") {
+        Some("ready")
+    } else {
+        None
+    };
+
+    apply_order_attribution(
+        conn,
+        order_id,
+        Some(cashier_shift_id.as_str()),
+        Some(cashier_staff_id.as_str()),
+        None,
+        None,
+        Some("pickup"),
+        target_status,
+        now,
+    )
+}
+
+fn get_recorded_order_payment_totals(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<(f64, f64, f64), String> {
+    conn.query_row(
+        "SELECT
+            COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'cash' THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'completed' AND method = 'card' THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END), 0)
+         FROM order_payments
+         WHERE order_id = ?1",
+        params![order_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|e| format!("load recorded order payments: {e}"))
 }
 
 fn adjust_drawer_totals(

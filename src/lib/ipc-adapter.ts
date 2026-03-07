@@ -31,6 +31,7 @@ import type {
   SyncRemoveInvalidOrdersResponse,
   SyncValidatePendingOrdersResponse,
   TerminalConfigGetSettingRequest,
+  ZReportSubmitResponse,
 } from './ipc-contracts';
 
 // ============================================================================
@@ -100,38 +101,53 @@ function buildAuthSetupPinArg(input: AuthSetupPinInput): AuthSetupPinRequest {
   return input;
 }
 
+/** Normalize a SettingsGetRequest so only canonical fields are sent to Rust. */
+function normalizeSettingsGetRequest(
+  req: SettingsGetRequest,
+  extraKey?: string,
+  extraDefault?: unknown,
+): SettingsGetRequest {
+  const out: SettingsGetRequest = { ...req };
+  // Canonicalize key: settingKey -> key
+  if (out.settingKey !== undefined && out.key === undefined) {
+    out.key = out.settingKey;
+  }
+  delete out.settingKey;
+  // Canonicalize default: default -> defaultValue
+  if (out.default !== undefined && out.defaultValue === undefined) {
+    out.defaultValue = out.default;
+  }
+  delete out.default;
+  // Merge extra positional args if the object didn't already have them
+  if (typeof extraKey === 'string' && out.key === undefined) out.key = extraKey;
+  if (extraDefault !== undefined && out.defaultValue === undefined) out.defaultValue = extraDefault;
+  return out;
+}
+
 function buildSettingsGetInvoke(
   request?: SettingsGetInput,
   key?: string,
-  defaultValue?: unknown
+  defaultValue?: unknown,
 ): { channel: 'get-settings' | 'settings:get'; args: unknown[] } {
+  // No args → fetch all settings
   if (request === undefined && key === undefined && defaultValue === undefined) {
     return { channel: 'get-settings', args: [] };
   }
 
+  // String shorthand: settings.get('category', 'key', default?)
   if (typeof request === 'string') {
-    if (key === undefined && defaultValue === undefined) {
-      return { channel: 'settings:get', args: [request] };
-    }
-    if (defaultValue === undefined) {
-      return { channel: 'settings:get', args: [request, key] };
-    }
-    return { channel: 'settings:get', args: [request, key, defaultValue] };
+    const args: unknown[] = [request];
+    if (key !== undefined) args.push(key);
+    if (defaultValue !== undefined) args.push(defaultValue);
+    return { channel: 'settings:get', args };
   }
 
-  const payload: Record<string, unknown> = request ? { ...request } : {};
-  if (typeof key === 'string' && payload.key === undefined && payload.settingKey === undefined) {
-    payload.key = key;
-  }
-  if (
-    defaultValue !== undefined &&
-    payload.defaultValue === undefined &&
-    payload.default === undefined
-  ) {
-    payload.defaultValue = defaultValue;
-  }
-
-  return { channel: 'settings:get', args: Object.keys(payload).length ? [payload] : [] };
+  // Object form: normalize aliases then send
+  const normalized = normalizeSettingsGetRequest(request ?? {}, key, defaultValue);
+  return {
+    channel: 'settings:get',
+    args: Object.keys(normalized).length ? [normalized] : [],
+  };
 }
 
 function buildSettingsSetArgs(input: SettingsSetInput, value?: unknown): unknown[] {
@@ -777,7 +793,7 @@ export interface PlatformBridge {
     generateZReport(params: { branchId: string; date?: string }): Promise<any>;
     getDailyStaffPerformance(params: { branchId: string; date?: string }): Promise<any>;
     printZReport(params: { zReportId?: string; snapshot?: any; terminalName?: string }): Promise<IpcResult>;
-    submitZReport(params: { branchId: string; date?: string }): Promise<IpcResult>;
+    submitZReport(params: { branchId: string; date?: string }): Promise<ZReportSubmitResponse>;
   };
 
   // -- Menu ------------------------------------------------------------------

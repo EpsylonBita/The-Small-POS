@@ -992,11 +992,7 @@ pub async fn shift_record_staff_payment(
         "paymentType": payment_type,
         "notes": notes
     });
-    let idem = format!(
-        "staff-payment:{}:{}",
-        payment_id,
-        Utc::now().timestamp_millis()
-    );
+    let idem = format!("staff-payment:{}:{}", payment_id, uuid::Uuid::new_v4());
     let _ = conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('staff_payment', ?1, 'insert', ?2, ?3)",

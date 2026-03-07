@@ -61,6 +61,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use serde::Deserialize;
 
@@ -170,6 +171,14 @@ fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("terminal identity mismatch")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
+}
+
+fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
+    let raw_api_key = Zeroizing::new(storage::get_credential("pos_api_key")?);
+    Some(Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    ))
 }
 
 /// Perform a full factory reset triggered by terminal deletion detection.
@@ -797,7 +806,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
     .map_err(|e| format!("insert order: {e}"))?;
 
     // Enqueue for sync
-    let idempotency_key = format!("{terminal_id}:{order_id}:{}", Utc::now().timestamp_millis());
+    let idempotency_key = format!("{terminal_id}:{order_id}:{}", Uuid::new_v4());
     let mut sync_data = payload.clone();
     if let Value::Object(obj) = &mut sync_data {
         obj.entry("orderId".to_string())
@@ -825,6 +834,52 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         if let Some(req_id) = client_request_id.as_ref() {
             obj.entry("clientRequestId".to_string())
                 .or_insert_with(|| Value::String(req_id.clone()));
+        }
+        match resolved_staff_shift_id.as_ref() {
+            Some(shift_id) => {
+                obj.insert("staffShiftId".to_string(), Value::String(shift_id.clone()));
+                obj.insert(
+                    "staff_shift_id".to_string(),
+                    Value::String(shift_id.clone()),
+                );
+            }
+            None => {
+                obj.insert("staffShiftId".to_string(), Value::Null);
+                obj.insert("staff_shift_id".to_string(), Value::Null);
+            }
+        }
+        match resolved_staff_id.as_ref() {
+            Some(staff_id) => {
+                obj.insert("staffId".to_string(), Value::String(staff_id.clone()));
+                obj.insert("staff_id".to_string(), Value::String(staff_id.clone()));
+            }
+            None => {
+                obj.insert("staffId".to_string(), Value::Null);
+                obj.insert("staff_id".to_string(), Value::Null);
+            }
+        }
+        match driver_id.as_ref() {
+            Some(driver_id) => {
+                obj.insert("driverId".to_string(), Value::String(driver_id.clone()));
+                obj.insert("driver_id".to_string(), Value::String(driver_id.clone()));
+            }
+            None => {
+                obj.insert("driverId".to_string(), Value::Null);
+                obj.insert("driver_id".to_string(), Value::Null);
+            }
+        }
+        match driver_name.as_ref() {
+            Some(driver_name) => {
+                obj.insert("driverName".to_string(), Value::String(driver_name.clone()));
+                obj.insert(
+                    "driver_name".to_string(),
+                    Value::String(driver_name.clone()),
+                );
+            }
+            None => {
+                obj.insert("driverName".to_string(), Value::Null);
+                obj.insert("driver_name".to_string(), Value::Null);
+            }
         }
     }
     let sync_payload = serde_json::to_string(&sync_data).unwrap_or_else(|_| "{}".to_string());
@@ -906,11 +961,19 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
         .query_map([], |row| {
             // Parse items JSON
             let items_str: String = row.get(5)?;
-            let items: Value = serde_json::from_str(&items_str).unwrap_or(Value::Array(vec![]));
+            let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
+                warn!("JSON parse fallback (items): {e}");
+                Value::Array(vec![])
+            });
             let ghost_metadata_str: Option<String> = row.get(42)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .map(|raw| {
+                    serde_json::from_str::<Value>(raw).unwrap_or_else(|e| {
+                        warn!("JSON parse fallback (ghost_metadata): {e}");
+                        Value::Null
+                    })
+                })
                 .unwrap_or(Value::Null);
             let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
 
@@ -1006,11 +1069,19 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
         params![id],
         |row| {
             let items_str: String = row.get(5)?;
-            let items: Value = serde_json::from_str(&items_str).unwrap_or(Value::Array(vec![]));
+            let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
+                warn!("JSON parse fallback (items): {e}");
+                Value::Array(vec![])
+            });
             let ghost_metadata_str: Option<String> = row.get(42)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
-                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .map(|raw| {
+                    serde_json::from_str::<Value>(raw).unwrap_or_else(|e| {
+                        warn!("JSON parse fallback (ghost_metadata): {e}");
+                        Value::Null
+                    })
+                })
                 .unwrap_or(Value::Null);
             let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
             let ghost_source: Option<String> = row.get(41)?;
@@ -1127,7 +1198,10 @@ pub fn validate_pending_orders(db: &DbState) -> Result<Value, String> {
 
     for (queue_id, entity_id, created_at) in pending_entries {
         // get_order_by_id acquires its own lock internally
-        let order = get_order_by_id(db, &entity_id).unwrap_or(Value::Null);
+        let order = get_order_by_id(db, &entity_id).unwrap_or_else(|e| {
+            warn!(order_id = %entity_id, "get_order_by_id fallback: {e}");
+            Value::Null
+        });
 
         if order.is_null() {
             invalid_count += 1;
@@ -1328,7 +1402,7 @@ pub async fn check_network_status() -> Value {
         Some(url) => url,
         None => return serde_json::json!({ "isOnline": false }),
     };
-    let api_key = match storage::get_credential("pos_api_key") {
+    let api_key = match load_zeroized_pos_api_key_optional() {
         Some(k) => k,
         None => return serde_json::json!({ "isOnline": false }),
     };
@@ -1346,7 +1420,7 @@ pub async fn check_network_status() -> Value {
 
     match client
         .head(&health_url)
-        .header("X-POS-API-Key", &api_key)
+        .header("X-POS-API-Key", api_key.as_str())
         .send()
         .await
     {
@@ -2268,7 +2342,23 @@ async fn poll_order_receipt_statuses(
                             );
                         }
                     }
-                    "pending" | "processing" | "failed" => {
+                    "failed" => {
+                        let moved = move_receipt_back_to_pending(
+                            db,
+                            &receipt_id,
+                            error_message,
+                            DEFAULT_RETRY_DELAY_MS,
+                        )?;
+                        if moved > 0 {
+                            warn!(
+                                receipt_id = %receipt_id,
+                                rows = moved,
+                                error = error_message,
+                                "Remote order receipt failed; moved back to local queue for retry/failure handling"
+                            );
+                        }
+                    }
+                    "pending" | "processing" => {
                         defer_receipt_poll(
                             db,
                             &receipt_id,
@@ -2425,7 +2515,7 @@ fn materialize_remote_order(
     );
     let staff_shift_id = str_any(remote_order, &["staff_shift_id", "staffShiftId"]);
     let staff_id = str_any(remote_order, &["staff_id", "staffId"]);
-    let driver_id = str_any(remote_order, &["driver_id", "driverId"]).or_else(|| staff_id.clone());
+    let driver_id = str_any(remote_order, &["driver_id", "driverId"]);
     let driver_name = str_any(remote_order, &["driver_name", "driverName"]);
     let discount_percentage =
         num_any(remote_order, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
@@ -2921,7 +3011,7 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         Some(url) => url,
         None => return Ok(0),
     };
-    let api_key = match storage::get_credential("pos_api_key") {
+    let api_key = match load_zeroized_pos_api_key_optional() {
         Some(k) => k,
         None => return Ok(0),
     };
@@ -3551,7 +3641,10 @@ fn build_normalized_order_operation(
         .get("orderData")
         .cloned()
         .unwrap_or_else(|| payload.clone());
-    let local_order = get_order_by_id(db, entity_id).unwrap_or(Value::Null);
+    let local_order = get_order_by_id(db, entity_id).unwrap_or_else(|e| {
+        warn!(order_id = %entity_id, "get_order_by_id fallback: {e}");
+        Value::Null
+    });
     let source = if local_order.is_null() {
         &payload_data
     } else {
@@ -3685,13 +3778,8 @@ fn build_normalized_order_operation(
         });
     let estimated_ready_time = i64_any(source, &["estimatedTime", "estimated_time"])
         .or_else(|| i64_any(&payload_data, &["estimatedTime", "estimated_time"]));
-    let driver_id = str_any(source, &["driverId", "driver_id", "staffId", "staff_id"])
-        .or_else(|| {
-            str_any(
-                &payload_data,
-                &["driverId", "driver_id", "staffId", "staff_id"],
-            )
-        })
+    let driver_id = str_any(source, &["driverId", "driver_id"])
+        .or_else(|| str_any(&payload_data, &["driverId", "driver_id"]))
         .filter(|id| Uuid::parse_str(id).is_ok());
 
     let notes = str_any(
@@ -3833,7 +3921,10 @@ async fn sync_order_batch_via_direct_api(
             continue;
         }
 
-        let local_order = get_order_by_id(db, entity_id).unwrap_or(Value::Null);
+        let local_order = get_order_by_id(db, entity_id).unwrap_or_else(|e| {
+            warn!(order_id = %entity_id, "get_order_by_id fallback: {e}");
+            Value::Null
+        });
         if local_order
             .get("supabaseId")
             .and_then(Value::as_str)
@@ -5437,6 +5528,60 @@ mod tests {
     }
 
     #[test]
+    fn test_create_delivery_order_keeps_neutral_ownership_without_driver_assignment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, opening_cash_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'driver-shift-create', 'driver-create', 'Driver Create', 'branch-create', 'terminal-create', 'driver',
+                datetime('now'), 20.0, 'active', 'pending', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let payload = serde_json::json!({
+            "items": [{ "name": "Coffee", "quantity": 1, "price": 2.5 }],
+            "totalAmount": 2.5,
+            "subtotal": 2.5,
+            "status": "pending",
+            "orderType": "delivery",
+            "branchId": "branch-create",
+            "terminalId": "terminal-create",
+            "staffShiftId": "driver-shift-create",
+            "staffId": "driver-create"
+        });
+
+        let created = create_order(&db, &payload).expect("create order");
+        let order_id = created
+            .get("orderId")
+            .and_then(Value::as_str)
+            .expect("order id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let (staff_shift_id, staff_id, driver_id): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT staff_shift_id, staff_id, driver_id FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(staff_shift_id, None);
+        assert_eq!(staff_id, None);
+        assert_eq!(driver_id, None);
+    }
+
+    #[test]
     fn test_materialize_remote_order_inserts_missing_local_row() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -6012,6 +6157,66 @@ mod tests {
 
         assert!(has_outstanding_local_order_queue(&conn, "ord-queued"));
         assert!(!has_outstanding_local_order_queue(&conn, "ord-missing"));
+    }
+
+    #[test]
+    fn test_move_receipt_back_to_pending_releases_queued_remote_receipt() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-receipt', '[]', 11.1, 'out_for_delivery', 'queued', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, remote_receipt_id
+             ) VALUES (
+                'order', 'ord-receipt', 'update', '{}', 'order:receipt', 'queued_remote', 0, 5, 'receipt-1'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let moved = move_receipt_back_to_pending(&db, "receipt-1", "remote failed", 5_000)
+            .expect("move receipt back to pending");
+        assert_eq!(moved, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count, remote_receipt_id, last_error, order_sync_status): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM sync_queue WHERE entity_id = 'ord-receipt'),
+                    (SELECT retry_count FROM sync_queue WHERE entity_id = 'ord-receipt'),
+                    (SELECT remote_receipt_id FROM sync_queue WHERE entity_id = 'ord-receipt'),
+                    (SELECT last_error FROM sync_queue WHERE entity_id = 'ord-receipt'),
+                    (SELECT sync_status FROM orders WHERE id = 'ord-receipt')",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(retry_count, 1);
+        assert_eq!(remote_receipt_id, None);
+        assert_eq!(last_error.as_deref(), Some("remote failed"));
+        assert_eq!(order_sync_status, "pending");
     }
 
     #[test]

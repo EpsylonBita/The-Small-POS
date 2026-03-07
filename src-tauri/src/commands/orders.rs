@@ -311,6 +311,10 @@ pub async fn order_update_status(
             return Err(format!("Cancelled order cannot transition to {status}"));
         }
 
+        if !was_cancelled && next_is_cancelled {
+            order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, &now)?;
+        }
+
         conn.execute(
             "UPDATE orders
              SET status = ?1, sync_status = 'pending', updated_at = ?2
@@ -332,7 +336,7 @@ pub async fn order_update_status(
         let idem = format!(
             "order:update-status:{}:{}",
             actual_order_id,
-            Utc::now().timestamp_millis()
+            uuid::Uuid::new_v4()
         );
         let _ = conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
@@ -418,7 +422,7 @@ pub async fn order_update_items(
         let idem = format!(
             "order:update-items:{}:{}",
             actual_order_id,
-            Utc::now().timestamp_millis()
+            uuid::Uuid::new_v4()
         );
         let _ = conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
@@ -553,14 +557,7 @@ pub async fn order_save_from_remote(
     );
     let staff_shift_id = value_str(&order_data, &["staff_shift_id", "staffShiftId"]);
     let staff_id = value_str(&order_data, &["staff_id", "staffId"]);
-    let driver_id = value_str(&order_data, &["driver_id", "driverId"]).or_else(|| {
-        // Only fall back to staff_id for delivery orders — pickup/dine-in orders don't have drivers
-        if order_type == "delivery" {
-            staff_id.clone()
-        } else {
-            None
-        }
-    });
+    let driver_id = value_str(&order_data, &["driver_id", "driverId"]);
     let driver_name = value_str(&order_data, &["driver_name", "driverName"]);
     let discount_pct =
         value_f64(&order_data, &["discount_percentage", "discountPercentage"]).unwrap_or(0.0);
@@ -942,11 +939,7 @@ pub async fn order_approve(
         "status": "confirmed",
         "estimatedTime": estimated_time
     });
-    let idem = format!(
-        "order:approve:{}:{}",
-        order_id,
-        Utc::now().timestamp_millis()
-    );
+    let idem = format!("order:approve:{}:{}", order_id, uuid::Uuid::new_v4());
     let _ = conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
@@ -973,6 +966,16 @@ pub async fn order_decline(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let previous_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "pending".to_string());
+    if !matches!(previous_status.as_str(), "cancelled" | "canceled") {
+        order_ownership::reverse_order_drawer_attribution(&conn, &order_id, &now)?;
+    }
     conn.execute(
         "UPDATE orders
          SET status = 'cancelled',
@@ -989,11 +992,7 @@ pub async fn order_decline(
         "status": "cancelled",
         "reason": reason
     });
-    let idem = format!(
-        "order:decline:{}:{}",
-        order_id,
-        Utc::now().timestamp_millis()
-    );
+    let idem = format!("order:decline:{}:{}", order_id, uuid::Uuid::new_v4());
     let _ = conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
@@ -1021,7 +1020,6 @@ pub async fn order_assign_driver(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     let driver_name = resolve_driver_display_name(&conn, &driver_id);
-    let mut earning_created = false;
     let current_status: String = conn
         .query_row(
             "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
@@ -1043,77 +1041,88 @@ pub async fn order_assign_driver(
         )
         .unwrap_or(false);
 
+    if !is_delivery {
+        return Err("Driver assignment is only supported for delivery orders".into());
+    }
+
     let driver_shift_id = if is_delivery {
         order_ownership::resolve_driver_shift_id(&conn, &driver_id, None)?
     } else {
         None
     };
 
-    if let Some(ref shift_id) = driver_shift_id {
-        let assignment = order_ownership::assign_order_to_driver_shift(
-            &conn,
-            &order_id,
-            &driver_id,
-            driver_name.as_deref(),
-            shift_id,
-            &now,
-        )?;
+    let shift_id = driver_shift_id
+        .as_deref()
+        .ok_or_else(|| "Driver must have an active shift before assignment".to_string())?;
 
-        let earning_id = order_ownership::upsert_driver_earning(
-            &conn,
-            &order_id,
-            &driver_id,
-            &assignment,
-            &now,
-        )?;
-        earning_created = true;
+    let assignment = order_ownership::assign_order_to_driver_shift(
+        &conn,
+        &order_id,
+        &driver_id,
+        driver_name.as_deref(),
+        shift_id,
+        &now,
+    )?;
 
-        let _ = conn.execute(
-            "UPDATE orders
-             SET delivery_notes = COALESCE(?1, delivery_notes),
-                 sync_status = 'pending',
-                 updated_at = ?2
-             WHERE id = ?3",
-            rusqlite::params![notes, now, order_id],
-        );
+    let earning_id =
+        order_ownership::upsert_driver_earning(&conn, &order_id, &driver_id, &assignment, &now)?;
+    let earning_created = true;
 
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('driver_earning', ?1, 'create', ?2, ?3)",
-            rusqlite::params![
-                earning_id,
-                serde_json::json!({
-                    "id": earning_id,
-                    "driver_id": driver_id,
-                    "staff_shift_id": shift_id,
-                    "order_id": order_id,
-                    "branch_id": assignment.branch_id,
-                    "delivery_fee": assignment.delivery_fee,
-                    "tip_amount": assignment.tip_amount,
-                    "total_earning": assignment.delivery_fee + assignment.tip_amount,
-                    "payment_method": assignment.payment_method,
-                    "cash_collected": assignment.cash_collected,
-                    "card_amount": assignment.card_amount,
-                    "cash_to_return": assignment.cash_collected,
-                })
-                .to_string(),
-                format!("driver_earning:{earning_id}")
-            ],
-        );
-    } else {
-        conn.execute(
-            "UPDATE orders
-             SET staff_id = ?1,
-                 driver_id = ?1,
-                 driver_name = ?2,
-                 delivery_notes = COALESCE(?3, delivery_notes),
-                 sync_status = 'pending',
-                 updated_at = ?4
-             WHERE id = ?5",
-            rusqlite::params![driver_id, driver_name, notes, now, order_id],
+    let assigned_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| row.get(0),
         )
-        .map_err(|e| format!("assign driver: {e}"))?;
-    }
+        .unwrap_or_else(|_| current_status.clone());
+
+    let _ = conn.execute(
+        "UPDATE orders
+         SET delivery_notes = COALESCE(?1, delivery_notes),
+             sync_status = 'pending',
+             updated_at = ?2
+         WHERE id = ?3",
+        rusqlite::params![notes, now, order_id],
+    );
+
+    let _ = conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('driver_earning', ?1, 'create', ?2, ?3)",
+        rusqlite::params![
+            earning_id,
+            serde_json::json!({
+                "id": earning_id,
+                "driver_id": driver_id,
+                "staff_shift_id": shift_id,
+                "order_id": order_id,
+                "branch_id": assignment.branch_id,
+                "delivery_fee": assignment.delivery_fee,
+                "tip_amount": assignment.tip_amount,
+                "total_earning": assignment.delivery_fee + assignment.tip_amount,
+                "payment_method": assignment.payment_method,
+                "cash_collected": assignment.cash_collected,
+                "card_amount": assignment.card_amount,
+                "cash_to_return": assignment.cash_collected,
+            })
+            .to_string(),
+            format!("driver_earning:{earning_id}")
+        ],
+    );
+
+    let order_sync_payload = serde_json::json!({
+        "orderId": order_id,
+        "orderType": "delivery",
+        "status": assigned_status,
+        "driverId": driver_id,
+        "driverName": driver_name,
+        "deliveryNotes": notes,
+    });
+    let order_sync_idem = format!("order:assign-driver:{}:{}", order_id, uuid::Uuid::new_v4());
+    let _ = conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('order', ?1, 'update', ?2, ?3)",
+        rusqlite::params![order_id, order_sync_payload.to_string(), order_sync_idem],
+    );
 
     drop(conn);
 
@@ -1140,9 +1149,17 @@ pub async fn order_assign_driver(
         "orderId": order_id_raw,
         "driverId": driver_id,
         "driverName": driver_name,
+        "status": assigned_status,
         "notes": notes,
         "earningCreated": earning_created
     });
+    let _ = app.emit(
+        "order_status_updated",
+        serde_json::json!({
+            "orderId": order_id_raw,
+            "status": assigned_status,
+        }),
+    );
     let _ = app.emit("order_realtime_update", payload.clone());
     Ok(serde_json::json!({ "success": true, "data": payload }))
 }
@@ -1220,32 +1237,71 @@ pub async fn order_update_type(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let order_type = arg1.ok_or("Missing orderType")?;
+    let order_type = arg1.ok_or("Missing orderType")?.trim().to_ascii_lowercase();
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-    conn.execute(
-        "UPDATE orders SET order_type = ?1, sync_status = 'pending', updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![order_type, now, order_id],
-    )
-    .map_err(|e| format!("update order type: {e}"))?;
+    let mut emitted_status: Option<String> = None;
+    if order_type == "pickup" {
+        let current_status: String = conn
+            .query_row(
+                "SELECT COALESCE(status, 'pending')
+                 FROM orders
+                 WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("load pickup conversion context: {e}"))?;
+        order_ownership::assign_order_to_cashier_pickup(&conn, &order_id, &now)?;
+        emitted_status = Some(if order_ownership::is_final_order_status(&current_status) {
+            current_status
+        } else if current_status.eq_ignore_ascii_case("out_for_delivery") {
+            "ready".to_string()
+        } else {
+            current_status
+        });
+    } else {
+        conn.execute(
+            "UPDATE orders SET order_type = ?1, sync_status = 'pending', updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![order_type, now, order_id],
+        )
+        .map_err(|e| format!("update order type: {e}"))?;
+    }
     let payload = serde_json::json!({
         "orderId": order_id,
-        "orderType": order_type
+        "orderType": order_type,
+        "status": emitted_status,
+        "driverId": serde_json::Value::Null,
+        "driverName": serde_json::Value::Null
     });
-    let idem = format!(
-        "order:update-type:{}:{}",
-        order_id,
-        Utc::now().timestamp_millis()
-    );
+    let idem = format!("order:update-type:{}:{}", order_id, uuid::Uuid::new_v4());
     let _ = conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
         rusqlite::params![order_id, payload.to_string(), idem],
     );
     drop(conn);
+    if let Some(ref status) = emitted_status {
+        let _ = app.emit(
+            "order_status_updated",
+            serde_json::json!({
+                "orderId": order_id_raw,
+                "status": status,
+            }),
+        );
+    }
     let _ = app.emit("order_realtime_update", payload);
-    Ok(serde_json::json!({ "success": true }))
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": order_id_raw,
+        "data": {
+            "orderId": order_id_raw,
+            "orderType": order_type,
+            "status": emitted_status,
+            "driverId": serde_json::Value::Null,
+            "driverName": serde_json::Value::Null
+        }
+    }))
 }
 
 #[tauri::command]
@@ -1355,7 +1411,7 @@ pub async fn orders_force_sync_retry(
         let idem = format!(
             "order:force-retry:{}:{}",
             order_id_raw,
-            Utc::now().timestamp_millis()
+            uuid::Uuid::new_v4()
         );
         let _ = conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)

@@ -4,6 +4,10 @@
  */
 
 const SESSION_KEY = 'client_session_id';
+const BUSINESS_DAY_STORAGE_KEYS = [
+  'pos-user',
+  'pendingOrder',
+];
 
 /**
  * Get or create a unique client session ID
@@ -57,5 +61,21 @@ export function clearSessionId(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem(SESSION_KEY);
   }
+}
+
+/**
+ * Clear only the business-day renderer state that must not leak into the next
+ * cashier session. Preferences and terminal configuration stay intact.
+ */
+export function clearBusinessDayStorage(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  for (const key of BUSINESS_DAY_STORAGE_KEYS) {
+    localStorage.removeItem(key);
+  }
+
+  clearSessionId();
 }
 

@@ -1,6 +1,7 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { ErrorHandler, ErrorFactory, POSError } from '../../../shared/utils/error-handler';
 import { ErrorDisplay } from './ErrorDisplay';
+import i18n from '../../../lib/i18n';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -112,12 +113,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             }}
           >
             <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#333' }}>
-              What can you do?
+              {i18n.t('errorBoundary.whatCanYouDo', { defaultValue: 'What can you do?' })}
             </h4>
             <ul style={{ margin: '0', paddingLeft: '20px', fontSize: '13px', color: '#666' }}>
-              <li>Click the "Retry" button to try again</li>
-              <li>Refresh the page to restart the application</li>
-              <li>If the problem persists, contact support</li>
+              <li>{i18n.t('errorBoundary.tryRetry', { defaultValue: 'Click the "Retry" button to try again' })}</li>
+              <li>{i18n.t('errorBoundary.refreshPage', { defaultValue: 'Refresh the page to restart the application' })}</li>
+              <li>{i18n.t('errorBoundary.contactSupport', { defaultValue: 'If the problem persists, contact support' })}</li>
             </ul>
           </div>
 

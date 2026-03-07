@@ -1,6 +1,7 @@
 use chrono::Local;
 use serde::Deserialize;
 use tauri::Emitter;
+use zeroize::Zeroizing;
 
 use crate::{api, db, storage, sync, value_i64};
 
@@ -111,6 +112,23 @@ fn parse_retry_financial_queue_id(value: &serde_json::Value) -> Option<i64> {
         serde_json::Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
     }
+}
+
+fn load_zeroized_pos_api_key() -> Result<Zeroizing<String>, String> {
+    let raw_api_key =
+        Zeroizing::new(storage::get_credential("pos_api_key").ok_or("API key not configured")?);
+    Ok(Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    ))
+}
+
+fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
+    let raw_api_key = Zeroizing::new(storage::get_credential("pos_api_key")?);
+    Some(Zeroizing::new(
+        api::extract_api_key_from_connection_string(&raw_api_key)
+            .unwrap_or_else(|| (*raw_api_key).clone()),
+    ))
 }
 
 fn parse_retry_financial_item_payload(arg0: Option<serde_json::Value>) -> Result<i64, String> {
@@ -475,7 +493,7 @@ pub async fn sync_cleanup_deleted_orders(
     crate::hydrate_terminal_credentials_from_local_settings(&db);
     let admin_url =
         storage::get_credential("admin_dashboard_url").ok_or("Admin URL not configured")?;
-    let api_key = storage::get_credential("pos_api_key").ok_or("API key not configured")?;
+    let api_key = load_zeroized_pos_api_key()?;
 
     // Fetch deleted IDs from server (all deletions since epoch)
     let resp = api::fetch_from_admin(
@@ -617,7 +635,7 @@ pub async fn sync_get_inter_terminal_status(
     crate::hydrate_terminal_credentials_from_local_settings(&db);
 
     let admin_url = storage::get_credential("admin_dashboard_url");
-    let api_key = storage::get_credential("pos_api_key");
+    let api_key = load_zeroized_pos_api_key_optional();
     let terminal_id = storage::get_credential("terminal_id");
 
     let Some(admin_url_val) = admin_url else {

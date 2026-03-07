@@ -9,8 +9,9 @@
 use chrono::Utc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::Emitter;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use zeroize::Zeroizing;
 
 /// App start time for uptime calculation (epoch seconds).
 pub(crate) static APP_START_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -28,7 +29,6 @@ mod data_helpers;
 mod db;
 mod diagnostics;
 mod drawer;
-#[allow(dead_code)]
 mod ecr;
 mod escpos;
 mod hardware_manager;
@@ -224,11 +224,12 @@ async fn admin_fetch(
         hydrate_terminal_credentials_from_local_settings(db_state);
     }
 
-    let mut raw_api_key =
-        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?;
+    let mut raw_api_key = Zeroizing::new(
+        storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
+    );
     let api_key_source = raw_api_key.clone();
     if let Some(decoded_api_key) = api::extract_api_key_from_connection_string(&api_key_source) {
-        if decoded_api_key != raw_api_key {
+        if *decoded_api_key != **raw_api_key {
             let _ = storage::set_credential("pos_api_key", decoded_api_key.trim());
             if let Some(db_state) = db {
                 if let Ok(conn) = db_state.conn.lock() {
@@ -236,7 +237,7 @@ async fn admin_fetch(
                         db::set_setting(&conn, "terminal", "pos_api_key", decoded_api_key.trim());
                 }
             }
-            raw_api_key = decoded_api_key;
+            *raw_api_key = decoded_api_key;
         }
 
         if let Some(decoded_tid) = api::extract_terminal_id_from_connection_string(&api_key_source)
@@ -286,7 +287,7 @@ async fn admin_fetch(
         }
     }
 
-    let api_key = raw_api_key.trim().to_string();
+    let api_key = Zeroizing::new(raw_api_key.trim().to_string());
     if api_key.is_empty() {
         return Err("Terminal not configured: missing API key".to_string());
     }
@@ -439,13 +440,16 @@ pub fn run() {
             use std::sync::Arc;
             use tauri::Manager;
 
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data dir");
+            let app_data_dir = app.path().app_data_dir().map_err(|e| {
+                error!("Failed to get app data dir: {e}");
+                e
+            })?;
 
             // Main DB connection for Tauri commands
-            let db_state = db::init(&app_data_dir).expect("Failed to initialize database");
+            let db_state = db::init(&app_data_dir).map_err(|e| {
+                error!("Failed to initialize database: {e}");
+                format!("Failed to initialize database: {e}")
+            })?;
             hydrate_terminal_credentials_from_local_settings(&db_state);
             app.manage(db_state);
 
@@ -469,69 +473,107 @@ pub fn run() {
             app.manage(cancel_token.clone());
 
             // Second DB connection for the background sync loop
-            let db_for_sync =
-                Arc::new(db::init(&app_data_dir).expect("Failed to init sync database"));
+            let db_for_sync = match db::init(&app_data_dir) {
+                Ok(db) => Some(Arc::new(db)),
+                Err(e) => {
+                    error!("Failed to init sync database: {e} — sync worker disabled");
+                    None
+                }
+            };
             let db_for_startup = db_for_sync.clone();
 
             // Start background sync loop (15s interval)
-            sync::start_sync_loop(
-                app.handle().clone(),
-                db_for_sync,
-                sync_state.clone(),
-                15,
-                cancel_token.clone(),
-            );
+            if let Some(db_for_sync) = db_for_sync {
+                sync::start_sync_loop(
+                    app.handle().clone(),
+                    db_for_sync,
+                    sync_state.clone(),
+                    15,
+                    cancel_token.clone(),
+                );
+            }
 
             // Third DB connection for the background print worker
-            let db_for_print =
-                Arc::new(db::init(&app_data_dir).expect("Failed to init print database"));
-
-            // Start background print worker (5s interval)
-            print::start_print_worker(db_for_print, app_data_dir.clone(), 5, cancel_token.clone());
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    let db_for_print = Arc::new(db);
+                    // Start background print worker (5s interval)
+                    print::start_print_worker(
+                        db_for_print,
+                        app.handle().clone(),
+                        app_data_dir.clone(),
+                        5,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init print database: {e} — print worker disabled");
+                }
+            }
 
             // Start background printer status monitor (15s interval)
-            let db_for_printer_status =
-                Arc::new(db::init(&app_data_dir).expect("Failed to init printer status database"));
-            commands::print::start_printer_status_monitor(
-                app.handle().clone(),
-                db_for_printer_status,
-                15,
-                cancel_token.clone(),
-            );
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    let db_for_printer_status = Arc::new(db);
+                    commands::print::start_printer_status_monitor(
+                        app.handle().clone(),
+                        db_for_printer_status,
+                        15,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init printer status database: {e} — printer status monitor disabled");
+                }
+            }
 
             // Start background system health monitor (30s interval)
-            let db_for_system_health =
-                Arc::new(db::init(&app_data_dir).expect("Failed to init system health database"));
-            commands::diagnostics::start_system_health_monitor(
-                app.handle().clone(),
-                db_for_system_health,
-                sync_state.clone(),
-                30,
-                cancel_token.clone(),
-            );
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    let db_for_system_health = Arc::new(db);
+                    commands::diagnostics::start_system_health_monitor(
+                        app.handle().clone(),
+                        db_for_system_health,
+                        sync_state.clone(),
+                        30,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init system health database: {e} — system health monitor disabled");
+                }
+            }
 
             // Start background menu version monitor (30s interval)
-            let db_for_menu_version =
-                Arc::new(db::init(&app_data_dir).expect("Failed to init menu monitor database"));
-            commands::menu::start_menu_version_monitor(
-                app.handle().clone(),
-                db_for_menu_version,
-                30,
-                cancel_token.clone(),
-            );
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    let db_for_menu_version = Arc::new(db);
+                    commands::menu::start_menu_version_monitor(
+                        app.handle().clone(),
+                        db_for_menu_version,
+                        30,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init menu monitor database: {e} — menu monitor disabled");
+                }
+            }
 
             // Fetch terminal config (branch_id etc.) from admin on startup
             if storage::is_configured() {
                 let startup_app = app.handle().clone();
-                let startup_db = db_for_startup.clone();
+                let startup_db = db_for_startup;
                 tauri::async_runtime::spawn(async move {
-                    let raw_api_key = match storage::get_credential("pos_api_key") {
+                    let raw_api_key = Zeroizing::new(match storage::get_credential("pos_api_key") {
                         Some(k) => k,
                         None => return,
-                    };
-                    let api_key = api::extract_api_key_from_connection_string(&raw_api_key)
-                        .unwrap_or_else(|| raw_api_key.clone());
-                    if api_key != raw_api_key {
+                    });
+                    let api_key = Zeroizing::new(
+                        api::extract_api_key_from_connection_string(&raw_api_key)
+                            .unwrap_or_else(|| (*raw_api_key).clone()),
+                    );
+                    if *api_key != *raw_api_key {
                         let _ = storage::set_credential("pos_api_key", api_key.trim());
                     }
 
@@ -582,13 +624,15 @@ pub fn run() {
                                 let value = if ghost_enabled { "true" } else { "false" };
                                 let _ =
                                     storage::set_credential("ghost_mode_feature_enabled", value);
-                                if let Ok(conn) = startup_db.conn.lock() {
-                                    let _ = db::set_setting(
-                                        &conn,
-                                        "terminal",
-                                        "ghost_mode_feature_enabled",
-                                        value,
-                                    );
+                                if let Some(ref sdb) = startup_db {
+                                    if let Ok(conn) = sdb.conn.lock() {
+                                        let _ = db::set_setting(
+                                            &conn,
+                                            "terminal",
+                                            "ghost_mode_feature_enabled",
+                                            value,
+                                        );
+                                    }
                                 }
                             }
                             if let Some(supa) = resp.get("supabase") {
@@ -603,14 +647,16 @@ pub fn run() {
                                     }
                                 }
                             }
-                            if let Ok(updated) =
-                                cache_terminal_settings_snapshot(startup_db.as_ref(), &resp)
-                            {
-                                if !updated.is_empty() {
-                                    info!(
-                                        count = updated.len(),
-                                        "Startup: cached terminal settings snapshot"
-                                    );
+                            if let Some(ref sdb) = startup_db {
+                                if let Ok(updated) =
+                                    cache_terminal_settings_snapshot(sdb.as_ref(), &resp)
+                                {
+                                    if !updated.is_empty() {
+                                        info!(
+                                            count = updated.len(),
+                                            "Startup: cached terminal settings snapshot"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -618,7 +664,7 @@ pub fn run() {
                             warn!("Startup: failed to fetch terminal config: {e}");
                             if is_terminal_auth_failure(&e) {
                                 handle_invalid_terminal_credentials(
-                                    Some(startup_db.as_ref()),
+                                    startup_db.as_deref(),
                                     &startup_app,
                                     "startup_terminal_config_fetch",
                                     &e,

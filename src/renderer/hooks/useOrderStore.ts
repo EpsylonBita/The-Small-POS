@@ -34,6 +34,31 @@ interface SyncRetryInfo {
   lastError?: string;
 }
 
+// IPC response interfaces for bridge calls
+interface IpcResult {
+  success?: boolean;
+  error?: string;
+  orderId?: string;
+  status?: string;
+  data?: {
+    orderId?: string;
+    driverName?: string;
+    earningCreated?: boolean;
+    status?: string;
+  };
+  driverName?: string;
+  earningCreated?: boolean;
+}
+
+// IPC result for operations that return complex error objects
+interface IpcResultWithDetailedError {
+  success?: boolean;
+  error?: string | { userMessage?: string; message?: string };
+  orderId?: string;
+  status?: string;
+  data?: { orderId?: string; status?: string };
+}
+
 // Define the order store interface
 interface OrderStore {
   orders: Order[];
@@ -119,26 +144,25 @@ const bridge = getBridge();
 
 const INTERNAL_PLUGINS = new Set(['pos', 'web', 'android-ios', 'kiosk']);
 
-const getOrderPlugin = (order: Order | any): string | null => {
+const getOrderPlugin = (order: Order): string | null => {
   return (
-    (order as any).plugin ||
-    (order as any).order_plugin ||
-    (order as any).platform ||
-    (order as any).order_platform ||
+    order.plugin ||
+    order.order_plugin ||
+    order.platform ||
+    order.order_platform ||
     null
   );
 };
 
-const getExternalPluginOrderId = (order: Order | any): string | null => {
+const getExternalPluginOrderId = (order: Order): string | null => {
   return (
-    (order as any).external_plugin_order_id ||
-    (order as any).externalPluginOrderId ||
-    (order as any).external_platform_order_id ||
+    order.external_plugin_order_id ||
+    order.external_platform_order_id ||
     null
   );
 };
 
-const isPendingExternalOrder = (order: Order | any): boolean => {
+const isPendingExternalOrder = (order: Order): boolean => {
   const plugin = getOrderPlugin(order);
   const externalId = getExternalPluginOrderId(order);
   return (
@@ -149,8 +173,8 @@ const isPendingExternalOrder = (order: Order | any): boolean => {
   );
 };
 
-const isGhostOrder = (order: Order | any): boolean => {
-  const value = (order as any)?.is_ghost ?? (order as any)?.isGhost;
+const isGhostOrder = (order: Order): boolean => {
+  const value: unknown = order.is_ghost;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value === 1;
   if (typeof value === 'string') {
@@ -160,17 +184,17 @@ const isGhostOrder = (order: Order | any): boolean => {
   return false;
 };
 
-const getOrderUniqueKey = (order: Order | any): string => {
+const getOrderUniqueKey = (order: Order): string => {
   const plugin = getOrderPlugin(order);
   const externalId = getExternalPluginOrderId(order);
   if (externalId && plugin) {
     return `ext:${plugin}:${externalId}`;
   }
-  const orderNumber = (order as any).order_number || (order as any).orderNumber;
+  const orderNumber = order.order_number || order.orderNumber;
   if (orderNumber) {
     return `ord:${orderNumber}`;
   }
-  const supabaseId = (order as any).supabase_id || (order as any).supabaseId;
+  const supabaseId = order.supabase_id;
   if (supabaseId) {
     return `sup:${supabaseId}`;
   }
@@ -180,7 +204,7 @@ const getOrderUniqueKey = (order: Order | any): string => {
 const dedupeOrders = (orders: Order[]): Order[] => {
   const byKey = new Map<string, Order>();
 
-  const getOrderKeys = (order: Order | any): string[] => {
+  const getOrderKeys = (order: Order): string[] => {
     const keys: string[] = [];
     if (order?.id) keys.push(`id:${order.id}`);
 
@@ -188,23 +212,23 @@ const dedupeOrders = (orders: Order[]): Order[] => {
     const externalId = getExternalPluginOrderId(order);
     if (externalId && plugin) keys.push(`ext:${plugin}:${externalId}`);
 
-    const orderNumber = (order as any).order_number || (order as any).orderNumber;
+    const orderNumber = order.order_number || order.orderNumber;
     if (orderNumber) keys.push(`ord:${orderNumber}`);
 
-    const supabaseId = (order as any).supabase_id || (order as any).supabaseId;
+    const supabaseId = order.supabase_id;
     if (supabaseId) keys.push(`sup:${supabaseId}`);
 
     return keys;
   };
 
   const chooseOrder = (existing: Order, incoming: Order): Order => {
-    const existingStatus = (existing as any).sync_status || (existing as any).syncStatus;
-    const incomingStatus = (incoming as any).sync_status || (incoming as any).syncStatus;
+    const existingStatus = existing.sync_status || existing.syncStatus;
+    const incomingStatus = incoming.sync_status || incoming.syncStatus;
     if (existingStatus === 'pending' && incomingStatus !== 'pending') return existing;
     if (incomingStatus === 'pending' && existingStatus !== 'pending') return incoming;
 
-    const existingTs = new Date((existing as any).updated_at || (existing as any).updatedAt || (existing as any).created_at || (existing as any).createdAt || 0).getTime();
-    const incomingTs = new Date((incoming as any).updated_at || (incoming as any).updatedAt || (incoming as any).created_at || (incoming as any).createdAt || 0).getTime();
+    const existingTs = new Date(existing.updated_at || existing.updatedAt || existing.created_at || existing.createdAt || 0).getTime();
+    const incomingTs = new Date(incoming.updated_at || incoming.updatedAt || incoming.created_at || incoming.createdAt || 0).getTime();
     return incomingTs >= existingTs ? incoming : existing;
   };
 
@@ -261,8 +285,8 @@ const splitOrdersForQueue = (orders: Order[]): { visible: Order[]; pendingExtern
   });
 
   pendingExternal.sort((a, b) => {
-    const aTime = new Date((a as any).created_at || (a as any).createdAt || 0).getTime();
-    const bTime = new Date((b as any).created_at || (b as any).createdAt || 0).getTime();
+    const aTime = new Date(a.created_at || a.createdAt || 0).getTime();
+    const bTime = new Date(b.created_at || b.createdAt || 0).getTime();
     return aTime - bTime;
   });
 
@@ -283,12 +307,12 @@ const findOrderInState = (state: Pick<OrderStore, 'orders' | 'pendingExternalOrd
   return combined.find((order) => order.id === orderId) || null;
 };
 
-const findOrderIndex = (orders: Order[], incoming: any): number => {
+const findOrderIndex = (orders: Order[], incoming: Partial<Order>): number => {
   return orders.findIndex((order) =>
     order.id === incoming.id ||
-    (order as any).supabase_id === incoming.id ||
-    (order as any).supabase_id === incoming.supabase_id ||
-    ((order as any).order_number && incoming.order_number && (order as any).order_number === incoming.order_number) ||
+    order.supabase_id === incoming.id ||
+    order.supabase_id === incoming.supabase_id ||
+    (order.order_number && incoming.order_number && order.order_number === incoming.order_number) ||
     (order.orderNumber && incoming.orderNumber && order.orderNumber === incoming.orderNumber)
   );
 };
@@ -375,7 +399,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       console.log('📡 Setting up real-time order update listeners...');
 
       // Listen for real-time order updates from main process
-      const handleOrderRealtimeUpdate = (orderData: any) => {
+      const handleOrderRealtimeUpdate = (orderData: Partial<Order>) => {
         console.log('📡 Received real-time order update (remote wins):', orderData);
 
         // Always accept remote: merge/overwrite local snapshot with remote payload
@@ -383,28 +407,28 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           const combined = [...state.orders, ...state.pendingExternalOrders];
           const existingOrderIndex = combined.findIndex(order =>
             order.id === orderData.id ||
-            (order as any).supabase_id === orderData.id ||
-            ((order as any).order_number && orderData.order_number && (order as any).order_number === orderData.order_number)
+            order.supabase_id === orderData.id ||
+            (order.order_number && orderData.order_number && order.order_number === orderData.order_number)
           );
 
           if (existingOrderIndex >= 0) {
-            const current: any = combined[existingOrderIndex] as any;
+            const current = combined[existingOrderIndex];
             // Do not overwrite local pending changes
-            if ((current as any).sync_status === 'pending' || (current as any).syncStatus === 'pending') {
+            if (current.sync_status === 'pending' || current.syncStatus === 'pending') {
               return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
             }
             // Only accept newer remote updates
-            const currentTs = new Date((current as any).updatedAt || (current as any).updated_at || 0).getTime();
-            const incomingTs = new Date((orderData as any).updated_at || (orderData as any).updatedAt || 0).getTime();
+            const currentTs = new Date(current.updatedAt || current.updated_at || 0).getTime();
+            const incomingTs = new Date(orderData.updated_at || orderData.updatedAt || 0).getTime();
             if (incomingTs && currentTs && incomingTs <= currentTs) {
               return { orders: state.orders, pendingExternalOrders: state.pendingExternalOrders };
             }
             const updatedOrders = [...combined];
-            const mappedStatus = (orderData as any).status ? mapStatusForPOS((orderData as any).status as any) : (current as any).status;
-            const currentStatus = (current as any).status as string;
+            const mappedStatus = orderData.status ? mapStatusForPOS(orderData.status) : current.status;
+            const currentStatus = current.status as string;
             // Treat delivered and cancelled as final and sticky; do not revert them due to incoming non-final statuses
             const currentFinal = ['completed', 'cancelled', 'delivered'].includes(currentStatus);
-            const incomingFinal = ['completed', 'cancelled', 'delivered'].includes(mappedStatus as any);
+            const incomingFinal = ['completed', 'cancelled', 'delivered'].includes(mappedStatus);
             const currentCancelled = currentStatus === 'cancelled' || currentStatus === 'canceled';
             const nextStatus = currentCancelled && mappedStatus !== 'cancelled'
               ? currentStatus
@@ -413,8 +437,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               ...updatedOrders[existingOrderIndex],
               ...orderData,
               status: nextStatus
-            };
-            const split = splitOrdersForQueue(updatedOrders as Order[]);
+            } as Order;
+            const split = splitOrdersForQueue(updatedOrders);
             return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
           } else {
             // Do not add remote-only orders; trigger refresh instead
@@ -429,7 +453,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const handleOrderStatusUpdate = ({ orderId, status }: { orderId: string; status: string }) => {
         console.log('📡 Received order status update:', { orderId, status });
 
-        const incomingMapped = mapStatusForPOS(status as any);
+        const incomingMapped = mapStatusForPOS(status) as Order['status'];
         set((state) => {
           const combined = [...state.orders, ...state.pendingExternalOrders];
           const updated = combined.map(order =>
@@ -440,13 +464,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                   return {
                     ...order,
                     // Preserve delivered/cancelled status from reverting due to any non-final push
-                    status: isStickyFinal ? order.status : (incomingMapped as any),
+                    status: isStickyFinal ? order.status : incomingMapped,
                     updatedAt: new Date().toISOString()
                   };
                 })()
               : order
           );
-          const split = splitOrdersForQueue(updated as Order[]);
+          const split = splitOrdersForQueue(updated);
           return { orders: split.visible, pendingExternalOrders: split.pendingExternal };
         });
 
@@ -489,7 +513,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       };
 
       // Listen for order updates (e.g., after editing items)
-      const handleOrderUpdated = (orderData: any) => {
+      const handleOrderUpdated = (orderData: Partial<Order> & { id: string }) => {
         console.log('📡 [useOrderStore] Received order updated:', orderData);
 
         // Validate order data
@@ -505,9 +529,9 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           if (existingOrderIndex >= 0) {
             console.log('📡 [useOrderStore] Updating order in state:', orderData.id);
             const updatedOrders = [...combined];
-            const currentStatus = (updatedOrders[existingOrderIndex] as any)?.status as string;
+            const currentStatus = updatedOrders[existingOrderIndex].status as string;
             const incomingStatus = orderData.status
-              ? mapStatusForPOS(orderData.status as any)
+              ? mapStatusForPOS(orderData.status)
               : currentStatus;
             updatedOrders[existingOrderIndex] = {
               ...updatedOrders[existingOrderIndex],
@@ -517,8 +541,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                 : incomingStatus,
               items: orderData.items || updatedOrders[existingOrderIndex].items,
               totalAmount: orderData.totalAmount ?? orderData.total_amount ?? updatedOrders[existingOrderIndex].totalAmount,
-            };
-            return splitOrdersForState(updatedOrders as Order[]);
+            } as Order;
+            return splitOrdersForState(updatedOrders);
           }
 
           console.log('📡 [useOrderStore] Order not found in state, skipping update:', orderData.id);
@@ -774,8 +798,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         ready: counts.ready || 0,
         completed: counts.completed || 0,
         cancelled: counts.cancelled || 0,
-        delivered: counts.delivered || 0
-      } as any;
+      };
 
       // Cache the result
       set({ _orderCounts: result });
@@ -825,21 +848,21 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         );
 
         // Update local state after successful API call
-        const mappedLocalStatus = mapStatusForPOS(status as any);
+        const mappedLocalStatus = mapStatusForPOS(status) as Order['status'];
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
         const updatedOrders = combined.map(order =>
           order.id === orderId
             ? {
                 ...order,
-                status: mappedLocalStatus as any,
+                status: mappedLocalStatus,
                 updatedAt: new Date().toISOString(),
-                sync_status: 'pending',
-                syncStatus: 'pending'
+                sync_status: 'pending' as const,
+                syncStatus: 'pending' as const
               }
             : order
         );
-        return splitOrdersForState(updatedOrders as Order[]);
+        return splitOrdersForState(updatedOrders);
       });
 
 
@@ -935,7 +958,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         // Save order for retry if it's a network/timeout error
         let savedForRetry = false;
         try {
-          const resp = await bridge.orders.saveForRetry(orderData as any);
+          const resp = await bridge.orders.saveForRetry(orderData as Partial<Order>) as unknown as IpcResult;
           savedForRetry = !!resp?.success;
         } catch {}
 
@@ -966,11 +989,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           set((state) => {
             const combinedCurrent = [...state.orders, ...state.pendingExternalOrders];
             const effectiveFetchedOrders = fetchedOrders.map((fetchedOrder) => {
-              const fetchedOrderNumber = fetchedOrder.orderNumber || (fetchedOrder as any).order_number;
-              const fetchedSupabaseId = (fetchedOrder as any).supabase_id;
+              const fetchedOrderNumber = fetchedOrder.orderNumber || fetchedOrder.order_number;
+              const fetchedSupabaseId = fetchedOrder.supabase_id;
               const localMatch = combinedCurrent.find((order) => {
-                const orderNumber = order.orderNumber || (order as any).order_number;
-                const supabaseId = (order as any).supabase_id;
+                const orderNumber = order.orderNumber || order.order_number;
+                const supabaseId = order.supabase_id;
                 return order.id === fetchedOrder.id
                   || (fetchedOrderNumber && orderNumber === fetchedOrderNumber)
                   || (fetchedSupabaseId && supabaseId === fetchedSupabaseId);
@@ -978,14 +1001,14 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
               if (!localMatch) return fetchedOrder;
 
-              const localStatus = String((localMatch as any).status || '').toLowerCase();
-              const fetchedStatus = String((fetchedOrder as any).status || '').toLowerCase();
+              const localStatus = String(localMatch.status || '').toLowerCase();
+              const fetchedStatus = String(fetchedOrder.status || '').toLowerCase();
               const keepLocalCancelled = (localStatus === 'cancelled' || localStatus === 'canceled')
                 && fetchedStatus !== 'cancelled'
                 && fetchedStatus !== 'canceled';
 
               return keepLocalCancelled
-                ? { ...fetchedOrder, status: localMatch.status, updatedAt: localMatch.updatedAt || (localMatch as any).updated_at }
+                ? { ...fetchedOrder, status: localMatch.status, updatedAt: localMatch.updatedAt || localMatch.updated_at }
                 : fetchedOrder;
             });
 
@@ -997,14 +1020,14 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                 .map(o => [o.orderNumber || o.order_number, o])
             );
             const fetchedOrdersBySupabaseId = new Map(
-              effectiveFetchedOrders.filter(o => (o as any).supabase_id)
-                .map(o => [(o as any).supabase_id, o])
+              effectiveFetchedOrders.filter(o => o.supabase_id)
+                .map(o => [o.supabase_id, o])
             );
 
             // Helper to check if an order exists in fetched results using any identifier
             const existsInFetched = (order: Order) => {
-              const orderNum = order.orderNumber || (order as any).order_number;
-              const supabaseId = (order as any).supabase_id;
+              const orderNum = order.orderNumber || order.order_number;
+              const supabaseId = order.supabase_id;
               return fetchedOrdersById.has(order.id) ||
                      (orderNum && fetchedOrdersByOrderNumber.has(orderNum)) ||
                      (supabaseId && fetchedOrdersBySupabaseId.has(supabaseId));
@@ -1017,11 +1040,11 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               // Keep orders that are not in the fetched list AND were created recently (within last 30 seconds)
               // This handles the race condition where order is created but not yet in DB query results
               if (!existsInFetched(order)) {
-                const createdAt = new Date(order.createdAt || (order as any).created_at || 0).getTime();
+                const createdAt = new Date(order.createdAt || order.created_at || 0).getTime();
                 const now = Date.now();
                 const isRecent = (now - createdAt) < 30000; // 30 seconds
                 if (isRecent) {
-                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}, orderNumber: ${order.orderNumber || (order as any).order_number}`);
+                  console.log(`[silentRefresh] Preserving recent order not in DB: ${order.id}, orderNumber: ${order.orderNumber || order.order_number}`);
                   return true;
                 }
               }
@@ -1035,12 +1058,12 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             // Fall back to id if order_number is not available
             const uniqueOrders = Array.from(
               new Map(mergedOrders.map(o => {
-                const key = o.orderNumber || (o as any).order_number || o.id;
+                const key = o.orderNumber || o.order_number || o.id;
                 return [key, o];
               })).values()
             );
 
-            return splitOrdersForState(uniqueOrders as Order[]);
+            return splitOrdersForState(uniqueOrders);
           });
           get()._invalidateCache();
         }
@@ -1122,13 +1145,13 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         const result = await invokeElectronIpc('kitchen:print-ticket', {
           id: order.id,
           orderId: order.id,
-          orderNumber: order.orderNumber || (order as any).order_number,
-          customerName: order.customerName || (order as any).customer_name || 'Walk-in',
-          orderType: order.orderType || (order as any).order_type || 'pickup',
-          tableNumber: order.tableNumber || (order as any).table_number || null,
-          notes: order.notes || (order as any).special_instructions || null,
-          createdAt: order.createdAt || (order as any).created_at || new Date().toISOString(),
-          estimatedTime: order.estimatedTime || (order as any).estimated_time || null,
+          orderNumber: order.orderNumber || order.order_number,
+          customerName: order.customerName || order.customer_name || 'Walk-in',
+          orderType: order.orderType || order.order_type || 'pickup',
+          tableNumber: order.tableNumber || order.table_number || null,
+          notes: order.notes || order.special_instructions || null,
+          createdAt: order.createdAt || order.created_at || new Date().toISOString(),
+          estimatedTime: order.estimatedTime || order.estimated_time || null,
           items: order.items || [],
         });
 
@@ -1160,7 +1183,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
               ? { ...order, estimatedTime, updatedAt: new Date().toISOString() }
               : order
           );
-          return splitOrdersForState(updatedOrders as Order[]);
+          return splitOrdersForState(updatedOrders);
         });
 
 
@@ -1171,7 +1194,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           throw new Error('Order not found');
         }
 
-        const currentStatus = mapStatusForPOS(order.status as any);
+        const currentStatus = mapStatusForPOS(order.status);
         const response = await invokeElectronIpc('order:update-status', {
           orderId,
           status: currentStatus,
@@ -1270,8 +1293,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `assignDriver_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const result = await bridge.orders.assignDriver(orderId, driverId, notes);
-        const driverName = String((result as any)?.driverName || (result as any)?.data?.driverName || '').trim();
+        const result = await bridge.orders.assignDriver(orderId, driverId, notes) as unknown as IpcResult;
+        const driverName = String(result?.driverName || result?.data?.driverName || '').trim();
         if (result?.success) {
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
@@ -1280,51 +1303,32 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             ? (() => {
                 const currentStatus = String(order.status || '').toLowerCase();
                 const isCancelled = currentStatus === 'cancelled' || currentStatus === 'canceled';
+                const isFinal = currentStatus === 'completed' || currentStatus === 'delivered';
+                const serverStatus = String(result?.data?.status || result?.status || '').trim().toLowerCase();
+                const nextStatus = isCancelled
+                  ? order.status
+                  : (serverStatus
+                    ? (mapStatusForPOS(serverStatus) as Order['status'])
+                    : (isFinal ? order.status : 'out_for_delivery' as const));
                 return {
                   ...order,
-                  status: isCancelled ? order.status : 'completed',
+                  status: nextStatus,
+                  orderType: 'delivery' as const,
+                  order_type: 'delivery' as const,
                   driverId,
+                  driver_id: driverId,
                   driverName: driverName || order.driverName || '',
+                  driver_name: driverName || (order as any).driver_name || '',
                   updatedAt: new Date().toISOString(),
-                  sync_status: 'pending',
-                  syncStatus: 'pending'
+                  sync_status: 'pending' as const,
+                  syncStatus: 'pending' as const
                 };
               })()
             : order
         );
-        return splitOrdersForState(updatedOrders as Order[]);
+        return splitOrdersForState(updatedOrders);
       });
 
-
-          // Persist final status via dedicated IPC
-          try {
-            await bridge.orders.updateStatus(orderId, 'completed');
-          } catch (e) {
-            console.warn('[useOrderStore] update-status failed after driver assignment', e);
-          }
-
-          // If backend didn't create driver_earnings (e.g. no active shift found), try frontend fallback
-          const earningCreated = (result as any)?.data?.earningCreated || (result as any)?.earningCreated;
-          if (!earningCreated) {
-            try {
-              const order = get().orders.find(o => o.id === orderId);
-              const totalAmount = order?.totalAmount || 0;
-              const paymentMethod = order?.paymentMethod || 'cash';
-              const cashCollected = paymentMethod === 'cash' ? totalAmount : 0;
-              const cardAmount = paymentMethod === 'card' ? totalAmount : 0;
-              await bridge.drivers.recordEarning({
-                driverId,
-                orderId,
-                deliveryFee: 0,
-                tipAmount: 0,
-                paymentMethod,
-                cashCollected,
-                cardAmount,
-              });
-            } catch (earningErr) {
-              console.warn('[useOrderStore] fallback recordEarning failed:', earningErr);
-            }
-          }
 
           get()._invalidateCache();
           toast.success(driverName ? `Driver assigned: ${driverName}` : 'Driver assigned');
@@ -1345,17 +1349,36 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
       const operation = `convertToPickup_${orderId}`;
       get()._setLoading(operation, true);
       try {
-        const resp = await bridge.orders.updateType(orderId, 'pickup');
+        const resp = await bridge.orders.updateType(orderId, 'pickup') as unknown as IpcResultWithDetailedError;
         if (resp?.success) {
-      const updatedOrderId = (resp as any)?.orderId || (resp as any)?.data?.orderId || orderId;
+      const updatedOrderId = resp?.orderId || resp?.data?.orderId || orderId;
       set((state) => {
         const combined = [...state.orders, ...state.pendingExternalOrders];
         const updatedOrders = combined.map(order =>
           order.id === updatedOrderId
-            ? { ...order, orderType: 'pickup', driverId: undefined, updatedAt: new Date().toISOString() }
+            ? (() => {
+                const currentStatus = String(order.status || '').toLowerCase();
+                const isFinal = currentStatus === 'completed' || currentStatus === 'delivered';
+                const serverStatus = String(resp?.data?.status || resp?.status || '').trim().toLowerCase();
+                return {
+                  ...order,
+                  orderType: 'pickup' as const,
+                  order_type: 'pickup' as const,
+                  status: serverStatus
+                    ? (mapStatusForPOS(serverStatus) as Order['status'])
+                    : (!isFinal && currentStatus === 'out_for_delivery' ? 'ready' as const : order.status),
+                  driverId: undefined,
+                  driver_id: undefined,
+                  driverName: '',
+                  driver_name: '',
+                  updatedAt: new Date().toISOString(),
+                  sync_status: 'pending' as const,
+                  syncStatus: 'pending' as const
+                };
+              })()
             : order
         );
-        return splitOrdersForState(updatedOrders as Order[]);
+        return splitOrdersForState(updatedOrders);
       });
 
 
@@ -1363,10 +1386,15 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
           toast.success('Converted to Pickup');
           return true;
         }
-        const rawError = (resp as any)?.error;
-        const errMsg = typeof rawError === 'string'
-          ? rawError
-          : (rawError?.userMessage || rawError?.message || (rawError ? JSON.stringify(rawError) : 'Failed to convert'));
+        const rawError = resp?.error;
+        let errMsg: string;
+        if (typeof rawError === 'string') {
+          errMsg = rawError;
+        } else if (rawError && typeof rawError === 'object') {
+          errMsg = rawError.userMessage || rawError.message || JSON.stringify(rawError);
+        } else {
+          errMsg = 'Failed to convert';
+        }
         throw new Error(errMsg);
       } catch (error: any) {
         const message = error?.message || 'Failed to convert to Pickup';
@@ -1394,7 +1422,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             ? { ...order, preparationProgress: progress, updatedAt: new Date().toISOString() }
             : order
         );
-        return splitOrdersForState(updatedOrders as Order[]);
+        return splitOrdersForState(updatedOrders);
       });
 
 
@@ -1417,8 +1445,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     resolveConflict: async (conflictId: string, strategy: string) => {
       try {
-        const result = await bridge.orders.resolveConflict(conflictId, strategy);
-        if ((result as any)?.success !== false) {
+        const result = await bridge.orders.resolveConflict(conflictId, strategy) as unknown as IpcResult;
+        if (result?.success !== false) {
           // Remove resolved conflict from state
           set((state) => ({
             ...state,
@@ -1454,8 +1482,8 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
     forceRetrySync: async (orderId: string) => {
       try {
-        const result = await bridge.orders.forceSyncRetry(orderId);
-        if ((result as any)?.success !== false) {
+        const result = await bridge.orders.forceSyncRetry(orderId) as unknown as IpcResult;
+        if (result?.success !== false) {
           // Remove from retry map
           set((state) => {
             const newRetries = new Map(state.syncRetries);
