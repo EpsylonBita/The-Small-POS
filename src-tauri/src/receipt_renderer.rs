@@ -1171,18 +1171,6 @@ fn format_datetime_human(iso: &str) -> String {
         })
 }
 
-/// Short date format DD/MM HH:MM (no year) for space-efficient display.
-fn format_datetime_short(iso: &str) -> String {
-    DateTime::parse_from_rfc3339(iso)
-        .map(|dt| dt.format("%d/%m %H:%M").to_string())
-        .unwrap_or_else(|_| {
-            let trimmed = &iso[..iso.len().min(26)];
-            chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
-                .map(|dt| dt.format("%d/%m %H:%M").to_string())
-                .unwrap_or_else(|_| iso.to_string())
-        })
-}
-
 fn customization_qty(value: f64) -> String {
     if value <= 0.0 {
         return "1".to_string();
