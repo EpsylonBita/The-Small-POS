@@ -10,11 +10,17 @@ function toOptionalTrimmedString(value: unknown): string | undefined {
 // Show fatal errors visually (since DevTools may not be open)
 function showFatalError(err: unknown) {
   const msg = err instanceof Error ? err.stack || err.message : String(err);
-  document.getElementById('root')!.innerHTML = `
-    <div style="color:#f87171;background:#1e293b;padding:32px;font-family:monospace;white-space:pre-wrap;max-width:800px;margin:40px auto;">
-      <h2 style="color:#fbbf24;margin-top:0;">Fatal Startup Error</h2>
-      <p>${msg}</p>
-    </div>`;
+  const root = document.getElementById('root')!;
+  const container = document.createElement('div');
+  container.style.cssText = 'color:#f87171;background:#1e293b;padding:32px;font-family:monospace;white-space:pre-wrap;max-width:800px;margin:40px auto';
+  const heading = document.createElement('h2');
+  heading.style.cssText = 'color:#fbbf24;margin-top:0';
+  heading.textContent = 'Fatal Startup Error';
+  const body = document.createElement('p');
+  body.textContent = msg;
+  container.appendChild(heading);
+  container.appendChild(body);
+  root.replaceChildren(container);
   console.error('[FATAL]', err);
 }
 
