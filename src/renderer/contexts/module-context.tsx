@@ -15,19 +15,12 @@ import type {
   ModuleId,
   EnabledModule,
   ModuleMetadata,
-  FeatureFlag,
   POSModuleInfo,
   POSModulesEnabledResponse,
 } from '../../shared/types/modules';
 import {
-  resolveEnabledModules,
   getModuleMetadata,
-  type FeatureAccessChecker,
 } from '../../shared/services/moduleRegistry';
-import {
-  FEATURE_PLAN_MAP,
-  STARTER_FEATURES,
-} from '../../shared/types/features';
 import {
   isCoreModule,
   getCoreModuleIds,
@@ -35,6 +28,7 @@ import {
   isModuleExcludedFromPos,
 } from '../../shared/constants/pos-modules';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { getCachedTerminalCredentials } from '../services/terminal-credentials';
 
 // =============================================
 // TYPES
@@ -93,6 +87,8 @@ interface ModuleCacheData {
   lockedModulePlans: Record<string, string>;
   businessType: BusinessType;
   organizationId: string;
+  terminalId?: string;
+  adminDashboardUrl?: string;
   timestamp: number;
   /** Modules fetched from admin dashboard API (Requirements 5.1, 5.2) */
   apiModules?: POSModuleInfo[];
@@ -105,7 +101,7 @@ interface ModuleCacheData {
 // =============================================
 
 const CACHE_KEY = 'pos-modules-cache';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
  * Default core module metadata for fallback scenarios.
@@ -172,47 +168,6 @@ function ensureCoreModulesPresent(modules: EnabledModule[]): EnabledModule[] {
 const ModuleContext = createContext<ModuleContextType | undefined>(undefined);
 
 // =============================================
-// SIMPLIFIED FEATURE CHECKER
-// =============================================
-
-/**
- * Simplified feature checker for POS.
- * Since POS doesn't have the admin-dashboard's feature-gates middleware,
- * we use a simplified approach based on the FEATURE_PLAN_MAP configuration.
- *
- * For POS terminals, we assume Starter plan by default. Features requiring
- * Professional or Enterprise plans will be marked as locked, allowing the
- * UI to show upgrade prompts appropriately.
- *
- * In the future, this can be enhanced to fetch the actual organization's
- * subscription plan from the main process or Supabase.
- */
-const createSimplifiedFeatureChecker = (): FeatureAccessChecker => {
-  return async (
-    _organizationId: string,
-    feature: FeatureFlag
-  ): Promise<{ allowed: boolean; currentPlan?: string; requiredPlan?: string }> => {
-    const currentPlan = 'Starter';
-
-    // Check if this feature is available on Starter plan
-    const isStarterFeature = STARTER_FEATURES.includes(feature);
-
-    if (isStarterFeature) {
-      return { allowed: true, currentPlan };
-    }
-
-    // Feature requires a higher plan - get the required plan from the map
-    const requiredPlan = FEATURE_PLAN_MAP[feature] || 'Professional';
-
-    return {
-      allowed: false,
-      currentPlan,
-      requiredPlan,
-    };
-  };
-};
-
-// =============================================
 // PROVIDER COMPONENT
 // =============================================
 
@@ -231,6 +186,19 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
   const isSyncingRef = useRef(false);
   // Ref to store previous apiModules for comparison without causing re-renders
   const prevApiModulesRef = useRef<POSModuleInfo[]>([]);
+
+  const getModuleCacheIdentity = useCallback(() => {
+    const creds = getCachedTerminalCredentials();
+    const adminDashboardUrl =
+      typeof window !== 'undefined'
+        ? (localStorage.getItem('admin_dashboard_url') || '').trim()
+        : '';
+
+    return {
+      terminalId: (creds.terminalId || '').trim(),
+      adminDashboardUrl,
+    };
+  }, []);
 
   /**
    * Reconstruct EnabledModule array from cached module IDs.
@@ -310,6 +278,8 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
           lockedModulePlans,
           businessType: bType,
           organizationId: orgId,
+          terminalId: getModuleCacheIdentity().terminalId,
+          adminDashboardUrl: getModuleCacheIdentity().adminDashboardUrl,
           timestamp: Date.now(),
           apiModules: apiMods,
           apiTimestamp: apiTs,
@@ -319,7 +289,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         console.warn('[ModuleContext] Failed to save cache:', err);
       }
     },
-    []
+    [getModuleCacheIdentity]
   );
 
   /**
@@ -446,13 +416,27 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
           posEnabled: transformed.length,
           removed: removedModuleIds.length,
           fromCache: result.fromCache,
+          stale: result.stale,
+          identityMatch: result.identityMatch,
         });
+        if (result.fromCache && result.stale) {
+          setError('Module data is stale');
+        } else if (result.fromCache && result.identityMatch === false) {
+          setError('Module state unavailable');
+        } else {
+          setError(null);
+        }
       } else {
         console.warn('[ModuleContext] Failed to sync from admin:', result.error);
-        // Don't clear existing modules on failure - keep cached data
+        if (enabledModules.length === 0) {
+          setError('Module state unavailable');
+        }
       }
     } catch (err) {
       console.error('[ModuleContext] Error syncing from admin:', err);
+      if (enabledModules.length === 0) {
+        setError('Module state unavailable');
+      }
     } finally {
       isSyncingRef.current = false;
       setIsSyncing(false);
@@ -480,9 +464,23 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       if (!cached) return null;
 
       const data: ModuleCacheData = JSON.parse(cached);
+      const identity = getModuleCacheIdentity();
 
       // Check if cache is still valid (Requirement 5.1 - 24 hour TTL)
       if (Date.now() - data.timestamp > CACHE_TTL_MS) {
+        localStorage.removeItem(CACHE_KEY);
+        return null;
+      }
+
+      if (
+        (data.organizationId && organizationId && data.organizationId !== organizationId) ||
+        (data.terminalId && identity.terminalId && data.terminalId !== identity.terminalId) ||
+        (
+          data.adminDashboardUrl &&
+          identity.adminDashboardUrl &&
+          data.adminDashboardUrl !== identity.adminDashboardUrl
+        )
+      ) {
         localStorage.removeItem(CACHE_KEY);
         return null;
       }
@@ -534,7 +532,7 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
     } catch {
       return null;
     }
-  }, [reconstructModulesFromIds, transformApiModules]);
+  }, [getModuleCacheIdentity, organizationId, reconstructModulesFromIds, transformApiModules]);
 
   // Known valid business types for runtime validation
   // Must match BusinessType from shared/types/organization.ts
@@ -652,31 +650,23 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
       setOrganizationId(orgId);
       setBusinessType(bType);
 
-      // Resolve modules using the simplified feature checker
-      const featureChecker = createSimplifiedFeatureChecker();
-      const result = await resolveEnabledModules(
-        orgId,
-        bType,
-        featureChecker,
-        { includeLocked: true, navigationOnly: false }
-      );
+      const cached = loadFromCache();
+      if (cached) {
+        setBusinessType(cached.businessType);
+        setOrganizationId(cached.organizationId);
+        setEnabledModules(cached.enabledModules);
+        setLockedModules(cached.lockedModules);
+        if (cached.apiModules) {
+          setApiModules(cached.apiModules);
+        }
+        setError(null);
+        return;
+      }
 
-      setEnabledModules(result.enabledModules);
-      setLockedModules(result.lockedModules);
-
-      // Cache the result (bType is validated at this point)
-      saveToCache(
-        result.enabledModules,
-        result.lockedModules,
-        bType,
-        orgId
-      );
-
-      console.log('[ModuleContext] Modules resolved:', {
-        enabled: result.enabledModules.length,
-        locked: result.lockedModules.length,
-        businessType: bType,
-      });
+      setEnabledModules(ensureCoreModulesPresent([]));
+      setLockedModules([]);
+      setApiModules([]);
+      setError('Module state unavailable');
     } catch (err) {
       console.error('[ModuleContext] Failed to resolve modules:', err);
 
@@ -689,7 +679,9 @@ export const ModuleProvider: React.FC<ModuleProviderProps> = ({ children }) => {
         setLockedModules(cached.lockedModules);
         console.log('[ModuleContext] Using cached modules due to error');
       } else {
-        setError('Failed to resolve modules');
+        setEnabledModules(ensureCoreModulesPresent([]));
+        setLockedModules([]);
+        setError('Module state unavailable');
       }
     } finally {
       setIsLoading(false);

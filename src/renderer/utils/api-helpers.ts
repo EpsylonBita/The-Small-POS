@@ -61,7 +61,8 @@ function toAdminApiPath(endpoint: string): string {
 
 /**
  * Get POS authentication headers for API calls
- * Fetches terminal ID and API key from the main process via IPC
+ * Fetches terminal identity from the main process via IPC.
+ * Native Tauri admin fetches handle API key authentication internally.
  */
 export async function getPosAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
@@ -81,18 +82,6 @@ export async function getPosAuthHeaders(): Promise<Record<string, string>> {
     if (terminalId) {
       headers['x-terminal-id'] = terminalId;
     }
-
-    // Get API key from native terminal config
-    const apiKey = await bridge.terminalConfig.getSetting('terminal', 'pos_api_key').catch(() => null);
-    if (apiKey) {
-      // The API key might be stored as JSON string, parse if needed
-      const parsedKey = typeof apiKey === 'string' && apiKey.startsWith('"')
-        ? JSON.parse(apiKey)
-        : apiKey;
-      if (parsedKey) {
-        headers['x-pos-api-key'] = String(parsedKey);
-      }
-    }
   } catch (error) {
     console.warn('[api-helpers] Failed to get POS auth headers:', error);
   }
@@ -109,14 +98,14 @@ export async function posApiFetch<T = any>(
   options: RequestInit = {}
 ): Promise<{ success: boolean; data?: T; error?: string; status?: number }> {
   try {
-    const authHeaders = await getPosAuthHeaders();
     const callerHeaders = normalizeHeaders(options.headers);
+    const method = (options.method || 'GET').toUpperCase();
+    const useTauriIpc = isTauriRuntime();
+    const authHeaders = useTauriIpc ? {} : await getPosAuthHeaders();
     const mergedHeaders = {
       ...authHeaders,
       ...callerHeaders,
     };
-    const method = (options.method || 'GET').toUpperCase();
-    const useTauriIpc = isTauriRuntime();
 
     if (!hasLoggedTransportPath) {
       hasLoggedTransportPath = true;
@@ -125,10 +114,12 @@ export async function posApiFetch<T = any>(
 
     if (useTauriIpc) {
       const bridge = getBridge();
+      const { ['x-pos-api-key']: _ignoredPosApiKey, ['x-terminal-id']: _ignoredTerminalId, ...nativeHeaders } =
+        mergedHeaders;
       const ipcResult = await bridge.adminApi.fetchFromAdmin(toAdminApiPath(endpoint), {
         method,
         body: options.body,
-        headers: mergedHeaders,
+        headers: nativeHeaders,
       });
 
       if (!ipcResult?.success) {

@@ -482,8 +482,9 @@ export function OrderApprovalPanel({
     console.log('[OrderApprovalPanel] Print button clicked, order ID:', order.id);
     setIsPrinting(true);
     try {
+      const printType = order.order_type === 'delivery' ? 'delivery' : 'customer';
       console.log('[OrderApprovalPanel] Calling bridge.payments.printReceipt with order ID:', order.id);
-      const result = await bridge.payments.printReceipt(order.id);
+      const result = await bridge.payments.printReceipt(order.id, printType);
       console.log('[OrderApprovalPanel] printReceipt result:', result);
       if (result?.success === false) {
         throw new Error(result.error || 'Print command returned failure');
@@ -495,7 +496,7 @@ export function OrderApprovalPanel({
     } finally {
       setIsPrinting(false);
     }
-  }, [bridge.payments, order.id, t]);
+  }, [bridge.payments, order.id, order.order_type, t]);
 
 
   const getOrderTypeLabel = (type: string) => {

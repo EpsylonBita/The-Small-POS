@@ -4,6 +4,7 @@ import type {
   DeliveryOverrideRequest,
   DeliveryOverrideResponse,
 } from '../types/delivery-validation';
+import { getBridge } from '../../lib';
 
 type LatLng = { lat: number; lng: number };
 
@@ -174,20 +175,65 @@ export class DeliveryValidationService {
     return undefined;
   }
 
+  private getBridge() {
+    if (typeof window === 'undefined') {
+      return null;
+    }
+
+    try {
+      return getBridge();
+    } catch {
+      return null;
+    }
+  }
+
+  private toAdminApiPath(endpoint: string): string {
+    const trimmed = endpoint.trim();
+    if (!trimmed) {
+      return '/api';
+    }
+
+    let relative = trimmed;
+    if (relative.startsWith(this.apiUrl)) {
+      relative = relative.slice(this.apiUrl.length);
+    }
+
+    if (!relative.startsWith('/')) {
+      relative = `/${relative}`;
+    }
+
+    return relative.startsWith('/api/') ? relative : `/api${relative}`;
+  }
+
   private async performBoundaryValidation(
     request: DeliveryBoundaryValidationRequest & { coordinates?: LatLng }
   ): Promise<DeliveryBoundaryValidationResponse> {
     const endpoint = this.config.apiKey
       ? `${this.apiUrl}/pos/delivery-zones/validate`
       : `${this.apiUrl}/delivery-zones/validate`;
+    const requestBody = {
+      ...request,
+      coordinates: request.coordinates,
+    };
+    const bridge = this.getBridge();
+
+    if (bridge) {
+      const ipcResult = await bridge.adminApi.fetchFromAdmin(this.toAdminApiPath(endpoint), {
+        method: 'POST',
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!ipcResult?.success) {
+        throw new Error(String(ipcResult?.error || 'Delivery validation failed'));
+      }
+
+      return this.enhanceValidationResponse(ipcResult?.data ?? ipcResult, request);
+    }
 
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: this.buildHeaders(),
-      body: JSON.stringify({
-        ...request,
-        coordinates: request.coordinates,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await this.parseResponse(response);

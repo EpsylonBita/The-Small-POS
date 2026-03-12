@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use crate::{customer_display, db, drawer, hardware_manager, loyalty, scale, scanner, serial};
+use crate::{
+    auth, customer_display, db, drawer, hardware_manager, loyalty, scale, scanner, serial,
+};
 
 fn value_to_string(value: &Value) -> Option<String> {
     match value {
@@ -586,9 +588,15 @@ pub async fn hardware_reconnect(
 pub async fn drawer_open(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,
-) -> Result<Value, String> {
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<Value, auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::CashDrawerControl,
+        &db,
+        &auth_state,
+    )?;
     let printer_id = parse_optional_printer_id(arg0);
-    drawer::open_cash_drawer(&db, printer_id.as_deref())
+    Ok(drawer::open_cash_drawer(&db, printer_id.as_deref())?)
 }
 
 #[cfg(test)]

@@ -7,8 +7,8 @@ use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 use crate::{
-    db, drawer, escpos, payload_arg0_as_string, print, printers, read_local_json_array,
-    receipt_renderer, value_str, write_local_json,
+    auth, db, drawer, escpos, payload_arg0_as_string, print, printers, read_local_json_array,
+    receipt_renderer, resolve_order_id, value_str, write_local_json,
 };
 
 // -- Print -------------------------------------------------------------------
@@ -53,8 +53,17 @@ struct PrinterRecommendationInput {
 struct PrinterRecommendation {
     detected_brand: String,
     recommended: serde_json::Value,
+    probe_hints: serde_json::Value,
     confidence: u8,
     reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct VerificationCandidate {
+    target: printers::ResolvedPrinterTarget,
+    emulation: String,
+    render_mode: String,
+    supports_logo: bool,
 }
 
 fn parse_order_id_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
@@ -63,6 +72,33 @@ fn parse_order_id_payload(arg0: Option<serde_json::Value>) -> Result<String, Str
         &["orderId", "order_id", "id", "supabaseId", "supabase_id"],
     )
     .ok_or("Missing orderId".into())
+}
+
+fn parse_requested_receipt_entity_type(
+    arg0: Option<&serde_json::Value>,
+    arg1: Option<&serde_json::Value>,
+) -> &'static str {
+    let candidate = arg1
+        .and_then(receipt_type_value)
+        .or_else(|| arg0.and_then(receipt_type_value))
+        .unwrap_or_else(|| "order_receipt".to_string());
+
+    match candidate.trim().to_ascii_lowercase().as_str() {
+        "delivery" | "delivery_slip" | "delivery-slip" | "delivery slip" | "slip" | "courier" => {
+            "delivery_slip"
+        }
+        _ => "order_receipt",
+    }
+}
+
+fn receipt_type_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(_) => {
+            value_str(value, &["type", "receiptType", "receipt_type", "mode"])
+        }
+        _ => None,
+    }
 }
 
 fn parse_profile_id_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
@@ -257,11 +293,17 @@ fn build_printer_recommendation(
     input: &PrinterRecommendationInput,
     app_language: &str,
 ) -> PrinterRecommendation {
+    let detected_from_network = if matches!(input.printer_type.as_str(), "network" | "wifi") {
+        printers::detect_network_printer_brand(&input.address)
+    } else {
+        printers::PrinterBrand::Unknown
+    };
     let detected_from_name = printers::detect_printer_brand(&input.name);
     let detected_from_address = printers::detect_printer_brand(&input.address);
     let combined_probe = format!("{} {}", input.name, input.address);
     let detected_from_combined = printers::detect_printer_brand(&combined_probe);
     let detected_brand = [
+        detected_from_network,
         detected_from_name,
         detected_from_address,
         detected_from_combined,
@@ -276,30 +318,41 @@ fn build_printer_recommendation(
     let (paper_size, paper_from_hint) = infer_recommended_paper_size(input);
     let star_mcp31 = is_star_mcp31_family(&combined_probe);
 
-    let receipt_template = if star_mcp31 { "classic" } else { "modern" };
+    let receipt_template = "classic";
     let font_type = "a";
     let layout_density = "compact";
     let header_emphasis = "strong";
 
-    let emulation = if star_mcp31 {
-        "star_line"
-    } else if detected_brand == printers::PrinterBrand::Star {
-        "star_line"
-    } else {
-        "auto"
-    };
-    let render_mode = if star_mcp31 { "raster_exact" } else { "text" };
+    let emulation = "auto";
+    let render_mode = "text";
 
-    let mut connection_details = serde_json::json!({
+    let connection_details = serde_json::json!({
         "type": input.printer_type.clone(),
         "render_mode": render_mode,
-        "emulation": emulation
-    });
-    if star_mcp31 {
-        if let Some(obj) = connection_details.as_object_mut() {
-            obj.insert("threshold".to_string(), serde_json::json!(155));
+        "emulation": emulation,
+        "capabilities": {
+            "status": "unverified",
+            "resolvedTransport": serde_json::Value::Null,
+            "resolvedAddress": serde_json::Value::Null,
+            "emulation": serde_json::Value::Null,
+            "renderMode": serde_json::Value::Null,
+            "baudRate": serde_json::Value::Null,
+            "supportsCut": false,
+            "supportsLogo": false,
+            "lastVerifiedAt": serde_json::Value::Null
         }
-    }
+    });
+    let preferred_emulation_order = if detected_brand == printers::PrinterBrand::Star || star_mcp31
+    {
+        vec!["star_line", "escpos"]
+    } else {
+        vec!["escpos", "star_line"]
+    };
+    let probe_hints = serde_json::json!({
+        "preferredEmulationOrder": preferred_emulation_order,
+        "preferredRenderOrder": ["text", "raster_exact"],
+        "preferredBaudRates": [115200, 9600, 19200, 38400]
+    });
 
     let mut confidence: i32 = 30;
     let mut reasons: Vec<String> = Vec::new();
@@ -347,6 +400,7 @@ fn build_printer_recommendation(
             "headerEmphasis": header_emphasis,
             "connectionDetails": connection_details
         }),
+        probe_hints,
         confidence: confidence.clamp(10, 99) as u8,
         reasons,
     }
@@ -360,7 +414,7 @@ fn should_discover_system_like(requested: &[String]) -> bool {
 }
 
 fn should_discover_bluetooth(requested: &[String]) -> bool {
-    requested.iter().any(|t| t == "bluetooth")
+    requested.is_empty() || requested.iter().any(|t| t == "bluetooth")
 }
 
 fn parse_printer_update_payload(
@@ -492,28 +546,15 @@ fn parse_label_print_batch_payload(
 #[tauri::command]
 pub async fn payment_print_receipt(
     arg0: Option<serde_json::Value>,
-    _arg1: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let order_id = parse_order_id_payload(arg0)?;
-
-    // Route delivery orders to the delivery slip format
-    let entity_type = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let ot: String = conn
-            .query_row(
-                "SELECT COALESCE(order_type, 'pickup') FROM orders WHERE id = ?1",
-                rusqlite::params![&order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "pickup".to_string());
-        if ot == "delivery" {
-            "delivery_slip"
-        } else {
-            "order_receipt"
-        }
-    };
+    let entity_type = parse_requested_receipt_entity_type(arg0.as_ref(), arg1.as_ref());
+    let order_id_raw = parse_order_id_payload(arg0)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    drop(conn);
 
     let enqueue_result = print::enqueue_print_job(&db, entity_type, &order_id, None)?;
 
@@ -684,10 +725,25 @@ fn profile_to_electron_format(profile: &serde_json::Value) -> serde_json::Value 
         .unwrap_or_else(|| {
             let printer_name =
                 value_str(profile, &["printerName", "printer_name"]).unwrap_or_default();
-            serde_json::json!({
-                "type": printer_type,
-                "systemName": printer_name
-            })
+            match printer_type.as_str() {
+                "network" | "wifi" => serde_json::json!({
+                    "type": printer_type,
+                    "ip": printer_name,
+                    "port": 9100
+                }),
+                "bluetooth" => serde_json::json!({
+                    "type": printer_type,
+                    "address": printer_name
+                }),
+                "usb" => serde_json::json!({
+                    "type": printer_type,
+                    "path": printer_name
+                }),
+                _ => serde_json::json!({
+                    "type": printer_type,
+                    "systemName": printer_name
+                }),
+            }
         });
 
     let is_default = profile
@@ -830,6 +886,277 @@ fn electron_to_profile_input(id: Option<String>, payload: serde_json::Value) -> 
     }
 
     serde_json::Value::Object(out)
+}
+
+fn normalize_draft_profile_payload(
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let mut mapped = electron_to_profile_input(None, payload);
+    let object = mapped
+        .as_object_mut()
+        .ok_or("Draft printer payload must be an object")?;
+
+    let role = object
+        .get("role")
+        .and_then(|value| value.as_str())
+        .unwrap_or("receipt")
+        .to_string();
+    if !object.contains_key("receiptTemplate") && matches!(role.as_str(), "receipt" | "kitchen") {
+        object.insert("receiptTemplate".to_string(), serde_json::json!("classic"));
+    }
+
+    let normalized_connection_json = printers::normalize_connection_json_for_role(
+        &role,
+        object
+            .get("connectionJson")
+            .and_then(|value| value.as_str()),
+        None,
+    )?;
+    if let Some(connection_json) = normalized_connection_json {
+        object.insert(
+            "connectionJson".to_string(),
+            serde_json::json!(connection_json),
+        );
+    }
+
+    Ok(mapped)
+}
+
+fn emulation_mode_key(mode: receipt_renderer::ReceiptEmulationMode) -> &'static str {
+    match mode {
+        receipt_renderer::ReceiptEmulationMode::Auto => "auto",
+        receipt_renderer::ReceiptEmulationMode::Escpos => "escpos",
+        receipt_renderer::ReceiptEmulationMode::StarLine => "star_line",
+    }
+}
+
+fn render_mode_key(mode: receipt_renderer::ClassicCustomerRenderMode) -> &'static str {
+    match mode {
+        receipt_renderer::ClassicCustomerRenderMode::Text => "text",
+        receipt_renderer::ClassicCustomerRenderMode::RasterExact => "raster_exact",
+    }
+}
+
+fn capability_candidate_json(
+    target: &printers::ResolvedPrinterTarget,
+    layout: &receipt_renderer::LayoutConfig,
+    supports_logo: bool,
+) -> serde_json::Value {
+    let (resolved_transport, resolved_address, baud_rate) = match target {
+        printers::ResolvedPrinterTarget::WindowsQueue { printer_name } => (
+            "windows_queue",
+            printer_name.clone(),
+            serde_json::Value::Null,
+        ),
+        printers::ResolvedPrinterTarget::RawTcp { host, port } => {
+            ("raw_tcp", format!("{host}:{port}"), serde_json::Value::Null)
+        }
+        printers::ResolvedPrinterTarget::SerialPort {
+            port_name,
+            baud_rate,
+        } => ("serial", port_name.clone(), serde_json::json!(baud_rate)),
+    };
+
+    serde_json::json!({
+        "status": "verified",
+        "resolvedTransport": resolved_transport,
+        "resolvedAddress": resolved_address,
+        "emulation": emulation_mode_key(layout.emulation_mode),
+        "renderMode": render_mode_key(layout.classic_customer_render_mode),
+        "baudRate": baud_rate,
+        "supportsCut": true,
+        "supportsLogo": supports_logo,
+        "lastVerifiedAt": chrono::Utc::now().to_rfc3339()
+    })
+}
+
+fn merge_candidate_capabilities_into_connection(
+    profile: &serde_json::Value,
+    candidate_capabilities: serde_json::Value,
+) -> serde_json::Value {
+    let mut connection_details = profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(|value| value.as_str())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if let Some(connection_object) = connection_details.as_object_mut() {
+        connection_object.insert("capabilities".to_string(), candidate_capabilities);
+    }
+
+    connection_details
+}
+
+fn target_capability_fields(
+    target: &printers::ResolvedPrinterTarget,
+) -> (&'static str, String, serde_json::Value) {
+    match target {
+        printers::ResolvedPrinterTarget::WindowsQueue { printer_name } => (
+            "windows_queue",
+            printer_name.clone(),
+            serde_json::Value::Null,
+        ),
+        printers::ResolvedPrinterTarget::RawTcp { host, port } => {
+            ("raw_tcp", format!("{host}:{port}"), serde_json::Value::Null)
+        }
+        printers::ResolvedPrinterTarget::SerialPort {
+            port_name,
+            baud_rate,
+        } => ("serial", port_name.clone(), serde_json::json!(baud_rate)),
+    }
+}
+
+fn profile_with_candidate_capabilities(
+    profile: &serde_json::Value,
+    target: &printers::ResolvedPrinterTarget,
+    emulation: &str,
+    render_mode: &str,
+    supports_logo: bool,
+) -> serde_json::Value {
+    let (resolved_transport, resolved_address, baud_rate) = target_capability_fields(target);
+    let candidate_capabilities = serde_json::json!({
+        "status": "verified",
+        "resolvedTransport": resolved_transport,
+        "resolvedAddress": resolved_address,
+        "emulation": emulation,
+        "renderMode": render_mode,
+        "baudRate": baud_rate,
+        "supportsCut": true,
+        "supportsLogo": supports_logo,
+        "lastVerifiedAt": chrono::Utc::now().to_rfc3339()
+    });
+
+    let merged_connection =
+        merge_candidate_capabilities_into_connection(profile, candidate_capabilities);
+    let mut updated = profile.clone();
+    if let Some(object) = updated.as_object_mut() {
+        object.insert(
+            "connectionJson".to_string(),
+            serde_json::json!(merged_connection.to_string()),
+        );
+    }
+    updated
+}
+
+fn profile_connection_details(profile: &serde_json::Value) -> serde_json::Value {
+    profile
+        .get("connectionJson")
+        .or_else(|| profile.get("connection_json"))
+        .and_then(|value| value.as_str())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn verification_emulation_candidates(profile: &serde_json::Value) -> Vec<String> {
+    let connection = profile_connection_details(profile);
+    let explicit = value_str(&connection, &["emulation"])
+        .unwrap_or_else(|| "auto".to_string())
+        .to_ascii_lowercase();
+
+    if matches!(explicit.as_str(), "escpos" | "star_line") {
+        return vec![explicit];
+    }
+
+    if printers::detect_printer_brand_for_profile(profile) == printers::PrinterBrand::Star {
+        vec!["star_line".to_string(), "escpos".to_string()]
+    } else {
+        vec!["escpos".to_string(), "star_line".to_string()]
+    }
+}
+
+fn verification_render_mode_candidates(
+    profile: &serde_json::Value,
+    sample_kind: &str,
+) -> Vec<String> {
+    if sample_kind != "branding" {
+        return vec!["text".to_string()];
+    }
+
+    let connection = profile_connection_details(profile);
+    let explicit = value_str(&connection, &["render_mode"])
+        .unwrap_or_else(|| "text".to_string())
+        .to_ascii_lowercase();
+
+    if explicit == "raster_exact" {
+        vec!["raster_exact".to_string(), "text".to_string()]
+    } else {
+        vec!["text".to_string(), "raster_exact".to_string()]
+    }
+}
+
+fn verification_target_candidates(
+    profile: &serde_json::Value,
+    target: &printers::ResolvedPrinterTarget,
+) -> Vec<printers::ResolvedPrinterTarget> {
+    match target {
+        printers::ResolvedPrinterTarget::SerialPort {
+            port_name,
+            baud_rate,
+        } => {
+            let connection = profile_connection_details(profile);
+            let explicit_baud = value_str(&connection, &["baudRate"])
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(*baud_rate);
+            let preferred = [explicit_baud, 115200, 9600, 19200, 38400];
+            let mut out = Vec::new();
+            for baud in preferred {
+                let candidate = printers::ResolvedPrinterTarget::SerialPort {
+                    port_name: port_name.clone(),
+                    baud_rate: baud,
+                };
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
+            }
+            out
+        }
+        other => vec![other.clone()],
+    }
+}
+
+fn verification_candidates_for_profile(
+    profile: &serde_json::Value,
+    target: &printers::ResolvedPrinterTarget,
+    sample_kind: &str,
+) -> Vec<VerificationCandidate> {
+    let target_candidates = verification_target_candidates(profile, target);
+    let emulations = verification_emulation_candidates(profile);
+    let render_modes = verification_render_mode_candidates(profile, sample_kind);
+
+    let mut out = Vec::new();
+    for target_candidate in target_candidates {
+        for emulation in &emulations {
+            for render_mode in &render_modes {
+                out.push(VerificationCandidate {
+                    target: target_candidate.clone(),
+                    emulation: emulation.clone(),
+                    render_mode: render_mode.clone(),
+                    supports_logo: sample_kind == "branding",
+                });
+            }
+        }
+    }
+    out
+}
+
+fn build_sample_bytes(
+    sample_kind: &str,
+    printer_label: &str,
+    layout: &receipt_renderer::LayoutConfig,
+) -> Result<(Vec<u8>, bool, &'static str), String> {
+    match sample_kind {
+        "encoding" => Ok((build_encoding_sample(layout), false, "POS Encoding Test")),
+        "branding" => {
+            let (bytes, supports_logo) = build_branding_sample(printer_label, layout)?;
+            Ok((bytes, supports_logo, "POS Branding Test"))
+        }
+        _ => Ok((
+            build_transport_text_sample(printer_label, layout),
+            false,
+            "POS Draft Test",
+        )),
+    }
 }
 
 #[derive(Default)]
@@ -997,11 +1324,69 @@ fn configured_printer_lookup(db: &db::DbState) -> ConfiguredPrinterLookup {
                         lookup.addresses.insert(address_token);
                     }
                 }
+                if let Some(connection_json) =
+                    value_str(profile, &["connectionJson", "connection_json"])
+                {
+                    if let Ok(connection) =
+                        serde_json::from_str::<serde_json::Value>(&connection_json)
+                    {
+                        for key in [
+                            "systemName",
+                            "deviceName",
+                            "hostname",
+                            "host",
+                            "ip",
+                            "address",
+                            "path",
+                            "serialPort",
+                            "portName",
+                            "comPort",
+                        ] {
+                            if let Some(value) = value_str(&connection, &[key]) {
+                                if let Some(token) = normalize_lookup_token(&value) {
+                                    lookup.names.insert(token);
+                                }
+                                if let Some(address_token) = normalize_address_token(&value) {
+                                    lookup.addresses.insert(address_token);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     lookup
+}
+
+fn resolved_transport_name(target: &printers::ResolvedPrinterTarget) -> &'static str {
+    target.transport_name()
+}
+
+fn resolve_profile_connection_state(
+    profile: &serde_json::Value,
+) -> (Option<printers::ResolvedPrinterTarget>, bool, &'static str) {
+    match printers::resolve_printer_target(profile) {
+        Ok(target) => {
+            let connected = printers::probe_printer_target(&target).is_ok();
+            let verification_status = printers::capability_verification_status(profile);
+            let state = if connected {
+                match verification_status {
+                    "verified" => "online",
+                    "degraded" => "degraded",
+                    _ => "unverified",
+                }
+            } else {
+                "offline"
+            };
+            (Some(target), connected, state)
+        }
+        Err(error) => {
+            warn!(error = %error, "Unable to resolve printer connection target");
+            (None, false, "unresolved")
+        }
+    }
 }
 
 fn is_configured_discovery_entry(
@@ -1013,6 +1398,69 @@ fn is_configured_discovery_entry(
     let address_token = normalize_address_token(address).unwrap_or_default();
     (!name_token.is_empty() && configured.names.contains(&name_token))
         || (!address_token.is_empty() && configured.addresses.contains(&address_token))
+}
+
+fn discover_serial_printers_native(
+    configured: &ConfiguredPrinterLookup,
+    include_usb: bool,
+    include_bluetooth: bool,
+) -> Vec<serde_json::Value> {
+    let mut discovered = Vec::new();
+
+    for port in serialport::available_ports().unwrap_or_default() {
+        match &port.port_type {
+            serialport::SerialPortType::UsbPort(usb) if include_usb => {
+                let port_name = port.port_name.clone();
+                let manufacturer = usb.manufacturer.clone();
+                let model = usb.product.clone();
+                let name = model
+                    .clone()
+                    .or_else(|| {
+                        manufacturer
+                            .clone()
+                            .map(|value| format!("{value} Serial Printer"))
+                    })
+                    .unwrap_or_else(|| format!("USB Serial Printer ({port_name})"));
+                let is_configured = is_configured_discovery_entry(configured, &name, &port_name);
+                discovered.push(serde_json::json!({
+                    "name": name,
+                    "type": "usb",
+                    "address": port_name,
+                    "path": port.port_name,
+                    "serialPort": port.port_name,
+                    "portName": port.port_name,
+                    "port": serde_json::Value::Null,
+                    "model": model,
+                    "manufacturer": manufacturer,
+                    "vendorId": usb.vid,
+                    "productId": usb.pid,
+                    "isConfigured": is_configured,
+                    "source": "serial-enum"
+                }));
+            }
+            serialport::SerialPortType::BluetoothPort if include_bluetooth => {
+                let port_name = port.port_name.clone();
+                let name = format!("Bluetooth Serial Printer ({port_name})");
+                let is_configured = is_configured_discovery_entry(configured, &name, &port_name);
+                discovered.push(serde_json::json!({
+                    "name": name,
+                    "type": "bluetooth",
+                    "address": port_name,
+                    "path": port.port_name,
+                    "serialPort": port.port_name,
+                    "portName": port.port_name,
+                    "port": serde_json::Value::Null,
+                    "model": serde_json::Value::Null,
+                    "manufacturer": "bluetooth-serial",
+                    "isConfigured": is_configured,
+                    "source": "serial-enum"
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    dedupe_discovered_printers(discovered)
 }
 
 fn parse_powershell_device_rows(parsed: serde_json::Value) -> Vec<serde_json::Value> {
@@ -1030,9 +1478,106 @@ fn detect_primary_ipv4() -> Option<std::net::Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("1.1.1.1:80").ok()?;
     match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() => Some(ip),
+        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_link_local() => {
+            Some(ip)
+        }
         _ => None,
     }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_lan_ipv4_values(parsed: &serde_json::Value) -> Vec<std::net::Ipv4Addr> {
+    let values: Vec<String> = match parsed {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|value| value_to_string(value.clone()))
+            .collect(),
+        serde_json::Value::String(value) => vec![value.clone()],
+        serde_json::Value::Object(obj) => {
+            let mut out = Vec::new();
+            if let Some(value) = obj.get("IPAddress").and_then(serde_json::Value::as_str) {
+                out.push(value.to_string());
+            }
+            out
+        }
+        _ => vec![],
+    };
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let parsed_ip = match value.trim().parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_link_local() => ip,
+            _ => continue,
+        };
+        if seen.insert(parsed_ip) {
+            out.push(parsed_ip);
+        }
+    }
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn detect_local_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    if let Some(primary) = detect_primary_ipv4() {
+        seen.insert(primary);
+        out.push(primary);
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$rows = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+  $_.IPAddress -and
+  $_.IPAddress -notlike '127.*' -and
+  $_.IPAddress -notlike '169.254.*' -and
+  $_.SkipAsSource -ne $true
+} | Sort-Object -Property InterfaceMetric | Select-Object -ExpandProperty IPAddress
+$rows | ConvertTo-Json -Compress
+"#;
+
+    let output = match run_hidden_powershell(script) {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(error = %error, "LAN printer discovery failed to enumerate local IPv4 addresses");
+            return out;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            stderr = %stderr,
+            "LAN printer discovery PowerShell IPv4 enumeration returned a non-success status"
+        );
+        return out;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() || stdout == "null" {
+        return out;
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(parsed) => {
+            for ip in parse_lan_ipv4_values(&parsed) {
+                if seen.insert(ip) {
+                    out.push(ip);
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                output = %stdout,
+                "LAN printer discovery PowerShell IPv4 enumeration returned invalid JSON"
+            );
+        }
+    }
+
+    out
 }
 
 #[cfg(target_os = "windows")]
@@ -1068,14 +1613,22 @@ async fn probe_lan_printer_host(ip: std::net::Ipv4Addr) -> Option<u16> {
 async fn discover_lan_printers_native(
     configured: &ConfiguredPrinterLookup,
 ) -> Vec<serde_json::Value> {
-    let primary_ip = match detect_primary_ipv4() {
-        Some(ip) => ip,
-        None => {
-            warn!("LAN printer discovery skipped: unable to detect primary IPv4 address");
-            return vec![];
+    let local_ips = detect_local_ipv4s();
+    if local_ips.is_empty() {
+        warn!("LAN printer discovery skipped: unable to detect any local private IPv4 address");
+        return vec![];
+    }
+
+    let mut hosts = Vec::new();
+    let mut seen_hosts = HashSet::new();
+    for local_ip in &local_ips {
+        for host in lan_subnet_hosts(*local_ip) {
+            if seen_hosts.insert(host) {
+                hosts.push(host);
+            }
         }
-    };
-    let hosts = lan_subnet_hosts(primary_ip);
+    }
+
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(48));
     let mut set = tokio::task::JoinSet::new();
 
@@ -1109,7 +1662,7 @@ async fn discover_lan_printers_native(
 
     let deduped = dedupe_discovered_printers(discovered);
     info!(
-        primary_ip = %primary_ip,
+        local_ips = ?local_ips,
         discovered = deduped.len(),
         "LAN printer discovery completed"
     );
@@ -1206,11 +1759,11 @@ fn resolve_bluetooth_address(device: &serde_json::Value, instance_id: &str, name
 
 #[cfg(target_os = "windows")]
 fn discover_bluetooth_pnp_rows() -> Vec<serde_json::Value> {
-    // Use a broad present-device query so printer modules that are not yet in fully "OK" state
-    // are still visible in the discovery modal.
+    // Use a broad paired-device query so classic Bluetooth printers remain visible even when
+    // Windows does not currently mark them as "present".
     let script = r#"
 $ErrorActionPreference = 'Stop'
-$devices = Get-PnpDevice -PresentOnly | Where-Object {
+$devices = Get-PnpDevice | Where-Object {
   (
     ($_.Class -like '*Bluetooth*') -or
     ($_.InstanceId -like 'BTH*') -or
@@ -1282,16 +1835,14 @@ fn collect_printer_status_map(
     db: &db::DbState,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let profiles = printers::list_printer_profiles(db)?;
-    let system = printers::list_system_printers();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let mut status_map = serde_json::Map::new();
     if let Some(arr) = profiles.as_array() {
         for profile in arr {
             let printer_id = value_str(profile, &["id"]).unwrap_or_default();
-            let printer_name =
-                value_str(profile, &["printerName", "printer_name"]).unwrap_or_default();
-            let connected = system.iter().any(|name| name == &printer_name);
+            let (target, connected, state) = resolve_profile_connection_state(profile);
+            let capabilities = printers::read_capability_snapshot(profile);
 
             let queue_len: i64 = conn
                 .query_row(
@@ -1301,12 +1852,19 @@ fn collect_printer_status_map(
                 )
                 .unwrap_or(0);
 
-            let state = if connected { "online" } else { "offline" };
             status_map.insert(
                 printer_id.clone(),
                 serde_json::json!({
                     "printerId": printer_id,
                     "state": state,
+                    "connected": connected,
+                    "transportReachable": connected,
+                    "verificationStatus": printers::capability_verification_status(profile),
+                    "resolvedTransport": target.as_ref().map(resolved_transport_name),
+                    "resolvedAddress": target.as_ref().map(|value| value.label()),
+                    "supportsLogo": capabilities.supports_logo,
+                    "supportsCut": capabilities.supports_cut,
+                    "lastVerifiedAt": capabilities.last_verified_at,
                     "queueLength": queue_len,
                     "lastSeen": chrono::Utc::now().to_rfc3339()
                 }),
@@ -1516,6 +2074,28 @@ mod bluetooth_discovery_tests {
         assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 1)));
         assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 254)));
     }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parse_lan_ipv4_values_filters_non_private_addresses() {
+        let parsed = serde_json::json!([
+            "192.168.1.19",
+            "10.0.0.7",
+            "127.0.0.1",
+            "169.254.1.20",
+            "8.8.8.8"
+        ]);
+
+        let values = parse_lan_ipv4_values(&parsed);
+
+        assert_eq!(
+            values,
+            vec![
+                std::net::Ipv4Addr::new(192, 168, 1, 19),
+                std::net::Ipv4Addr::new(10, 0, 0, 7)
+            ]
+        );
+    }
 }
 
 #[tauri::command]
@@ -1538,6 +2118,7 @@ pub async fn printer_scan_network(
             })
         })
         .collect();
+    discovered.extend(discover_serial_printers_native(&configured, true, false));
     discovered.extend(discover_lan_printers_native(&configured).await);
     let deduped = dedupe_discovered_printers(discovered);
     Ok(serde_json::json!({
@@ -1552,7 +2133,9 @@ pub async fn printer_scan_bluetooth(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let configured = configured_printer_lookup(&db);
-    let printers = discover_bluetooth_printers_native(&configured)?;
+    let mut printers = discover_bluetooth_printers_native(&configured)?;
+    printers.extend(discover_serial_printers_native(&configured, false, true));
+    let printers = dedupe_discovered_printers(printers);
     let message = if cfg!(target_os = "windows") {
         if printers.is_empty() {
             "No paired Bluetooth devices found".to_string()
@@ -1599,11 +2182,14 @@ pub async fn printer_discover(
                 "isConfigured": is_configured_discovery_entry(&configured, &printer_name, &address)
             }));
         }
+        out.extend(discover_serial_printers_native(&configured, true, false));
         out.extend(discover_lan_printers_native(&configured).await);
     }
 
     if wants_bluetooth {
-        let bluetooth = discover_bluetooth_printers_native(&configured)?;
+        let mut bluetooth = discover_bluetooth_printers_native(&configured)?;
+        bluetooth.extend(discover_serial_printers_native(&configured, false, true));
+        let bluetooth = dedupe_discovered_printers(bluetooth);
         info!(
             bluetooth_candidates = bluetooth.len(),
             "printer_discover native bluetooth scan result"
@@ -1717,9 +2303,8 @@ pub async fn printer_get_status(
     let printer_id = parse_printer_id_payload(arg0)?;
     let profile = printers::get_printer_profile(&db, &printer_id)?;
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let system = printers::list_system_printers();
-    let connected = system.iter().any(|name| name == &printer_name);
-    let state = if connected { "online" } else { "offline" };
+    let (target, connected, state) = resolve_profile_connection_state(&profile);
+    let capabilities = printers::read_capability_snapshot(&profile);
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let queue_len: i64 = conn
@@ -1735,6 +2320,13 @@ pub async fn printer_get_status(
         "printerId": printer_id,
         "state": state,
         "connected": connected,
+        "transportReachable": connected,
+        "verificationStatus": printers::capability_verification_status(&profile),
+        "resolvedTransport": target.as_ref().map(resolved_transport_name),
+        "resolvedAddress": target.as_ref().map(|value| value.label()),
+        "supportsLogo": capabilities.supports_logo,
+        "supportsCut": capabilities.supports_cut,
+        "lastVerifiedAt": capabilities.last_verified_at,
         "queueLength": queue_len,
         "printerName": printer_name,
         "lastSeen": chrono::Utc::now().to_rfc3339()
@@ -1816,6 +2408,308 @@ pub async fn printer_retry_job(
     printers::reprint_job(&db, &job_id)
 }
 
+fn ensure_target_ready(
+    target: &printers::ResolvedPrinterTarget,
+) -> Result<Option<Vec<String>>, String> {
+    if let printers::ResolvedPrinterTarget::WindowsQueue {
+        printer_name: windows_printer_name,
+    } = target
+    {
+        let known_printers = printers::list_system_printers();
+        let printer_known = known_printers
+            .iter()
+            .any(|name| name == windows_printer_name);
+        if !printer_known {
+            return Err(format!(
+                "Printer \"{}\" is not installed in Windows Printers",
+                windows_printer_name
+            ));
+        }
+        return Ok(Some(known_printers));
+    }
+
+    Ok(None)
+}
+
+fn build_transport_text_sample(
+    printer_label: &str,
+    layout: &receipt_renderer::LayoutConfig,
+) -> Vec<u8> {
+    let use_star_line_mode =
+        receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode);
+    let now_str = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+
+    let mut builder = if use_star_line_mode {
+        escpos::EscPosBuilder::new()
+            .with_paper(layout.paper_width)
+            .with_star_line_mode()
+    } else {
+        escpos::EscPosBuilder::new().with_paper(layout.paper_width)
+    };
+    builder.init();
+    let _warnings = receipt_renderer::apply_character_set_for_test(
+        &mut builder,
+        &layout.character_set,
+        layout.greek_render_mode.as_deref(),
+        layout.escpos_code_page,
+        layout.detected_brand,
+        layout.emulation_mode,
+    );
+    builder
+        .center()
+        .bold(true)
+        .text("THERMAL PRINTER TEST\n")
+        .bold(false)
+        .separator()
+        .left()
+        .text(&format!("Printer: {}\n", printer_label))
+        .text(&format!("Date: {}\n", now_str))
+        .text(&format!(
+            "Transport: {}\n",
+            emulation_mode_key(layout.emulation_mode)
+        ))
+        .text(&format!(
+            "Render: {}\n",
+            render_mode_key(layout.classic_customer_render_mode)
+        ))
+        .separator()
+        .text("ABCDEFGHIJKLMNOPQRSTUVWXYZ\n")
+        .text("abcdefghijklmnopqrstuvwxyz\n")
+        .text("0123456789 !@#$%^&*()\n")
+        .separator()
+        .center()
+        .text("-- End of Test --\n");
+    if use_star_line_mode {
+        builder.feed(3).star_cut();
+    } else {
+        builder.feed(4).cut();
+    }
+    builder.build()
+}
+
+fn build_encoding_sample(layout: &receipt_renderer::LayoutConfig) -> Vec<u8> {
+    let use_star_line_mode =
+        receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode);
+    let mut builder = if use_star_line_mode {
+        escpos::EscPosBuilder::new()
+            .with_paper(layout.paper_width)
+            .with_star_line_mode()
+    } else {
+        escpos::EscPosBuilder::new().with_paper(layout.paper_width)
+    };
+    builder.init();
+    let _warnings = receipt_renderer::apply_character_set_for_test(
+        &mut builder,
+        &layout.character_set,
+        layout.greek_render_mode.as_deref(),
+        layout.escpos_code_page,
+        layout.detected_brand,
+        layout.emulation_mode,
+    );
+    builder
+        .center()
+        .bold(true)
+        .text("ENCODING TEST\n")
+        .bold(false)
+        .separator()
+        .left()
+        .text("English: Receipt Printer\n")
+        .text("\u{0395}\u{03BB}\u{03BB}\u{03B7}\u{03BD}\u{03B9}\u{03BA}\u{03AC}: \u{0394}\u{03BF}\u{03BA}\u{03B9}\u{03BC}\u{03AE} \u{0395}\u{03BA}\u{03C4}\u{03CD}\u{03C0}\u{03C9}\u{03C3}\u{03B7}\u{03C2}\n")
+        .text("\u{039A}\u{03B1}\u{03C6}\u{03AD}\u{03C2} 3,50\n")
+        .text("\u{03A3}\u{03CD}\u{03BD}\u{03BF}\u{03BB}\u{03BF} 9,50\n")
+        .separator()
+        .center()
+        .text("Encoding OK?\n");
+    if use_star_line_mode {
+        builder.feed(3).star_cut();
+    } else {
+        builder.feed(4).cut();
+    }
+    builder.build()
+}
+
+fn build_branding_sample(
+    printer_label: &str,
+    layout: &receipt_renderer::LayoutConfig,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut bytes = build_transport_text_sample(printer_label, layout);
+    let mut supports_logo = false;
+    if let Some(prefix) = crate::print::build_logo_prefix_for_layout(layout)? {
+        let mut combined = Vec::with_capacity(prefix.len() + bytes.len() + 1);
+        combined.extend_from_slice(&prefix);
+        combined.push(0x0A);
+        combined.extend_from_slice(&bytes);
+        bytes = combined;
+        supports_logo = true;
+    }
+    Ok((bytes, supports_logo))
+}
+
+fn run_verification_dispatch(
+    db: &db::DbState,
+    base_profile: &serde_json::Value,
+    base_target: &printers::ResolvedPrinterTarget,
+    printer_label: &str,
+    sample_kind: &str,
+    probe_attempt: usize,
+) -> Result<
+    (
+        VerificationCandidate,
+        receipt_renderer::LayoutConfig,
+        printers::RawPrintResult,
+        bool,
+    ),
+    String,
+> {
+    let candidates = verification_candidates_for_profile(base_profile, base_target, sample_kind);
+    if candidates.is_empty() {
+        return Err("No verification candidates available for this printer".to_string());
+    }
+    if probe_attempt >= candidates.len() {
+        return Err("No additional protocol candidates remain. Open Expert Settings to adjust transport or emulation manually.".to_string());
+    }
+
+    let candidate = candidates[probe_attempt].clone();
+    let candidate_profile = profile_with_candidate_capabilities(
+        base_profile,
+        &candidate.target,
+        &candidate.emulation,
+        &candidate.render_mode,
+        candidate.supports_logo,
+    );
+    let layout = print::resolve_layout_config(db, &candidate_profile, "order_receipt")?;
+    let (test_data, supports_logo, doc_name) =
+        build_sample_bytes(sample_kind, printer_label, &layout)?;
+    let dispatch = printers::print_raw_for_target(&candidate.target, &test_data, doc_name)?;
+
+    Ok((candidate, layout, dispatch, supports_logo))
+}
+
+#[tauri::command]
+pub async fn printer_test_draft(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let sample_kind = value_str(&payload, &["sampleKind", "sample_kind"])
+        .unwrap_or_else(|| "transport_text".to_string())
+        .to_ascii_lowercase();
+    let probe_attempt = payload
+        .get("probeAttempt")
+        .or_else(|| payload.get("probe_attempt"))
+        .and_then(|value| {
+            value.as_u64().or_else(|| {
+                value
+                    .as_str()
+                    .and_then(|raw| raw.trim().parse::<u64>().ok())
+            })
+        })
+        .unwrap_or(0) as usize;
+    let draft_payload = payload
+        .get("profileDraft")
+        .cloned()
+        .or_else(|| payload.get("draft").cloned())
+        .or_else(|| payload.get("printer").cloned())
+        .unwrap_or_else(|| payload.clone());
+
+    let profile = normalize_draft_profile_payload(draft_payload)?;
+    let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
+    let target = match printers::resolve_printer_target(&profile) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerName": printer_name,
+                "sampleKind": sample_kind,
+                "verificationStatus": "unverified",
+                "transportReachable": false,
+                "error": error,
+            }));
+        }
+    };
+    let printer_label = if printer_name.is_empty() {
+        target.label()
+    } else {
+        printer_name.clone()
+    };
+
+    let known_printers = match ensure_target_ready(&target) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerName": printer_label,
+                "sampleKind": sample_kind,
+                "verificationStatus": "unverified",
+                "transportReachable": false,
+                "resolvedTransport": resolved_transport_name(&target),
+                "resolvedAddress": target.label(),
+                "error": error,
+            }));
+        }
+    };
+
+    let start = std::time::Instant::now();
+    match run_verification_dispatch(
+        &db,
+        &profile,
+        &target,
+        &printer_label,
+        &sample_kind,
+        probe_attempt,
+    ) {
+        Ok((candidate, layout, dispatch, supports_logo)) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            let candidate_capabilities =
+                capability_candidate_json(&candidate.target, &layout, supports_logo);
+            let candidate_connection = merge_candidate_capabilities_into_connection(
+                &profile,
+                candidate_capabilities.clone(),
+            );
+            Ok(serde_json::json!({
+                "success": true,
+                "printerName": printer_label,
+                "sampleKind": sample_kind,
+                "message": "Draft test print dispatched",
+                "latencyMs": latency_ms,
+                "bytesRequested": dispatch.bytes_requested,
+                "bytesWritten": dispatch.bytes_written,
+                "resolvedTransport": resolved_transport_name(&candidate.target),
+                "resolvedAddress": candidate.target.label(),
+                "transportReachable": true,
+                "verificationStatus": "candidate",
+                "emulationMode": emulation_mode_key(layout.emulation_mode),
+                "renderMode": render_mode_key(layout.classic_customer_render_mode),
+                "characterSet": layout.character_set,
+                "escposCodePage": layout.escpos_code_page,
+                "probeAttempt": probe_attempt,
+                "candidateCapabilities": candidate_capabilities,
+                "candidateConnectionDetails": candidate_connection,
+                "knownPrinters": known_printers
+            }))
+        }
+        Err(error) => {
+            warn!(printer = %printer_label, error = %error, sample_kind = %sample_kind, probe_attempt, "Draft print test failed");
+            Ok(serde_json::json!({
+                "success": false,
+                "printerName": printer_label,
+                "sampleKind": sample_kind,
+                "error": error,
+                "latencyMs": start.elapsed().as_millis() as u64,
+                "probeAttempt": probe_attempt,
+                "bytesWritten": 0,
+                "resolvedTransport": resolved_transport_name(&target),
+                "resolvedAddress": target.label(),
+                "transportReachable": false,
+                "verificationStatus": "unverified",
+                "knownPrinters": known_printers
+            }))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn printer_test(
     arg0: Option<serde_json::Value>,
@@ -1824,115 +2718,170 @@ pub async fn printer_test(
     let printer_id = parse_printer_id_payload(arg0)?;
     let profile = printers::get_printer_profile(&db, &printer_id)?;
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-
-    if printer_name.is_empty() {
-        return Err("Printer has no system printer name configured".into());
-    }
-
-    let known_printers = printers::list_system_printers();
-    let printer_known = known_printers.iter().any(|name| name == &printer_name);
-    if !printer_known {
-        return Ok(serde_json::json!({
-            "success": false,
-            "printerId": printer_id,
-            "error": format!("Printer \"{}\" is not installed in Windows Printers", printer_name),
-            "printerName": printer_name,
-            "knownPrinters": known_printers,
-        }));
-    }
+    let target = match printers::resolve_printer_target(&profile) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "printerName": printer_name,
+                "error": error,
+            }));
+        }
+    };
+    let printer_label = if printer_name.is_empty() {
+        target.label()
+    } else {
+        printer_name.clone()
+    };
+    let known_printers = match ensure_target_ready(&target) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "printerName": printer_label,
+                "resolvedTransport": resolved_transport_name(&target),
+                "resolvedAddress": target.label(),
+                "error": error,
+            }));
+        }
+    };
 
     let start = std::time::Instant::now();
-
-    // Determine paper width from profile
-    let paper_mm = profile
-        .get("paperWidthMm")
-        .or_else(|| profile.get("paper_width_mm"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(80) as i32;
-    let paper = escpos::PaperWidth::from_mm(paper_mm);
-
-    let now_str = chrono::Utc::now()
-        .format("%Y-%m-%d %H:%M:%S UTC")
-        .to_string();
-
-    // Generate ESC/POS binary test page
-    let mut builder = escpos::EscPosBuilder::new().with_paper(paper);
-    builder
-        .init()
-        .center()
-        .bold(true)
-        .text("TEST PRINT\n")
-        .bold(false)
-        .separator()
-        .left()
-        .text(&format!("Printer: {}\n", printer_name))
-        .text(&format!("Date: {}\n", now_str))
-        .separator()
-        .text("ABCDEFGHIJKLMNOPQRSTUVWXYZ\n")
-        .text("abcdefghijklmnopqrstuvwxyz\n")
-        .text("0123456789 !@#$%^&*()\n")
-        .separator()
-        .center()
-        .text("-- End of Test --\n");
-    let detected_brand = printers::detect_printer_brand(&printer_name);
-    if detected_brand == printers::PrinterBrand::Star {
-        builder.feed(3).star_cut();
+    let verification_status = printers::capability_verification_status(&profile);
+    let dispatch_result = if verification_status == "unverified" {
+        run_verification_dispatch(&db, &profile, &target, &printer_label, "transport_text", 0).map(
+            |(candidate, layout, dispatch, supports_logo)| {
+                let dispatch_target = candidate.target.clone();
+                let candidate_capabilities =
+                    capability_candidate_json(&dispatch_target, &layout, supports_logo);
+                (
+                    dispatch_target,
+                    layout,
+                    dispatch,
+                    supports_logo,
+                    Some(candidate_capabilities),
+                )
+            },
+        )
     } else {
-        builder.feed(4).cut();
-    }
-    let test_data = builder.build();
+        let layout = print::resolve_layout_config(&db, &profile, "order_receipt")?;
+        let test_data = build_transport_text_sample(&printer_label, &layout);
+        let dispatch = printers::print_raw_for_target(&target, &test_data, "POS Test Print")?;
+        Ok((target.clone(), layout, dispatch, false, None))
+    };
 
-    let doc_name = "POS Test Print";
-    // Send raw ESC/POS bytes to Windows printer
-    match printers::print_raw_to_windows(&printer_name, &test_data, doc_name) {
-        Ok(dispatch) => {
-            if let Err(probe_error) = printers::probe_printer_spool(&printer_name) {
-                warn!(
-                    printer = %printer_name,
-                    error = %probe_error,
-                    "Printer spool probe failed after test print dispatch"
-                );
-                return Ok(serde_json::json!({
-                    "success": false,
-                    "printerId": printer_id,
-                    "printerName": printer_name,
-                    "error": format!("Print data was sent but spool status probe failed: {probe_error}"),
-                    "bytesRequested": dispatch.bytes_requested,
-                    "bytesWritten": dispatch.bytes_written,
-                    "docName": dispatch.doc_name,
-                    "latencyMs": start.elapsed().as_millis() as u64
-                }));
+    match dispatch_result {
+        Ok((dispatch_target, layout, dispatch, supports_logo, candidate_capabilities)) => {
+            if matches!(
+                dispatch_target,
+                printers::ResolvedPrinterTarget::WindowsQueue { .. }
+            ) {
+                if let Err(probe_error) = printers::probe_printer_target(&dispatch_target) {
+                    warn!(
+                        printer = %printer_label,
+                        error = %probe_error,
+                        "Printer spool probe failed after test print dispatch"
+                    );
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "printerId": printer_id,
+                        "printerName": printer_label,
+                        "error": format!("Print data was sent but spool status probe failed: {probe_error}"),
+                        "bytesRequested": dispatch.bytes_requested,
+                        "bytesWritten": dispatch.bytes_written,
+                        "docName": dispatch.doc_name,
+                        "latencyMs": start.elapsed().as_millis() as u64,
+                        "resolvedTransport": resolved_transport_name(&dispatch_target),
+                        "resolvedAddress": dispatch_target.label(),
+                        "emulationMode": emulation_mode_key(layout.emulation_mode),
+                        "renderMode": render_mode_key(layout.classic_customer_render_mode),
+                        "characterSet": layout.character_set,
+                        "escposCodePage": layout.escpos_code_page,
+                        "candidateCapabilities": candidate_capabilities,
+                        "knownPrinters": known_printers
+                    }));
+                }
             }
 
             let latency_ms = start.elapsed().as_millis() as u64;
             info!(
-                printer = %printer_name,
+                printer = %printer_label,
                 latency_ms = latency_ms,
-                bytes = test_data.len(),
-                "Test print dispatched (ESC/POS raw)"
+                bytes = dispatch.bytes_requested,
+                emulation_mode = ?layout.emulation_mode,
+                render_mode = ?layout.classic_customer_render_mode,
+                verification_status = %verification_status,
+                "Test print dispatched"
             );
+
+            // Record test print in print_jobs for diagnostics tracking
+            {
+                let job_id = uuid::Uuid::new_v4().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id,
+                                                 status, created_at, updated_at, printed_at)
+                         VALUES (?1, 'test_print', ?2, ?3, 'printed', ?4, ?4, ?4)",
+                        rusqlite::params![job_id, job_id, printer_id, now],
+                    );
+                }
+            }
+
             Ok(serde_json::json!({
                 "success": true,
                 "printerId": printer_id,
-                "printerName": printer_name,
+                "printerName": printer_label,
                 "latencyMs": latency_ms,
                 "message": "Test print dispatched",
                 "bytesRequested": dispatch.bytes_requested,
                 "bytesWritten": dispatch.bytes_written,
-                "docName": dispatch.doc_name
+                "docName": dispatch.doc_name,
+                "resolvedTransport": resolved_transport_name(&dispatch_target),
+                "resolvedAddress": dispatch_target.label(),
+                "verificationStatus": verification_status,
+                "emulationMode": emulation_mode_key(layout.emulation_mode),
+                "renderMode": render_mode_key(layout.classic_customer_render_mode),
+                "characterSet": layout.character_set,
+                "escposCodePage": layout.escpos_code_page,
+                "candidateCapabilities": candidate_capabilities,
+                "candidateConnectionDetails": candidate_capabilities
+                    .clone()
+                    .map(|value| merge_candidate_capabilities_into_connection(&profile, value)),
+                "supportsLogo": supports_logo,
+                "knownPrinters": known_printers
             }))
         }
         Err(e) => {
-            warn!(printer = %printer_name, error = %e, "Test print failed");
+            warn!(printer = %printer_label, error = %e, "Test print failed");
+
+            // Record failed test print in print_jobs for diagnostics tracking
+            {
+                let job_id = uuid::Uuid::new_v4().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+                if let Ok(conn) = db.conn.lock() {
+                    let _ = conn.execute(
+                        "INSERT INTO print_jobs (id, entity_type, entity_id, printer_profile_id,
+                                                 status, created_at, updated_at)
+                         VALUES (?1, 'test_print', ?2, ?3, 'failed', ?4, ?4)",
+                        rusqlite::params![job_id, job_id, printer_id, now],
+                    );
+                }
+            }
+
             Ok(serde_json::json!({
                 "success": false,
                 "printerId": printer_id,
-                "printerName": printer_name,
+                "printerName": printer_label,
                 "error": e,
                 "latencyMs": start.elapsed().as_millis() as u64,
-                "bytesRequested": test_data.len(),
                 "bytesWritten": 0,
-                "docName": doc_name
+                "docName": "POS Test Print",
+                "resolvedTransport": resolved_transport_name(&target),
+                "resolvedAddress": target.label(),
+                "knownPrinters": known_printers
             }))
         }
     }
@@ -1946,71 +2895,76 @@ pub async fn printer_test_greek_direct(
     let printer_id = parse_printer_id_payload(arg0)?;
     let profile = printers::get_printer_profile(&db, &printer_id)?;
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-
-    if printer_name.is_empty() {
-        return Err("Printer has no system printer name configured".into());
-    }
-
-    let paper_mm = profile
-        .get("paperWidthMm")
-        .or_else(|| profile.get("paper_width_mm"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(80) as i32;
-    let paper = escpos::PaperWidth::from_mm(paper_mm);
-
-    let profile_character_set = profile
-        .get("characterSet")
-        .or_else(|| profile.get("character_set"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("PC437_USA");
-
-    // Auto-upgrade: match the same logic as resolve_layout_config in print.rs
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let app_language = crate::db::get_setting(&conn, "general", "language")
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "en".to_string());
-    drop(conn);
-
-    let character_set =
-        if profile_character_set == "PC437_USA" && !app_language.is_empty() && app_language != "en"
-        {
-            receipt_renderer::language_to_character_set(&app_language).to_string()
-        } else {
-            profile_character_set.to_string()
+    let target = match printers::resolve_printer_target(&profile) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "printerName": printer_name,
+                "error": error,
+            }));
+        }
+    };
+    let printer_label = if printer_name.is_empty() {
+        target.label()
+    } else {
+        printer_name.clone()
+    };
+    let known_printers = ensure_target_ready(&target).ok().flatten();
+    let verification_status = printers::capability_verification_status(&profile);
+    let (dispatch_target, layout) = if verification_status == "unverified" {
+        let candidates = verification_candidates_for_profile(&profile, &target, "encoding");
+        let Some(candidate) = candidates.into_iter().next() else {
+            return Ok(serde_json::json!({
+                "success": false,
+                "printerId": printer_id,
+                "printerName": printer_label,
+                "error": "No verification candidates available for this printer",
+                "resolvedTransport": resolved_transport_name(&target),
+                "resolvedAddress": target.label(),
+                "knownPrinters": known_printers
+            }));
         };
-
-    let escpos_code_page = profile
-        .get("escposCodePage")
-        .or_else(|| profile.get("escpos_code_page"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u8);
-
-    let greek_render_mode = profile
-        .get("greekRenderMode")
-        .or_else(|| profile.get("greek_render_mode"))
-        .and_then(|v| v.as_str());
+        let candidate_profile = profile_with_candidate_capabilities(
+            &profile,
+            &candidate.target,
+            &candidate.emulation,
+            &candidate.render_mode,
+            candidate.supports_logo,
+        );
+        (
+            candidate.target,
+            print::resolve_layout_config(&db, &candidate_profile, "order_receipt")?,
+        )
+    } else {
+        (
+            target.clone(),
+            print::resolve_layout_config(&db, &profile, "order_receipt")?,
+        )
+    };
+    let use_star_line_mode =
+        receipt_renderer::uses_star_commands(layout.detected_brand, layout.emulation_mode);
 
     let start = std::time::Instant::now();
 
-    let mut builder = escpos::EscPosBuilder::new().with_paper(paper);
+    let mut builder = if use_star_line_mode {
+        escpos::EscPosBuilder::new()
+            .with_paper(layout.paper_width)
+            .with_star_line_mode()
+    } else {
+        escpos::EscPosBuilder::new().with_paper(layout.paper_width)
+    };
     builder.init();
 
     // Apply character set using the same logic as receipts
-    let cfg = receipt_renderer::LayoutConfig {
-        paper_width: paper,
-        character_set: character_set.clone(),
-        greek_render_mode: greek_render_mode.map(ToString::to_string),
-        escpos_code_page,
-        ..Default::default()
-    };
-    let detected_brand = printers::detect_printer_brand(&printer_name);
     let _warnings = receipt_renderer::apply_character_set_for_test(
         &mut builder,
-        &cfg.character_set,
-        cfg.greek_render_mode.as_deref(),
-        cfg.escpos_code_page,
-        detected_brand,
+        &layout.character_set,
+        layout.greek_render_mode.as_deref(),
+        layout.escpos_code_page,
+        layout.detected_brand,
+        layout.emulation_mode,
     );
 
     builder
@@ -2020,10 +2974,11 @@ pub async fn printer_test_greek_direct(
         .bold(false)
         .separator()
         .left()
-        .text(&format!("Character Set: {}\n", cfg.character_set))
+        .text(&format!("Character Set: {}\n", layout.character_set))
         .text(&format!(
             "Code Page Override: {}\n",
-            escpos_code_page
+            layout
+                .escpos_code_page
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "Auto".to_string())
         ))
@@ -2047,7 +3002,7 @@ pub async fn printer_test_greek_direct(
     builder.separator().center();
     builder
         .text("\u{0395}\u{03C5}\u{03C7}\u{03B1}\u{03C1}\u{03B9}\u{03C3}\u{03C4}\u{03BF}\u{03CD}\u{03BC}\u{03B5}!\n");
-    if detected_brand == printers::PrinterBrand::Star {
+    if use_star_line_mode {
         builder.feed(3).star_cut();
     } else {
         builder.feed(4).cut();
@@ -2057,35 +3012,47 @@ pub async fn printer_test_greek_direct(
     let byte_count = test_data.len();
 
     info!(
-        printer = %printer_name,
-        character_set = %character_set,
-        code_page_override = ?escpos_code_page,
+        printer = %printer_label,
+        character_set = %layout.character_set,
+        code_page_override = ?layout.escpos_code_page,
+        emulation_mode = ?layout.emulation_mode,
         bytes = byte_count,
         "Greek test print dispatching"
     );
 
-    match printers::print_raw_to_windows(&printer_name, &test_data, "POS Greek Test") {
+    match printers::print_raw_for_target(&dispatch_target, &test_data, "POS Greek Test") {
         Ok(dispatch) => {
             let latency_ms = start.elapsed().as_millis() as u64;
             Ok(serde_json::json!({
                 "success": true,
                 "printerId": printer_id,
-                "printerName": printer_name,
-                "characterSet": character_set,
-                "escposCodePage": escpos_code_page,
+                "printerName": printer_label,
+                "characterSet": layout.character_set,
+                "escposCodePage": layout.escpos_code_page,
                 "latencyMs": latency_ms,
                 "bytesRequested": dispatch.bytes_requested,
                 "bytesWritten": dispatch.bytes_written,
-                "message": "Greek test print dispatched"
+                "message": "Greek test print dispatched",
+                "resolvedTransport": resolved_transport_name(&dispatch_target),
+                "resolvedAddress": dispatch_target.label(),
+                "verificationStatus": verification_status,
+                "emulationMode": emulation_mode_key(layout.emulation_mode),
+                "renderMode": render_mode_key(layout.classic_customer_render_mode),
+                "knownPrinters": known_printers
             }))
         }
         Err(e) => {
-            warn!(printer = %printer_name, error = %e, "Greek test print failed");
+            warn!(printer = %printer_label, error = %e, "Greek test print failed");
             Ok(serde_json::json!({
                 "success": false,
                 "printerId": printer_id,
-                "printerName": printer_name,
-                "error": e
+                "printerName": printer_label,
+                "error": e,
+                "resolvedTransport": resolved_transport_name(&dispatch_target),
+                "resolvedAddress": dispatch_target.label(),
+                "emulationMode": emulation_mode_key(layout.emulation_mode),
+                "renderMode": render_mode_key(layout.classic_customer_render_mode),
+                "knownPrinters": known_printers
             }))
         }
     }
@@ -2108,7 +3075,7 @@ pub async fn printer_get_auto_config(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
 
-    let brand = printers::detect_printer_brand(printer_name);
+    let brand = printers::detect_printer_brand_for_profile(&profile);
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let app_language = db::get_setting(&conn, "general", "language")
@@ -2117,7 +3084,15 @@ pub async fn printer_get_auto_config(
         .unwrap_or_else(|| "en".to_string());
 
     let auto_character_set = receipt_renderer::language_to_character_set(&app_language);
-    let auto_code_page = receipt_renderer::resolve_auto_code_page(brand, auto_character_set);
+    let code_page_brand = if printers::profile_uses_star_line_mode(&profile) {
+        printers::PrinterBrand::Star
+    } else if brand == printers::PrinterBrand::Star {
+        printers::PrinterBrand::Unknown
+    } else {
+        brand
+    };
+    let auto_code_page =
+        receipt_renderer::resolve_auto_code_page(code_page_brand, auto_character_set);
 
     Ok(serde_json::json!({
         "printerId": printer_id,
@@ -2146,6 +3121,7 @@ pub async fn printer_recommend_profile(
     Ok(serde_json::json!({
         "detectedBrand": recommendation.detected_brand,
         "recommended": recommendation.recommended,
+        "probeHints": recommendation.probe_hints,
         "confidence": recommendation.confidence,
         "reasons": recommendation.reasons,
         "appLanguage": app_language
@@ -2180,8 +3156,8 @@ pub async fn printer_diagnostics(
     let printer_type = value_str(&profile, &["printerType", "printer_type"])
         .unwrap_or_else(|| "system".to_string());
     let printer_name = value_str(&profile, &["printerName", "printer_name"]).unwrap_or_default();
-    let system = printers::list_system_printers();
-    let connected = system.iter().any(|name| name == &printer_name);
+    let (target, connected, state) = resolve_profile_connection_state(&profile);
+    let capabilities = printers::read_capability_snapshot(&profile);
 
     Ok(serde_json::json!({
         "success": true,
@@ -2190,6 +3166,13 @@ pub async fn printer_diagnostics(
             "connectionType": printer_type,
             "model": printer_name,
             "isOnline": connected,
+            "state": state,
+            "verificationStatus": printers::capability_verification_status(&profile),
+            "resolvedTransport": target.as_ref().map(resolved_transport_name),
+            "resolvedAddress": target.as_ref().map(|value| value.label()),
+            "supportsLogo": capabilities.supports_logo,
+            "supportsCut": capabilities.supports_cut,
+            "lastVerifiedAt": capabilities.last_verified_at,
             "recentJobs": {
                 "total": total_jobs,
                 "successful": successful_jobs,
@@ -2202,8 +3185,12 @@ pub async fn printer_diagnostics(
 #[tauri::command]
 pub async fn printer_bluetooth_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
-        "available": false,
-        "message": "Bluetooth printer transport is not implemented in Tauri backend yet"
+        "available": cfg!(target_os = "windows"),
+        "message": if cfg!(target_os = "windows") {
+            "Bluetooth thermal printing is available when Windows exposes a printer queue or RFCOMM/serial port"
+        } else {
+            "Bluetooth thermal printing is currently supported on Windows only"
+        }
     }))
 }
 
@@ -2213,7 +3200,13 @@ pub async fn printer_open_cash_drawer(
     _arg1: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<serde_json::Value, auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::CashDrawerControl,
+        &db,
+        &auth_state,
+    )?;
     let printer_id = parse_optional_printer_id_payload(arg0);
     let result = drawer::open_cash_drawer(&db, printer_id.as_deref())?;
     let _ = app.emit(
@@ -2266,9 +3259,127 @@ pub async fn label_print_batch(
     Ok(serde_json::json!({ "success": true, "jobId": job_id }))
 }
 
+// ---------------------------------------------------------------------------
+// Receipt sample preview (for live printer settings UI)
+// ---------------------------------------------------------------------------
+
+fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
+    let now = Utc::now().format("%Y-%m-%d %H:%M").to_string();
+    receipt_renderer::OrderReceiptDoc {
+        order_id: "preview-000".to_string(),
+        order_number: "ORD-0042".to_string(),
+        order_type: "dine_in".to_string(),
+        status: "completed".to_string(),
+        created_at: now,
+        table_number: Some("5".to_string()),
+        customer_name: Some("John D.".to_string()),
+        items: vec![
+            receipt_renderer::ReceiptItem {
+                name: "Espresso".to_string(),
+                quantity: 2.0,
+                total: 7.00,
+                customizations: vec![receipt_renderer::ReceiptCustomizationLine {
+                    name: "Extra shot".to_string(),
+                    quantity: 1.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            receipt_renderer::ReceiptItem {
+                name: "Club Sandwich".to_string(),
+                quantity: 1.0,
+                total: 12.50,
+                note: Some("No onions".to_string()),
+                ..Default::default()
+            },
+            receipt_renderer::ReceiptItem {
+                name: "Caesar Salad".to_string(),
+                quantity: 1.0,
+                total: 9.80,
+                ..Default::default()
+            },
+        ],
+        totals: vec![
+            receipt_renderer::TotalsLine {
+                label: "Subtotal".to_string(),
+                amount: 29.30,
+                emphasize: false,
+                ..Default::default()
+            },
+            receipt_renderer::TotalsLine {
+                label: "VAT 13%".to_string(),
+                amount: 3.81,
+                emphasize: false,
+                ..Default::default()
+            },
+            receipt_renderer::TotalsLine {
+                label: "Total".to_string(),
+                amount: 33.11,
+                emphasize: true,
+                ..Default::default()
+            },
+        ],
+        payments: vec![receipt_renderer::PaymentLine {
+            label: "Cash".to_string(),
+            amount: 40.00,
+            ..Default::default()
+        }],
+        order_notes: vec![],
+        adjustments: vec![],
+        masked_card: None,
+        customer_phone: None,
+        delivery_address: None,
+        delivery_city: None,
+        delivery_postal_code: None,
+        delivery_floor: None,
+        name_on_ringer: None,
+        driver_id: None,
+        driver_name: None,
+        delivery_slip_mode: Default::default(),
+    }
+}
+
+#[tauri::command]
+pub async fn receipt_sample_preview(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let text_scale_override = payload
+        .get("textScale")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let logo_scale_override = payload
+        .get("logoScale")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let profile = printers::resolve_printer_profile_for_role(&db, None, Some("receipt"))?
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut layout = print::resolve_layout_config(&db, &profile, "order_receipt")?;
+
+    if let Some(ts) = text_scale_override {
+        layout.text_scale = ts.clamp(0.8, 2.0);
+    }
+    if let Some(ls) = logo_scale_override {
+        layout.logo_scale = ls.clamp(0.5, 2.0);
+    }
+
+    let sample_doc = build_sample_receipt_doc();
+    let document = receipt_renderer::ReceiptDocument::OrderReceipt(sample_doc);
+    let html = receipt_renderer::render_html(&document, &layout);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "html": html,
+    }))
+}
+
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn parse_order_id_payload_accepts_string_and_object() {
@@ -2280,6 +3391,36 @@ mod dto_tests {
         .expect("object payload should parse");
         assert_eq!(from_string, "order-1");
         assert_eq!(from_object, "order-2");
+    }
+
+    #[test]
+    fn parse_requested_receipt_entity_type_defaults_to_customer_receipt() {
+        assert_eq!(
+            parse_requested_receipt_entity_type(None, None),
+            "order_receipt"
+        );
+        assert_eq!(
+            parse_requested_receipt_entity_type(
+                Some(&serde_json::json!({"type": "customer"})),
+                None
+            ),
+            "order_receipt"
+        );
+    }
+
+    #[test]
+    fn parse_requested_receipt_entity_type_accepts_delivery_aliases() {
+        assert_eq!(
+            parse_requested_receipt_entity_type(None, Some(&serde_json::json!("delivery"))),
+            "delivery_slip"
+        );
+        assert_eq!(
+            parse_requested_receipt_entity_type(
+                Some(&serde_json::json!({"receiptType": "delivery_slip"})),
+                None
+            ),
+            "delivery_slip"
+        );
     }
 
     #[test]
@@ -2308,10 +3449,10 @@ mod dto_tests {
     }
 
     #[test]
-    fn printer_discover_defaults_exclude_bluetooth() {
+    fn printer_discover_defaults_include_bluetooth() {
         let requested = parse_printer_discover_types(None);
         assert!(should_discover_system_like(&requested));
-        assert!(!should_discover_bluetooth(&requested));
+        assert!(should_discover_bluetooth(&requested));
     }
 
     #[test]
@@ -2321,7 +3462,52 @@ mod dto_tests {
     }
 
     #[test]
-    fn recommendation_prefers_star_mcp31_defaults() {
+    fn resolve_profile_connection_state_reports_network_online() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (_stream, _peer) = listener.accept().expect("accept probe connection");
+        });
+
+        let profile = serde_json::json!({
+            "printerType": "network",
+            "connectionJson": format!("{{\"type\":\"network\",\"ip\":\"127.0.0.1\",\"port\":{}}}", addr.port())
+        });
+
+        let (target, connected, state) = resolve_profile_connection_state(&profile);
+        handle.join().expect("listener thread should finish");
+
+        assert_eq!(
+            target.as_ref().map(resolved_transport_name),
+            Some("raw_tcp")
+        );
+        assert!(connected);
+        assert_eq!(state, "unverified");
+    }
+
+    #[test]
+    fn resolve_profile_connection_state_reports_network_offline() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind temporary listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        drop(listener);
+
+        let profile = serde_json::json!({
+            "printerType": "network",
+            "connectionJson": format!("{{\"type\":\"network\",\"ip\":\"127.0.0.1\",\"port\":{}}}", port)
+        });
+
+        let (target, connected, state) = resolve_profile_connection_state(&profile);
+
+        assert_eq!(
+            target.as_ref().map(resolved_transport_name),
+            Some("raw_tcp")
+        );
+        assert!(!connected);
+        assert_eq!(state, "offline");
+    }
+
+    #[test]
+    fn recommendation_prefers_unverified_compatible_defaults() {
         let input = PrinterRecommendationInput {
             name: "Star MCP31LB".to_string(),
             printer_type: "system".to_string(),
@@ -2346,14 +3532,20 @@ mod dto_tests {
         );
         assert_eq!(
             connection.get("render_mode").and_then(|v| v.as_str()),
-            Some("raster_exact")
+            Some("text")
         );
         assert_eq!(
             connection.get("emulation").and_then(|v| v.as_str()),
+            Some("auto")
+        );
+        assert_eq!(
+            recommendation.probe_hints["preferredEmulationOrder"][0].as_str(),
             Some("star_line")
         );
-        assert!(connection.get("printable_width_dots").is_none());
-        assert!(connection.get("left_margin_dots").is_none());
+        assert_eq!(
+            connection["capabilities"]["status"].as_str(),
+            Some("unverified")
+        );
         assert!(recommendation.confidence >= 80);
     }
 
@@ -2386,7 +3578,7 @@ mod dto_tests {
                 .recommended
                 .get("receiptTemplate")
                 .and_then(|v| v.as_str()),
-            Some("modern")
+            Some("classic")
         );
         assert_eq!(
             connection.get("render_mode").and_then(|v| v.as_str()),
@@ -2395,6 +3587,14 @@ mod dto_tests {
         assert_eq!(
             connection.get("emulation").and_then(|v| v.as_str()),
             Some("auto")
+        );
+        assert_eq!(
+            recommendation.probe_hints["preferredEmulationOrder"][0].as_str(),
+            Some("escpos")
+        );
+        assert_eq!(
+            recommendation.probe_hints["preferredBaudRates"][0].as_i64(),
+            Some(115200)
         );
     }
 
@@ -2500,6 +3700,22 @@ mod dto_tests {
         assert_eq!(electron["fontType"], "b");
         assert_eq!(electron["layoutDensity"], "balanced");
         assert_eq!(electron["headerEmphasis"], "normal");
+    }
+
+    #[test]
+    fn profile_to_electron_format_builds_network_connection_details_without_connection_json() {
+        let electron = profile_to_electron_format(&serde_json::json!({
+            "id": "p-net",
+            "name": "LAN Printer",
+            "printerType": "network",
+            "printerName": "192.168.1.19",
+            "paperWidthMm": 80,
+        }));
+
+        assert_eq!(electron["type"], "network");
+        assert_eq!(electron["connectionDetails"]["type"], "network");
+        assert_eq!(electron["connectionDetails"]["ip"], "192.168.1.19");
+        assert_eq!(electron["connectionDetails"]["port"], 9100);
     }
 
     #[test]

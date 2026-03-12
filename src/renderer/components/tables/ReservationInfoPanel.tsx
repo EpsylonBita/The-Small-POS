@@ -17,7 +17,6 @@ import React, { memo, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { reservationsService, type Reservation } from '../../services/ReservationsService';
-import { supabase } from '../../../shared/supabase';
 import { formatDate as formatDateValue, formatTime as formatTimeValue } from '../../utils/format';
 import {
   X,
@@ -113,19 +112,10 @@ export const ReservationInfoPanel: React.FC<ReservationInfoPanelProps> = memo(({
     try {
       // Update reservation status to 'seated'
       await reservationsService.updateStatus(reservation.id, 'seated');
-      
-      // Update table status to 'occupied'
-      const { error: tableError } = await supabase
-        .from('restaurant_tables')
-        .update({
-          status: 'occupied',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', tableId)
-        .eq('branch_id', branchId);
 
-      if (tableError) {
-        console.error('Error updating table status:', tableError);
+      const tableUpdated = await reservationsService.updateTableStatus(tableId, 'occupied');
+      if (!tableUpdated) {
+        console.warn('[ReservationInfoPanel] Failed to update table status to occupied');
       }
 
       // Callback to parent

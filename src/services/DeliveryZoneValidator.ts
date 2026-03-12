@@ -28,7 +28,6 @@ interface ValidatorConfig {
   cacheExpiryMs?: number;
   enableAnalytics?: boolean;
   authToken?: string;
-  apiKey?: string;
 }
 
 interface CachedValidation {
@@ -78,9 +77,9 @@ export class DeliveryZoneValidator {
       showAlternativeZones: true,
       enableDistanceCalculation: true,
       maxDeliveryDistance: 10000,
-      // Pass authentication credentials
+      // Use POS endpoint — actual API key injected by Rust IPC bridge
+      apiKey: 'pos',
       authToken: this.config.authToken,
-      apiKey: this.config.apiKey,
       terminalId: this.config.terminalId
     });
 
@@ -410,15 +409,12 @@ export class DeliveryZoneValidator {
    * Update authentication credentials at runtime
    * Call this when auth token becomes available or changes
    */
-  updateAuth(authToken?: string, apiKey?: string): void {
+  updateAuth(authToken?: string): void {
     if (authToken !== undefined) {
       this.config.authToken = authToken;
     }
-    if (apiKey !== undefined) {
-      this.config.apiKey = apiKey;
-    }
     // Update the underlying service
-    this.validationService.updateAuth(authToken, apiKey);
+    this.validationService.updateAuth(authToken);
   }
 }
 

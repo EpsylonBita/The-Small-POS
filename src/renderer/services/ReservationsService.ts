@@ -1,27 +1,12 @@
 /**
  * ReservationsService - POS Reservations Service
- * 
+ *
  * Provides reservation management functionality for the POS system.
- * Uses sync/API fetch paths and event-driven refresh orchestration.
- * 
- * Requirements:
- * - 4.3: Store reservation with 'pending' status
- * - 4.6: Generate unique reservation number in format RES-YYYYMMDD-XXXX
- * 
- * **Feature: pos-tables-reservations-sync, Property 5: Reservation Number Format**
- * **Validates: Requirements 4.6**
+ * Uses typed terminal-authenticated POS routes only.
  */
 
-import { supabase } from '../../shared/supabase';
 import { getBridge, isBrowser } from '../../lib';
-
-type IpcInvoke = (channel: string, ...args: any[]) => Promise<any>;
-
-function getIpcInvoke(): IpcInvoke | null {
-  if (isBrowser()) return null;
-  const bridge = getBridge();
-  return bridge.invoke.bind(bridge);
-}
+import { posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -33,17 +18,21 @@ function formatError(error: unknown): string {
   }
 }
 
-// Re-export utility functions for convenience
-export { 
-  generateReservationNumber, 
-  validateReservationNumberFormat, 
+export {
+  generateReservationNumber,
+  validateReservationNumberFormat,
   parseReservationNumber,
   isReservationWithinMinutes,
-  isReservationLate
+  isReservationLate,
 } from '../utils/reservationUtils';
 
-// Types
-export type ReservationStatus = 'pending' | 'confirmed' | 'seated' | 'completed' | 'no_show' | 'cancelled';
+export type ReservationStatus =
+  | 'pending'
+  | 'confirmed'
+  | 'seated'
+  | 'completed'
+  | 'no_show'
+  | 'cancelled';
 
 export interface Reservation {
   id: string;
@@ -113,7 +102,6 @@ export interface CreateReservationDto {
   notes?: string;
 }
 
-// Transform API response to domain model
 function transformFromAPI(data: any): Reservation {
   return {
     id: data.id,
@@ -148,397 +136,295 @@ function transformFromAPI(data: any): Reservation {
   };
 }
 
-class ReservationsService {
-  private branchId: string = '';
-  private organizationId: string = '';
+function buildQueryString(params: Record<string, string | undefined>): string {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (typeof value === 'string' && value.trim()) {
+      search.set(key, value);
+    }
+  });
+  const query = search.toString();
+  return query ? `?${query}` : '';
+}
 
-  /**
-   * Set the current branch and organization context
-   */
+function listDatesInclusive(start: string, end: string): string[] {
+  if (!start || !end || start === end) {
+    return start ? [start] : [];
+  }
+
+  const dates: string[] = [];
+  const cursor = new Date(`${start}T00:00:00`);
+  const target = new Date(`${end}T00:00:00`);
+
+  while (cursor <= target) {
+    const yyyy = cursor.getFullYear();
+    const mm = String(cursor.getMonth() + 1).padStart(2, '0');
+    const dd = String(cursor.getDate()).padStart(2, '0');
+    dates.push(`${yyyy}-${mm}-${dd}`);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return dates;
+}
+
+class ReservationsService {
+  private bridge = getBridge();
+  private branchId = '';
+  private organizationId = '';
+
   setContext(branchId: string, organizationId: string): void {
     this.branchId = branchId;
     this.organizationId = organizationId;
   }
 
-  /**
-   * Fetch reservations with optional filters
-   * For room reservations, also fetches reservations where the date range overlaps with check_in/check_out dates
-   */
+  private async listReservations(params?: {
+    date?: string;
+    status?: string;
+    search?: string;
+    table_id?: string;
+  }): Promise<{ reservations: any[]; error?: string }> {
+    const query = buildQueryString({
+      date: params?.date,
+      status: params?.status,
+      search: params?.search,
+      table_id: params?.table_id,
+    });
+
+    const result = isBrowser()
+      ? await posApiGet<{ success?: boolean; reservations?: any[]; error?: string }>(
+          `/api/pos/reservations${query}`,
+        )
+      : await this.bridge.reservations.list(params);
+
+    if (!result.success) {
+      return { reservations: [], error: result.error || 'Failed to fetch reservations' };
+    }
+
+    const payload = (result.data ?? {}) as {
+      success?: boolean;
+      reservations?: any[];
+      error?: string;
+    };
+
+    if (payload.success === false) {
+      return { reservations: [], error: payload.error || 'Failed to fetch reservations' };
+    }
+
+    return {
+      reservations: Array.isArray(payload.reservations) ? payload.reservations : [],
+    };
+  }
+
+  private async getReservation(reservationId: string): Promise<{ reservation?: any; error?: string }> {
+    const result = isBrowser()
+      ? await posApiGet<{ success?: boolean; reservation?: any; error?: string }>(
+          `/api/pos/reservations/${reservationId}`,
+        )
+      : await this.bridge.reservations.get(reservationId);
+
+    if (!result.success) {
+      return { error: result.error || 'Failed to fetch reservation' };
+    }
+
+    const payload = (result.data ?? {}) as {
+      success?: boolean;
+      reservation?: any;
+      error?: string;
+    };
+
+    if (payload.success === false) {
+      return { error: payload.error || 'Failed to fetch reservation' };
+    }
+
+    return { reservation: payload.reservation };
+  }
+
+  private async createReservationRequest(payload: Record<string, unknown>) {
+    const result = isBrowser()
+      ? await posApiPost<{ success?: boolean; reservation?: any; error?: string }>(
+          '/api/pos/reservations',
+          payload,
+        )
+      : await this.bridge.reservations.create(payload);
+
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to create reservation');
+    }
+
+    const body = (result.data ?? {}) as {
+      success?: boolean;
+      reservation?: any;
+      error?: string;
+      message?: string;
+    };
+
+    if (body.success === false || !body.reservation) {
+      throw new Error(body.error || body.message || 'Failed to create reservation');
+    }
+
+    return body.reservation;
+  }
+
+  private async updateReservationRequest(
+    reservationId: string,
+    payload: Record<string, unknown>,
+  ) {
+    const result = isBrowser()
+      ? await posApiPatch<{ success?: boolean; reservation?: any; error?: string }>(
+          `/api/pos/reservations/${reservationId}`,
+          payload,
+        )
+      : await this.bridge.reservations.update(reservationId, payload);
+
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to update reservation');
+    }
+
+    const body = (result.data ?? {}) as {
+      success?: boolean;
+      reservation?: any;
+      error?: string;
+      message?: string;
+    };
+
+    if (body.success === false || !body.reservation) {
+      throw new Error(body.error || body.message || 'Failed to update reservation');
+    }
+
+    return body.reservation;
+  }
+
   async fetchReservations(filters?: ReservationFilters): Promise<Reservation[]> {
     try {
-      const invoke = getIpcInvoke();
-      const hasIpc = !!invoke;
-      if (invoke && this.branchId) {
-        const dateFrom = filters?.dateFrom ? String(filters.dateFrom).split('T')[0] : undefined;
-        const dateTo = filters?.dateTo ? String(filters.dateTo).split('T')[0] : undefined;
-        const useSingleDayFilter = !!dateFrom && (!dateTo || dateTo === dateFrom);
-
-        const options: Record<string, unknown> = {};
-        if (useSingleDayFilter && dateFrom) {
-          options.date = dateFrom;
-        }
-        if (filters?.statusFilter && filters.statusFilter !== 'all') {
-          options.status = filters.statusFilter;
-        }
-        if (filters?.searchTerm) {
-          options.search = filters.searchTerm;
-        }
-
-        const result = await invoke('sync:fetch-reservations', options);
-        if (result?.success) {
-          const reservations = Array.isArray(result.reservations) ? result.reservations : [];
-          return reservations
-            .map(transformFromAPI)
-            .sort(
-              (a: Reservation, b: Reservation) =>
-                new Date(a.reservationDatetime || a.checkInDate || '').getTime() -
-                new Date(b.reservationDatetime || b.checkInDate || '').getTime()
-            );
-        }
-
-        console.warn('[ReservationsService] IPC reservations fetch failed:', result?.error || 'Unknown error');
+      if (!this.branchId) {
         return [];
       }
 
-      if (hasIpc) {
-        // In Electron, avoid direct renderer Supabase fallback when IPC is available but unavailable for this branch/context.
-        return [];
-      }
+      const search = filters?.searchTerm || undefined;
+      const status =
+        filters?.statusFilter && filters.statusFilter !== 'all'
+          ? filters.statusFilter
+          : undefined;
 
-      // Fallback: direct Supabase queries
-      // Fetch table reservations (filtered by reservation_date)
-      let tableQuery = supabase
-        .from('reservations')
-        .select('*')
-        .eq('branch_id', this.branchId)
-        .not('table_id', 'is', null)
-        .order('reservation_datetime', { ascending: true });
+      let rows: any[] = [];
+      const rangeDates =
+        filters?.dateFrom && filters?.dateTo
+          ? listDatesInclusive(filters.dateFrom, filters.dateTo)
+          : [];
 
-      if (filters?.dateFrom) {
-        tableQuery = tableQuery.gte('reservation_date', filters.dateFrom);
-      }
-      if (filters?.dateTo) {
-        tableQuery = tableQuery.lte('reservation_date', filters.dateTo);
-      }
-      if (filters?.statusFilter && filters.statusFilter !== 'all') {
-        tableQuery = tableQuery.eq('status', filters.statusFilter);
-      }
-      if (filters?.searchTerm) {
-        tableQuery = tableQuery.or(
-          `customer_name.ilike.%${filters.searchTerm}%,customer_phone.ilike.%${filters.searchTerm}%`
+      if (rangeDates.length > 1) {
+        const responses = await Promise.all(
+          rangeDates.map((date) =>
+            this.listReservations({
+              date,
+              status,
+              search,
+            }),
+          ),
         );
+
+        const errors = responses.map((response) => response.error).filter(Boolean);
+        if (errors.length > 0) {
+          console.warn('[ReservationsService] Range reservation fetch returned errors:', errors);
+        }
+
+        const deduped = new Map<string, any>();
+        responses.forEach((response) => {
+          response.reservations.forEach((reservation) => {
+            if (reservation?.id) {
+              deduped.set(String(reservation.id), reservation);
+            }
+          });
+        });
+        rows = Array.from(deduped.values());
+      } else {
+        const response = await this.listReservations({
+          date: filters?.dateFrom || filters?.dateTo,
+          status,
+          search,
+        });
+
+        if (response.error) {
+          console.error('[ReservationsService] Failed to fetch reservations:', response.error);
+          return [];
+        }
+
+        rows = response.reservations;
       }
 
-      // Fetch room reservations
-      // For room reservations, show all active/upcoming reservations
-      // The date filter is less strict - show reservations that are:
-      // 1. Currently active (check_in <= today AND check_out >= today)
-      // 2. Upcoming (check_in is in the future)
-      // 3. Recently completed (check_out was recent)
-      let roomQuery = supabase
-        .from('reservations')
-        .select('*')
-        .eq('branch_id', this.branchId)
-        .not('room_id', 'is', null)
-        .in('status', ['pending', 'confirmed', 'seated']) // Only active reservations
-        .order('check_in_date', { ascending: true });
-
-      // For room reservations with a single day filter (Today/Tomorrow), 
-      // show all reservations where check_out hasn't passed yet
-      if (filters?.dateFrom) {
-        roomQuery = roomQuery.gte('check_out_date', filters.dateFrom);
-      }
-      // For week view, also limit to reservations starting within the range
-      if (filters?.dateFrom !== filters?.dateTo && filters?.dateTo) {
-        // Week view - show reservations that overlap with the week
-        // Already filtered by check_out >= dateFrom above
-        // No additional filter needed - we want to see all active reservations
-      }
-      if (filters?.statusFilter && filters.statusFilter !== 'all') {
-        roomQuery = roomQuery.eq('status', filters.statusFilter);
-      }
-      if (filters?.searchTerm) {
-        roomQuery = roomQuery.or(
-          `customer_name.ilike.%${filters.searchTerm}%,customer_phone.ilike.%${filters.searchTerm}%`
+      return rows
+        .map(transformFromAPI)
+        .sort(
+          (a, b) =>
+            new Date(a.reservationDatetime || a.checkInDate || '').getTime() -
+            new Date(b.reservationDatetime || b.checkInDate || '').getTime(),
         );
-      }
-
-      // Execute both queries
-      const [tableResult, roomResult] = await Promise.all([tableQuery, roomQuery]);
-
-      if (tableResult.error) {
-        console.error('[ReservationsService] Error fetching table reservations:', formatError(tableResult.error));
-      }
-      if (roomResult.error) {
-        console.error('[ReservationsService] Error fetching room reservations:', formatError(roomResult.error));
-      }
-
-      // Combine results
-      const tableData = tableResult.data || [];
-      const roomData = roomResult.data || [];
-      const data = [...tableData, ...roomData];
-
-      // Sort combined results by datetime
-      return data.map(transformFromAPI).sort((a, b) => 
-        new Date(a.reservationDatetime || a.checkInDate || '').getTime() - 
-        new Date(b.reservationDatetime || b.checkInDate || '').getTime()
-      );
     } catch (error) {
       console.error('[ReservationsService] Failed to fetch reservations:', formatError(error));
       return [];
     }
   }
 
-  /**
-   * Fetch a single reservation by ID
-   */
   async fetchReservationById(reservationId: string): Promise<Reservation | null> {
     try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`);
-        if (!result?.success || result?.data?.success === false) {
-          console.error(
-            '[ReservationsService] API error fetching reservation by id:',
-            result?.error || result?.data?.error || 'Unknown error'
-          );
-          return null;
+      const response = await this.getReservation(reservationId);
+      if (!response.reservation) {
+        if (response.error) {
+          console.error('[ReservationsService] Error fetching reservation:', response.error);
         }
-
-        const reservation = result?.data?.reservation;
-        return reservation ? transformFromAPI(reservation) : null;
-      }
-
-      const { data, error } = await supabase
-        .from('reservations')
-        .select('*')
-        .eq('id', reservationId)
-        .single();
-
-      if (error) {
-        console.error('Error fetching reservation:', error);
         return null;
       }
 
-      return data ? transformFromAPI(data) : null;
+      return transformFromAPI(response.reservation);
     } catch (error) {
-      console.error('Failed to fetch reservation:', error);
+      console.error('[ReservationsService] Failed to fetch reservation:', formatError(error));
       return null;
     }
   }
 
-  /**
-   * Create a new reservation
-   * 
-   * Requirements:
-   * - 4.3: Store reservation with 'pending' status
-   * - 4.6: Generate unique reservation number in format RES-YYYYMMDD-XXXX
-   * 
-   * Note: The database trigger generates the reservation_number automatically.
-   * The client-side generation is available for testing and fallback purposes.
-   */
   async createReservation(data: CreateReservationDto): Promise<Reservation> {
-    try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        if (!this.branchId) {
-          throw new Error('Branch context is required for reservation creation');
-        }
+    const reservation = await this.createReservationRequest({
+      customerName: data.customerName,
+      customerPhone: data.customerPhone,
+      customerEmail: data.customerEmail || undefined,
+      partySize: data.partySize,
+      reservationDate: data.reservationDate,
+      reservationTime: data.reservationTime,
+      durationMinutes: data.durationMinutes || 90,
+      tableId: data.tableId || undefined,
+      roomId: data.roomId || undefined,
+      roomNumber: data.roomNumber || undefined,
+      checkInDate: data.checkInDate || undefined,
+      checkOutDate: data.checkOutDate || undefined,
+      customerId: data.customerId || undefined,
+      specialRequests: data.specialRequests || undefined,
+      notes: data.notes || undefined,
+    });
 
-        const result = await invoke('api:fetch-from-admin', '/api/pos/reservations', {
-          method: 'POST',
-          body: {
-            customerName: data.customerName,
-            customerPhone: data.customerPhone,
-            customerEmail: data.customerEmail || undefined,
-            partySize: data.partySize,
-            reservationDate: data.reservationDate,
-            reservationTime: data.reservationTime,
-            durationMinutes: data.durationMinutes || 90,
-            tableId: data.tableId || undefined,
-            roomId: data.roomId || undefined,
-            roomNumber: data.roomNumber || undefined,
-            checkInDate: data.checkInDate || undefined,
-            checkOutDate: data.checkOutDate || undefined,
-            customerId: data.customerId || undefined,
-            specialRequests: data.specialRequests || undefined,
-            notes: data.notes || undefined,
-          },
-        });
-
-        if (!result?.success || result?.data?.success === false) {
-          throw new Error(result?.error || result?.data?.error || result?.data?.message || 'Failed to create reservation');
-        }
-
-        const reservation = result?.data?.reservation;
-        if (!reservation) {
-          throw new Error('Reservation creation returned no reservation payload');
-        }
-
-        return transformFromAPI(reservation);
-      }
-
-      // Combine date and time into datetime
-      const reservationDatetime = `${data.reservationDate}T${data.reservationTime}`;
-      
-      const insertData = {
-        organization_id: this.organizationId,
-        branch_id: this.branchId,
-        customer_name: data.customerName,
-        customer_phone: data.customerPhone,
-        customer_email: data.customerEmail || null,
-        party_size: data.partySize,
-        reservation_date: data.reservationDate,
-        reservation_time: data.reservationTime,
-        reservation_datetime: reservationDatetime,
-        duration_minutes: data.durationMinutes || 90,
-        table_id: data.tableId || null,
-        room_id: data.roomId || null,
-        room_number: data.roomNumber || null,
-        check_in_date: data.checkInDate || null,
-        check_out_date: data.checkOutDate || null,
-        customer_id: data.customerId || null,
-        special_requests: data.specialRequests || null,
-        notes: data.notes || null,
-        status: 'pending', // Requirements 4.3: Store with 'pending' status
-      };
-
-      const { data: reservation, error } = await supabase
-        .from('reservations')
-        .insert(insertData)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Error creating reservation:', error);
-        throw error;
-      }
-
-      return transformFromAPI(reservation);
-    } catch (error) {
-      console.error('Failed to create reservation:', error);
-      throw error;
-    }
+    return transformFromAPI(reservation);
   }
 
-  /**
-   * Update reservation status
-   */
   async updateStatus(
     reservationId: string,
     status: ReservationStatus,
-    metadata?: { cancellationReason?: string }
+    metadata?: { cancellationReason?: string },
   ): Promise<Reservation> {
-    try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        const body: Record<string, unknown> = { status };
-        if (metadata?.cancellationReason) {
-          body.cancellation_reason = metadata.cancellationReason;
-        }
+    const reservation = await this.updateReservationRequest(reservationId, {
+      status,
+      cancellation_reason: metadata?.cancellationReason,
+    });
 
-        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`, {
-          method: 'PATCH',
-          body,
-        });
-
-        if (!result?.success || result?.data?.success === false) {
-          throw new Error(result?.error || result?.data?.error || 'Failed to update reservation status');
-        }
-
-        const reservation = result?.data?.reservation;
-        if (!reservation) {
-          throw new Error('Reservation status update returned no reservation payload');
-        }
-
-        return transformFromAPI(reservation);
-      }
-
-      const updateData: any = {
-        status,
-        updated_at: new Date().toISOString(),
-      };
-
-      const now = new Date().toISOString();
-      if (status === 'confirmed') {
-        updateData.confirmed_at = now;
-      } else if (status === 'seated') {
-        updateData.seated_at = now;
-      } else if (status === 'completed') {
-        updateData.completed_at = now;
-      } else if (status === 'cancelled') {
-        updateData.cancelled_at = now;
-        updateData.cancellation_reason = metadata?.cancellationReason || null;
-      }
-
-      const { data: reservation, error } = await supabase
-        .from('reservations')
-        .update(updateData)
-        .eq('id', reservationId)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Error updating reservation status:', error);
-        throw error;
-      }
-
-      return transformFromAPI(reservation);
-    } catch (error) {
-      console.error('Failed to update reservation status:', error);
-      throw error;
-    }
+    return transformFromAPI(reservation);
   }
 
-  /**
-   * Assign a table to a reservation
-   */
   async assignTable(reservationId: string, tableId: string): Promise<Reservation> {
-    try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        const result = await invoke('api:fetch-from-admin', `/api/pos/reservations/${reservationId}`, {
-          method: 'PATCH',
-          body: { table_id: tableId },
-        });
+    const reservation = await this.updateReservationRequest(reservationId, {
+      table_id: tableId,
+    });
 
-        if (!result?.success || result?.data?.success === false) {
-          throw new Error(result?.error || result?.data?.error || result?.data?.message || 'Failed to assign table');
-        }
-
-        const reservation = result?.data?.reservation;
-        if (!reservation) {
-          throw new Error('Reservation table assignment returned no reservation payload');
-        }
-
-        return transformFromAPI(reservation);
-      }
-
-      const { data: reservation, error } = await supabase
-        .from('reservations')
-        .update({
-          table_id: tableId,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', reservationId)
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Error assigning table:', error);
-        throw error;
-      }
-
-      return transformFromAPI(reservation);
-    } catch (error) {
-      console.error('Failed to assign table:', error);
-      throw error;
-    }
+    return transformFromAPI(reservation);
   }
 
-  /**
-   * Calculate statistics from reservations
-   */
   calculateStats(reservations: Reservation[]): ReservationStats {
     const stats: ReservationStats = {
       total: reservations.length,
@@ -551,76 +437,76 @@ class ReservationsService {
       totalGuests: 0,
     };
 
-    reservations.forEach((r) => {
-      if (r.status === 'confirmed') stats.confirmed++;
-      if (r.status === 'pending') stats.pending++;
-      if (r.status === 'seated') stats.seated++;
-      if (r.status === 'completed') stats.completed++;
-      if (r.status === 'no_show') stats.noShow++;
-      if (r.status === 'cancelled') stats.cancelled++;
+    reservations.forEach((reservation) => {
+      if (reservation.status === 'confirmed') stats.confirmed++;
+      if (reservation.status === 'pending') stats.pending++;
+      if (reservation.status === 'seated') stats.seated++;
+      if (reservation.status === 'completed') stats.completed++;
+      if (reservation.status === 'no_show') stats.noShow++;
+      if (reservation.status === 'cancelled') stats.cancelled++;
 
-      // Count guests for active reservations
-      if (['confirmed', 'pending', 'seated'].includes(r.status)) {
-        stats.totalGuests += r.partySize;
+      if (['confirmed', 'pending', 'seated'].includes(reservation.status)) {
+        stats.totalGuests += reservation.partySize;
       }
     });
 
     return stats;
   }
 
-  /**
-   * Update table status to 'reserved' if reservation is within threshold
-   * 
-   * **Feature: pos-tables-reservations-sync, Property 6: Near-Time Reservation Table Status**
-   * **Validates: Requirements 4.4**
-   * 
-   * Requirements 4.4: Update table status to 'reserved' if reservation time is within 30 minutes
-   * 
-   * @param tableId - The table ID to update
-   * @param reservationDatetime - The reservation datetime string
-   * @param minutesThreshold - Minutes threshold (default 30)
-   * @returns true if table was updated, false otherwise
-   */
-  async updateTableStatusIfNearTime(
-    tableId: string,
-    reservationDatetime: string,
-    minutesThreshold: number = 30
-  ): Promise<boolean> {
+  async updateTableStatus(tableId: string, status: string): Promise<boolean> {
     try {
-      const reservationTime = new Date(reservationDatetime);
-      const now = new Date();
-      
-      // Check if reservation is within threshold
-      const diffMs = reservationTime.getTime() - now.getTime();
-      const diffMinutes = diffMs / (1000 * 60);
-      
-      // Only update if reservation is in the future and within threshold
-      // Also allow slightly past reservations (up to 5 minutes) for edge cases
-      if (diffMinutes >= -5 && diffMinutes <= minutesThreshold) {
-        return await this.updateTableStatusToReserved(tableId);
+      const result = isBrowser()
+        ? await posApiPatch<{ success?: boolean; error?: string }>(
+            `/api/pos/tables/${tableId}`,
+            { status },
+          )
+        : await this.bridge.tables.updateStatus(tableId, status);
+
+      if (!result.success) {
+        console.error('[ReservationsService] Failed to update table status:', result.error);
+        return false;
       }
 
-      return false;
+      const payload = (result.data ?? {}) as { success?: boolean; error?: string };
+      if (payload.success === false) {
+        console.error('[ReservationsService] Failed to update table status:', payload.error);
+        return false;
+      }
+
+      return true;
     } catch (error) {
-      console.error('[ReservationsService] Failed to update table status for near-time reservation:', formatError(error));
+      console.error('[ReservationsService] Failed to update table status:', formatError(error));
       return false;
     }
   }
 
-  /**
-   * Create a reservation and update table status if it's for today
-   * 
-   * **Feature: pos-tables-reservations-sync, Property 6: Near-Time Reservation Table Status**
-   * **Validates: Requirements 4.4**
-   * 
-   * This is a convenience method that combines reservation creation with
-   * automatic table status update for today's reservations.
-   */
+  async updateTableStatusIfNearTime(
+    tableId: string,
+    reservationDatetime: string,
+    minutesThreshold = 30,
+  ): Promise<boolean> {
+    try {
+      const reservationTime = new Date(reservationDatetime);
+      const now = new Date();
+      const diffMinutes = (reservationTime.getTime() - now.getTime()) / (1000 * 60);
+
+      if (diffMinutes >= -5 && diffMinutes <= minutesThreshold) {
+        return this.updateTableStatusToReserved(tableId);
+      }
+
+      return false;
+    } catch (error) {
+      console.error(
+        '[ReservationsService] Failed to update table status for near-time reservation:',
+        formatError(error),
+      );
+      return false;
+    }
+  }
+
   async createReservationWithTableUpdate(data: CreateReservationDto): Promise<Reservation> {
-    // Create the reservation first
     const reservation = await this.createReservation(data);
 
-    // If a table is assigned and reservation is for today, update table status to reserved
     if (data.tableId) {
       const today = new Date().toISOString().split('T')[0];
       if (data.reservationDate === today) {
@@ -631,294 +517,144 @@ class ReservationsService {
     return reservation;
   }
 
-  /**
-   * Update table status to 'reserved'
-   */
   async updateTableStatusToReserved(tableId: string): Promise<boolean> {
-    try {
-      const invoke = getIpcInvoke();
-      if (invoke) {
-        const result = await invoke('api:fetch-from-admin', `/api/pos/tables/${tableId}`, {
-          method: 'PATCH',
-          body: { status: 'reserved' },
-        });
-
-        if (!result?.success || result?.data?.success === false) {
-          console.error(
-            '[ReservationsService] Error updating table status to reserved via API:',
-            result?.error || result?.data?.error || 'Unknown error'
-          );
-          return false;
-        }
-
-        return true;
-      }
-
-      const { error } = await supabase
-        .from('restaurant_tables')
-        .update({
-          status: 'reserved',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', tableId)
-        .eq('branch_id', this.branchId);
-
-      if (error) {
-        console.error('[ReservationsService] Error updating table status to reserved:', formatError(error));
-        return false;
-      }
-
-      return true;
-    } catch (error) {
-      console.error('[ReservationsService] Failed to update table status to reserved:', formatError(error));
-      return false;
-    }
+    return this.updateTableStatus(tableId, 'reserved');
   }
 
-  /**
-   * Get all reservations for a specific table
-   */
   async getReservationsForTable(tableId: string): Promise<Reservation[]> {
     try {
-      const invoke = getIpcInvoke();
-      if (invoke && this.branchId) {
-        const result = await invoke('sync:fetch-reservations', { table_id: tableId });
-        if (!result?.success) {
-          console.error(
-            '[ReservationsService] IPC error fetching table reservations:',
-            result?.error || 'Unknown error'
-          );
-          return [];
-        }
-
-        const reservations = Array.isArray(result?.reservations) ? result.reservations : [];
-        return reservations
-          .filter((reservation: any) => ['pending', 'confirmed'].includes(reservation?.status))
-          .map(transformFromAPI)
-          .sort(
-            (a: Reservation, b: Reservation) =>
-              new Date(a.reservationDatetime || '').getTime() -
-              new Date(b.reservationDatetime || '').getTime()
-          );
-      }
-
-      const { data, error } = await supabase
-        .from('reservations')
-        .select('*')
-        .eq('table_id', tableId)
-        .eq('branch_id', this.branchId)
-        .in('status', ['pending', 'confirmed'])
-        .order('reservation_datetime', { ascending: true });
-
-      if (error) {
-        console.error('Error fetching reservations for table:', error);
+      const response = await this.listReservations({ table_id: tableId });
+      if (response.error) {
+        console.error('[ReservationsService] Error fetching reservations for table:', response.error);
         return [];
       }
 
-      return (data || []).map(transformFromAPI);
+      return response.reservations
+        .filter((reservation) => ['pending', 'confirmed'].includes(reservation?.status))
+        .map(transformFromAPI)
+        .sort(
+          (a, b) =>
+            new Date(a.reservationDatetime || '').getTime() -
+            new Date(b.reservationDatetime || '').getTime(),
+        );
     } catch (error) {
-      console.error('Failed to fetch reservations for table:', error);
+      console.error('[ReservationsService] Failed to fetch reservations for table:', formatError(error));
       return [];
     }
   }
 
-  /**
-   * Get today's reservation for a specific table (if any)
-   */
   async getTodayReservationForTable(tableId: string): Promise<Reservation | null> {
     try {
       const today = new Date().toISOString().split('T')[0];
-
-      const invoke = getIpcInvoke();
-      if (invoke && this.branchId) {
-        const result = await invoke('sync:fetch-reservations', {
-          date: today,
-          table_id: tableId,
-        });
-        if (!result?.success) {
-          console.error(
-            '[ReservationsService] IPC error fetching today reservation for table:',
-            result?.error || 'Unknown error'
-          );
-          return null;
-        }
-
-        const reservations = Array.isArray(result?.reservations) ? result.reservations : [];
-        const filtered = reservations
-          .filter((reservation: any) => ['pending', 'confirmed'].includes(reservation?.status))
-          .sort((a: any, b: any) =>
-            new Date(a?.reservation_datetime || '').getTime() -
-            new Date(b?.reservation_datetime || '').getTime()
-          );
-
-        return filtered.length > 0 ? transformFromAPI(filtered[0]) : null;
-      }
-
-      const { data, error } = await supabase
-        .from('reservations')
-        .select('*')
-        .eq('table_id', tableId)
-        .eq('branch_id', this.branchId)
-        .eq('reservation_date', today)
-        .in('status', ['pending', 'confirmed'])
-        .order('reservation_time', { ascending: true })
-        .limit(1);
-
-      if (error) {
-        console.error('Error fetching today reservation for table:', error);
+      const response = await this.listReservations({ date: today, table_id: tableId });
+      if (response.error) {
+        console.error(
+          '[ReservationsService] Error fetching today reservation for table:',
+          response.error,
+        );
         return null;
       }
 
-      return data && data.length > 0 ? transformFromAPI(data[0]) : null;
+      const filtered = response.reservations
+        .filter((reservation) => ['pending', 'confirmed'].includes(reservation?.status))
+        .sort(
+          (a, b) =>
+            new Date(a?.reservation_datetime || '').getTime() -
+            new Date(b?.reservation_datetime || '').getTime(),
+        );
+
+      return filtered.length > 0 ? transformFromAPI(filtered[0]) : null;
     } catch (error) {
-      console.error('Failed to fetch today reservation for table:', error);
+      console.error('[ReservationsService] Failed to fetch today reservation for table:', formatError(error));
       return null;
     }
   }
 
-  /**
-   * Check for reservation conflicts at a specific date/time for a table
-   * Returns conflicting reservations if any exist
-   */
   async checkReservationConflicts(
     tableId: string,
     reservationDate: string,
     reservationTime: string,
-    durationMinutes: number = 90
+    durationMinutes = 90,
   ): Promise<Reservation[]> {
     try {
-      let data: any[] = [];
+      const response = await this.listReservations({
+        date: reservationDate,
+        table_id: tableId,
+      });
 
-      const invoke = getIpcInvoke();
-      if (invoke && this.branchId) {
-        const result = await invoke('sync:fetch-reservations', {
-          date: reservationDate,
-          table_id: tableId,
-        });
-        if (!result?.success) {
-          console.error(
-            '[ReservationsService] IPC error checking reservation conflicts:',
-            result?.error || 'Unknown error'
-          );
-          return [];
-        }
-
-        data = (Array.isArray(result?.reservations) ? result.reservations : []).filter(
-          (reservation: any) =>
-            ['pending', 'confirmed'].includes(reservation?.status) &&
-            reservation?.reservation_date === reservationDate
-        );
-      } else {
-        // Get all reservations for this table on the same date
-        const response = await supabase
-          .from('reservations')
-          .select('*')
-          .eq('table_id', tableId)
-          .eq('branch_id', this.branchId)
-          .eq('reservation_date', reservationDate)
-          .in('status', ['pending', 'confirmed']);
-
-        if (response.error) {
-          console.error('Error checking reservation conflicts:', response.error);
-          return [];
-        }
-
-        data = response.data || [];
+      if (response.error) {
+        console.error('[ReservationsService] Error checking reservation conflicts:', response.error);
+        return [];
       }
 
-      if (data.length === 0) return [];
-
-      // Check for time overlaps
       const newStartTime = new Date(`${reservationDate}T${reservationTime}`);
       const newEndTime = new Date(newStartTime.getTime() + durationMinutes * 60 * 1000);
 
-      const conflicts = data.filter((res: any) => {
-        const existingStartTime = new Date(`${res.reservation_date}T${res.reservation_time}`);
-        const existingEndTime = new Date(existingStartTime.getTime() + (res.duration_minutes || 90) * 60 * 1000);
-
-        // Check if times overlap
-        return (newStartTime < existingEndTime && newEndTime > existingStartTime);
-      });
-
-      return conflicts.map(transformFromAPI);
+      return response.reservations
+        .filter(
+          (reservation) =>
+            ['pending', 'confirmed'].includes(reservation?.status) &&
+            reservation?.reservation_date === reservationDate,
+        )
+        .filter((reservation) => {
+          const existingStartTime = new Date(
+            `${reservation.reservation_date}T${reservation.reservation_time}`,
+          );
+          const existingEndTime = new Date(
+            existingStartTime.getTime() +
+              (Number(reservation.duration_minutes || 90) * 60 * 1000),
+          );
+          return newStartTime < existingEndTime && newEndTime > existingStartTime;
+        })
+        .map(transformFromAPI);
     } catch (error) {
-      console.error('Failed to check reservation conflicts:', error);
+      console.error('[ReservationsService] Failed to check reservation conflicts:', formatError(error));
       return [];
     }
   }
 
-  /**
-   * Cancel a reservation
-   */
   async cancelReservation(reservationId: string, reason?: string): Promise<Reservation> {
     return this.updateStatus(reservationId, 'cancelled', { cancellationReason: reason });
   }
 
-  /**
-   * Update all table statuses based on today's reservations
-   * Call this on app startup or periodically to sync table statuses
-   */
   async syncTableStatusesForToday(): Promise<void> {
     try {
       const today = new Date().toISOString().split('T')[0];
-
-      let tableReservations: Array<{ table_id: string }> = [];
-
-      const invoke = getIpcInvoke();
-      const hasIpc = !!invoke;
-      if (invoke && this.branchId) {
-        const result = await invoke('sync:fetch-reservations', { date: today });
-        if (result?.success) {
-          tableReservations = (Array.isArray(result.reservations) ? result.reservations : [])
-            .filter((reservation: any) =>
-              reservation?.table_id &&
-              reservation?.reservation_date === today &&
-              ['pending', 'confirmed'].includes(reservation?.status)
-            )
-            .map((reservation: any) => ({ table_id: reservation.table_id as string }));
-        } else {
-          console.warn(
-            '[ReservationsService] IPC fetch for today reservations failed:',
-            result?.error || 'Unknown error'
-          );
-          return;
-        }
-      }
-
-      if (!hasIpc && tableReservations.length === 0) {
-        const { data: reservations, error } = await supabase
-          .from('reservations')
-          .select('table_id')
-          .eq('branch_id', this.branchId)
-          .eq('reservation_date', today)
-          .in('status', ['pending', 'confirmed'])
-          .not('table_id', 'is', null);
-
-        if (error) {
-          console.error('[ReservationsService] Error fetching today reservations:', formatError(error));
-          return;
-        }
-
-        tableReservations = (reservations || []) as Array<{ table_id: string }>;
-      }
-
-      if (tableReservations.length === 0) {
+      const response = await this.listReservations({ date: today });
+      if (response.error) {
+        console.error('[ReservationsService] Error fetching today reservations:', response.error);
         return;
       }
 
-      const tableIds = [...new Set(tableReservations.map((r) => r.table_id))];
+      const tableIds = [
+        ...new Set(
+          response.reservations
+            .filter(
+              (reservation) =>
+                reservation?.table_id &&
+                reservation?.reservation_date === today &&
+                ['pending', 'confirmed'].includes(reservation?.status),
+            )
+            .map((reservation) => String(reservation.table_id)),
+        ),
+      ];
 
       for (const tableId of tableIds) {
-        await this.updateTableStatusToReserved(tableId as string);
+        await this.updateTableStatusToReserved(tableId);
       }
 
-      console.log(`[ReservationsService] Synced ${tableIds.length} table(s) to reserved status for today's reservations`);
+      if (tableIds.length > 0) {
+        console.log(
+          `[ReservationsService] Synced ${tableIds.length} table(s) to reserved status for today's reservations`,
+        );
+      }
     } catch (error) {
-      console.error('[ReservationsService] Failed to sync table statuses for today:', formatError(error));
+      console.error(
+        '[ReservationsService] Failed to sync table statuses for today:',
+        formatError(error),
+      );
     }
   }
 }
 
-// Export singleton instance
 export const reservationsService = new ReservationsService();
-

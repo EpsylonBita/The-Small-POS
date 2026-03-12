@@ -233,6 +233,7 @@ pub trait EcrProtocol: Send {
     /// Returns the report text if supported, or `Err` for devices that
     /// do not implement X-reports. The default implementation returns
     /// an error.
+    #[allow(dead_code)]
     fn x_report(&mut self) -> Result<Option<String>, String> {
         Err(format!("{}: X-report not supported", self.name()))
     }

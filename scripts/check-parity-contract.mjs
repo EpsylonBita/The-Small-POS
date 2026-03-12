@@ -56,6 +56,15 @@ function parseChannelMap() {
   return parseObjectMap(match[1]);
 }
 
+function parseCommandOverrides() {
+  const adapter = readFile('src/lib/ipc-adapter.ts');
+  const match = adapter.match(/COMMAND_OVERRIDES[\s\S]*?=\s*{([\s\S]*?)^\s*};/m);
+  if (!match) {
+    return new Map();
+  }
+  return parseObjectMap(match[1]);
+}
+
 function parseEventMap() {
   const bridge = readFile('src/lib/event-bridge.ts');
   const match = bridge.match(/const EVENT_MAP[\s\S]*?=\s*{([\s\S]*?)^\};/m);
@@ -127,8 +136,8 @@ function parseRustEmittedEvents() {
   return events;
 }
 
-function toRustCommand(channel) {
-  return channel.replace(/[:\-]/g, '_');
+function toRustCommand(channel, commandOverrides) {
+  return commandOverrides.get(channel) || channel.replace(/[:\-]/g, '_');
 }
 
 function printList(title, values) {
@@ -144,6 +153,7 @@ function printList(title, values) {
 
 function main() {
   const channelMap = parseChannelMap();
+  const commandOverrides = parseCommandOverrides();
   const eventMap = parseEventMap();
   const registeredCommands = parseRustRegisteredCommands();
   const commandDefinitions = parseRustCommandDefinitions();
@@ -152,23 +162,23 @@ function main() {
 
   const mappedChannels = [...channelMap.keys()].sort();
   const mappedMissing = mappedChannels
-    .filter((channel) => !registeredCommands.has(toRustCommand(channel)))
+    .filter((channel) => !registeredCommands.has(toRustCommand(channel, commandOverrides)))
     .sort();
 
   const used = [...usedChannels].sort();
   const usedUnmapped = used.filter((channel) => !channelMap.has(channel)).sort();
   const usedUnmappedWithRustCommand = usedUnmapped
-    .filter((channel) => registeredCommands.has(toRustCommand(channel)))
+    .filter((channel) => registeredCommands.has(toRustCommand(channel, commandOverrides)))
     .sort();
   const usedUnmappedWithoutRustCommand = usedUnmapped
-    .filter((channel) => !registeredCommands.has(toRustCommand(channel)))
+    .filter((channel) => !registeredCommands.has(toRustCommand(channel, commandOverrides)))
     .sort();
   const usedUnmappedWithoutRustCommandRequired = usedUnmappedWithoutRustCommand
     .filter((channel) => !OPTIONAL_LEGACY_RENDERER_CHANNELS.has(channel))
     .sort();
   const usedMissing = used
     .filter((channel) => channelMap.has(channel))
-    .filter((channel) => !registeredCommands.has(toRustCommand(channel)))
+    .filter((channel) => !registeredCommands.has(toRustCommand(channel, commandOverrides)))
     .sort();
 
   const requiredEvents = [...eventMap.keys()].sort();

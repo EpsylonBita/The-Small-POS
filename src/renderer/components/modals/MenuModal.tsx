@@ -10,6 +10,7 @@ import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -103,6 +104,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
+  const { hasModule } = useAcquiredModules();
+  const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
   const bridge = getBridge();
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
@@ -382,6 +385,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Fetch delivery zone info when modal opens for delivery orders (if not provided via props)
   useEffect(() => {
     const fetchDeliveryZoneInfo = async () => {
+      // Skip delivery zone validation if the delivery_zones module is not acquired.
+      // Orders can still be placed with fee = 0.
+      if (!hasDeliveryZonesModule) {
+        setLocalDeliveryZoneInfo(null);
+        return;
+      }
       // Only fetch if: modal is open, order type is delivery, no zone info provided, has address, not in edit mode
       if (!isOpen || orderType !== 'delivery' || editMode) {
         setLocalDeliveryZoneInfo(null);
@@ -421,11 +430,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZoneInfo();
-    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+    }, [deliveryZoneInfo, editMode, getSelectedAddressCoordinates, hasDeliveryZonesModule, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Fetch delivery zones to get default minimum order amount (fallback when validation doesn't work)
   useEffect(() => {
     const fetchDeliveryZones = async () => {
+      if (!hasDeliveryZonesModule) return;
       // Only fetch if: modal is open, order type is delivery, no zone info yet, not in edit mode
       if (!isOpen || orderType !== 'delivery' || editMode) {
         return;
@@ -461,7 +471,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     };
 
     fetchDeliveryZones();
-  }, [isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
+  }, [hasDeliveryZonesModule, isOpen, orderType, editMode, staff?.branchId, effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount]);
 
   // Transform customizations from Supabase format to MenuCart format
   const transformCustomizations = (customizations: any): any[] => {
@@ -1163,7 +1173,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     );
   };
 
-  const handlePaymentComplete = async (paymentData: any) => {
+  const handlePaymentComplete = async (paymentData: any): Promise<boolean> => {
     setIsLocalProcessing(true);
     const isGhostOrder = shouldBypassPaymentWithGhostMode;
     const ghostMetadata = isGhostOrder
@@ -1232,11 +1242,13 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
       onClose();
+      return true;
     } catch (error) {
       console.error('Error completing order:', error);
       toast.error(t('modals.menu.orderFailed'));
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
+      return false;
     }
   };
 
@@ -1254,6 +1266,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       <LiquidGlassModal
         isOpen={isOpen}
         onClose={onClose}
+        ariaLabel={getModalTitle()}
         header={
           <div className="flex flex-col gap-1 px-6 py-3 border-b border-white/10 flex-shrink-0">
             {/* Main row: Title + Customer + Close */}

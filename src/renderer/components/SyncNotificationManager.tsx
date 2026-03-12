@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
+import { toast } from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
+import { getErrorMessage } from '../utils/privileged-actions';
 
 interface SyncNotificationManagerProps {
   onSettingsUpdate?: (settings: any) => void;
@@ -28,6 +31,8 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
   onHardwareConfigUpdate
 }) => {
   const bridge = getBridge();
+  const { runWithPrivilegedConfirmation, confirmationModal } =
+    usePrivilegedActionConfirmation();
   const [pendingUpdates, setPendingUpdates] = useState<SettingsUpdate[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [restartRequired, setRestartRequired] = useState<RestartNotification | null>(null);
@@ -122,9 +127,19 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
     }
   };
 
-  const handleRestartNow = () => {
-    void bridge.app.restart();
-    setRestartRequired(null);
+  const handleRestartNow = async () => {
+    try {
+      await runWithPrivilegedConfirmation({
+        scope: 'system_control',
+        action: () => bridge.app.restart(),
+        title: 'Confirm restart',
+        subtitle: 'Enter the admin PIN to restart the POS and apply the hardware changes.',
+      });
+      setRestartRequired(null);
+    } catch (error) {
+      console.error('Failed to restart after hardware change:', error);
+      toast.error(getErrorMessage(error, 'Failed to restart the POS'));
+    }
   };
 
   const handleRestartLater = () => {
@@ -259,7 +274,9 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
                 Restart Later
               </button>
               <button 
-                onClick={handleRestartNow}
+                onClick={() => {
+                  void handleRestartNow();
+                }}
                 className="flex-1 bg-red-600 text-white py-2 px-4 rounded font-medium hover:bg-red-700"
               >
                 Restart Now
@@ -268,6 +285,7 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
           </div>
         </div>
       )}
+      {confirmationModal}
     </>
   );
 };

@@ -2,8 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { User, Phone, MapPin, Trash2, Edit, Check, ArrowRight, Search, Ban, AlertTriangle, Mail } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { getApiUrl } from '../../../config/environment';
-import { posApiGet } from '../../utils/api-helpers';
+import { posApiDelete, posApiFetch, posApiGet } from '../../utils/api-helpers';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useTheme } from '../../contexts/theme-context';
@@ -430,26 +429,9 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
 
     setIsDeleting(true);
     try {
-      const { posKey, termId } = await resolvePosCredentials();
+      const result = await posApiDelete<any>(`pos/customers/${customer.id}`);
 
-      // Build headers with POS authentication
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (posKey) {
-        headers['x-pos-api-key'] = String(posKey);
-      }
-      if (termId) {
-        headers['x-terminal-id'] = String(termId);
-      }
-
-      const response = await fetch(getApiUrl(`pos/customers/${customer.id}`), {
-        method: 'DELETE',
-        headers,
-        credentials: 'omit', // Don't send cookies for POS endpoint
-      });
-
-      const result = await response.json();
-
-      if (result.success) {
+      if (result.success && result.data?.success !== false) {
         // Clear the customer from state
         setCustomer(null);
         setCustomers([]);
@@ -778,7 +760,7 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                               onClick={async (e) => {
                                 e.stopPropagation();
                                 // Use toast confirmation for address deletion
-                                toast((toastInstance) => (
+      toast((toastInstance) => (
                                   <div className="flex flex-col gap-3">
                                     <p className="text-sm font-medium">{t('modals.customerSearch.confirmDeleteAddress', 'Delete this address?')}</p>
                                     <div className="flex gap-2">
@@ -786,19 +768,11 @@ export const CustomerSearchModal: React.FC<CustomerSearchModalProps> = ({
                                         onClick={async () => {
                                           toast.dismiss(toastInstance.id);
                                           try {
-                                            const { posKey, termId } = await resolvePosCredentials();
-
-                                            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-                                            if (posKey) headers['x-pos-api-key'] = String(posKey);
-                                            if (termId) headers['x-terminal-id'] = String(termId);
-
-                                            const response = await fetch(getApiUrl(`pos/customers/${customer.id}/addresses/${addr.id}`), {
+                                            const result = await posApiFetch<any>(`pos/customers/${customer.id}/addresses/${addr.id}`, {
                                               method: 'DELETE',
-                                              headers,
-                                              credentials: 'omit',
+                                              headers: { 'Content-Type': 'application/json' },
                                             });
-                                            const result = await response.json().catch(() => ({}));
-                                            if (response.ok && result.success !== false) {
+                                            if (result.success && result.data?.success !== false) {
                                               setCustomer(prev => prev ? {
                                                 ...prev,
                                                 addresses: prev.addresses?.filter(a => a.id !== addr.id)

@@ -29,11 +29,11 @@ const CMD_SUBTOTAL: u8 = 0x33;
 const CMD_PAYMENT: u8 = 0x35;
 const CMD_CLOSE_FISCAL_RECEIPT: u8 = 0x38;
 const CMD_CANCEL_RECEIPT: u8 = 0x39;
+#[allow(dead_code)]
 const CMD_X_REPORT: u8 = 0x6E;
 const CMD_Z_REPORT: u8 = 0x6F;
 const CMD_GET_STATUS_FISCAL: u8 = 0x4A;
 
-const DEFAULT_TIMEOUT_MS: u64 = 5000;
 const FISCAL_TIMEOUT_MS: u64 = 15000;
 
 // ---------------------------------------------------------------------------
@@ -359,8 +359,10 @@ impl EcrProtocol for GenericEscPosFiscal {
     }
 
     fn abort(&mut self) -> Result<(), String> {
-        let _ = self.send_command(CMD_CANCEL_RECEIPT, &[]);
-        Ok(())
+        let cancel_result = self.send_command(CMD_CANCEL_RECEIPT, &[]).map(|_| ());
+        let disconnect_result = self.transport.disconnect();
+        self.initialized = false;
+        cancel_result.and(disconnect_result)
     }
 
     fn test_connection(&mut self) -> Result<bool, String> {

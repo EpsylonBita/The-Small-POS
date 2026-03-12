@@ -113,8 +113,9 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
         return;
       }
       try {
-        // Small delay to ensure database is ready after restart
-        await new Promise(resolve => setTimeout(resolve, 500));
+        // Yield to the event loop so React can flush the initial render
+        // before we start invoking Tauri IPC commands.
+        await new Promise(resolve => setTimeout(resolve, 0));
         
         // Update admin URL from stored settings (for API calls)
         await updateAdminUrlFromSettings();
@@ -140,34 +141,36 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
           localStorage.removeItem("pos-user");
           clearTerminalCredentialCache();
         } else {
-          // If configured, sync credentials from main process to in-memory cache
-          // This ensures menu-version polling can authenticate immediately
+          // If configured, sync terminal identity from the main process to the
+          // in-memory cache. Native admin fetches handle POS authentication.
           try {
-            const [settings, apiKeyFromMain] = await Promise.all([
+            const [settings, config] = await Promise.all([
               bridge.terminalConfig.getSettings(),
-              bridge.terminalConfig.getSetting('terminal', 'pos_api_key'),
+              bridge.terminalConfig.getFullConfig(),
             ]);
 
-            const terminalId = settings?.['terminal.terminal_id'] || settings?.terminal?.terminal_id;
-            const apiKey =
-              (typeof apiKeyFromMain === 'string' ? apiKeyFromMain : '') ||
-              settings?.['terminal.pos_api_key'] ||
-              settings?.terminal?.pos_api_key;
+            const terminalId =
+              config?.terminal_id ||
+              settings?.['terminal.terminal_id'] ||
+              settings?.terminal?.terminal_id;
+            const branchId =
+              config?.branch_id ||
+              settings?.['terminal.branch_id'] ||
+              settings?.terminal?.branch_id;
+            const organizationId =
+              config?.organization_id ||
+              settings?.['terminal.organization_id'] ||
+              settings?.terminal?.organization_id;
 
             console.log('[ConfigGuard] Resolved credentials:', {
               terminalId: terminalId || '(not found)',
-              hasApiKey: !!apiKey,
+              branchId: branchId || '(not found)',
+              organizationId: organizationId || '(not found)',
             });
 
             if (terminalId) {
               updateTerminalCredentialCache({ terminalId });
             }
-            if (apiKey) {
-              updateTerminalCredentialCache({ apiKey });
-            }
-
-            const branchId = settings?.['terminal.branch_id'] || settings?.terminal?.branch_id;
-            const organizationId = settings?.['terminal.organization_id'] || settings?.terminal?.organization_id;
             if (branchId) {
               updateTerminalCredentialCache({ branchId });
             }
@@ -231,15 +234,35 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
   }, [t]);
 
   // Listen for terminal-credentials-updated event (after onboarding)
-  // This stores credentials in in-memory cache for immediate renderer access
+  // This stores terminal identity in in-memory cache for immediate renderer access
   useEffect(() => {
-    const handleCredentialsUpdated = (data: { terminalId?: string; apiKey?: string }) => {
+    const handleCredentialsUpdated = (data: {
+      terminalId?: string;
+      terminal_id?: string;
+      branchId?: string;
+      branch_id?: string;
+      organizationId?: string;
+      organization_id?: string;
+      config?: {
+        terminal_id?: string;
+        branch_id?: string;
+        organization_id?: string;
+      };
+    }) => {
       console.log('[ConfigGuard] Terminal credentials updated');
-      if (data?.terminalId) {
-        updateTerminalCredentialCache({ terminalId: data.terminalId });
+      const terminalId = data?.terminalId || data?.terminal_id || data?.config?.terminal_id;
+      const branchId = data?.branchId || data?.branch_id || data?.config?.branch_id;
+      const organizationId =
+        data?.organizationId || data?.organization_id || data?.config?.organization_id;
+
+      if (terminalId) {
+        updateTerminalCredentialCache({ terminalId });
       }
-      if (data?.apiKey) {
-        updateTerminalCredentialCache({ apiKey: data.apiKey });
+      if (branchId) {
+        updateTerminalCredentialCache({ branchId });
+      }
+      if (organizationId) {
+        updateTerminalCredentialCache({ organizationId });
       }
       const cached = getCachedTerminalCredentials();
       setSupabaseContext({
@@ -260,8 +283,15 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
   // Listen for terminal-config-updated event (from heartbeat)
   // This updates in-memory terminal identity from server heartbeat
   useEffect(() => {
-    const handleConfigUpdated = (data: { branch_id?: string; organization_id?: string }) => {
+    const handleConfigUpdated = (data: {
+      terminal_id?: string;
+      branch_id?: string;
+      organization_id?: string;
+    }) => {
       console.log('[ConfigGuard] Terminal config updated from heartbeat:', data);
+      if (data?.terminal_id) {
+        updateTerminalCredentialCache({ terminalId: data.terminal_id });
+      }
       if (data?.branch_id) {
         updateTerminalCredentialCache({ branchId: data.branch_id });
       }

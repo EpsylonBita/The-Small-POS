@@ -5,10 +5,35 @@
 - Hardware output is generated directly as ESC/POS bytes from structured data. The legacy HTML-to-text stripping path is removed from queue printing.
 - HTML artifacts are still written to `receipts/` for preview/audit/debug.
 
+## LAN Raw TCP Dispatch (2026-03-07)
+- `system` printer profiles still dispatch through the Windows spooler and require a valid installed Windows printer queue.
+- `network` and `wifi` printer profiles now dispatch ESC/POS bytes directly over raw TCP and do not require Windows installation.
+- Direct LAN dispatch uses `connection_json.ip` / `hostname` plus `port`, defaulting to `9100` when the port is not set.
+- Existing saved LAN/Wi-Fi profiles continue to work without schema changes; legacy rows fall back to `printer_name` when `connection_json` is missing.
+- USB and Bluetooth behavior is unchanged in this pass.
+
+## Classic Layout Restoration (2026-03-08)
+- The old screenshot-2 classic layout is restored as the default for receipt-like order printing across USB, Windows queue, and raw LAN dispatch.
+- Receipt-like docs:
+  - `order_receipt`
+  - `delivery_slip`
+  - `kitchen_ticket`
+- Effective default for `receipt` and `kitchen` printer profiles:
+  - `receipt_template = classic`
+  - `connection_json.render_mode = raster_exact`
+- DB migration v26 rewrites existing `receipt` / `kitchen` profiles back to `classic` and injects `render_mode = raster_exact` into `connection_json`.
+- New receipt and kitchen profiles also default to the same classic+raster configuration at save time.
+- For receipt-like raster jobs, the organization-configured logo remains dynamic and is now rendered inside the composed raster bitmap instead of being prepended as a separate raw logo block.
+- The legacy prepend-logo path is still used for non-receipt-like documents.
+- Deterministic screenshot-2 lock for receipt-like docs on the restored classic path:
+  - Font A
+  - compact spacing preset
+  - strong header emphasis
+
 ## Template System
 - `receipt_template` supports `classic` and `modern`.
-- `modern` is default for new `receipt` and `kitchen` profiles.
-- DB migration v20 rolls existing `receipt`/`kitchen` profiles from `NULL`/`classic` to `modern`.
+- `classic` is the active default for new `receipt` and `kitchen` profiles.
+- DB migration v26 rolls existing `receipt`/`kitchen` profiles back to `classic` and restores `connection_json.render_mode = raster_exact`.
 - Renderer keeps both templates active; profile template is respected exactly at runtime.
 - Optional local override is available via `receipt.template_override` (`classic` or `modern`) for controlled diagnostics.
 - Both templates use the same content skeleton (header -> order meta -> delivery -> items -> totals -> payment -> footer) with different visual styling.
@@ -83,9 +108,9 @@
 
 ## Classic Customer Receipt v3 Exact Mode (2026-03-05)
 - Added `raster_exact` for classic customer docs (`order_receipt`, `delivery_slip`) to target screenshot-like deterministic output.
-- Existing default remains `text`; kitchen/shift/z-report paths are unchanged.
+- Historical note: this was originally opt-in. Current restored default for receipt-like docs is `raster_exact`.
 - `raster_exact` composes the full classic customer body as a monochrome bitmap and dispatches via spooler RAW (no transport-path changes).
-- Logo flow is still prepend-based; extra logo/body LF is skipped only when body mode is `raster_exact` to avoid variable top gap.
+- Current behavior for receipt-like docs is embedded-logo composition inside the same raster bitmap. Prepend-logo flow remains for non-receipt docs.
 - New optional `connection_json` keys (no DB schema changes):
   - `render_mode`: `text` | `raster_exact`
   - `emulation`: `auto` | `escpos` | `star_line`

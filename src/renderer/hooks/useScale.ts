@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
+import { getBridge } from '../../lib';
 
 export interface ScaleReading {
   weight: number;
@@ -32,6 +32,18 @@ export interface UseScale {
   tare: () => Promise<void>;
   readWeight: () => Promise<ScaleReading | null>;
 }
+
+interface ScaleReadWeightResult {
+  success?: boolean;
+  weight?: number;
+  unit?: string;
+  stable?: boolean;
+  raw?: string;
+}
+
+const bridge = getBridge();
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 export function useScale(
   autoConnect = false,
@@ -85,9 +97,9 @@ export function useScale(
       const baud = settings.scale_baud_rate || 9600;
       const protocol = settings.scale_protocol || 'generic';
 
-      invoke('scale_connect', { arg0: port, arg1: baud, arg2: protocol }).catch((e) => {
+      bridge.hardware.scaleConnect({ port, baud, protocol }).catch((e) => {
         console.warn('[useScale] Auto-connect failed:', e);
-        setState((prev) => ({ ...prev, error: String(e) }));
+        setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
       });
     }
   }, [autoConnect, settings?.scale_port, settings?.scale_baud_rate, settings?.scale_protocol]);
@@ -96,14 +108,14 @@ export function useScale(
     async (port?: string, baudRate?: number, protocol?: string) => {
       try {
         setState((prev) => ({ ...prev, error: null }));
-        await invoke('scale_connect', {
-          arg0: port || settings?.scale_port || 'COM3',
-          arg1: baudRate || settings?.scale_baud_rate || 9600,
-          arg2: protocol || settings?.scale_protocol || 'generic',
+        await bridge.hardware.scaleConnect({
+          port: port || settings?.scale_port || 'COM3',
+          baud: baudRate || settings?.scale_baud_rate || 9600,
+          protocol: protocol || settings?.scale_protocol || 'generic',
         });
         setState((prev) => ({ ...prev, connected: true }));
-      } catch (e: any) {
-        setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+      } catch (e) {
+        setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
       }
     },
     [settings]
@@ -111,24 +123,24 @@ export function useScale(
 
   const disconnect = useCallback(async () => {
     try {
-      await invoke('scale_disconnect');
+      await bridge.hardware.scaleDisconnect();
       setState({ connected: false, reading: null, error: null });
-    } catch (e: any) {
-      setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
     }
   }, []);
 
   const tare = useCallback(async () => {
     try {
-      await invoke('scale_tare');
-    } catch (e: any) {
-      setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+      await bridge.hardware.scaleTare();
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
     }
   }, []);
 
   const readWeight = useCallback(async (): Promise<ScaleReading | null> => {
     try {
-      const result = (await invoke('scale_read_weight')) as any;
+      const result = (await bridge.hardware.scaleReadWeight()) as ScaleReadWeightResult;
       if (result?.success && result.weight !== undefined) {
         return {
           weight: result.weight,

@@ -17,7 +17,6 @@ const state: TerminalCredentialState = {
 type TerminalSettingsShape = {
   terminal?: {
     terminal_id?: string
-    pos_api_key?: string
     organization_id?: string
     branch_id?: string
   }
@@ -33,10 +32,6 @@ function readFromSettings(settings: TerminalSettingsShape | null | undefined): T
     (settings['terminal.terminal_id'] as string | undefined) ||
     settings.terminal?.terminal_id ||
     ''
-  const apiKey =
-    (settings['terminal.pos_api_key'] as string | undefined) ||
-    settings.terminal?.pos_api_key ||
-    ''
   const organizationId =
     (settings['terminal.organization_id'] as string | undefined) ||
     settings.terminal?.organization_id ||
@@ -46,7 +41,7 @@ function readFromSettings(settings: TerminalSettingsShape | null | undefined): T
     settings.terminal?.branch_id ||
     ''
 
-  return { terminalId, apiKey, organizationId, branchId }
+  return { terminalId, apiKey: '', organizationId, branchId }
 }
 
 export function updateTerminalCredentialCache(
@@ -126,10 +121,6 @@ async function invokeSpecialized(channel: SpecializedTerminalLookup): Promise<st
   }
 }
 
-async function invokeTerminalApiKey(): Promise<string> {
-  return invokeSettingByKey('pos_api_key')
-}
-
 export async function refreshTerminalCredentialCache(): Promise<TerminalCredentialState> {
   const settings = await invokeSettings()
   const resolved = readFromSettings(settings)
@@ -142,9 +133,6 @@ export async function refreshTerminalCredentialCache(): Promise<TerminalCredenti
   }
   if (!resolved.organizationId) {
     resolved.organizationId = await invokeSpecialized('terminal-config:get-organization-id')
-  }
-  if (!resolved.apiKey) {
-    resolved.apiKey = await invokeTerminalApiKey()
   }
   if (!resolved.terminalId) {
     resolved.terminalId = await invokeSettingByKey('terminal_id')
@@ -164,7 +152,7 @@ export async function refreshTerminalCredentialCache(): Promise<TerminalCredenti
 
 export async function getResolvedTerminalCredentials(): Promise<TerminalCredentialState> {
   const cached = getCachedTerminalCredentials()
-  if (cached.terminalId && cached.apiKey && cached.organizationId && cached.branchId) {
+  if (cached.terminalId && cached.organizationId && cached.branchId) {
     return cached
   }
   return refreshTerminalCredentialCache()
@@ -186,7 +174,6 @@ export async function getResolvedTerminalIdentity(): Promise<{
 export async function getPosAuthHeaders(): Promise<Record<string, string>> {
   const creds = await getResolvedTerminalCredentials()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (creds.apiKey) headers['x-pos-api-key'] = String(creds.apiKey)
   if (creds.terminalId) headers['x-terminal-id'] = String(creds.terminalId)
   return headers
 }

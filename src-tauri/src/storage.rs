@@ -93,16 +93,15 @@ pub fn is_configured() -> bool {
 
 /// Return all stored terminal config as a JSON value that matches the shape
 /// the React frontend expects.
+#[allow(dead_code)]
 pub fn get_full_config() -> Value {
     serde_json::json!({
         "terminal_id":     get_credential(KEY_TERMINAL_ID),
         "branch_id":       get_credential(KEY_BRANCH_ID),
         "organization_id": get_credential(KEY_ORG_ID),
+        "admin_dashboard_url": get_credential(KEY_ADMIN_URL),
         "admin_url":       get_credential(KEY_ADMIN_URL),
-        "api_key":         get_credential(KEY_API_KEY),
         "business_type":   get_credential(KEY_BUSINESS_TYPE).unwrap_or_else(|| "food".to_string()),
-        "supabase_url":    get_credential(KEY_SUPABASE_URL),
-        "supabase_anon_key": get_credential(KEY_SUPABASE_ANON_KEY),
         "ghost_mode_feature_enabled": get_credential(KEY_GHOST_MODE_FEATURE_ENABLED),
     })
 }
@@ -242,6 +241,7 @@ pub fn factory_reset() -> Result<Value, String> {
 /// `terminal_config_get_setting(category, key)` stub but is currently unused.
 pub fn get_setting(_category: Option<&str>, key: Option<&str>) -> Value {
     match key {
+        Some(k) if crate::is_sensitive_terminal_setting(k) => Value::Null,
         Some(k) => match get_credential(k) {
             Some(v) => Value::String(v),
             None => Value::Null,
@@ -255,6 +255,7 @@ pub fn get_setting(_category: Option<&str>, key: Option<&str>) -> Value {
 /// will read from the `local_settings` table instead.
 pub fn settings_get(key: Option<&str>) -> Value {
     match key {
+        Some(k) if crate::is_sensitive_terminal_setting(k) => Value::Null,
         Some(k) => match get_credential(k) {
             Some(v) => Value::String(v),
             None => Value::Null,

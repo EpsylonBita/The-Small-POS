@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { getApiUrl } from '../../config/environment';
-import { posApiGet } from '../utils/api-helpers';
+import { posApiFetch, posApiGet } from '../utils/api-helpers';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import toast from 'react-hot-toast';
-import { getPosAuthHeaders, getResolvedTerminalCredentials } from '../services/terminal-credentials';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import {
   Users,
@@ -105,26 +103,8 @@ const UsersPage: React.FC = () => {
   const loadUsers = async () => {
     setLoading(true);
     try {
-      // Fetch customers via IPC for performance
+      // Use the supported customer contract only; /api/pos/users is deprecated.
       const customers = (await bridge.customers.search('')) || [];
-
-      // Fetch app users using POS-auth endpoint to avoid admin cookie requirement
-      const params = new URLSearchParams({ page: '1', limit: '100', sortBy: 'created_at', sortOrder: 'desc' })
-
-      // Resolve POS API key and terminal id from secure IPC/cache context
-      const resolved = await getResolvedTerminalCredentials()
-      const posKey = (resolved.apiKey || '').trim()
-      const termId = (resolved.terminalId || '').trim()
-
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (posKey) headers['x-pos-api-key'] = String(posKey)
-      if (termId) headers['x-terminal-id'] = String(termId)
-
-      const result = await posApiGet<{ users?: any[] }>(`pos/users?${params.toString()}`, { headers })
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to load users')
-      }
-      const appUsers = Array.isArray(result.data?.users) ? result.data.users : []
 
       // Merge into single list
       const unified = [
@@ -139,22 +119,10 @@ const UsersPage: React.FC = () => {
           created_at: customer.created_at,
           updated_at: customer.updated_at,
           is_banned: Boolean(customer.is_banned)
-        })),
-        ...appUsers.map((u: any) => ({
-          id: u.id,
-          name: u.full_name || u.email || u.phone || 'Unnamed User',
-          email: u.email,
-          phone: u.phone,
-          type: 'app_user' as const,
-          loyalty_points: 0,
-          total_orders: 0,
-          created_at: u.created_at,
-          updated_at: u.updated_at,
-          is_banned: false
         }))
       ]
 
-      // Deduplicate by ID (in case /api/pos/users returns customers)
+      // Deduplicate by ID in case IPC and live refresh overlap.
       const uniqueUsers = Array.from(
         new Map(unified.map(user => [user.id, user])).values()
       )
@@ -179,21 +147,12 @@ const UsersPage: React.FC = () => {
     }
 
     try {
-      const headers = await getPosAuthHeaders();
-      const response = await fetch(`${getApiUrl('pos/customers')}?phone=${encodeURIComponent(user.phone)}`, {
-        method: 'GET',
-        headers,
-      });
+      const result = await posApiGet<any>(`pos/customers?phone=${encodeURIComponent(user.phone)}`);
+      const payload = result.success ? result.data : null;
+      console.log('Customer details from API:', payload);
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log('Customer details from API:', result);
-
-      if (result.success && result.customer && result.customer.addresses) {
-        setUserAddresses(result.customer.addresses.map((addr: any) => ({
+      if (result.success && payload?.success && payload.customer && payload.customer.addresses) {
+        setUserAddresses(payload.customer.addresses.map((addr: any) => ({
           id: addr.id,
           customer_id: user.id,
           street_address: addr.street || addr.street_address,
@@ -244,26 +203,23 @@ const UsersPage: React.FC = () => {
 
     setIsLoadingAddresses(true);
     try {
-      const response = await fetch(getApiUrl('google-maps/autocomplete'), {
+      const result = await posApiFetch<any>('pos/google-maps/search-places', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           input: input.trim(),
           location: { latitude: 37.9755, longitude: 23.7348 }, // Athens center
           radius: 20000 // 20km radius
-        })
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to search addresses');
       }
 
-      const result = await response.json();
-
-      if (result.predictions && Array.isArray(result.predictions)) {
-        setAddressSuggestions(result.predictions.slice(0, 5));
+      const payload = result.data;
+      if (payload?.predictions && Array.isArray(payload.predictions)) {
+        setAddressSuggestions(payload.predictions.slice(0, 5));
         setShowSuggestions(true);
       } else {
         setAddressSuggestions([]);
@@ -281,24 +237,22 @@ const UsersPage: React.FC = () => {
   const handleAddressSuggestionClick = async (suggestion: any) => {
     try {
       // Get place details to extract postal code and city
-      const response = await fetch(getApiUrl('google-maps/place-details'), {
+      const result = await posApiFetch<any>('pos/google-maps/place-details', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           place_id: suggestion.place_id
-        })
+        }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to load place details');
       }
 
-      const result = await response.json();
+      const payload = result.data;
 
-      if (result && result.result) {
-        const addressComponents = result.result.address_components || [];
+      if (payload && payload.result) {
+        const addressComponents = payload.result.address_components || [];
 
         // Extract street number and route (street name)
         const streetNumber = addressComponents.find((c: any) => c.types.includes('street_number'))?.long_name || '';
@@ -347,11 +301,9 @@ const UsersPage: React.FC = () => {
     try {
       // Combine street_address and city into a single address field for the API
       const combinedAddress = `${editedAddress.street_address || ''}, ${editedAddress.city || ''}`.trim();
-      const headers = await getPosAuthHeaders();
-
-      const response = await fetch(getApiUrl(`pos/customers/${selectedUser.id}/addresses/${addressId}`), {
+      const result = await posApiFetch<any>(`pos/customers/${selectedUser.id}/addresses/${addressId}`, {
         method: 'PUT',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           address: combinedAddress,
           postal_code: editedAddress.postal_code,
@@ -362,13 +314,11 @@ const UsersPage: React.FC = () => {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to update address');
       }
 
-      const result = await response.json();
-
-      if (result.success) {
+      if (result.data?.success !== false) {
         toast.success('Address updated successfully');
 
         // Update local state with the returned address data
@@ -406,19 +356,16 @@ const UsersPage: React.FC = () => {
     }
 
     try {
-      const headers = await getPosAuthHeaders();
-      const response = await fetch(getApiUrl(`pos/customers/${selectedUser.id}/addresses/${addressId}`), {
+      const result = await posApiFetch<any>(`pos/customers/${selectedUser.id}/addresses/${addressId}`, {
         method: 'DELETE',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to delete address');
       }
 
-      const result = await response.json();
-
-      if (result.success) {
+      if (result.data?.success !== false) {
         toast.success('Address deleted successfully');
 
         // Update local state
@@ -1097,4 +1044,3 @@ const UsersPage: React.FC = () => {
 };
 
 export default UsersPage;
-

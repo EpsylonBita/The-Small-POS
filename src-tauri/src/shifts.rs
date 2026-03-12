@@ -270,6 +270,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(f64, f64), String> {
+        #[allow(clippy::needless_late_init)]
         let expected: f64;
 
         if role_type == "cashier" || role_type == "manager" {
@@ -1615,6 +1616,7 @@ pub(crate) fn build_cashier_staff_checkout_rows(
         )
         .map_err(|e| format!("prepare cashier staff rows: {e}"))?;
 
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(
         String,
         String,
@@ -1850,6 +1852,7 @@ fn build_waiter_tables(conn: &rusqlite::Connection, shift_id: &str) -> Result<Ve
         )
         .map_err(|e| format!("prepare waiter tables: {e}"))?;
 
+    #[allow(clippy::type_complexity)]
     let orders: Vec<(
         String,
         Option<String>,

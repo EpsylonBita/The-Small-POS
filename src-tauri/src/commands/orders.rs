@@ -703,17 +703,15 @@ pub async fn order_save_from_remote(
     }
 
     if !is_ghost {
-        let auto_print_type = if order_type == "delivery" {
-            "delivery_slip"
-        } else {
-            "order_receipt"
-        };
-        if let Err(error) = print::enqueue_print_job(&db, auto_print_type, &local_id, None) {
-            tracing::warn!(
-                order_id = %local_id,
-                error = %error,
-                "Failed to enqueue remote order receipt auto-print job"
-            );
+        for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
+            if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None) {
+                tracing::warn!(
+                    order_id = %local_id,
+                    entity_type = %entity_type,
+                    error = %error,
+                    "Failed to enqueue remote order auto-print job"
+                );
+            }
         }
     }
 
@@ -741,7 +739,7 @@ pub async fn order_fetch_items_from_supabase(
         &[
             (
                 "select",
-                "id,menu_item_id,quantity,unit_price,total_price,notes,customizations".to_string(),
+                "id,menu_item_id,menu_item_name,quantity,unit_price,total_price,notes,customizations".to_string(),
             ),
             ("order_id", format!("eq.{}", order_id)),
         ],
@@ -795,7 +793,13 @@ pub async fn order_fetch_items_from_supabase(
                         .and_then(|v| v.as_f64())
                         .unwrap_or(unit_price * quantity);
                     let default_name = format!("Item {}", i + 1);
-                    let item_name = names.get(menu_item_id).cloned().unwrap_or(default_name);
+                    let item_name = row
+                        .get("menu_item_name")
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| names.get(menu_item_id).cloned())
+                        .unwrap_or(default_name);
                     serde_json::json!({
                         "id": row.get("id").cloned().unwrap_or(serde_json::Value::Null),
                         "menu_item_id": menu_item_id,

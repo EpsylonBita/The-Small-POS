@@ -8,7 +8,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { getBridge } from '../../lib';
 
 export interface DisplayState {
   connected: boolean;
@@ -26,6 +26,10 @@ export interface UseCustomerDisplay {
   clear: () => Promise<void>;
 }
 
+const bridge = getBridge();
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 export function useCustomerDisplay(
   autoConnect = false,
   settings?: { customer_display_enabled?: boolean; display_port?: string; display_connection_type?: string }
@@ -41,11 +45,11 @@ export function useCustomerDisplay(
       const connType = settings.display_connection_type || 'serial';
       const target = settings.display_port || 'COM4';
 
-      invoke('display_connect', { arg0: connType, arg1: target })
+      bridge.hardware.displayConnect({ connectionType: connType, target })
         .then(() => setState({ connected: true, error: null }))
         .catch((e) => {
           console.warn('[useCustomerDisplay] Auto-connect failed:', e);
-          setState({ connected: false, error: String(e) });
+          setState({ connected: false, error: getErrorMessage(e) });
         });
     }
   }, [autoConnect, settings?.customer_display_enabled, settings?.display_port, settings?.display_connection_type]);
@@ -53,28 +57,28 @@ export function useCustomerDisplay(
   const connect = useCallback(async (connectionType?: string, target?: string) => {
     try {
       setState((prev) => ({ ...prev, error: null }));
-      await invoke('display_connect', {
-        arg0: connectionType || 'serial',
-        arg1: target || 'COM4',
+      await bridge.hardware.displayConnect({
+        connectionType: connectionType || 'serial',
+        target: target || 'COM4',
       });
       setState({ connected: true, error: null });
-    } catch (e: any) {
-      setState({ connected: false, error: e?.message || String(e) });
+    } catch (e) {
+      setState({ connected: false, error: getErrorMessage(e) });
     }
   }, []);
 
   const disconnect = useCallback(async () => {
     try {
-      await invoke('display_disconnect');
+      await bridge.hardware.displayDisconnect();
       setState({ connected: false, error: null });
-    } catch (e: any) {
-      setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
     }
   }, []);
 
   const showLine = useCallback(async (line1: string, line2: string) => {
     try {
-      await invoke('display_show_line', { arg0: line1, arg1: line2 });
+      await bridge.hardware.displayShowLine(line1, line2);
     } catch (e) {
       console.warn('[useCustomerDisplay] showLine failed:', e);
     }
@@ -82,7 +86,7 @@ export function useCustomerDisplay(
 
   const showItem = useCallback(async (name: string, price: number, qty: number, currency = '$') => {
     try {
-      await invoke('display_show_item', { arg0: name, arg1: price, arg2: qty, arg3: currency });
+      await bridge.hardware.displayShowItem({ name, price, qty, currency });
     } catch (e) {
       console.warn('[useCustomerDisplay] showItem failed:', e);
     }
@@ -90,7 +94,7 @@ export function useCustomerDisplay(
 
   const showTotal = useCallback(async (subtotal: number, tax: number, total: number, currency = '$') => {
     try {
-      await invoke('display_show_total', { arg0: subtotal, arg1: tax, arg2: total, arg3: currency });
+      await bridge.hardware.displayShowTotal({ subtotal, tax, total, currency });
     } catch (e) {
       console.warn('[useCustomerDisplay] showTotal failed:', e);
     }
@@ -98,7 +102,7 @@ export function useCustomerDisplay(
 
   const showWelcome = useCallback(async () => {
     try {
-      await invoke('display_show_line', { arg0: '   THE SMALL POS', arg1: '    Welcome!' });
+      await bridge.hardware.displayShowLine('   THE SMALL POS', '    Welcome!');
     } catch (e) {
       console.warn('[useCustomerDisplay] showWelcome failed:', e);
     }
@@ -106,7 +110,7 @@ export function useCustomerDisplay(
 
   const clear = useCallback(async () => {
     try {
-      await invoke('display_clear');
+      await bridge.hardware.displayClear();
     } catch (e) {
       console.warn('[useCustomerDisplay] clear failed:', e);
     }

@@ -362,6 +362,26 @@ export class OrderService {
   // Lightweight connectivity check to Admin POS API
   async testConnection(): Promise<{ ok: boolean; status: number; message?: string }> {
     try {
+      const bridge = this.getBridge();
+      if (bridge && !this.allowAdminApiFallback()) {
+        const result = await bridge.adminApi.fetchFromAdmin('/api/pos/orders?limit=1', {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json',
+          },
+        });
+
+        if (result?.success) {
+          return { ok: true, status: result.status || 200 };
+        }
+
+        return {
+          ok: false,
+          status: result?.status || 0,
+          message: result?.error || 'Non-OK response',
+        };
+      }
+
       const headers = await this.buildHeaders();
       const url = getApiUrl('/pos/orders?limit=1')
       const response = await fetch(url, { method: 'GET', headers })
@@ -388,6 +408,11 @@ export class OrderService {
       const rawItems = orderData.items || []
       const hasInvalidMenuItem = rawItems.some((item: any) => {
         const menuItemId = item?.menu_item_id || item?.menuItemId || item?.id
+        const isManualItem =
+          item?.is_manual === true || String(menuItemId || '').trim().toLowerCase() === 'manual'
+        if (isManualItem) {
+          return false
+        }
         return !menuItemId || !uuidRegex.test(String(menuItemId))
       })
       if (hasInvalidMenuItem) {
@@ -648,6 +673,9 @@ export class OrderService {
         branch_id: branchId || orderDataAny.branch_id,
         organization_id: organizationId || orderDataAny.organization_id,
         items: (orderData.items || []).map((item: any) => {
+          const rawMenuItemId = item.menu_item_id || item.menuItemId || item.id || null
+          const isManualItem =
+            item?.is_manual === true || String(rawMenuItemId || '').trim().toLowerCase() === 'manual'
           const categoryName =
             item.category_name ||
             item.categoryName ||
@@ -685,7 +713,12 @@ export class OrderService {
             );
 
           return {
-            menu_item_id: item.menu_item_id || item.menuItemId || item.id,
+            menu_item_id:
+              isManualItem
+                ? null
+                : (typeof rawMenuItemId === 'string' && uuidRegex.test(rawMenuItemId.trim())
+                    ? rawMenuItemId.trim()
+                    : rawMenuItemId),
             quantity: item.quantity || 1,
             unit_price: item.unitPrice || item.unit_price || item.price || 0,
             total_price:
@@ -725,6 +758,8 @@ export class OrderService {
             category_name: normalizedCategory || null,
             subcategory_name: normalizedSubcategory || null,
             category_path: typeof categoryPath === 'string' ? categoryPath : null,
+            name: normalizedSubcategory || null,
+            menu_item_name: normalizedSubcategory || null,
             notes:
               (typeof item.notes === 'string' && item.notes.trim()) ||
               null,

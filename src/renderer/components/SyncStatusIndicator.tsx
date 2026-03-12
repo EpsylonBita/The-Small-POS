@@ -1310,7 +1310,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                             <span>{ENTITY_TYPE_KEYS[job.entityType] ? t(ENTITY_TYPE_KEYS[job.entityType], { defaultValue: job.entityType }) : job.entityType}</span>
                             <span
                               className={`font-mono ${
-                                job.status === 'printed'
+                                job.status === 'printed' || job.status === 'dispatched'
                                   ? 'text-green-500'
                                   : job.status === 'failed'
                                     ? 'text-red-500'

@@ -10,7 +10,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
+import { getBridge } from '../../lib';
 
 export interface LoyaltyCard {
   uid: string;
@@ -30,6 +30,10 @@ export interface UseLoyaltyReader {
   processCard: (uid: string) => Promise<void>;
   clearLastCard: () => void;
 }
+
+const bridge = getBridge();
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 export function useLoyaltyReader(
   autoStart = false,
@@ -85,7 +89,7 @@ export function useLoyaltyReader(
   // Auto-start
   useEffect(() => {
     if (autoStart) {
-      invoke('loyalty_reader_start')
+      bridge.hardware.loyaltyReaderStart()
         .then(() => setState((prev) => ({ ...prev, connected: true })))
         .catch((e) => console.warn('[useLoyaltyReader] Auto-start failed:', e));
     }
@@ -94,25 +98,25 @@ export function useLoyaltyReader(
   const start = useCallback(async () => {
     try {
       setState((prev) => ({ ...prev, error: null }));
-      await invoke('loyalty_reader_start');
+      await bridge.hardware.loyaltyReaderStart();
       setState((prev) => ({ ...prev, connected: true }));
-    } catch (e: any) {
-      setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
     }
   }, []);
 
   const stop = useCallback(async () => {
     try {
-      await invoke('loyalty_reader_stop');
+      await bridge.hardware.loyaltyReaderStop();
       setState((prev) => ({ ...prev, connected: false }));
-    } catch (e: any) {
-      setState((prev) => ({ ...prev, error: e?.message || String(e) }));
+    } catch (e) {
+      setState((prev) => ({ ...prev, error: getErrorMessage(e) }));
     }
   }, []);
 
   const processCard = useCallback(async (uid: string) => {
     try {
-      await invoke('loyalty_process_card', { arg0: uid });
+      await bridge.hardware.loyaltyProcessCard(uid);
     } catch (e) {
       console.warn('[useLoyaltyReader] processCard failed:', e);
     }

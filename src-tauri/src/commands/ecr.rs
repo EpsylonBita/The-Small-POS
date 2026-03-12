@@ -502,11 +502,56 @@ pub async fn ecr_get_device_status(
         .and_then(|d| d.get("status"))
         .and_then(|v| v.as_str())
         .unwrap_or("disconnected");
+    let live_status = if connected {
+        Some(mgr.get_device_status(&device_id))
+    } else {
+        None
+    };
+    let (
+        status,
+        ready,
+        busy,
+        error,
+        firmware_version,
+        serial_number,
+        fiscal_receipt_counter,
+        fiscal_z_counter,
+    ) = match live_status {
+        Some(Ok(status)) => {
+            let status_label = if status.error.is_some() {
+                "error"
+            } else if status.busy {
+                "busy"
+            } else {
+                "connected"
+            };
+            (
+                status_label,
+                status.ready,
+                status.busy,
+                status.error,
+                status.firmware_version,
+                status.serial_number,
+                status.fiscal_receipt_counter,
+                status.fiscal_z_counter,
+            )
+        }
+        Some(Err(error)) => ("error", false, false, Some(error), None, None, None, None),
+        None => (db_status, false, false, None, None, None, None, None),
+    };
+
     Ok(serde_json::json!({
         "success": device.is_some(),
         "deviceId": device_id,
         "connected": connected,
-        "status": if connected { "connected" } else { db_status }
+        "status": status,
+        "ready": ready,
+        "busy": busy,
+        "error": error,
+        "firmwareVersion": firmware_version,
+        "serialNumber": serial_number,
+        "fiscalReceiptCounter": fiscal_receipt_counter,
+        "fiscalZCounter": fiscal_z_counter,
     }))
 }
 

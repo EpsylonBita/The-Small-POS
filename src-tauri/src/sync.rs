@@ -234,6 +234,8 @@ static FAILED_ORDER_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Disable stuck-receipt cleanup DELETE calls for this process when backend does not support it.
 #[allow(dead_code)]
 static STUCK_RECEIPT_CLEANUP_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+/// Ensure old sync failure pruning runs once per process start.
+static SYNC_FAILURE_PRUNE_DONE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_RETRY_DELAY_MS: i64 = 5_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
@@ -893,17 +895,15 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     drop(conn);
 
-    let auto_print_type = if order_type == "delivery" {
-        "delivery_slip"
-    } else {
-        "order_receipt"
-    };
-    if let Err(error) = print::enqueue_print_job(db, auto_print_type, &order_id, None) {
-        warn!(
-            order_id = %order_id,
-            error = %error,
-            "Failed to enqueue order receipt print job after local create"
-        );
+    for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
+        if let Err(error) = print::enqueue_print_job(db, entity_type, &order_id, None) {
+            warn!(
+                order_id = %order_id,
+                entity_type = %entity_type,
+                error = %error,
+                "Failed to enqueue automatic print job after local create"
+            );
+        }
     }
 
     info!(order_id = %order_id, "Order created and queued for sync");
@@ -1604,6 +1604,27 @@ fn requeue_failed_order_validation_rows(db: &DbState) -> Result<usize, String> {
     .map_err(|e| format!("requeue failed order validation rows: {e}"))
 }
 
+/// Maximum age (in days) for failed sync entries before they are pruned.
+const SYNC_FAILURE_MAX_AGE_DAYS: i64 = 30;
+
+/// Delete `sync_queue` entries with `status = 'failed'` that are older than
+/// [`SYNC_FAILURE_MAX_AGE_DAYS`] days. This prevents the sync queue from
+/// growing indefinitely with permanently-failed entries that will never be
+/// retried.
+///
+/// Called once per process start from [`run_sync_cycle`] (guarded by
+/// [`SYNC_FAILURE_PRUNE_DONE`]).
+fn prune_old_sync_failures(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE status = 'failed'
+           AND updated_at < datetime('now', ?1)",
+        params![format!("-{SYNC_FAILURE_MAX_AGE_DAYS} days")],
+    )
+    .map_err(|e| format!("prune old sync failures: {e}"))
+}
+
 /// A sync queue row with all fields needed for processing.
 type SyncItem = (
     i64,
@@ -1854,15 +1875,12 @@ fn should_emit_deduped_warn(fingerprint: &str, now: DateTime<Utc>) -> bool {
         Err(_) => return true,
     };
 
-    let should_emit = match (&guard.last_fingerprint, guard.last_warned_at) {
+    let should_emit = !matches!(
+        (&guard.last_fingerprint, guard.last_warned_at),
         (Some(last), Some(last_at))
             if last == fingerprint
-                && (now - last_at) < ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS) =>
-        {
-            false
-        }
-        _ => true,
-    };
+                && (now - last_at) < ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS)
+    );
 
     if should_emit {
         guard.last_fingerprint = Some(fingerprint.to_string());
@@ -2756,7 +2774,7 @@ async fn reconcile_remote_orders(
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
             // Orders created at or before the last Z-report were already counted
-            // and cleared by finalize_end_of_day — do not re-materialize them.
+            // and cleared by the local day-rollover cleanup — do not re-materialize them.
             let eod_cutoff: Option<String> =
                 crate::db::get_setting(&conn, "system", "last_z_report_timestamp");
 
@@ -2954,10 +2972,10 @@ async fn reconcile_remote_orders(
         }
 
         for local_id in newly_materialized_order_ids {
-            let mut auto_print_type = "order_receipt";
+            let mut auto_print_types = print::auto_print_entity_types_for_order_type("pickup");
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
-                if order_json.get("orderType").and_then(|v| v.as_str()) == Some("delivery") {
-                    auto_print_type = "delivery_slip";
+                if let Some(order_type) = order_json.get("orderType").and_then(|v| v.as_str()) {
+                    auto_print_types = print::auto_print_entity_types_for_order_type(order_type);
                 }
                 let _ = app.emit("order_created", order_json.clone());
                 let _ = app.emit("order_realtime_update", order_json);
@@ -2968,12 +2986,15 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if let Err(error) = print::enqueue_print_job(db, auto_print_type, &local_id, None) {
-                warn!(
-                    order_id = %local_id,
-                    error = %error,
-                    "Failed to enqueue print job for newly materialized remote order"
-                );
+            for entity_type in auto_print_types {
+                if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
+                    warn!(
+                        order_id = %local_id,
+                        entity_type = %entity_type,
+                        error = %error,
+                        "Failed to enqueue print job for newly materialized remote order"
+                    );
+                }
             }
         }
 
@@ -3031,6 +3052,18 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         if let Ok(requeued) = requeue_failed_order_validation_rows(db) {
             if requeued > 0 {
                 info!(requeued, "Requeued failed order validation sync rows");
+            }
+        }
+    }
+
+    // Prune permanently-failed sync entries older than 30 days (once per session).
+    if SYNC_FAILURE_PRUNE_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        if let Ok(pruned) = prune_old_sync_failures(db) {
+            if pruned > 0 {
+                info!(pruned, "Pruned old failed sync queue entries");
             }
         }
     }
@@ -3567,18 +3600,25 @@ fn validate_menu_items_against_cache(db: &DbState, items: &Value) -> Result<(), 
 fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
     let mut normalized = Vec::new();
     for item in items.as_array().cloned().unwrap_or_default() {
-        // Removed "id" fallback to prevent extracting wrong ID field
-        let menu_item_id = str_any(&item, &["menu_item_id", "menuItemId"]);
-        let Some(menu_item_id) = menu_item_id else {
-            warn!("Skipping order item without menu_item_id");
-            continue;
+        // Removed "id" fallback to prevent extracting wrong ID field.
+        // Manual-priced items are allowed to sync without a menu_item_id as
+        // long as they include their own line name/price.
+        let raw_menu_item_id = str_any(&item, &["menu_item_id", "menuItemId"]);
+        let menu_item_id = match raw_menu_item_id {
+            Some(candidate) if Uuid::parse_str(&candidate).is_ok() => Some(candidate),
+            Some(candidate) => {
+                warn!(
+                    menu_item_id = %candidate,
+                    "Normalizing non-UUID menu_item_id to null for order sync"
+                );
+                None
+            }
+            None => None,
         };
 
-        if Uuid::parse_str(&menu_item_id).is_err() {
-            warn!(
-                menu_item_id = %menu_item_id,
-                "Skipping order item with non-UUID menu_item_id"
-            );
+        let name = str_any(&item, &["menu_item_name", "name"]);
+        if menu_item_id.is_none() && name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            warn!("Skipping order item without valid menu_item_id or name");
             continue;
         }
 
@@ -3608,7 +3648,6 @@ fn normalize_order_items_for_sync(items: &Value) -> Vec<Value> {
             .cloned()
             .unwrap_or(Value::Null);
 
-        let name = str_any(&item, &["menu_item_name", "name"]);
         let notes = str_any(&item, &["notes"]);
 
         normalized.push(serde_json::json!({
@@ -3981,13 +4020,29 @@ async fn sync_order_batch_via_direct_api(
             .cloned()
             .unwrap_or_default()
         {
-            let menu_item_id = raw_item
+            let raw_menu_item_id = raw_item
                 .get("menu_item_id")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            if menu_item_id.is_empty() || Uuid::parse_str(&menu_item_id).is_err() {
+            let menu_item_id = if raw_menu_item_id.is_empty() {
+                None
+            } else if Uuid::parse_str(&raw_menu_item_id).is_ok() {
+                Some(raw_menu_item_id)
+            } else {
+                warn!(
+                    menu_item_id = %raw_menu_item_id,
+                    "Direct order fallback normalizing non-UUID menu_item_id to null"
+                );
+                None
+            };
+            let item_name = raw_item.get("name").cloned().unwrap_or(Value::Null);
+            let has_name = item_name
+                .as_str()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            if menu_item_id.is_none() && !has_name {
                 continue;
             }
             let quantity = raw_item
@@ -4005,7 +4060,7 @@ async fn sync_order_batch_via_direct_api(
                 "menu_item_id": menu_item_id,
                 "quantity": quantity,
                 "unit_price": unit_price,
-                "name": raw_item.get("name").cloned().unwrap_or(Value::Null),
+                "name": item_name,
                 "category_id": raw_item.get("category_id").cloned().unwrap_or(Value::Null),
                 "category_name": raw_item.get("category_name").cloned().unwrap_or(Value::Null),
                 "customizations": raw_item.get("customizations").cloned().unwrap_or(Value::Null),
@@ -5579,6 +5634,30 @@ mod tests {
         assert_eq!(staff_shift_id, None);
         assert_eq!(staff_id, None);
         assert_eq!(driver_id, None);
+
+        let receipt_jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_type = 'order_receipt'
+                   AND entity_id = ?1
+                   AND status = 'pending'",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let slip_jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs
+                 WHERE entity_type = 'delivery_slip'
+                   AND entity_id = ?1
+                   AND status = 'pending'",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(receipt_jobs, 0);
+        assert_eq!(slip_jobs, 1);
     }
 
     #[test]

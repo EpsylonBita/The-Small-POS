@@ -22,7 +22,7 @@ interface PaymentModalProps {
     driverId?: string;
     cashReceived?: number;
     change?: number;
-  }) => void;
+  }) => void | Promise<void | boolean>;
 }
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
@@ -90,12 +90,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const handleSimplePayment = async (method: 'cash' | 'card') => {
     setIsProcessingPayment(true);
     try {
-      // Brief processing delay
+      // Intentional 500ms delay: gives the user visible feedback that the
+      // payment is being processed (the spinner / "processing" state) before
+      // the modal closes.  Without this, quick cash payments feel like the
+      // button did nothing because the modal dismisses instantly.
       await new Promise(resolve => setTimeout(resolve, 500));
 
       const txId = `${method.toUpperCase()}-${Date.now()}`;
 
-      onPaymentComplete({
+      const completionResult = await onPaymentComplete({
         method,
         amount: orderTotal,
         transactionId: txId,
@@ -103,6 +106,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         cashReceived: method === 'cash' ? (cashAmount || orderTotal) : undefined,
         change: method === 'cash' ? (changeAmount > 0 ? changeAmount : 0) : undefined
       });
+
+      if (completionResult === false) {
+        return;
+      }
 
       try {
         ActivityTracker.trackPaymentCompleted(orderTotal, method, txId, undefined);

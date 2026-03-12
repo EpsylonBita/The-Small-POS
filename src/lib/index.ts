@@ -52,6 +52,10 @@ export {
 
 export type {
   AuthSetupPinRequest,
+  PrivilegedActionConfirmRequest,
+  PrivilegedActionConfirmResponse,
+  PrivilegedActionErrorPayload,
+  PrivilegedActionScope,
   SettingsConfiguredResponse,
   SettingsGetRequest,
   SettingsSetRequest,

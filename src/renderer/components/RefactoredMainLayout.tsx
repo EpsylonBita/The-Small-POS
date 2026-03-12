@@ -147,6 +147,32 @@ interface RefactoredMainLayoutProps {
   onLogout?: () => void;
 }
 
+const PENDING_POST_LOGIN_INTENT_KEY = 'PendingPostLoginIntent';
+
+function savePendingPostLoginIntent(view: string) {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.setItem(
+    PENDING_POST_LOGIN_INTENT_KEY,
+    JSON.stringify({ view, createdAt: Date.now() })
+  );
+}
+
+function consumePendingPostLoginIntent(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  const raw = window.sessionStorage.getItem(PENDING_POST_LOGIN_INTENT_KEY);
+  if (!raw) return null;
+
+  window.sessionStorage.removeItem(PENDING_POST_LOGIN_INTENT_KEY);
+
+  try {
+    const parsed = JSON.parse(raw) as { view?: unknown };
+    return typeof parsed.view === 'string' && parsed.view.trim() ? parsed.view.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className = '', onLogout }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -201,9 +227,26 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       return; // Don't change view
     }
 
+    if (!isShiftActive && view !== 'dashboard') {
+      savePendingPostLoginIntent(view);
+      shiftManagerRef.current?.openCheckin();
+      return;
+    }
+
     setCurrentView(view);
     console.log('✅ View state updated to:', view);
   };
+
+  useEffect(() => {
+    if (!isShiftActive) {
+      return;
+    }
+
+    const pendingView = consumePendingPostLoginIntent();
+    if (pendingView && pendingView !== currentView) {
+      setCurrentView(pendingView);
+    }
+  }, [currentView, isShiftActive]);
 
   // Handle logout
   const handleLogout = () => {

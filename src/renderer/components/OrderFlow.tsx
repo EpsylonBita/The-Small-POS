@@ -588,15 +588,30 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       }
 
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      const normalizedItems = orderData.items.map((item: any) => ({
-        menu_item_id: item.menuItemId || item.menu_item_id || item.id, // Use menuItemId (Supabase UUID) instead of id (cart ID)
-        name: item.name || item.menu_item_name || null,
-        quantity: item.quantity,
-        price: item.price,
-        customizations: item.customizations || item.selectedIngredients || null,
-        notes: item.notes || item.special_instructions || null
-      }));
+      const normalizedItems = orderData.items.map((item: any) => {
+        const rawMenuItemId = item.menuItemId || item.menu_item_id || item.id || null;
+        const normalizedMenuItemId =
+          typeof rawMenuItemId === 'string' && uuidRegex.test(rawMenuItemId.trim())
+            ? rawMenuItemId.trim()
+            : null;
+        const isManualItem =
+          item?.is_manual === true ||
+          String(rawMenuItemId || '').trim().toLowerCase() === 'manual';
+
+        return {
+          menu_item_id: isManualItem ? null : normalizedMenuItemId,
+          name: item.name || item.menu_item_name || null,
+          quantity: item.quantity,
+          price: item.price,
+          customizations: item.customizations || item.selectedIngredients || null,
+          notes: item.notes || item.special_instructions || null,
+          is_manual: isManualItem
+        };
+      });
       const invalidItems = normalizedItems.filter((item: any) => {
+        if (item?.is_manual === true) {
+          return false;
+        }
         const id = typeof item.menu_item_id === 'string' ? item.menu_item_id.trim() : '';
         return !uuidRegex.test(id);
       });

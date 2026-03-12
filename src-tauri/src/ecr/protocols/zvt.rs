@@ -429,7 +429,10 @@ impl EcrProtocol for ZvtProtocol {
     }
 
     fn abort(&mut self) -> Result<(), String> {
-        self.cancel_transaction()
+        let cancel_result = self.cancel_transaction();
+        let disconnect_result = self.transport.disconnect();
+        self.initialized = false;
+        cancel_result.and(disconnect_result)
     }
 
     fn test_connection(&mut self) -> Result<bool, String> {

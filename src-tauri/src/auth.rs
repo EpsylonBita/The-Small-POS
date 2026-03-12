@@ -7,6 +7,7 @@
 //! table is used only for audit/persistence across restarts.
 
 use chrono::{DateTime, Duration, Utc};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -23,6 +24,7 @@ const MAX_FAILED_ATTEMPTS: u32 = 5;
 const LOCKOUT_MINUTES: i64 = 15;
 const SESSION_INACTIVITY_MINUTES: i64 = 30;
 const SESSION_MAX_DURATION_HOURS: i64 = 2;
+pub(crate) const PRIVILEGED_ACTION_TTL_SECONDS: i64 = 300;
 const LOCKOUT_ATTEMPTS_KEY: &str = "lockout_attempts";
 const LOCKOUT_LAST_ATTEMPT_KEY: &str = "lockout_last_attempt";
 
@@ -46,7 +48,7 @@ const STAFF_PERMISSIONS: &[&str] = &["view_orders", "update_order_status", "crea
 // ---------------------------------------------------------------------------
 
 /// An active staff session.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct StaffSession {
     session_id: String,
     staff_id: String,
@@ -97,11 +99,89 @@ struct LockoutEntry {
     last_attempt: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrivilegedActionScope {
+    SystemControl,
+    CashDrawerControl,
+}
+
+impl PrivilegedActionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemControl => "system_control",
+            Self::CashDrawerControl => "cash_drawer_control",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "system_control" => Some(Self::SystemControl),
+            "cash_drawer_control" => Some(Self::CashDrawerControl),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, thiserror::Error, PartialEq, Eq)]
+#[error("{code}: {reason}")]
+pub struct PrivilegedActionError {
+    pub code: &'static str,
+    pub scope: String,
+    pub reason: String,
+    #[serde(rename = "ttlSeconds", skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<i64>,
+}
+
+impl PrivilegedActionError {
+    fn unauthorized(scope: Option<PrivilegedActionScope>, reason: impl Into<String>) -> Self {
+        Self {
+            code: "UNAUTHORIZED",
+            scope: scope
+                .map(PrivilegedActionScope::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            reason: reason.into(),
+            ttl_seconds: None,
+        }
+    }
+
+    fn reauth_required(scope: PrivilegedActionScope, reason: impl Into<String>) -> Self {
+        Self {
+            code: "REAUTH_REQUIRED",
+            scope: scope.as_str().to_string(),
+            reason: reason.into(),
+            ttl_seconds: Some(PRIVILEGED_ACTION_TTL_SECONDS),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, thiserror::Error)]
+#[serde(untagged)]
+pub enum GuardedCommandError {
+    #[error(transparent)]
+    Structured(#[from] PrivilegedActionError),
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&str> for GuardedCommandError {
+    fn from(value: &str) -> Self {
+        Self::Message(value.to_string())
+    }
+}
+
+impl From<String> for GuardedCommandError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
 /// Tauri managed state for authentication.
 pub struct AuthState {
     sessions: Mutex<HashMap<String, StaffSession>>,
     current_session_id: Mutex<Option<String>>,
     lockout: Mutex<LockoutEntry>,
+    privileged_grants: Mutex<HashMap<String, DateTime<Utc>>>,
 }
 
 impl AuthState {
@@ -113,6 +193,7 @@ impl AuthState {
                 attempts: 0,
                 last_attempt: Utc::now(),
             }),
+            privileged_grants: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -134,6 +215,116 @@ fn extract_pin(arg: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_scope(arg: &Value) -> Option<PrivilegedActionScope> {
+    if let Some(scope) = arg.as_str() {
+        return PrivilegedActionScope::parse(scope);
+    }
+    if let Some(obj) = arg.as_object() {
+        if let Some(scope) = obj.get("scope").and_then(Value::as_str) {
+            return PrivilegedActionScope::parse(scope);
+        }
+    }
+    None
+}
+
+fn grant_key(session_id: &str, scope: PrivilegedActionScope) -> String {
+    format!("{session_id}:{}", scope.as_str())
+}
+
+fn prune_expired_privileged_grants(auth: &AuthState, now: DateTime<Utc>) {
+    if let Ok(mut grants) = auth.privileged_grants.lock() {
+        grants.retain(|_, expires_at| *expires_at > now);
+    }
+}
+
+fn clear_privileged_grants_for_session(auth: &AuthState, session_id: &str) {
+    if let Ok(mut grants) = auth.privileged_grants.lock() {
+        let prefix = format!("{session_id}:");
+        grants.retain(|key, _| !key.starts_with(&prefix));
+    }
+}
+
+fn record_privileged_grant_at(
+    auth: &AuthState,
+    session_id: &str,
+    scope: PrivilegedActionScope,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, String> {
+    let expires_at = now + Duration::seconds(PRIVILEGED_ACTION_TTL_SECONDS);
+    let mut grants = auth
+        .privileged_grants
+        .lock()
+        .map_err(|e| format!("privileged grants mutex poisoned: {e}"))?;
+    grants.insert(grant_key(session_id, scope), expires_at);
+    Ok(expires_at)
+}
+
+fn has_fresh_privileged_grant_at(
+    auth: &AuthState,
+    session_id: &str,
+    scope: PrivilegedActionScope,
+    now: DateTime<Utc>,
+) -> bool {
+    prune_expired_privileged_grants(auth, now);
+    auth.privileged_grants
+        .lock()
+        .ok()
+        .and_then(|grants| grants.get(&grant_key(session_id, scope)).cloned())
+        .map(|expires_at| expires_at > now)
+        .unwrap_or(false)
+}
+
+fn resolve_current_terminal_id(db: &db::DbState) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if let Some(terminal_id) = db::get_setting(&conn, "terminal", "terminal_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(terminal_id);
+    }
+    drop(conn);
+
+    storage::get_credential("terminal_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or("Current terminal is not configured in local storage".to_string())
+}
+
+fn current_terminal_has_cash_drawer_role(db: &db::DbState) -> Result<bool, String> {
+    let terminal_id = resolve_current_terminal_id(db)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let role: Option<String> = conn
+        .query_row(
+            "SELECT role_type
+             FROM staff_shifts
+             WHERE terminal_id = ?1 AND status = 'active'
+             ORDER BY check_in_time DESC
+             LIMIT 1",
+            rusqlite::params![terminal_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    Ok(matches!(role.as_deref(), Some("cashier" | "manager")))
+}
+
+fn verify_pin_for_session(
+    pin: &str,
+    session: &StaffSession,
+    db: &db::DbState,
+) -> Result<bool, String> {
+    let key = if session.role == "admin" {
+        "admin_pin_hash"
+    } else {
+        "staff_pin_hash"
+    };
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let Some(hash) = db::get_setting(&conn, "staff", key) else {
+        return Ok(false);
+    };
+    bcrypt::verify(pin, &hash).map_err(|e| format!("Failed to verify PIN: {e}"))
 }
 
 /// Check whether the terminal is currently locked out.
@@ -331,6 +522,8 @@ pub fn logout(auth: &AuthState) {
             return;
         };
         sessions.remove(&sid);
+        drop(sessions);
+        clear_privileged_grants_for_session(auth, &sid);
         info!(session_id = %sid, "session logged out");
     }
 }
@@ -354,6 +547,7 @@ pub fn validate_session(auth: &AuthState) -> Value {
                     if let Ok(mut sessions) = auth.sessions.lock() {
                         sessions.remove(&sid);
                     }
+                    clear_privileged_grants_for_session(auth, &sid);
                 }
             }
             serde_json::json!({ "valid": false, "reason": "Session expired or not found" })
@@ -410,10 +604,13 @@ pub fn setup_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String>
         return Err("At least one PIN (adminPin or staffPin) is required".into());
     }
 
-    // Validate: numeric, at least 4 digits
+    // Validate: numeric, 4–32 digits
     fn validate_pin(pin: &str, label: &str) -> Result<(), String> {
         if pin.len() < 4 {
             return Err(format!("{label} must be at least 4 digits"));
+        }
+        if pin.len() > 32 {
+            return Err(format!("{label} must be 32 characters or fewer"));
         }
         if !pin.chars().all(|c| c.is_ascii_digit()) {
             return Err(format!("{label} must contain only digits"));
@@ -460,6 +657,148 @@ pub fn get_current_user(auth: &AuthState) -> Value {
     get_session_json(auth)
 }
 
+fn authorize_privileged_action_at(
+    scope: PrivilegedActionScope,
+    db: &db::DbState,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+) -> Result<StaffSession, PrivilegedActionError> {
+    let Some(session) = get_current_session(auth) else {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Active session required",
+        ));
+    };
+
+    if scope == PrivilegedActionScope::SystemControl && session.role != "admin" {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Active admin session required",
+        ));
+    }
+
+    if scope == PrivilegedActionScope::CashDrawerControl {
+        match current_terminal_has_cash_drawer_role(db) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(PrivilegedActionError::unauthorized(
+                    Some(scope),
+                    "Active cashier or manager shift required on this terminal",
+                ));
+            }
+            Err(error) => {
+                return Err(PrivilegedActionError::unauthorized(Some(scope), error));
+            }
+        }
+    }
+
+    if !has_fresh_privileged_grant_at(auth, &session.session_id, scope, now) {
+        return Err(PrivilegedActionError::reauth_required(
+            scope,
+            "Fresh PIN confirmation required",
+        ));
+    }
+
+    Ok(session)
+}
+
+pub fn authorize_privileged_action(
+    scope: PrivilegedActionScope,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<(), PrivilegedActionError> {
+    authorize_privileged_action_at(scope, db, auth, Utc::now()).map(|_| ())
+}
+
+fn confirm_privileged_action_at(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    auth: &AuthState,
+    now: DateTime<Utc>,
+) -> Result<Value, PrivilegedActionError> {
+    let payload = arg0.ok_or_else(|| {
+        PrivilegedActionError::unauthorized(None, "Missing privileged action confirmation payload")
+    })?;
+    let pin = extract_pin(&payload).ok_or_else(|| {
+        PrivilegedActionError::unauthorized(None, "PIN is required for privileged confirmation")
+    })?;
+    let scope = extract_scope(&payload)
+        .ok_or_else(|| PrivilegedActionError::unauthorized(None, "Invalid privileged scope"))?;
+
+    let session = match scope {
+        PrivilegedActionScope::SystemControl => {
+            match get_current_session(auth) {
+                Some(session) if session.role == "admin" => session,
+                Some(_) => {
+                    return Err(PrivilegedActionError::unauthorized(
+                        Some(scope),
+                        "Active admin session required",
+                    ));
+                }
+                None => {
+                    // No active session — create a temporary admin session so the
+                    // privileged-grant chain works. PIN verified by standard flow below.
+                    let _ = create_session(auth, "admin", "system-control");
+                    get_current_session(auth).ok_or_else(|| {
+                        PrivilegedActionError::unauthorized(
+                            Some(scope),
+                            "Failed to create temporary session",
+                        )
+                    })?
+                }
+            }
+        }
+        PrivilegedActionScope::CashDrawerControl => {
+            let Some(session) = get_current_session(auth) else {
+                return Err(PrivilegedActionError::unauthorized(
+                    Some(scope),
+                    "Active session required",
+                ));
+            };
+            match current_terminal_has_cash_drawer_role(db) {
+                Ok(true) => session,
+                Ok(false) => {
+                    return Err(PrivilegedActionError::unauthorized(
+                        Some(scope),
+                        "Active cashier or manager shift required on this terminal",
+                    ));
+                }
+                Err(error) => {
+                    return Err(PrivilegedActionError::unauthorized(Some(scope), error));
+                }
+            }
+        }
+    };
+
+    let pin_ok = verify_pin_for_session(&pin, &session, db)
+        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+    if !pin_ok {
+        return Err(PrivilegedActionError::unauthorized(
+            Some(scope),
+            "Invalid PIN",
+        ));
+    }
+
+    let expires_at = record_privileged_grant_at(auth, &session.session_id, scope, now)
+        .map_err(|error| PrivilegedActionError::unauthorized(Some(scope), error))?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "scope": scope.as_str(),
+        "sessionId": session.session_id,
+        "ttlSeconds": PRIVILEGED_ACTION_TTL_SECONDS,
+        "expiresAt": expires_at.to_rfc3339(),
+    }))
+}
+
+pub fn confirm_privileged_action(
+    arg0: Option<Value>,
+    db: &db::DbState,
+    auth: &AuthState,
+) -> Result<Value, PrivilegedActionError> {
+    confirm_privileged_action_at(arg0, db, auth, Utc::now())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,6 +820,56 @@ mod tests {
         db::get_setting(&conn, "staff", LOCKOUT_ATTEMPTS_KEY)
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0)
+    }
+
+    fn set_pin_hash(db_state: &db::DbState, key: &str, pin: &str) {
+        let conn = db_state.conn.lock().expect("db lock");
+        let hash = bcrypt::hash(pin, 4).expect("hash test pin");
+        db::set_setting(&conn, "staff", key, &hash).expect("store pin hash");
+    }
+
+    fn set_terminal_id(db_state: &db::DbState, terminal_id: &str) {
+        let conn = db_state.conn.lock().expect("db lock");
+        db::set_setting(&conn, "terminal", "terminal_id", terminal_id).expect("store terminal id");
+    }
+
+    fn insert_active_shift(db_state: &db::DbState, terminal_id: &str, role_type: &str) {
+        let now = Utc::now().to_rfc3339();
+        let conn = db_state.conn.lock().expect("db lock");
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?7, ?7)",
+            rusqlite::params![
+                format!("shift-{role_type}"),
+                format!("staff-{role_type}"),
+                format!("{role_type} staff"),
+                "branch-1",
+                terminal_id,
+                role_type,
+                now,
+            ],
+        )
+        .expect("insert active shift");
+    }
+
+    fn current_session_id(auth: &AuthState) -> String {
+        auth.current_session_id
+            .lock()
+            .expect("session lock")
+            .clone()
+            .expect("current session id")
+    }
+
+    fn login_as_admin(db_state: &db::DbState, auth: &AuthState) {
+        set_pin_hash(db_state, "admin_pin_hash", "1234");
+        login(Some(serde_json::json!({ "pin": "1234" })), db_state, auth).expect("admin login");
+    }
+
+    fn login_as_staff(db_state: &db::DbState, auth: &AuthState) {
+        set_pin_hash(db_state, "staff_pin_hash", "4321");
+        login(Some(serde_json::json!({ "pin": "4321" })), db_state, auth).expect("staff login");
     }
 
     #[test]
@@ -564,5 +953,234 @@ mod tests {
         .expect_err("invalid login should fail after reset");
         assert_eq!(err, "Invalid PIN");
         assert_eq!(lockout_attempts(&db_state), 1);
+    }
+
+    #[test]
+    fn confirm_privileged_action_accepts_admin_system_control_pin() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+
+        let result = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "1234",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect("system control confirmation should succeed");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            authorize_privileged_action(PrivilegedActionScope::SystemControl, &db_state, &auth),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn confirm_privileged_action_rejects_wrong_pin() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+
+        let error = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "9999",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect_err("wrong pin should fail");
+
+        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.scope, "system_control");
+        assert_eq!(error.reason, "Invalid PIN");
+    }
+
+    #[test]
+    fn privileged_grants_are_scope_isolated() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+        set_terminal_id(&db_state, "terminal-1");
+        insert_active_shift(&db_state, "terminal-1", "manager");
+
+        confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "1234",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect("system control confirmation should succeed");
+
+        let error = authorize_privileged_action_at(
+            PrivilegedActionScope::CashDrawerControl,
+            &db_state,
+            &auth,
+            Utc::now(),
+        )
+        .expect_err("system_control grant must not satisfy cash_drawer_control");
+
+        assert_eq!(error.code, "REAUTH_REQUIRED");
+        assert_eq!(error.scope, "cash_drawer_control");
+        assert_eq!(error.ttl_seconds, Some(PRIVILEGED_ACTION_TTL_SECONDS));
+    }
+
+    #[test]
+    fn privileged_grants_expire_after_ttl() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+
+        let granted_at = Utc::now();
+        confirm_privileged_action_at(
+            Some(serde_json::json!({
+                "pin": "1234",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+            granted_at,
+        )
+        .expect("system control confirmation should succeed");
+
+        let error = authorize_privileged_action_at(
+            PrivilegedActionScope::SystemControl,
+            &db_state,
+            &auth,
+            granted_at + Duration::seconds(PRIVILEGED_ACTION_TTL_SECONDS + 1),
+        )
+        .expect_err("expired grant should require re-auth");
+
+        assert_eq!(error.code, "REAUTH_REQUIRED");
+        assert_eq!(error.scope, "system_control");
+    }
+
+    #[test]
+    fn system_control_requires_admin_session() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_staff(&db_state, &auth);
+
+        let error = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "4321",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect_err("staff session must not confirm system control");
+
+        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.scope, "system_control");
+        assert!(error.reason.contains("admin"));
+    }
+
+    #[test]
+    fn cash_drawer_control_accepts_cashier_shift() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_staff(&db_state, &auth);
+        set_terminal_id(&db_state, "terminal-cashier");
+        insert_active_shift(&db_state, "terminal-cashier", "cashier");
+
+        confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "4321",
+                "scope": "cash_drawer_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect("cashier shift should allow drawer control confirmation");
+
+        assert_eq!(
+            authorize_privileged_action(PrivilegedActionScope::CashDrawerControl, &db_state, &auth),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn cash_drawer_control_accepts_manager_shift() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_staff(&db_state, &auth);
+        set_terminal_id(&db_state, "terminal-manager");
+        insert_active_shift(&db_state, "terminal-manager", "manager");
+
+        let result = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "4321",
+                "scope": "cash_drawer_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect("manager shift should allow drawer control confirmation");
+
+        assert_eq!(
+            result.get("scope").and_then(Value::as_str),
+            Some("cash_drawer_control")
+        );
+    }
+
+    #[test]
+    fn cash_drawer_control_rejects_non_cashier_shift() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_staff(&db_state, &auth);
+        set_terminal_id(&db_state, "terminal-driver");
+        insert_active_shift(&db_state, "terminal-driver", "driver");
+
+        let error = confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "4321",
+                "scope": "cash_drawer_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect_err("driver shift must not allow drawer control");
+
+        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(error.scope, "cash_drawer_control");
+        assert!(error.reason.contains("cashier or manager"));
+    }
+
+    #[test]
+    fn logout_clears_privileged_grants_for_session() {
+        let db_state = test_db_state();
+        let auth = AuthState::new();
+        login_as_admin(&db_state, &auth);
+        let session_id = current_session_id(&auth);
+        confirm_privileged_action(
+            Some(serde_json::json!({
+                "pin": "1234",
+                "scope": "system_control"
+            })),
+            &db_state,
+            &auth,
+        )
+        .expect("system control confirmation should succeed");
+        assert!(has_fresh_privileged_grant_at(
+            &auth,
+            &session_id,
+            PrivilegedActionScope::SystemControl,
+            Utc::now()
+        ));
+
+        logout(&auth);
+
+        assert!(!has_fresh_privileged_grant_at(
+            &auth,
+            &session_id,
+            PrivilegedActionScope::SystemControl,
+            Utc::now()
+        ));
     }
 }

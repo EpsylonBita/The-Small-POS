@@ -3,60 +3,13 @@ import { Toaster, toast } from 'react-hot-toast';
 import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
 import { getBridge } from '../../lib';
+import {
+    decodeConnectionString,
+    looksLikeRawApiKey,
+    normalizeAdminDashboardUrl,
+} from '../utils/connection-code';
 
 type SupportedLanguage = 'en' | 'el' | 'de' | 'fr' | 'it';
-
-/**
- * Decode the connection string from admin dashboard
- * Format: base64url(JSON({ key, url, tid, surl?, skey? }))
- */
-function decodeConnectionString(connectionString: string): {
-    apiKey: string;
-    adminUrl: string;
-    terminalId: string;
-    supabaseUrl?: string;
-    supabaseAnonKey?: string;
-} | null {
-    try {
-        // Handle base64url encoding (replace - with + and _ with /)
-        const base64 = connectionString.replace(/-/g, '+').replace(/_/g, '/');
-        const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
-        const decoded = atob(padded);
-        const parsed = JSON.parse(decoded);
-
-        if (parsed.key && parsed.url && parsed.tid) {
-            const supabaseUrl = typeof parsed.surl === 'string'
-                ? parsed.surl
-                : (typeof parsed.supabaseUrl === 'string' ? parsed.supabaseUrl : undefined);
-            const supabaseAnonKey = typeof parsed.skey === 'string'
-                ? parsed.skey
-                : (typeof parsed.supabaseAnonKey === 'string' ? parsed.supabaseAnonKey : undefined);
-
-            return {
-                apiKey: parsed.key,
-                adminUrl: parsed.url,
-                terminalId: parsed.tid,
-                supabaseUrl,
-                supabaseAnonKey,
-            };
-        }
-        return null;
-    } catch (e) {
-        console.error('Failed to decode connection string:', e);
-        return null;
-    }
-}
-
-function looksLikeRawApiKey(value: string): boolean {
-    const input = value.trim();
-    if (!input || input.length < 24 || input.length > 80) {
-        return false;
-    }
-    if (!/^[A-Za-z0-9_-]+$/.test(input)) {
-        return false;
-    }
-    return !input.startsWith('eyJ');
-}
 
 const OnboardingPage: React.FC = () => {
     const bridge = getBridge();
@@ -96,8 +49,7 @@ const OnboardingPage: React.FC = () => {
             }
 
             // Call the backend to update credentials and sync
-            const normalizedAdminUrl = decoded.adminUrl.replace(/\/+$/, '').replace(/\/api$/i, '');
-            localStorage.setItem('admin_dashboard_url', normalizedAdminUrl);
+            const normalizedAdminUrl = normalizeAdminDashboardUrl(decoded.adminUrl);
             const result = await bridge.settings.updateTerminalCredentials({
                 terminalId: decoded.terminalId,
                 apiKey: decoded.apiKey,
@@ -108,15 +60,13 @@ const OnboardingPage: React.FC = () => {
             });
 
             if (result && result.success) {
+                await bridge.terminalConfig.syncFromAdmin();
+                localStorage.setItem('admin_dashboard_url', normalizedAdminUrl);
                 toast.success(t('onboarding.success', { defaultValue: 'Terminal configured successfully!' }));
-                // Restart the entire Electron app to reinitialize with new settings
-                setTimeout(async () => {
-                    try {
-                        await bridge.app.restart();
-                    } catch (e) {
-                        console.error('Failed to restart app, falling back to reload:', e);
-                        window.location.reload();
-                    }
+                // A renderer reload is sufficient here because onboarding runs before any
+                // authenticated admin session exists, while native restart is now guarded.
+                setTimeout(() => {
+                    window.location.reload();
                 }, 1500);
             } else {
                 throw new Error(result?.error || t('onboarding.configureFailed', { defaultValue: 'Failed to configure terminal' }));

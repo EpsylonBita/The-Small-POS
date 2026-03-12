@@ -5,7 +5,9 @@ use tauri::Emitter;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::{db, payload_arg0_as_string, storage, validate_external_url, APP_START_EPOCH};
+use crate::{
+    auth, db, ecr, payload_arg0_as_string, storage, validate_external_url, APP_START_EPOCH,
+};
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -127,7 +129,17 @@ fn parse_screen_capture_signal_polling_payload(
 }
 
 #[tauri::command]
-pub async fn app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn app_shutdown(
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, ecr::DeviceManager>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<(), auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
     info!("app:shutdown requested");
     let _ = app.emit(
         "control_command_received",
@@ -138,12 +150,23 @@ pub async fn app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
         serde_json::json!({ "source": "ipc" }),
     );
     let _ = app.emit("app_close", serde_json::json!({ "reason": "shutdown" }));
+    mgr.shutdown();
     app.exit(0);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn app_restart(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn app_restart(
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, ecr::DeviceManager>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<(), auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
     info!("app:restart requested");
     let _ = app.emit(
         "control_command_received",
@@ -153,6 +176,7 @@ pub async fn app_restart(app: tauri::AppHandle) -> Result<(), String> {
         "app_restart_initiated",
         serde_json::json!({ "source": "ipc" }),
     );
+    mgr.shutdown();
     app.restart();
 }
 

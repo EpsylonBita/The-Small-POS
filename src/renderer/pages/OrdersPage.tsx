@@ -620,14 +620,14 @@ const OrdersPage: React.FC = () => {
         onClose={() => setSelectedOrder(null)}
         onPrintReceipt={async () => {
           const orderId = selectedOrder?.id;
-          window.alert(`Print clicked! Order ID: ${orderId || 'NONE'}`);
+          const printType = selectedOrder?.order_type === 'delivery' ? 'delivery' : 'customer';
           if (!orderId) {
             toast.error('No order ID available for printing');
             return;
           }
           toast.loading('Printing receipt...', { id: 'print-receipt' });
           try {
-            const result = await bridge.payments.printReceipt(orderId);
+            const result = await bridge.payments.printReceipt(orderId, printType);
             console.log('[OrdersPage] printReceipt result:', result);
             if (result?.success) {
               toast.success('Receipt sent to printer', { id: 'print-receipt' });

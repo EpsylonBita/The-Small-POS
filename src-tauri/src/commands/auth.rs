@@ -119,6 +119,15 @@ pub async fn auth_get_session_stats(
 }
 
 #[tauri::command]
+pub async fn auth_confirm_privileged_action(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<Value, auth::PrivilegedActionError> {
+    auth::confirm_privileged_action(arg0, &db, &auth_state)
+}
+
+#[tauri::command]
 pub async fn auth_setup_pin(
     arg0: Option<Value>,
     db: tauri::State<'_, db::DbState>,

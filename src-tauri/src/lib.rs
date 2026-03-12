@@ -50,7 +50,7 @@ mod terminal_helpers;
 mod zreport;
 
 const MODULE_CACHE_FILE: &str = "module-cache.json";
-pub(crate) const MODULE_CACHE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+pub(crate) const MODULE_CACHE_TTL_MS: i64 = 15 * 60 * 1000;
 const UPDATER_MANIFEST_URL: &str =
     "https://github.com/EpsylonBita/The-Small-POS/releases/latest/download/latest.json";
 const EXTERNAL_URL_MAX_LEN: usize = 2048;
@@ -693,6 +693,7 @@ pub fn run() {
             commands::auth::auth_validate_session,
             commands::auth::auth_has_permission,
             commands::auth::auth_get_session_stats,
+            commands::auth::auth_confirm_privileged_action,
             commands::auth::auth_setup_pin,
             // Staff auth
             commands::auth::staff_auth_authenticate_pin,
@@ -729,6 +730,7 @@ pub fn run() {
             commands::settings::terminal_config_get_organization_id,
             commands::settings::terminal_config_get_business_type,
             commands::settings::terminal_config_get_full_config,
+            commands::settings::terminal_config_sync_from_admin,
             commands::settings::terminal_config_refresh,
             // Orders
             commands::orders::order_get_all,
@@ -775,8 +777,6 @@ pub fn run() {
             commands::sync::sync_clear_all_orders,
             commands::sync::sync_cleanup_deleted_orders,
             commands::sync::sync_rediscover_parent,
-            commands::sync::sync_fetch_tables,
-            commands::sync::sync_fetch_reservations,
             commands::sync::sync_fetch_suppliers,
             commands::sync::sync_fetch_analytics,
             commands::sync::sync_fetch_orders,
@@ -808,8 +808,6 @@ pub fn run() {
             commands::shifts::shift_get_summary,
             commands::shifts::shift_record_expense,
             commands::shifts::shift_get_expenses,
-            commands::shifts::shift_list_staff_for_checkin,
-            commands::shifts::shift_get_staff_roles,
             commands::shifts::shift_record_staff_payment,
             commands::shifts::shift_get_staff_payments,
             commands::shifts::shift_get_staff_payments_by_staff,
@@ -840,6 +838,7 @@ pub fn run() {
             commands::print::print_list_jobs,
             commands::print::print_get_receipt_file,
             commands::print::print_reprint_job,
+            commands::print::receipt_sample_preview,
             commands::print::label_print,
             commands::print::label_print_batch,
             // Screen capture / Geo
@@ -862,6 +861,7 @@ pub fn run() {
             commands::print::printer_cancel_job,
             commands::print::printer_retry_job,
             commands::print::printer_test,
+            commands::print::printer_test_draft,
             commands::print::printer_test_greek_direct,
             commands::print::printer_get_auto_config,
             commands::print::printer_recommend_profile,

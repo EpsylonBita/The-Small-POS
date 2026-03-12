@@ -13,6 +13,7 @@ import { useModules } from '../../contexts/module-context';
 import { useProductCatalog } from '../../hooks/useProductCatalog';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
+import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useOnBarcodeScan, useBarcodeScannerContext } from '../../contexts/barcode-scanner-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { PaymentModal } from './PaymentModal';
@@ -88,6 +89,8 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const { resolvedTheme } = useTheme();
   const { organizationId: moduleOrgId } = useModules();
   const { maxDiscountPercentage } = useDiscountSettings();
+  const { hasModule } = useAcquiredModules();
+  const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
   const { state: scannerState } = useBarcodeScannerContext();
   const isDark = resolvedTheme === 'dark';
 
@@ -254,6 +257,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   }, [branchId, bridge.customers, isOpen, orderType, selectedAddress, selectedCustomer?.id]);
 
   useEffect(() => {
+    if (!hasDeliveryZonesModule) {
+      setLocalDeliveryZoneInfo(null);
+      return;
+    }
     if (!isOpen || orderType !== 'delivery') {
       setLocalDeliveryZoneInfo(null);
       return;
@@ -293,7 +300,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [deliveryZoneInfo, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
+  }, [deliveryZoneInfo, hasDeliveryZonesModule, isOpen, orderType, resolvedSelectedAddressCoordinates, selectedAddress, validateDeliveryAddress]);
 
   // Focus barcode input when modal opens
   useEffect(() => {

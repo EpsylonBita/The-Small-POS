@@ -59,6 +59,7 @@ const SuppliersPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -70,6 +71,7 @@ const SuppliersPage: React.FC = () => {
 
   const fetchSuppliers = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
@@ -102,9 +104,12 @@ const SuppliersPage: React.FC = () => {
       }
       setSuppliers(result.data?.suppliers || []);
       setInvoices(result.data?.invoices || []);
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch suppliers:', error);
-      toast.error(t('suppliers.errors.loadFailed', 'Failed to load suppliers'));
+      const message = t('suppliers.errors.loadFailed', 'Failed to load suppliers');
+      setError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -158,6 +163,28 @@ const SuppliersPage: React.FC = () => {
         </button>
       </div>
 
+      {error && !loading && (
+        <div className={`mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-red-950/30 border-red-900 text-red-100' : 'bg-red-50 border-red-200 text-red-700'}`}>
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 mt-0.5" />
+              <div>
+                <p className="font-semibold">{t('suppliers.errors.loadFailedTitle', 'Suppliers unavailable')}</p>
+                <p className={`text-sm ${isDark ? 'text-red-200/80' : 'text-red-600'}`}>{error}</p>
+              </div>
+            </div>
+            <button
+              onClick={fetchSuppliers}
+              className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium border ${isDark ? 'border-red-700 hover:bg-red-900/40' : 'border-red-300 hover:bg-red-100'}`}
+            >
+              {t('common.retry', 'Retry')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!error && (
+        <>
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
@@ -304,6 +331,8 @@ const SuppliersPage: React.FC = () => {
             </tbody>
           </table>
         </div>
+      )}
+        </>
       )}
     </div>
   );

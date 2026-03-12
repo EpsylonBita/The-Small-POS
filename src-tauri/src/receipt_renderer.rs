@@ -187,17 +187,12 @@ pub struct AdjustmentLine {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliverySlipMode {
+    #[default]
     DeliveryOrder,
     AssignDriver,
-}
-
-impl Default for DeliverySlipMode {
-    fn default() -> Self {
-        Self::DeliveryOrder
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -410,6 +405,10 @@ pub struct LayoutConfig {
     pub printable_width_dots: u16,
     pub left_margin_dots: u16,
     pub raster_threshold: u8,
+    /// User-configurable text scale for classic receipt layout (0.8–2.0, default 1.25).
+    pub text_scale: f32,
+    /// User-configurable logo scale (0.5–2.0, default 1.0).
+    pub logo_scale: f32,
 }
 
 impl Default for LayoutConfig {
@@ -445,6 +444,8 @@ impl Default for LayoutConfig {
             printable_width_dots: 576,
             left_margin_dots: 0,
             raster_threshold: 160,
+            text_scale: 1.25,
+            logo_scale: 1.0,
         }
     }
 }
@@ -1630,11 +1631,10 @@ fn apply_character_set(
     character_set: &str,
     greek_render_mode: Option<&str>,
     escpos_code_page: Option<u8>,
-    brand: crate::printers::PrinterBrand,
+    use_star_commands: bool,
 ) -> Vec<RenderWarning> {
     let mut warnings = Vec::new();
     let cs = character_set.trim().to_ascii_uppercase();
-    let is_star = brand == crate::printers::PrinterBrand::Star;
 
     // When user provides an explicit code page override, use it directly.
     // This lets users match the exact code page number for their printer model
@@ -1648,7 +1648,7 @@ fn apply_character_set(
     // Star Line Mode uses ESC GS t n (0x1B 0x1D 0x74 n), whereas
     // standard ESC/POS uses ESC t n (0x1B 0x74 n).
     let set_code_page = |b: &mut EscPosBuilder, page: u8| {
-        if is_star {
+        if use_star_commands {
             b.star_code_page(page);
         } else {
             b.code_page(page);
@@ -1681,7 +1681,7 @@ fn apply_character_set(
                 set_code_page(builder, 16);
             }
             "PC737_GREEK" | "CP66_GREEK" | "PC851_GREEK" | "PC869_GREEK" | "PC1253_GREEK" => {
-                if is_star {
+                if use_star_commands {
                     builder.star_code_page(15);
                 } else {
                     builder.code_page(14);
@@ -1717,13 +1717,14 @@ pub fn apply_character_set_for_test(
     greek_render_mode: Option<&str>,
     escpos_code_page: Option<u8>,
     brand: crate::printers::PrinterBrand,
+    emulation_mode: ReceiptEmulationMode,
 ) -> Vec<RenderWarning> {
     apply_character_set(
         builder,
         character_set,
         greek_render_mode,
         escpos_code_page,
-        brand,
+        uses_star_commands(brand, emulation_mode),
     )
 }
 
@@ -1798,11 +1799,34 @@ pub fn resolve_auto_code_page(
     }
 }
 
-fn html_shell(title: &str, body: &str, template: ReceiptTemplate) -> String {
+fn html_shell(
+    title: &str,
+    body: &str,
+    template: ReceiptTemplate,
+    text_scale: f32,
+    logo_scale: f32,
+) -> String {
     let template_cls = match template {
         ReceiptTemplate::Modern => "modern",
         ReceiptTemplate::Classic => "classic",
     };
+    // Scale classic CSS font sizes: base_size * text_scale (base sizes are the
+    // original unscaled values; at text_scale=1.0 they match the original CSS).
+    let ts = text_scale;
+    let c_store_name = 12.0_f32 * ts;
+    let c_store_sub = 10.0_f32 * ts;
+    let c_store_detail = 9.0_f32 * ts;
+    let c_meta = 9.0_f32 * ts;
+    let c_sec_head = 9.0_f32 * ts;
+    let c_item = 10.0_f32 * ts;
+    let c_item_mods = 8.5_f32 * ts;
+    let c_table = 10.0_f32 * ts;
+    let c_grand = 13.0_f32 * ts;
+    let c_footer = 9.0_f32 * ts;
+    // Logo dimensions scale with logo_scale (base: 60px circle, 11px text).
+    let logo_w = (60.0_f32 * logo_scale).round();
+    let logo_h = logo_w;
+    let logo_font = (11.0_f32 * logo_scale).round();
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -1821,9 +1845,9 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
 
 /* Logo */
 .logo-area {{ text-align: center; margin-bottom: 12px; }}
-.logo-circle {{ width: 60px; height: 60px; border: 2px solid #000; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+.logo-circle {{ width: {logo_w}px; height: {logo_h}px; border: 2px solid #000; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
 .logo-circle img {{ width: 100%; height: 100%; object-fit: contain; }}
-.logo-circle .logo-text {{ font-size: 11px; font-weight: 700; text-transform: uppercase; text-align: center; line-height: 1.2; }}
+.logo-circle .logo-text {{ font-size: {logo_font}px; font-weight: 700; text-transform: uppercase; text-align: center; line-height: 1.2; }}
 
 /* Branch info (shared) */
 .branch-info {{ text-align: center; margin-bottom: 14px; }}
@@ -1854,27 +1878,27 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
 
 /* ── CLASSIC ── */
 .classic {{ font-family: 'Courier Prime', 'Courier New', monospace; }}
-.classic .branch-info .store-name {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 1px; }}
-.classic .branch-info .store-sub {{ font-family: 'Playfair Display', Georgia, serif; font-size: 10px; font-style: italic; color: #555; margin-bottom: 5px; }}
-.classic .branch-info .store-detail {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; color: #444; line-height: 1.75; }}
+.classic .branch-info .store-name {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_store_name}px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 1px; }}
+.classic .branch-info .store-sub {{ font-family: 'Playfair Display', Georgia, serif; font-size: {c_store_sub}px; font-style: italic; color: #555; margin-bottom: 5px; }}
+.classic .branch-info .store-detail {{ font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_store_detail}px; color: #444; line-height: 1.75; }}
 .classic hr {{ border: none; border-top: 1px dashed #999; margin: 10px 0; }}
 .classic hr.solid {{ border-top: 1px solid #000; margin: 10px 0; }}
 .classic hr.double {{ border-top: 3px double #000; margin: 10px 0; }}
-.classic .meta-line {{ font-size: 9px; line-height: 1.85; }}
+.classic .meta-line {{ font-size: {c_meta}px; line-height: 1.85; }}
 .classic .meta-line b {{ font-weight: 700; }}
-.classic .sec-head {{ background: #000; color: #fff; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; font-weight: 700; letter-spacing: 3px; text-align: center; padding: 3px 0; margin: 10px 0 8px; }}
-.classic .item {{ font-size: 10px; margin-bottom: 6px; }}
+.classic .sec-head {{ background: #000; color: #fff; font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_sec_head}px; font-weight: 700; letter-spacing: 3px; text-align: center; padding: 3px 0; margin: 10px 0 8px; }}
+.classic .item {{ font-size: {c_item}px; margin-bottom: 6px; }}
 .classic .item-row {{ display: flex; justify-content: space-between; }}
 .classic .item-name {{ font-weight: 700; }}
 .classic .item-price {{ font-weight: 700; }}
-.classic .item-mods {{ font-size: 8.5px; color: #666; padding-left: 10px; margin-top: 1px; line-height: 1.6; }}
-.classic table {{ width: 100%; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 10px; border-collapse: collapse; }}
+.classic .item-mods {{ font-size: {c_item_mods}px; color: #666; padding-left: 10px; margin-top: 1px; line-height: 1.6; }}
+.classic table {{ width: 100%; font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_table}px; border-collapse: collapse; }}
 .classic table td {{ padding: 2px 0; }}
 .classic table .r {{ text-align: right; }}
 .classic table .dim {{ color: #555; }}
-.classic .grand td {{ font-size: 13px; font-weight: 700; padding-top: 5px; }}
-.classic .change td {{ font-size: 13px; font-weight: 700; padding-top: 5px; }}
-.classic .footer {{ text-align: center; margin-top: 14px; font-family: 'Courier Prime', 'Courier New', monospace; font-size: 9px; color: #666; line-height: 2; letter-spacing: 1px; }}
+.classic .grand td {{ font-size: {c_grand}px; font-weight: 700; padding-top: 5px; }}
+.classic .change td {{ font-size: {c_grand}px; font-weight: 700; padding-top: 5px; }}
+.classic .footer {{ text-align: center; margin-top: 14px; font-family: 'Courier Prime', 'Courier New', monospace; font-size: {c_footer}px; color: #666; line-height: 2; letter-spacing: 1px; }}
 
 /* Legacy compat classes */
 .line {{ display: flex; justify-content: space-between; gap: 8px; font-size: 10px; }}
@@ -1888,7 +1912,20 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
 </html>"#,
         title = esc(title),
         template_cls = template_cls,
-        body = body
+        body = body,
+        logo_w = logo_w,
+        logo_h = logo_h,
+        logo_font = logo_font,
+        c_store_name = c_store_name,
+        c_store_sub = c_store_sub,
+        c_store_detail = c_store_detail,
+        c_meta = c_meta,
+        c_sec_head = c_sec_head,
+        c_item = c_item,
+        c_item_mods = c_item_mods,
+        c_table = c_table,
+        c_grand = c_grand,
+        c_footer = c_footer,
     )
 }
 
@@ -2369,7 +2406,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(translated_footer)
             ));
 
-            html_shell("Order Receipt", &body, cfg.template)
+            html_shell(
+                "Order Receipt",
+                &body,
+                cfg.template,
+                cfg.text_scale,
+                cfg.logo_scale,
+            )
         }
         ReceiptDocument::KitchenTicket(doc) => {
             let lang = cfg.language.as_str();
@@ -2569,7 +2612,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 }
             }
             body.push_str("</div>");
-            html_shell(receipt_label(lang, "KITCHEN TICKET"), &body, cfg.template)
+            html_shell(
+                receipt_label(lang, "KITCHEN TICKET"),
+                &body,
+                cfg.template,
+                cfg.text_scale,
+                cfg.logo_scale,
+            )
         }
         ReceiptDocument::DeliverySlip(doc) => {
             let lang = cfg.language.as_str();
@@ -2694,7 +2743,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     .as_deref()
                     .unwrap_or(receipt_label(lang, "Thank you")))
             ));
-            html_shell(receipt_label(lang, "DELIVERY SLIP"), &body, cfg.template)
+            html_shell(
+                receipt_label(lang, "DELIVERY SLIP"),
+                &body,
+                cfg.template,
+                cfg.text_scale,
+                cfg.logo_scale,
+            )
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let expected = doc
@@ -2749,7 +2804,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Variance")),
                 variance
             );
-            html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg.template)
+            html_shell(
+                receipt_label(lang, "SHIFT CHECKOUT"),
+                &body,
+                cfg.template,
+                cfg.text_scale,
+                cfg.logo_scale,
+            )
         }
         ReceiptDocument::ZReport(doc) => {
             let mut body = format!(
@@ -2940,7 +3001,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 ));
             }
 
-            html_shell(receipt_label(lang, "Z REPORT"), &body, cfg.template)
+            html_shell(
+                receipt_label(lang, "Z REPORT"),
+                &body,
+                cfg.template,
+                cfg.text_scale,
+                cfg.logo_scale,
+            )
         }
     }
 }
@@ -3038,7 +3105,14 @@ fn emit_pair_internal(
             }
             builder.bold(true).text(value).bold(false).lf();
         } else {
-            builder.line_pair(tail, value);
+            // Use passed `width` for gap calculation instead of `line_pair()`
+            // which uses `self.paper.chars()` (not scaled for 2×2 text).
+            builder.text(tail);
+            let gap = width.saturating_sub(tail_len + value_len);
+            for _ in 0..gap {
+                builder.text(" ");
+            }
+            builder.text(value).lf();
         }
     } else {
         builder.text(tail).lf();
@@ -3115,7 +3189,7 @@ fn wrap_centered_header(text: &str, width: usize) -> Vec<String> {
 
 fn split_address_segments(value: &str) -> Vec<String> {
     value
-        .split(|ch| matches!(ch, ',' | '|' | '\n' | '\r'))
+        .split([',', '|', '\n', '\r'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .map(ToString::to_string)
@@ -3252,16 +3326,12 @@ fn emit_section_header(builder: &mut EscPosBuilder, title: &str, style: EscPosSt
         builder.lf();
     }
     if style.modern {
-        // Modern: left-aligned bold title + dash rule below
-        let rule: String = std::iter::repeat(style.profile.section_rule)
-            .take(width.max(8))
-            .collect();
-        builder.left();
-        builder.bold(true).text(&title_upper).lf().bold(false);
+        // Modern: thin dash rule above + centered bold title (matches HTML preview)
+        let rule = "-".repeat(width.max(8));
         builder.text(&rule).lf();
-        for _ in 0..style.profile.section_spacing_lines {
-            builder.lf();
-        }
+        builder.center();
+        builder.bold(true).text(&title_upper).lf().bold(false);
+        builder.left();
         return;
     }
     if !style.profile.bracket_sections {
@@ -3390,7 +3460,11 @@ fn emit_header(
             message: "Logo enabled but URL missing; using text header fallback".to_string(),
         });
     }
-    let header_width = cfg.paper_width.chars();
+    let header_width = if style.modern {
+        cfg.paper_width.chars()
+    } else {
+        cfg.paper_width.chars() / 2
+    };
 
     if style.modern {
         // ── Modern header ──────────────────────────────────────────────
@@ -3627,7 +3701,7 @@ fn emit_header(
     }
     builder.left();
     // Classic customer receipts keep a compact handoff into the order banner.
-    if !(doc_target.is_customer_receipt() && !style.modern) {
+    if !doc_target.is_customer_receipt() || style.modern {
         builder.lf();
     }
 }
@@ -3640,12 +3714,32 @@ fn default_printable_width_dots_for_paper(paper: PaperWidth) -> u16 {
     }
 }
 
-fn is_star_line_mode(cfg: &LayoutConfig) -> bool {
-    match cfg.emulation_mode {
+pub fn uses_star_commands(
+    brand: crate::printers::PrinterBrand,
+    emulation_mode: ReceiptEmulationMode,
+) -> bool {
+    match emulation_mode {
         ReceiptEmulationMode::StarLine => true,
         ReceiptEmulationMode::Escpos => false,
-        ReceiptEmulationMode::Auto => cfg.detected_brand == crate::printers::PrinterBrand::Star,
+        ReceiptEmulationMode::Auto => brand == crate::printers::PrinterBrand::Star,
     }
+}
+
+pub fn effective_code_page_brand(
+    brand: crate::printers::PrinterBrand,
+    emulation_mode: ReceiptEmulationMode,
+) -> crate::printers::PrinterBrand {
+    if uses_star_commands(brand, emulation_mode) {
+        crate::printers::PrinterBrand::Star
+    } else if brand == crate::printers::PrinterBrand::Star {
+        crate::printers::PrinterBrand::Unknown
+    } else {
+        brand
+    }
+}
+
+fn is_star_line_mode(cfg: &LayoutConfig) -> bool {
+    uses_star_commands(cfg.detected_brand, cfg.emulation_mode)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3794,7 +3888,14 @@ fn scale_raster_exact_preset(mut preset: RasterExactPreset, scale: f32) -> Raste
 
 fn raster_exact_preset_for_layout(cfg: &LayoutConfig) -> RasterExactPreset {
     let base = raster_exact_preset_for_paper(cfg.paper_width);
-    scale_raster_exact_preset(base, raster_readability_scale(cfg))
+    // Apply user-configurable text_scale for classic layout so raster-exact
+    // text is larger on thermal paper, then layer on the readability adjustment.
+    let classic_scale = if cfg.template != ReceiptTemplate::Modern {
+        cfg.text_scale
+    } else {
+        1.0
+    };
+    scale_raster_exact_preset(base, classic_scale * raster_readability_scale(cfg))
 }
 
 struct RasterFonts {
@@ -3802,13 +3903,23 @@ struct RasterFonts {
     bold: RustFont<'static>,
 }
 
-impl RasterFonts {
-    fn load() -> Result<Self, String> {
+/// Cached parsed TTF fonts — parsing embedded TTF bytes is expensive (~100-500ms
+/// per font).  Since the fonts are static, we parse once and reuse forever.
+fn cached_raster_fonts() -> &'static RasterFonts {
+    use std::sync::OnceLock;
+    static FONTS: OnceLock<RasterFonts> = OnceLock::new();
+    FONTS.get_or_init(|| {
         let regular = RustFont::try_from_bytes(NOTO_SERIF_REGULAR_TTF)
-            .ok_or_else(|| "failed to load embedded Noto Serif Regular".to_string())?;
+            .expect("embedded Noto Serif Regular must parse");
         let bold = RustFont::try_from_bytes(NOTO_SERIF_BOLD_TTF)
-            .ok_or_else(|| "failed to load embedded Noto Serif Bold".to_string())?;
-        Ok(Self { regular, bold })
+            .expect("embedded Noto Serif Bold must parse");
+        RasterFonts { regular, bold }
+    })
+}
+
+impl RasterFonts {
+    fn load() -> Result<&'static Self, String> {
+        Ok(cached_raster_fonts())
     }
 
     fn font(&self, weight: RasterTextWeight) -> &RustFont<'static> {
@@ -3886,7 +3997,7 @@ struct TtfReceiptComposer {
     content_width: i32,
     y: i32,
     preset: RasterExactPreset,
-    fonts: RasterFonts,
+    fonts: &'static RasterFonts,
     missing_glyph_count: usize,
 }
 
@@ -4128,6 +4239,7 @@ fn glyph_for_char(ch: char) -> [u8; 8] {
         .unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap_or([0; 8]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_bitmap_text(
     image: &mut GrayImage,
     text: &str,
@@ -4419,25 +4531,131 @@ fn grayscale_to_raster_bytes(image: &GrayImage, threshold: u8) -> (u16, u16, Vec
     (width_bytes, height as u16, data)
 }
 
+const ESC_POS_RASTER_MAX_CHUNK_HEIGHT_DOTS: usize = 192;
+
 fn raster_image_to_escpos_bytes(image: &GrayImage, cfg: &LayoutConfig) -> Vec<u8> {
     let threshold = cfg.raster_threshold.clamp(40, 240);
     let (width_bytes, height_dots, data) = grayscale_to_raster_bytes(image, threshold);
     let mut builder = EscPosBuilder::new().with_paper(cfg.paper_width);
     builder.init();
     if is_star_line_mode(cfg) {
+        // Star printers require the Star-specific ESC * r raster protocol.
+        // GS v 0 is NOT supported by Star mC-Print3 and similar models.
         builder.star_raster_image(width_bytes, height_dots, &data);
         builder.lf().lf().lf().lf().star_cut();
     } else {
-        builder.raster_image(width_bytes, height_dots, &data);
+        // Standard ESC/POS: chunk tall images into multiple GS v 0 commands
+        // to stay within printer buffer limits.
+        let row_bytes = width_bytes as usize;
+        let total_rows = height_dots as usize;
+        let chunk_height = ESC_POS_RASTER_MAX_CHUNK_HEIGHT_DOTS.max(1);
+        for row_start in (0..total_rows).step_by(chunk_height) {
+            let rows_in_chunk = (total_rows - row_start).min(chunk_height);
+            let byte_start = row_start * row_bytes;
+            let byte_end = byte_start + rows_in_chunk * row_bytes;
+            builder.raster_image(
+                width_bytes,
+                rows_in_chunk as u16,
+                &data[byte_start..byte_end],
+            );
+        }
         builder.feed(4).cut();
     }
     builder.build()
 }
 
+fn copy_gray_image(dst: &mut GrayImage, src: &GrayImage, offset_x: u32, offset_y: u32) {
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            let target_x = offset_x + x;
+            let target_y = offset_y + y;
+            if target_x < dst.width() && target_y < dst.height() {
+                let pixel = *src.get_pixel(x, y);
+                dst.put_pixel(target_x, target_y, pixel);
+            }
+        }
+    }
+}
+
+fn first_non_white_row(image: &GrayImage) -> Option<u32> {
+    for y in 0..image.height() {
+        for x in 0..image.width() {
+            if image.get_pixel(x, y).0[0] < 250 {
+                return Some(y);
+            }
+        }
+    }
+    None
+}
+
+fn trim_raster_body_top_margin(image: &GrayImage) -> GrayImage {
+    let Some(first_dark_row) = first_non_white_row(image) else {
+        return image.clone();
+    };
+    let crop_from = first_dark_row.saturating_sub(2);
+    if crop_from == 0 {
+        return image.clone();
+    }
+    image::imageops::crop_imm(
+        image,
+        0,
+        crop_from,
+        image.width(),
+        image.height() - crop_from,
+    )
+    .to_image()
+}
+
+fn receipt_like_logo_top_padding(paper: PaperWidth) -> u32 {
+    match paper {
+        PaperWidth::Mm58 => 10,
+        PaperWidth::Mm80 => 14,
+        PaperWidth::Mm112 => 18,
+    }
+}
+
+fn receipt_like_logo_gap(paper: PaperWidth) -> u32 {
+    match paper {
+        PaperWidth::Mm58 => 8,
+        PaperWidth::Mm80 => 12,
+        PaperWidth::Mm112 => 16,
+    }
+}
+
+fn compose_receipt_like_logo_image(body: GrayImage, cfg: &LayoutConfig) -> GrayImage {
+    let logo = match crate::print::load_receipt_like_logo_image(cfg) {
+        Ok(Some(logo)) => logo,
+        Ok(None) => return body,
+        Err(err) => {
+            tracing::warn!(error = %err, "Receipt logo embed failed; keeping body-only raster output");
+            return body;
+        }
+    };
+
+    let body = trim_raster_body_top_margin(&body);
+    let top_padding = receipt_like_logo_top_padding(cfg.paper_width);
+    let gap = receipt_like_logo_gap(cfg.paper_width);
+    let total_height = top_padding + logo.height() + gap + body.height();
+    let mut combined = GrayImage::from_pixel(body.width(), total_height, Luma([255]));
+    let logo_x = ((combined.width() as i32 - logo.width() as i32) / 2).max(0) as u32;
+    copy_gray_image(&mut combined, &logo, logo_x, top_padding);
+    copy_gray_image(&mut combined, &body, 0, top_padding + logo.height() + gap);
+    combined
+}
+
+fn finalize_raster_exact_bytes(body: GrayImage, cfg: &LayoutConfig, embed_logo: bool) -> Vec<u8> {
+    let composed = if embed_logo {
+        compose_receipt_like_logo_image(body, cfg)
+    } else {
+        body
+    };
+    raster_image_to_escpos_bytes(&composed, cfg)
+}
+
 fn render_classic_customer_raster_exact_ttf(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<GrayImage, String> {
     let (doc, is_delivery_slip) = match document {
         ReceiptDocument::OrderReceipt(doc) => (doc, false),
         ReceiptDocument::DeliverySlip(doc) => (doc, true),
@@ -4453,7 +4671,7 @@ fn render_classic_customer_raster_exact_ttf(
     let short_number = extract_short_order_number(&doc.order_number);
     let mut canvas = TtfReceiptComposer::try_new(cfg)?;
     let preset = canvas.preset;
-    let cur = resolve_raster_currency_symbol(cfg, &canvas.fonts);
+    let cur = resolve_raster_currency_symbol(cfg, canvas.fonts);
 
     canvas.draw_rule();
     if let Some(copy_label) = cfg
@@ -4694,14 +4912,13 @@ fn render_classic_customer_raster_exact_ttf(
         return Err("embedded font missing glyphs for classic raster exact body".to_string());
     }
 
-    let image = canvas.into_cropped();
-    Ok(raster_image_to_escpos_bytes(&image, cfg))
+    Ok(canvas.into_cropped())
 }
 
 fn render_classic_customer_raster_exact_bitmap(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<GrayImage, String> {
     let (doc, is_delivery_slip) = match document {
         ReceiptDocument::OrderReceipt(doc) => (doc, false),
         ReceiptDocument::DeliverySlip(doc) => (doc, true),
@@ -4976,8 +5193,7 @@ fn render_classic_customer_raster_exact_bitmap(
         );
     }
 
-    let image = canvas.into_cropped();
-    Ok(raster_image_to_escpos_bytes(&image, cfg))
+    Ok(canvas.into_cropped())
 }
 
 fn render_classic_customer_raster_exact(
@@ -4985,10 +5201,11 @@ fn render_classic_customer_raster_exact(
     cfg: &LayoutConfig,
 ) -> Result<Vec<u8>, String> {
     match render_classic_customer_raster_exact_ttf(document, cfg) {
-        Ok(bytes) => Ok(bytes),
+        Ok(image) => Ok(finalize_raster_exact_bytes(image, cfg, true)),
         Err(err) => {
             tracing::warn!(error = %err, "Raster exact TTF render failed; using bitmap fallback");
-            render_classic_customer_raster_exact_bitmap(document, cfg)
+            let image = render_classic_customer_raster_exact_bitmap(document, cfg)?;
+            Ok(finalize_raster_exact_bytes(image, cfg, true))
         }
     }
 }
@@ -5115,12 +5332,12 @@ fn emit_raster_common_footer(
 fn render_classic_non_customer_raster_exact_ttf(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<GrayImage, String> {
     let lang = cfg.language.as_str();
     let comma = cfg.decimal_comma;
     let mut canvas = TtfReceiptComposer::try_new(cfg)?;
     let preset = canvas.preset;
-    let cur = resolve_raster_currency_symbol(cfg, &canvas.fonts);
+    let cur = resolve_raster_currency_symbol(cfg, canvas.fonts);
 
     emit_raster_common_header(&mut canvas, cfg, lang, preset);
 
@@ -5424,8 +5641,7 @@ fn render_classic_non_customer_raster_exact_ttf(
         return Err("embedded font missing glyphs for classic raster exact body".to_string());
     }
 
-    let image = canvas.into_cropped();
-    Ok(raster_image_to_escpos_bytes(&image, cfg))
+    Ok(canvas.into_cropped())
 }
 
 fn render_classic_raster_exact(
@@ -5436,13 +5652,19 @@ fn render_classic_raster_exact(
         ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
             render_classic_customer_raster_exact(document, cfg)
         }
-        _ => render_classic_non_customer_raster_exact_ttf(document, cfg),
+        ReceiptDocument::KitchenTicket(_) => {
+            let image = render_classic_non_customer_raster_exact_ttf(document, cfg)?;
+            Ok(finalize_raster_exact_bytes(image, cfg, true))
+        }
+        _ => {
+            let image = render_classic_non_customer_raster_exact_ttf(document, cfg)?;
+            Ok(finalize_raster_exact_bytes(image, cfg, false))
+        }
     }
 }
 
 pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRender {
     let doc_target = escpos_document_target(document);
-    let width = cfg.paper_width.chars();
     let style = escpos_style(cfg, doc_target);
     let classic_customer_layout = !style.modern && doc_target.is_customer_receipt();
     let mut warnings = Vec::new();
@@ -5461,14 +5683,21 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }),
         }
     }
-    let mut builder = EscPosBuilder::new().with_paper(cfg.paper_width);
+    let use_star_commands = is_star_line_mode(cfg);
+    let mut builder = if use_star_commands {
+        EscPosBuilder::new()
+            .with_paper(cfg.paper_width)
+            .with_star_line_mode()
+    } else {
+        EscPosBuilder::new().with_paper(cfg.paper_width)
+    };
     builder.init();
     warnings.extend(apply_character_set(
         &mut builder,
         &cfg.character_set,
         cfg.greek_render_mode.as_deref(),
         cfg.escpos_code_page,
-        cfg.detected_brand,
+        use_star_commands,
     ));
     let render_font = if classic_customer_layout {
         // Classic receipt v2.1 lock: always use Font A for deterministic output.
@@ -5484,12 +5713,18 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             builder.font_b();
         }
     }
+    // Classic layout: double text size (2×2) for larger thermal print output.
+    // Halve effective width since each character now occupies 2 columns.
+    let width = if !style.modern {
+        builder.text_size(2, 2);
+        cfg.paper_width.chars() / 2
+    } else {
+        cfg.paper_width.chars()
+    };
     emit_header(&mut builder, cfg, style, doc_target, &mut warnings);
 
     let lang = cfg.language.as_str();
     let comma = cfg.decimal_comma;
-    let is_star = cfg.detected_brand == crate::printers::PrinterBrand::Star;
-
     match document {
         ReceiptDocument::OrderReceipt(doc) => {
             let render_delivery_block = should_render_delivery_block(doc);
@@ -5509,22 +5744,54 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 let order_label = receipt_label(lang, "Order");
                 let type_label = receipt_label(lang, "Type");
                 if style.modern {
-                    // Modern: inline banner
+                    // Modern: bordered order-type box + meta-grid pairs (matches HTML preview)
+                    emit_rule(&mut builder, width, '-');
                     builder.center().bold(true);
-                    emit_banner(
-                        &mut builder,
-                        width,
-                        '-',
-                        &format!("{} #{}", order_label, doc.order_number),
-                    );
+                    builder.text(&format!("[ {} ]", order_type_display)).lf();
                     builder.bold(false).left();
-                    let meta_line = format!(
-                        "{}  |  {}: {}",
-                        format_datetime_short(&doc.created_at).replace(' ', "  |  "),
-                        type_label,
-                        order_type_display,
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Order"),
+                        &format!("#{}", doc.order_number),
+                        width,
                     );
-                    builder.text(&meta_line).lf();
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Date"),
+                        &format_datetime_human(&doc.created_at),
+                        width,
+                    );
+                    if let Some(table) = doc
+                        .table_number
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        emit_pair(&mut builder, receipt_label(lang, "Table"), table, width);
+                    }
+                    if let Some(customer) = doc
+                        .customer_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                    {
+                        emit_pair(
+                            &mut builder,
+                            receipt_label(lang, "Customer"),
+                            customer,
+                            width,
+                        );
+                    }
+                    if !render_delivery_block {
+                        if let Some(phone) = doc
+                            .customer_phone
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            emit_pair(&mut builder, receipt_label(lang, "Phone"), phone, width);
+                        }
+                    }
                 } else {
                     // Classic: reverse (white-on-black) banner for order number
                     // Uppercase label (Παραγγελία → ΠΑΡΑΓΓΕΛΙΑ) and use short
@@ -5547,13 +5814,13 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         emit_rule(&mut builder, width, style.profile.block_rule);
                     }
                     builder.center().bold(true);
-                    if is_star {
+                    if use_star_commands {
                         builder.star_reverse(true);
                     } else {
                         builder.reverse(true);
                     }
                     builder.text(&padded).lf();
-                    if is_star {
+                    if use_star_commands {
                         builder.star_reverse(false);
                     } else {
                         builder.reverse(false);
@@ -5577,48 +5844,52 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     }
                 }
             }
-            if let Some(table) = doc
-                .table_number
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                let table_label = receipt_label(lang, "Table");
-                builder
-                    .bold(true)
-                    .text(&format!("{table_label}:"))
-                    .bold(false)
-                    .text(&format!(" {table}"))
-                    .lf();
-            }
-            if let Some(customer) = doc
-                .customer_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                let customer_label = receipt_label(lang, "Customer");
-                builder
-                    .bold(true)
-                    .text(&format!("{customer_label}:"))
-                    .bold(false)
-                    .text(&format!(" {customer}"))
-                    .lf();
-            }
-            if let Some(phone) = doc
-                .customer_phone
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                if !render_delivery_block {
-                    let phone_label = receipt_label(lang, "Phone");
+            // Classic only: table/customer/phone as bold-label pairs
+            // (Modern handles these in the meta-grid above)
+            if !style.modern {
+                if let Some(table) = doc
+                    .table_number
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    let table_label = receipt_label(lang, "Table");
                     builder
                         .bold(true)
-                        .text(&format!("{phone_label}:"))
+                        .text(&format!("{table_label}:"))
                         .bold(false)
-                        .text(&format!(" {phone}"))
+                        .text(&format!(" {table}"))
                         .lf();
+                }
+                if let Some(customer) = doc
+                    .customer_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    let customer_label = receipt_label(lang, "Customer");
+                    builder
+                        .bold(true)
+                        .text(&format!("{customer_label}:"))
+                        .bold(false)
+                        .text(&format!(" {customer}"))
+                        .lf();
+                }
+                if let Some(phone) = doc
+                    .customer_phone
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    if !render_delivery_block {
+                        let phone_label = receipt_label(lang, "Phone");
+                        builder
+                            .bold(true)
+                            .text(&format!("{phone_label}:"))
+                            .bold(false)
+                            .text(&format!(" {phone}"))
+                            .lf();
+                    }
                 }
             }
             if render_delivery_block {
@@ -5753,11 +6024,16 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 );
                 builder.underline(0);
             }
-            if !order_notes.is_empty() {
+            if !order_notes.is_empty() && !style.modern {
                 emit_rule(&mut builder, width, style.profile.block_rule);
             }
-            // Both templates: section header ΕΙΔΗ with dash rule
-            emit_section_header(&mut builder, receipt_label(lang, "ITEMS"), style, width);
+            // Section header: modern uses "Order" (ΠΑΡΑΓΓΕΛΙΑ), classic uses "ITEMS" (ΕΙΔΗ)
+            let items_label = if style.modern {
+                receipt_label(lang, "Order")
+            } else {
+                receipt_label(lang, "ITEMS")
+            };
+            emit_section_header(&mut builder, items_label, style, width);
             if doc.items.is_empty() {
                 builder.text(receipt_label(lang, "No items")).lf();
             } else {
@@ -5772,9 +6048,10 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     } else {
                         money_locale(item.total, comma)
                     };
+                    let qty_sep = if style.modern { "\u{00D7} " } else { " x " };
                     emit_item_line(
                         &mut builder,
-                        &format!("{} x {}", qty(item.quantity), item.name),
+                        &format!("{}{}{}", qty(item.quantity), qty_sep, item.name),
                         &item_price,
                         width,
                         style,
@@ -5797,8 +6074,8 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 }
             }
             if style.modern {
-                // Modern: blank line before totals
-                builder.lf();
+                // Modern: dash rule before totals (matches HTML <hr>)
+                emit_rule(&mut builder, width, '-');
             } else {
                 // Classic: rule before totals
                 emit_rule(&mut builder, width, style.profile.block_rule);
@@ -5821,7 +6098,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     // Emphasized totals (ΣΥΝΟΛΟ) — bold + large, with currency
                     builder.bold(true);
                     if can_scale_text(style) {
-                        builder.double_height();
+                        if style.modern {
+                            builder.double_height();
+                        } else {
+                            builder.text_size(2, 4);
+                        }
                     }
                     emit_pair(
                         &mut builder,
@@ -5830,7 +6111,11 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                     if can_scale_text(style) {
-                        builder.normal_size();
+                        if style.modern {
+                            builder.normal_size();
+                        } else {
+                            builder.text_size(2, 2);
+                        }
                     }
                     builder.bold(false);
                     if !style.modern {
@@ -6402,7 +6687,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .lf()
                     .bold(false)
                     .left();
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
                 for d in &doc.driver_deliveries {
                     let label = format!("#{} {}", d.order_number, d.payment_method);
                     emit_pair(
@@ -6412,7 +6697,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                 }
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
 
                 builder.lf();
                 builder
@@ -6422,7 +6707,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .lf()
                     .bold(false)
                     .left();
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
                 emit_pair(
                     &mut builder,
                     receipt_label(lang, "Cash Collected"),
@@ -6447,7 +6732,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     &money_locale(doc.total_tips, comma),
                     width,
                 );
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
 
                 emit_pair(
                     &mut builder,
@@ -6509,7 +6794,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &doc.terminal_name,
                 width,
             );
-            builder.separator();
+            emit_rule(&mut builder, width, '-');
 
             // --- Sales summary ---
             builder
@@ -6549,7 +6834,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     width,
                 );
             }
-            builder.separator();
+            emit_rule(&mut builder, width, '-');
 
             // --- Payments ---
             builder
@@ -6585,7 +6870,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     width,
                 );
             }
-            builder.separator();
+            emit_rule(&mut builder, width, '-');
 
             // --- Order breakdown ---
             let has_breakdown =
@@ -6632,7 +6917,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                 }
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
             }
 
             // --- Cash drawer ---
@@ -6696,7 +6981,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         width,
                     );
                 }
-                builder.separator();
+                emit_rule(&mut builder, width, '-');
                 emit_pair(
                     &mut builder,
                     receipt_label(lang, "Expected"),
@@ -6791,7 +7076,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
         }
         builder.left();
     }
-    if cfg.detected_brand == crate::printers::PrinterBrand::Star {
+    if use_star_commands {
         // Star Line Mode: LF feed + ESC d 1 partial cut.
         // Star does not recognize GS V A and prints literal "VA" text.
         builder.lf().lf().lf().lf().star_cut();
@@ -6858,6 +7143,26 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.code == "greek_bitmap_fallback"));
+    }
+
+    #[test]
+    fn text_render_uses_star_commands_when_star_line_emulation_is_forced() {
+        let cfg = LayoutConfig {
+            character_set: "PC737_GREEK".to_string(),
+            emulation_mode: ReceiptEmulationMode::StarLine,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "A-2".to_string(),
+            order_type: "dine-in".to_string(),
+            created_at: "2026-02-24".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let out = render_escpos(&doc, &cfg);
+
+        assert!(out.bytes.windows(4).any(|w| w == [0x1B, 0x1D, 0x74, 15]));
+        assert!(out.bytes.windows(3).any(|w| w == [0x1B, 0x64, 0x01]));
+        assert!(!out.bytes.windows(4).any(|w| w == [0x1D, 0x56, 0x41, 0x10]));
     }
 
     #[test]
@@ -7095,7 +7400,8 @@ mod tests {
         });
         let out = render_escpos(&doc, &cfg);
         let text = String::from_utf8_lossy(&out.bytes);
-        let rules = count_text(&text, "------------------------------------------------");
+        let rule_str = "-".repeat(cfg.paper_width.chars() / 2);
+        let rules = count_text(&text, &rule_str);
         assert!(rules >= 3, "expected at least 3 rules, got {rules}");
     }
 
@@ -7148,7 +7454,7 @@ mod tests {
         assert!(banner_pos != usize::MAX, "banner text not found");
 
         let prefix = &text[..banner_pos];
-        let rule = "-".repeat(cfg.paper_width.chars());
+        let rule = "-".repeat(cfg.paper_width.chars() / 2);
         assert_eq!(
             count_text(prefix, &rule),
             3,
@@ -7205,9 +7511,8 @@ mod tests {
         assert!(subtotal_pos < total_pos);
         let between = &text[subtotal_pos..total_pos];
         assert!(!between.contains("\n\n\n"), "unexpected extra gap");
-        let between_rules = between
-            .matches("------------------------------------------------")
-            .count();
+        let rule_str = "-".repeat(cfg.paper_width.chars() / 2);
+        let between_rules = between.matches(&rule_str).count();
         assert_eq!(between_rules, 1, "expected single rule before TOTAL");
     }
 
@@ -7226,8 +7531,9 @@ mod tests {
         });
         let out = render_escpos(&doc, &cfg);
         let text = String::from_utf8_lossy(&out.bytes);
+        let eff_width = cfg.paper_width.chars() / 2;
         let short_star = "*".repeat(14);
-        let long_star = "*".repeat(cfg.paper_width.chars());
+        let long_star = "*".repeat(eff_width);
         let short_line = format!("{short_star}\n");
         let long_line = format!("{long_star}\n");
         let short_pos = text.find(&short_line).unwrap_or(usize::MAX);
@@ -7238,7 +7544,7 @@ mod tests {
             short_pos < long_pos,
             "expected top short stars before bottom long stars"
         );
-        let top_rule = "-".repeat(cfg.paper_width.chars());
+        let top_rule = "-".repeat(eff_width);
         let top_rule_pos = text.find(&top_rule).unwrap_or(usize::MAX);
         assert!(
             top_rule_pos < short_pos,
@@ -7403,7 +7709,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_customer_raster_exact_uses_star_raster_when_forced() {
+    fn classic_customer_raster_exact_uses_star_raster_when_star_line_mode() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
@@ -7418,7 +7724,16 @@ mod tests {
         });
         let out = render_escpos(&doc, &cfg);
         assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
-        assert!(count_sequence(&out.bytes, &[0x1B, b'*', b'r', b'A']) >= 1);
+        // Star printers must use Star raster (ESC * r A), not GS v 0.
+        assert!(
+            count_sequence(&out.bytes, &[0x1B, b'*', b'r', b'A']) >= 1,
+            "expected Star raster mode (ESC * r A) for Star Line Mode"
+        );
+        assert_eq!(
+            count_sequence(&out.bytes, &[0x1D, b'v', b'0', 0x00]),
+            0,
+            "GS v 0 should not be used for Star printers"
+        );
     }
 
     #[test]
@@ -7495,6 +7810,22 @@ mod tests {
         });
         let out = render_escpos(&doc, &cfg);
         assert_eq!(out.body_mode, EscPosBodyMode::RasterExact);
+    }
+
+    #[test]
+    fn escpos_raster_exact_chunks_tall_images_into_multiple_gs_v0_commands() {
+        let cfg = LayoutConfig {
+            emulation_mode: ReceiptEmulationMode::Escpos,
+            paper_width: PaperWidth::Mm80,
+            ..LayoutConfig::default()
+        };
+        let image = GrayImage::from_pixel(576, 500, Luma([255]));
+        let bytes = raster_image_to_escpos_bytes(&image, &cfg);
+
+        assert!(
+            count_sequence(&bytes, &[0x1D, b'v', b'0']) >= 3,
+            "expected tall ESC/POS raster to be chunked into multiple GS v 0 commands"
+        );
     }
 
     #[test]
@@ -8027,11 +8358,11 @@ mod tests {
             ..LayoutConfig::default()
         };
 
-        // Modern: ITEMS < TOTAL < PAYMENT
+        // Modern: ORDER < TOTAL < PAYMENT
         {
             let out = render_escpos(&doc, &modern);
             let text = String::from_utf8_lossy(&out.bytes);
-            let items = text.find("ITEMS").unwrap_or(usize::MAX);
+            let items = text.find("ORDER").unwrap_or(usize::MAX);
             let total = text.find("TOTAL").unwrap_or(usize::MAX);
             let payment = text.find("PAYMENT").unwrap_or(usize::MAX);
             assert!(items < total);
@@ -8138,13 +8469,145 @@ mod tests {
             String::from_utf8_lossy(&render_escpos(&doc, &classic).bytes).to_string();
         let modern_text = String::from_utf8_lossy(&render_escpos(&doc, &modern).bytes).to_string();
 
-        // Both templates use section headers with ITEMS
-        assert!(modern_text.contains("ITEMS"));
+        // Modern uses "ORDER" section header, classic uses "ITEMS"
+        assert!(modern_text.contains("ORDER"));
         assert!(classic_text.contains("ITEMS"));
         // Classic uses box-drawing rules; Modern uses dash rules
         assert!(!classic_text.contains("===="));
         assert!(!modern_text.contains("===="));
         // Classic no longer has star line at top
         assert!(!classic_text.contains("* * *"));
+    }
+
+    #[test]
+    fn text_scale_affects_raster_preset_sizes() {
+        let small = LayoutConfig {
+            text_scale: 0.8,
+            template: ReceiptTemplate::Classic,
+            ..LayoutConfig::default()
+        };
+        let large = LayoutConfig {
+            text_scale: 2.0,
+            template: ReceiptTemplate::Classic,
+            ..LayoutConfig::default()
+        };
+        let preset_small = raster_exact_preset_for_layout(&small);
+        let preset_large = raster_exact_preset_for_layout(&large);
+        // Larger text_scale must produce larger item font sizes
+        assert!(
+            preset_large.item_style.size_px > preset_small.item_style.size_px,
+            "large text_scale ({}) should have bigger item font than small ({})",
+            preset_large.item_style.size_px,
+            preset_small.item_style.size_px,
+        );
+        assert!(
+            preset_large.total_style.size_px > preset_small.total_style.size_px,
+            "large text_scale ({}) should have bigger total font than small ({})",
+            preset_large.total_style.size_px,
+            preset_small.total_style.size_px,
+        );
+    }
+
+    #[test]
+    fn text_scale_default_matches_legacy_hardcoded_value() {
+        // Default text_scale=1.25 must produce the same preset as the old
+        // hardcoded classic_scale=1.25 path when using Classic template.
+        let default_cfg = LayoutConfig::default();
+        assert!(
+            (default_cfg.text_scale - 1.25).abs() < f32::EPSILON,
+            "default text_scale should be 1.25, got {}",
+            default_cfg.text_scale
+        );
+
+        // Classic template applies text_scale: base 30px * 1.25 = 37.5
+        let classic_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            ..LayoutConfig::default()
+        };
+        let preset = raster_exact_preset_for_layout(&classic_cfg);
+        assert!(
+            (preset.item_style.size_px - 37.5).abs() < 0.01,
+            "classic item_style.size_px should be 37.5px (30 * 1.25), got {}",
+            preset.item_style.size_px,
+        );
+
+        // Modern template ignores text_scale: base 30px * 1.0 = 30
+        let modern_preset = raster_exact_preset_for_layout(&default_cfg);
+        assert!(
+            (modern_preset.item_style.size_px - 30.0).abs() < 0.01,
+            "modern item_style.size_px should be 30px (unscaled), got {}",
+            modern_preset.item_style.size_px,
+        );
+    }
+
+    #[test]
+    fn modern_template_ignores_text_scale_for_raster() {
+        // Modern template should use scale=1.0 regardless of text_scale
+        let modern_low = LayoutConfig {
+            text_scale: 0.8,
+            template: ReceiptTemplate::Modern,
+            ..LayoutConfig::default()
+        };
+        let modern_high = LayoutConfig {
+            text_scale: 2.0,
+            template: ReceiptTemplate::Modern,
+            ..LayoutConfig::default()
+        };
+        let preset_low = raster_exact_preset_for_layout(&modern_low);
+        let preset_high = raster_exact_preset_for_layout(&modern_high);
+        // Modern ignores text_scale, so presets should be identical
+        assert_eq!(
+            preset_low.item_style.size_px, preset_high.item_style.size_px,
+            "Modern template should ignore text_scale: low={}, high={}",
+            preset_low.item_style.size_px, preset_high.item_style.size_px,
+        );
+    }
+
+    #[test]
+    fn html_render_includes_text_and_logo_scale_in_css() {
+        let cfg = LayoutConfig {
+            text_scale: 1.5,
+            logo_scale: 1.5,
+            organization_name: "Test Store".to_string(),
+            show_logo: true,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-1".to_string(),
+            order_type: "dine-in".to_string(),
+            created_at: "2026-03-09".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let html = render_html(&doc, &cfg);
+
+        // text_scale=1.5: base store name font 12px * 1.5 = 18px
+        assert!(
+            html.contains("18px"),
+            "HTML should contain 18px for store name at text_scale=1.5"
+        );
+
+        // logo_scale=1.5: logo circle 60 * 1.5 = 90px
+        assert!(
+            html.contains("90px"),
+            "HTML should contain 90px for logo circle at logo_scale=1.5"
+        );
+
+        // Verify default scales produce default sizes
+        let default_cfg = LayoutConfig {
+            organization_name: "Test Store".to_string(),
+            show_logo: true,
+            ..LayoutConfig::default()
+        };
+        let default_html = render_html(&doc, &default_cfg);
+        // text_scale=1.25: base 12 * 1.25 = 15px for store name
+        assert!(
+            default_html.contains("15px"),
+            "Default HTML should contain 15px for store name at text_scale=1.25"
+        );
+        // logo_scale=1.0: logo circle 60 * 1.0 = 60px
+        assert!(
+            default_html.contains("60px"),
+            "Default HTML should contain 60px for logo circle at logo_scale=1.0"
+        );
     }
 }

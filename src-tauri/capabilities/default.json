@@ -11,5 +11,6 @@
     "updater:deny-download",
     "updater:deny-install",
     "updater:deny-download-and-install"
-  ]
+  ],
+  "_NOTE_core_default": "TODO: core:default grants all core permissions (window management, path resolution, tray, resources, image, menu, webview, app lifecycle). Consider replacing with fine-grained permissions (e.g. core:window:allow-create, core:app:allow-version, core:path:default) once the full set of required core APIs is audited. Tracked as a low-priority hardening task."
 }

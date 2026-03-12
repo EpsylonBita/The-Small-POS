@@ -403,6 +403,9 @@ impl EscPosBuilder {
         let n_l = (width_bytes & 0x00FF) as u8;
         let n_h = ((width_bytes >> 8) & 0x00FF) as u8;
 
+        // ESC @ — reset printer state before entering raster mode.
+        // Prevents corruption from residual bold/underline/codepage state.
+        self.init();
         // ESC * r A — enter raster mode
         self.raw(&[ESC, b'*', b'r', b'A']);
         // ESC * r P '0' NUL — continuous mode (no page boundary).

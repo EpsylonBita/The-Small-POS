@@ -1,9 +1,17 @@
+use chrono::Utc;
 use rusqlite::params;
 use serde_json::Value;
 use tauri::Emitter;
 use zeroize::Zeroizing;
 
-use crate::{api, db, menu, storage};
+use crate::terminal_helpers::{
+    extract_enabled_features_from_terminal_settings_response,
+    extract_parent_terminal_id_from_terminal_settings_response,
+    extract_terminal_type_from_terminal_settings_response,
+};
+use crate::{api, auth, db, menu, storage};
+
+const TERMINAL_RUNTIME_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
 
 #[derive(Debug, PartialEq)]
 struct SettingsSetPayload {
@@ -36,6 +44,29 @@ fn value_to_bool_string(value: &Value) -> Option<String> {
             return Some("false".to_string());
         }
     }
+    None
+}
+
+fn restart_required_reason_for_setting(full_key: &str) -> Option<&'static str> {
+    let normalized = full_key.trim().to_ascii_lowercase();
+    if normalized.starts_with("printer.")
+        || normalized.starts_with("hardware.")
+        || normalized.starts_with("display.")
+        || normalized.starts_with("scanner.")
+        || normalized.starts_with("scale.")
+        || normalized.starts_with("ecr.")
+        || normalized.starts_with("payment_terminal.")
+        || normalized.starts_with("peripherals.")
+    {
+        return Some("hardware_config_changed");
+    }
+
+    if normalized.starts_with("terminal.admin_dashboard_url")
+        || normalized.starts_with("terminal.terminal_id")
+    {
+        return Some("terminal_connection_changed");
+    }
+
     None
 }
 
@@ -209,6 +240,117 @@ fn parse_terminal_config_get_setting_payload(
     (category, key)
 }
 
+fn parse_json_string(value: &str) -> Value {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        return parsed;
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => Value::String(trimmed.to_string()),
+    }
+}
+
+fn read_runtime_setting(db: &db::DbState, category: &str, key: &str) -> Option<String> {
+    let conn = db.conn.lock().ok()?;
+    db::get_setting(&conn, category, key)
+}
+
+fn build_terminal_runtime_config(db: &db::DbState) -> Value {
+    let terminal_id = storage::get_credential("terminal_id")
+        .or_else(|| read_runtime_setting(db, "terminal", "terminal_id"));
+    let branch_id = storage::get_credential("branch_id")
+        .or_else(|| read_runtime_setting(db, "terminal", "branch_id"));
+    let organization_id = storage::get_credential("organization_id")
+        .or_else(|| read_runtime_setting(db, "terminal", "organization_id"));
+    let admin_dashboard_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| read_runtime_setting(db, "terminal", "admin_dashboard_url"))
+        .or_else(|| read_runtime_setting(db, "terminal", "admin_url"));
+    let business_type = storage::get_credential("business_type")
+        .or_else(|| read_runtime_setting(db, "terminal", "business_type"))
+        .or_else(|| read_runtime_setting(db, "general", "business_type"))
+        .unwrap_or_else(|| "food".to_string());
+    let terminal_type = read_runtime_setting(db, "terminal", "terminal_type");
+    let parent_terminal_id = read_runtime_setting(db, "terminal", "parent_terminal_id");
+    let enabled_features = read_runtime_setting(db, "terminal", "enabled_features")
+        .map(|raw| parse_json_string(&raw))
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let last_config_sync_at = read_runtime_setting(db, "terminal", "last_config_sync_at");
+    let ghost_mode_feature_enabled = storage::get_credential("ghost_mode_feature_enabled")
+        .or_else(|| read_runtime_setting(db, "terminal", "ghost_mode_feature_enabled"));
+
+    let sync_health = if terminal_id.as_deref().unwrap_or("").trim().is_empty()
+        || admin_dashboard_url
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        "offline"
+    } else if let Some(last_sync) = last_config_sync_at.as_deref() {
+        let age_ms = chrono::DateTime::parse_from_rfc3339(last_sync)
+            .ok()
+            .map(|parsed| {
+                Utc::now()
+                    .signed_duration_since(parsed.with_timezone(&Utc))
+                    .num_milliseconds()
+                    .max(0)
+            })
+            .unwrap_or(TERMINAL_RUNTIME_STALE_AFTER_MS + 1);
+        if age_ms > TERMINAL_RUNTIME_STALE_AFTER_MS {
+            "stale"
+        } else {
+            "polling"
+        }
+    } else {
+        "offline"
+    };
+
+    serde_json::json!({
+        "terminal_id": terminal_id,
+        "branch_id": branch_id,
+        "organization_id": organization_id,
+        "admin_dashboard_url": admin_dashboard_url,
+        "admin_url": admin_dashboard_url,
+        "business_type": business_type,
+        "terminal_type": terminal_type,
+        "parent_terminal_id": parent_terminal_id,
+        "enabled_features": enabled_features,
+        "last_config_sync_at": last_config_sync_at,
+        "ghost_mode_feature_enabled": ghost_mode_feature_enabled,
+        "sync_health": sync_health,
+        // Compatibility aliases while renderer migrates to the new DTO.
+        "terminalType": terminal_type,
+        "parentTerminalId": parent_terminal_id,
+        "features": enabled_features,
+    })
+}
+
+fn emit_terminal_runtime_update(
+    app: &tauri::AppHandle,
+    db: &db::DbState,
+    source: &str,
+    updated: Option<Vec<String>>,
+) {
+    let mut payload = build_terminal_runtime_config(db);
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("source".to_string(), serde_json::json!(source));
+        if let Some(updated_keys) = updated {
+            map.insert("updated".to_string(), serde_json::json!(updated_keys));
+        }
+    }
+
+    let _ = app.emit("terminal_config_updated", payload.clone());
+    let _ = app.emit("terminal_settings_updated", payload);
+}
+
 async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), String> {
     let raw_api_key = Zeroizing::new(
         storage::get_credential("pos_api_key").ok_or("Terminal not configured: missing API key")?,
@@ -263,6 +405,40 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         tracing::info!(
             ghost_mode_feature_enabled = %value,
             "Stored ghost_mode_feature_enabled from admin settings"
+        );
+    }
+    if let Some(terminal_type) = extract_terminal_type_from_terminal_settings_response(&resp) {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "terminal_type", &terminal_type);
+        }
+        tracing::info!(terminal_type = %terminal_type, "Stored terminal_type from admin settings");
+    }
+    if let Some(parent_terminal_id) =
+        extract_parent_terminal_id_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "parent_terminal_id", &parent_terminal_id);
+        }
+        tracing::info!(
+            parent_terminal_id = %crate::mask_terminal_id(&parent_terminal_id),
+            "Stored parent_terminal_id from admin settings"
+        );
+    }
+    if let Some(enabled_features) = extract_enabled_features_from_terminal_settings_response(&resp)
+    {
+        if let Ok(encoded) = serde_json::to_string(&enabled_features) {
+            if let Ok(conn) = db.conn.lock() {
+                let _ = db::set_setting(&conn, "terminal", "enabled_features", &encoded);
+            }
+            tracing::info!("Stored enabled_features from admin settings");
+        }
+    }
+    if let Ok(conn) = db.conn.lock() {
+        let _ = db::set_setting(
+            &conn,
+            "terminal",
+            "last_config_sync_at",
+            &Utc::now().to_rfc3339(),
         );
     }
 
@@ -349,11 +525,6 @@ pub async fn settings_get(
 
     if let (Some(cat), Some(k)) = (category.clone(), key.clone()) {
         if cat == "terminal" && crate::is_sensitive_terminal_setting(&k) {
-            if let Some(credential_key) = crate::credential_key_for_terminal_setting(&k) {
-                if let Some(v) = storage::get_credential(credential_key) {
-                    return Ok(serde_json::Value::String(v));
-                }
-            }
             if !default_value.is_null() {
                 return Ok(default_value);
             }
@@ -382,6 +553,12 @@ pub async fn settings_get(
 
     if let Some(k) = key {
         // Legacy one-arg form: settings:get('terminal_id')
+        if crate::is_sensitive_terminal_setting(&k) {
+            if !default_value.is_null() {
+                return Ok(default_value);
+            }
+            return Ok(serde_json::Value::Null);
+        }
         return Ok(storage::settings_get(Some(&k)));
     }
 
@@ -400,13 +577,6 @@ pub async fn settings_get_local(
     if let Some(serde_json::Value::String(key)) = arg0 {
         if let Some((category, setting_key)) = key.split_once('.') {
             if category == "terminal" && crate::is_sensitive_terminal_setting(setting_key) {
-                if let Some(credential_key) =
-                    crate::credential_key_for_terminal_setting(setting_key)
-                {
-                    if let Some(v) = storage::get_credential(credential_key) {
-                        return Ok(serde_json::Value::String(v));
-                    }
-                }
                 return Ok(serde_json::Value::Null);
             }
 
@@ -427,6 +597,9 @@ pub async fn settings_get_local(
             }
             return Ok(serde_json::Value::Null);
         }
+        if crate::is_sensitive_terminal_setting(&key) {
+            return Ok(serde_json::Value::Null);
+        }
         return Ok(storage::settings_get(Some(&key)));
     }
 
@@ -437,7 +610,13 @@ pub async fn settings_get_local(
 pub async fn settings_factory_reset(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
-) -> Result<Value, String> {
+    auth_state: tauri::State<'_, auth::AuthState>,
+) -> Result<Value, auth::GuardedCommandError> {
+    auth::authorize_privileged_action(
+        auth::PrivilegedActionScope::SystemControl,
+        &db,
+        &auth_state,
+    )?;
     let _ = crate::clear_operational_data_inner(&db);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -517,11 +696,13 @@ pub async fn settings_update_terminal_credentials(
         tracing::warn!(error = %e, "Failed to fetch terminal config from admin (non-fatal)");
     }
 
-    let _ = app.emit(
-        "terminal_credentials_updated",
-        serde_json::json!({ "success": true }),
-    );
+    let mut credentials_payload = build_terminal_runtime_config(&db);
+    if let Some(map) = credentials_payload.as_object_mut() {
+        map.insert("success".to_string(), serde_json::json!(true));
+    }
+    let _ = app.emit("terminal_credentials_updated", credentials_payload);
     let _ = app.emit("terminal_enabled", serde_json::json!({ "success": true }));
+    emit_terminal_runtime_update(&app, &db, "settings_update_terminal_credentials", None);
     crate::scrub_sensitive_local_settings(&db);
 
     Ok(result)
@@ -799,8 +980,21 @@ pub async fn settings_update_local(
     );
     let _ = app.emit(
         "terminal_settings_updated",
-        serde_json::json!({ "updated": updated_keys }),
+        serde_json::json!({ "updated": updated_keys.clone() }),
     );
+    if let Some(reason) = updated_keys
+        .iter()
+        .find_map(|full_key| restart_required_reason_for_setting(full_key))
+    {
+        let _ = app.emit(
+            "app_restart_required",
+            serde_json::json!({
+                "reason": reason,
+                "hardware_type": "configuration",
+                "updated": updated_keys.clone(),
+            }),
+        );
+    }
     crate::scrub_sensitive_local_settings(&db);
     Ok(serde_json::json!({ "success": true }))
 }
@@ -915,8 +1109,18 @@ pub async fn terminal_config_get_settings(
 pub async fn terminal_config_get_setting(
     arg0: Option<Value>,
     arg1: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
     let (category, key) = parse_terminal_config_get_setting_payload(arg0, arg1);
+    if let Some(ref terminal_key) = key {
+        let cat = category.as_deref().unwrap_or("terminal");
+        if cat == "terminal" && crate::is_sensitive_terminal_setting(terminal_key) {
+            return Ok(serde_json::Value::Null);
+        }
+        if let Some(local) = read_runtime_setting(&db, cat, terminal_key) {
+            return Ok(parse_json_string(&local));
+        }
+    }
     Ok(storage::get_setting(category.as_deref(), key.as_deref()))
 }
 
@@ -958,8 +1162,25 @@ pub async fn terminal_config_get_business_type(
 }
 
 #[tauri::command]
-pub async fn terminal_config_get_full_config() -> Result<Value, String> {
-    Ok(storage::get_full_config())
+pub async fn terminal_config_get_full_config(
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    Ok(build_terminal_runtime_config(&db))
+}
+
+#[tauri::command]
+pub async fn terminal_config_sync_from_admin(
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    crate::hydrate_terminal_credentials_from_local_settings(&db);
+    refresh_terminal_context_from_admin(&db).await?;
+    let config = build_terminal_runtime_config(&db);
+    emit_terminal_runtime_update(&app, &db, "terminal_config_sync_from_admin", None);
+    Ok(serde_json::json!({
+        "success": true,
+        "config": config
+    }))
 }
 
 #[tauri::command]
@@ -995,16 +1216,9 @@ pub async fn terminal_config_refresh(
         );
     }
 
-    let _ = app.emit(
-        "terminal_config_updated",
-        serde_json::json!({ "source": "terminal_config_refresh" }),
-    );
+    emit_terminal_runtime_update(&app, &db, "terminal_config_refresh", None);
     let _ = app.emit(
         "hardware_config_update",
-        serde_json::json!({ "source": "terminal_config_refresh" }),
-    );
-    let _ = app.emit(
-        "terminal_settings_updated",
         serde_json::json!({ "source": "terminal_config_refresh" }),
     );
     Ok(result)

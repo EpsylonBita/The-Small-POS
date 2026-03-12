@@ -9,6 +9,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "type-check": "tsc --noEmit",
+    "locale:parity": "node scripts/check-locale-parity.mjs",
     "test:native-runtime": "node scripts/check-no-electron-surfaces.mjs && node scripts/check-native-bootstrap.mjs",
     "soak:report": "node scripts/evaluate-soak-report.mjs --report docs/security-native-migration/reports/staging-soak-report.json",
     "parity:contract": "node scripts/check-parity-contract.mjs",
@@ -17,8 +18,8 @@
     "pos:tauri:build:win": "tauri build --target x86_64-pc-windows-msvc",
     "pos:tauri:bundle:win": "tauri build --target x86_64-pc-windows-msvc --bundles nsis",
     "pos:tauri:manifest": "node scripts/generate-updater-manifest.mjs",
-    "pos:tauri:verify": "tsc --noEmit && vite build && bash scripts/verify-rust.sh && npm run parity:contract && npm run test:native-runtime",
-    "pos:tauri:verify:win": "tsc --noEmit && vite build && powershell -ExecutionPolicy Bypass -File scripts/verify-rust.ps1 && npm run parity:contract && npm run test:native-runtime"
+    "pos:tauri:verify": "tsc --noEmit && npm run locale:parity && vite build && bash scripts/verify-rust.sh && npm run parity:contract && npm run test:native-runtime",
+    "pos:tauri:verify:win": "tsc --noEmit && npm run locale:parity && vite build && powershell -ExecutionPolicy Bypass -File scripts/verify-rust.ps1 && npm run parity:contract && npm run test:native-runtime"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.50.0",

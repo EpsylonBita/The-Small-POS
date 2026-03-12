@@ -9,6 +9,7 @@ struct ModulesSaveCachePayload {
     modules: Vec<serde_json::Value>,
     organization_id: Option<String>,
     terminal_id: Option<String>,
+    admin_dashboard_url: Option<String>,
     api_timestamp: Option<String>,
 }
 
@@ -23,6 +24,8 @@ struct ModulesSaveCacheObject {
     organization_id: Option<String>,
     #[serde(default, alias = "terminal_id")]
     terminal_id: Option<String>,
+    #[serde(default, alias = "admin_dashboard_url", alias = "adminUrl")]
+    admin_dashboard_url: Option<String>,
     #[serde(default, alias = "api_timestamp")]
     api_timestamp: Option<String>,
     #[serde(default)]
@@ -41,6 +44,7 @@ fn parse_modules_save_cache_payload(arg0: Option<serde_json::Value>) -> ModulesS
             modules: arr,
             organization_id: None,
             terminal_id: None,
+            admin_dashboard_url: None,
             api_timestamp: None,
         },
         Some(serde_json::Value::Object(obj)) => {
@@ -61,11 +65,79 @@ fn parse_modules_save_cache_payload(arg0: Option<serde_json::Value>) -> ModulesS
                 modules,
                 organization_id: normalize_optional_string(parsed.organization_id),
                 terminal_id: normalize_optional_string(parsed.terminal_id),
+                admin_dashboard_url: normalize_optional_string(parsed.admin_dashboard_url),
                 api_timestamp: normalize_optional_string(parsed.api_timestamp.or(parsed.timestamp)),
             }
         }
         _ => ModulesSaveCachePayload::default(),
     }
+}
+
+fn current_module_identity(db: &db::DbState) -> (String, String, String) {
+    let organization_id = storage::get_credential("organization_id")
+        .or_else(|| crate::read_local_setting(db, "terminal", "organization_id"))
+        .unwrap_or_default();
+    let terminal_id = storage::get_credential("terminal_id")
+        .or_else(|| crate::read_local_setting(db, "terminal", "terminal_id"))
+        .unwrap_or_default();
+    let admin_dashboard_url = storage::get_credential("admin_dashboard_url")
+        .or_else(|| crate::read_local_setting(db, "terminal", "admin_dashboard_url"))
+        .unwrap_or_default();
+    (organization_id, terminal_id, admin_dashboard_url)
+}
+
+fn cache_identity_matches(
+    cache: &serde_json::Value,
+    organization_id: &str,
+    terminal_id: &str,
+    admin_dashboard_url: &str,
+) -> bool {
+    let cached_org = cache
+        .get("organizationId")
+        .or_else(|| cache.get("organization_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cached_terminal = cache
+        .get("terminalId")
+        .or_else(|| cache.get("terminal_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cached_admin = cache
+        .get("adminDashboardUrl")
+        .or_else(|| cache.get("admin_dashboard_url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    cached_org == organization_id
+        && cached_terminal == terminal_id
+        && cached_admin == admin_dashboard_url
+}
+
+fn cache_age_ms(cache: &serde_json::Value) -> i64 {
+    let cached_at = cache.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+    (Utc::now().timestamp_millis() - cached_at).max(0)
+}
+
+fn cache_is_stale(cache: &serde_json::Value) -> bool {
+    cache_age_ms(cache) >= crate::MODULE_CACHE_TTL_MS
+}
+
+fn cache_fallback_allowed(fetch_err: &str, identity_match: bool) -> bool {
+    if !identity_match {
+        return false;
+    }
+
+    let lower = fetch_err.to_ascii_lowercase();
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("invalid api key")
+        || lower.contains("not authorized")
+        || lower.contains("terminal identity mismatch")
+    {
+        return false;
+    }
+
+    true
 }
 
 #[tauri::command]
@@ -102,6 +174,9 @@ pub async fn modules_fetch_from_admin(
                 .map(|s| s.to_string())
                 .or_else(|| storage::get_credential("organization_id"))
                 .unwrap_or_default();
+            let admin_dashboard_url = storage::get_credential("admin_dashboard_url")
+                .or_else(|| crate::read_local_setting(&db, "terminal", "admin_dashboard_url"))
+                .unwrap_or_default();
             if !organization_id.trim().is_empty() {
                 let _ = storage::set_credential("organization_id", &organization_id);
             }
@@ -129,6 +204,7 @@ pub async fn modules_fetch_from_admin(
                 "apiModules": api_modules,
                 "organizationId": organization_id,
                 "terminalId": terminal_id,
+                "adminDashboardUrl": admin_dashboard_url,
                 "timestamp": Utc::now().timestamp_millis(),
                 "apiTimestamp": api_timestamp,
             });
@@ -155,11 +231,39 @@ pub async fn modules_fetch_from_admin(
                     "stats": stats,
                     "processing_time_ms": processing_time_ms,
                 },
-                "fromCache": false
+                "fromCache": false,
+                "cacheAgeMs": 0,
+                "stale": false,
+                "identityMatch": true
             }))
         }
         Err(fetch_err) => match crate::read_module_cache(&db) {
             Ok(cache) => {
+                let (current_org, current_terminal, current_admin_url) =
+                    current_module_identity(&db);
+                let identity_match = cache_identity_matches(
+                    &cache,
+                    &current_org,
+                    &current_terminal,
+                    &current_admin_url,
+                );
+                if !cache_fallback_allowed(&fetch_err, identity_match) {
+                    let _ = app.emit(
+                        "modules_sync_error",
+                        serde_json::json!({
+                            "error": fetch_err,
+                            "identityMatch": identity_match
+                        }),
+                    );
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "error": fetch_err,
+                        "fromCache": false,
+                        "identityMatch": identity_match,
+                        "modules": serde_json::Value::Null
+                    }));
+                }
+
                 let api_modules = cache
                     .get("apiModules")
                     .and_then(|v| v.as_array())
@@ -180,6 +284,8 @@ pub async fn modules_fetch_from_admin(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let cache_age_ms = cache_age_ms(&cache);
+                let stale = cache_is_stale(&cache);
 
                 Ok(serde_json::json!({
                     "success": true,
@@ -199,6 +305,9 @@ pub async fn modules_fetch_from_admin(
                         "processing_time_ms": 0,
                     },
                     "fromCache": true,
+                    "cacheAgeMs": cache_age_ms,
+                    "stale": stale,
+                    "identityMatch": identity_match,
                     "error": fetch_err
                 }))
             }
@@ -248,15 +357,16 @@ pub async fn modules_get_cached(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let (current_org, current_terminal, current_admin_url) = current_module_identity(&db);
+    let identity_match =
+        cache_identity_matches(&cache, &current_org, &current_terminal, &current_admin_url);
     let api_timestamp = cache
         .get("apiTimestamp")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let cached_at = cache.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
-    let now = Utc::now().timestamp_millis();
-    let cache_age = (now - cached_at).max(0);
-    let is_valid = cache_age < crate::MODULE_CACHE_TTL_MS;
+    let cache_age = cache_age_ms(&cache);
+    let is_valid = cache_age < crate::MODULE_CACHE_TTL_MS && identity_match;
 
     Ok(serde_json::json!({
         "success": true,
@@ -276,7 +386,10 @@ pub async fn modules_get_cached(
             "processing_time_ms": 0,
         },
         "isValid": is_valid,
-        "cacheAge": cache_age
+        "cacheAge": cache_age,
+        "cacheAgeMs": cache_age,
+        "stale": cache_age >= crate::MODULE_CACHE_TTL_MS,
+        "identityMatch": identity_match
     }))
 }
 
@@ -296,6 +409,10 @@ pub async fn modules_save_cache(
         .terminal_id
         .or_else(|| storage::get_credential("terminal_id"))
         .unwrap_or_default();
+    let admin_dashboard_url = parsed
+        .admin_dashboard_url
+        .or_else(|| storage::get_credential("admin_dashboard_url"))
+        .unwrap_or_default();
     let api_timestamp = parsed
         .api_timestamp
         .unwrap_or_else(|| Utc::now().to_rfc3339());
@@ -304,6 +421,7 @@ pub async fn modules_save_cache(
         "apiModules": parsed.modules,
         "organizationId": organization_id,
         "terminalId": terminal_id,
+        "adminDashboardUrl": admin_dashboard_url,
         "timestamp": Utc::now().timestamp_millis(),
         "apiTimestamp": api_timestamp,
     });

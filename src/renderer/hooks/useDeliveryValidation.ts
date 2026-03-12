@@ -13,12 +13,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { DeliveryZoneValidator } from '../../services/DeliveryZoneValidator';
 import { useShift } from '../contexts/shift-context';
-import { supabase } from '../lib/supabase';
-import { getBridge } from '../../lib';
-import {
-  getCachedTerminalCredentials,
-  updateTerminalCredentialCache,
-} from '../services/terminal-credentials';
 import type {
   DeliveryBoundaryValidationResponse,
   DeliveryOverrideResponse
@@ -48,7 +42,6 @@ interface UseDeliveryValidationReturn {
 export function useDeliveryValidation(
   options: UseDeliveryValidationOptions = {}
 ): UseDeliveryValidationReturn {
-  const bridge = getBridge();
   const {
     debounceMs = 500,
     autoValidate = true,
@@ -73,8 +66,6 @@ export function useDeliveryValidation(
   useEffect(() => {
     if (!shift.activeShift) return;
 
-    const apiKey = getCachedTerminalCredentials().apiKey || '';
-
     try {
       validatorRef.current = new DeliveryZoneValidator({
         branchId: shift.activeShift.branch_id,
@@ -83,21 +74,7 @@ export function useDeliveryValidation(
         enableCaching: cacheResults,
         cacheExpiryMs: 30 * 60 * 1000, // 30 minutes
         enableAnalytics: true,
-        apiKey: apiKey || undefined
       });
-
-      // Always try to refresh API key via bridge to keep cache current.
-      bridge.terminalConfig.getSetting('terminal', 'pos_api_key')
-        .then((ipcApiKey) => {
-          const apiKeyValue = typeof ipcApiKey === 'string' ? ipcApiKey : '';
-          if (apiKeyValue && validatorRef.current) {
-            validatorRef.current.updateAuth(undefined, apiKeyValue);
-            updateTerminalCredentialCache({ apiKey: apiKeyValue });
-          }
-        })
-        .catch((err: Error) => {
-          console.warn('[useDeliveryValidation] Failed to get API key from bridge:', err);
-        });
     } catch (err) {
       console.error('[useDeliveryValidation] Error initializing validator:', err);
       setError('Failed to initialize delivery validator');
@@ -109,7 +86,7 @@ export function useDeliveryValidation(
         clearTimeout(debounceTimerRef.current);
       }
     };
-  }, [bridge, shift.activeShift, cacheResults]);
+  }, [shift.activeShift, cacheResults]);
 
   // Subscribe to delivery_zones changes for realtime updates
   useEffect(() => {

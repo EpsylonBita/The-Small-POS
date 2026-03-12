@@ -312,7 +312,9 @@ pub fn export_diagnostics_with_options(
     let about = redact_value_for_export(get_about_info(), export_options.redact_sensitive);
     zip.start_file("about.json", zip_options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(serde_json::to_string_pretty(&about).unwrap().as_bytes())
+    let about_json = serde_json::to_string_pretty(&about)
+        .map_err(|e| format!("Failed to serialize about info: {e}"))?;
+    zip.write_all(about_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 2. System health
@@ -321,14 +323,18 @@ pub fn export_diagnostics_with_options(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     zip.start_file("system_health.json", zip_options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(serde_json::to_string_pretty(&health).unwrap().as_bytes())
+    let health_json = serde_json::to_string_pretty(&health)
+        .map_err(|e| format!("Failed to serialize system health: {e}"))?;
+    zip.write_all(health_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 3. Pending sync counts by entity type
     let backlog = redact_value_for_export(get_sync_backlog(&conn), export_options.redact_sensitive);
     zip.start_file("sync_backlog.json", zip_options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(serde_json::to_string_pretty(&backlog).unwrap().as_bytes())
+    let backlog_json = serde_json::to_string_pretty(&backlog)
+        .map_err(|e| format!("Failed to serialize sync backlog: {e}"))?;
+    zip.write_all(backlog_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 4. Last 20 sync errors
@@ -338,7 +344,9 @@ pub fn export_diagnostics_with_options(
     );
     zip.start_file("sync_errors.json", zip_options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(serde_json::to_string_pretty(&errors).unwrap().as_bytes())
+    let errors_json = serde_json::to_string_pretty(&errors)
+        .map_err(|e| format!("Failed to serialize sync errors: {e}"))?;
+    zip.write_all(errors_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 5. Printer profiles + last print job statuses
@@ -348,7 +356,9 @@ pub fn export_diagnostics_with_options(
     );
     zip.start_file("printer_diagnostics.json", zip_options)
         .map_err(|e| e.to_string())?;
-    zip.write_all(serde_json::to_string_pretty(&printers).unwrap().as_bytes())
+    let printers_json = serde_json::to_string_pretty(&printers)
+        .map_err(|e| format!("Failed to serialize printer diagnostics: {e}"))?;
+    zip.write_all(printers_json.as_bytes())
         .map_err(|e| e.to_string())?;
 
     // 6. Include log files

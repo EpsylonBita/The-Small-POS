@@ -676,22 +676,6 @@ pub async fn sync_rediscover_parent() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub async fn sync_fetch_tables(
-    arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    sync_fetch_with_options("/api/pos/tables", arg0, &db).await
-}
-
-#[tauri::command]
-pub async fn sync_fetch_reservations(
-    arg0: Option<serde_json::Value>,
-    db: tauri::State<'_, db::DbState>,
-) -> Result<serde_json::Value, String> {
-    sync_fetch_with_options("/api/pos/reservations", arg0, &db).await
-}
-
-#[tauri::command]
 pub async fn sync_fetch_suppliers(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,

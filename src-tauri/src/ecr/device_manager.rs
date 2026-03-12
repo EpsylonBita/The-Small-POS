@@ -52,6 +52,8 @@ impl DeviceManager {
 
         // Create transport
         let transport_box = transport::create_transport(connection_type, connection_details)?;
+        let transport_description = transport_box.description();
+        let initial_transport_state = transport_box.state();
 
         // Create protocol adapter
         let mut protocol =
@@ -59,6 +61,7 @@ impl DeviceManager {
 
         // Initialize (connects transport + handshake)
         protocol.initialize()?;
+        let protocol_display_name = protocol.name().to_string();
 
         // Store managed device
         let mut devices = self.devices.lock().map_err(|e| e.to_string())?;
@@ -70,7 +73,9 @@ impl DeviceManager {
             },
         );
 
-        info!("Device {device_id} connected ({protocol_name} via {connection_type})");
+        info!(
+            "Device {device_id} connected ({protocol_display_name} via {transport_description}, initial transport state: {initial_transport_state:?})"
+        );
         Ok(())
     }
 

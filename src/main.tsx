@@ -22,19 +22,9 @@ try {
   // IPC abstraction layer -- must run before React renders
   const { getBridge } = await import('./lib');
 
-  // Hydrate frontend Supabase client with credentials from the secure store.
-  // This must happen before React renders so components can use Supabase.
+  // Hydrate secure terminal identity before React renders.
   try {
     const config = await getBridge().terminalConfig.getFullConfig();
-    const supabaseUrl = toOptionalTrimmedString(config?.supabase_url);
-    const supabaseAnonKey = toOptionalTrimmedString(config?.supabase_anon_key);
-
-    if (supabaseUrl && supabaseAnonKey) {
-      const { configureSupabaseRuntime } = await import('./shared/supabase-config');
-      configureSupabaseRuntime(supabaseUrl, supabaseAnonKey);
-      console.log('[Startup] Supabase configured from terminal credentials');
-    }
-
     const terminalId = toOptionalTrimmedString(config?.terminal_id);
     const organizationId = toOptionalTrimmedString(config?.organization_id);
     const branchId = toOptionalTrimmedString(config?.branch_id);

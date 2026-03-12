@@ -204,7 +204,12 @@ const AvailableState: React.FC<AvailableStateProps> = ({
           <h4 className="text-sm font-semibold text-gray-300 mb-2">{t('updates.available.whatsNew')}</h4>
           <div
             className="text-sm text-gray-400 prose prose-invert prose-sm"
-            dangerouslySetInnerHTML={{ __html: releaseNotes }}
+            dangerouslySetInnerHTML={{
+              __html: DOMPurify.sanitize(releaseNotes, {
+                ALLOWED_TAGS: ['p', 'strong', 'em', 'b', 'i', 'ul', 'ol', 'li', 'br', 'h1', 'h2', 'h3', 'h4'],
+                ALLOWED_ATTR: []
+              })
+            }}
           />
         </div>
       )}

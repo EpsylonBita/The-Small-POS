@@ -56,12 +56,14 @@ export function getDeliveryFeeStatus(
     return 'requires_selection';
   }
 
-  if (validationStatus === 'out_of_zone' || reason === 'OUT_OF_ZONE') {
-    return 'out_of_zone';
-  }
-
-  if (validationResult) {
-    return 'unavailable';
+  // Out of zone or validation unavailable → resolve with fee = 0 so orders aren't blocked.
+  // A dedicated out-of-zone fee will be configurable from the admin dashboard (future feature).
+  if (
+    validationStatus === 'out_of_zone' ||
+    reason === 'OUT_OF_ZONE' ||
+    validationResult
+  ) {
+    return 'resolved';
   }
 
   return 'loading';

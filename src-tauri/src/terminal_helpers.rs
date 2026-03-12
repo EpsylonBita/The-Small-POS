@@ -46,6 +46,17 @@ fn nested_value_bool(v: &serde_json::Value, pointers: &[&str]) -> Option<bool> {
     None
 }
 
+fn nested_object_value(v: &serde_json::Value, pointers: &[&str]) -> Option<serde_json::Value> {
+    for pointer in pointers {
+        if let Some(value) = v.pointer(pointer) {
+            if value.is_object() {
+                return Some(value.clone());
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_org_id_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -113,6 +124,54 @@ pub(crate) fn extract_ghost_mode_feature_from_terminal_settings_response(
             "/terminal/ghost_mode_feature_enabled",
             "/terminal/enabled_features/ghost_mode",
             "/enabled_features/ghost_mode",
+        ],
+    )
+}
+
+pub(crate) fn extract_terminal_type_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["terminal_type"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/terminal_type",
+                "/terminal/terminal_type",
+                "/terminal/type",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_parent_terminal_id_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["parent_terminal_id"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/parent_terminal_id",
+                "/terminal/parent_terminal_id",
+                "/terminal/parent/id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_enabled_features_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if let Some(value) = resp.get("enabled_features") {
+        if value.is_object() {
+            return Some(value.clone());
+        }
+    }
+
+    nested_object_value(
+        resp,
+        &[
+            "/settings/terminal/enabled_features",
+            "/terminal/enabled_features",
         ],
     )
 }
@@ -304,6 +363,7 @@ pub(crate) fn is_sensitive_terminal_setting(setting_key: &str) -> bool {
     matches!(
         key.as_str(),
         "pos_api_key"
+            | "supabase_anon_key"
             | "service_role_key"
             | "supabase_service_role_key"
             | "supabase_service_key"
@@ -321,6 +381,7 @@ pub(crate) fn is_sensitive_terminal_setting(setting_key: &str) -> bool {
 pub(crate) fn scrub_sensitive_local_settings(db: &db::DbState) {
     let sensitive_keys = [
         "pos_api_key",
+        "supabase_anon_key",
         "service_role_key",
         "supabase_service_role_key",
         "supabase_service_key",

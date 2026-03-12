@@ -10,6 +10,28 @@ export interface AuthSetupPinRequest {
   staffPin?: string;
 }
 
+export type PrivilegedActionScope = 'system_control' | 'cash_drawer_control';
+
+export interface PrivilegedActionConfirmRequest {
+  pin: string;
+  scope: PrivilegedActionScope;
+}
+
+export interface PrivilegedActionConfirmResponse {
+  success: boolean;
+  scope: PrivilegedActionScope;
+  sessionId: string;
+  ttlSeconds: number;
+  expiresAt: string;
+}
+
+export interface PrivilegedActionErrorPayload {
+  code: 'UNAUTHORIZED' | 'REAUTH_REQUIRED' | string;
+  scope?: string;
+  reason?: string;
+  ttlSeconds?: number | null;
+}
+
 // -- Settings / Terminal Config ----------------------------------------------
 
 export interface SettingsConfiguredResponse {
@@ -63,6 +85,27 @@ export interface TerminalConfigGetSettingRequest {
   fullKey?: string;
   setting?: string;
   name?: string;
+}
+
+export type SyncHealthState = 'polling' | 'stale' | 'offline';
+
+export interface TerminalRuntimeConfig {
+  terminal_id?: string | null;
+  branch_id?: string | null;
+  organization_id?: string | null;
+  admin_dashboard_url?: string | null;
+  admin_url?: string | null;
+  business_type?: string | null;
+  terminal_type?: string | null;
+  parent_terminal_id?: string | null;
+  enabled_features?: Record<string, boolean>;
+  last_config_sync_at?: string | null;
+  ghost_mode_feature_enabled?: string | boolean | null;
+  sync_health?: SyncHealthState;
+  // Compatibility aliases while the renderer migrates.
+  terminalType?: string | null;
+  parentTerminalId?: string | null;
+  features?: Record<string, boolean>;
 }
 
 // -- Sync --------------------------------------------------------------------

@@ -36,21 +36,22 @@ export interface TerminalConfig {
 }
 
 /**
- * Default features for main POS terminal (all features enabled)
+ * Default features for unknown terminal state (all features disabled until
+ * authoritative terminal config is loaded).
  */
 const DEFAULT_FEATURES: FeatureFlags = {
-  cashDrawer: true,
-  zReportExecution: true,
-  cashPayments: true,
-  cardPayments: true,
-  orderCreation: true,
-  orderModification: true,
-  discounts: true,
-  refunds: true,
-  expenses: true,
-  staffPayments: true,
-  reports: true,
-  settings: true,
+  cashDrawer: false,
+  zReportExecution: false,
+  cashPayments: false,
+  cardPayments: false,
+  orderCreation: false,
+  orderModification: false,
+  discounts: false,
+  refunds: false,
+  expenses: false,
+  staffPayments: false,
+  reports: false,
+  settings: false,
 };
 
 /**
@@ -74,6 +75,10 @@ const DEFAULT_FEATURES: FeatureFlags = {
  */
 import { FEATURE_KEY_MAPPING, mapServerFeaturesToLocal as mapServerToLocal } from '../../shared/feature-mapping';
 
+function isTerminalType(value: unknown): value is TerminalType {
+  return value === 'main' || value === 'mobile_waiter';
+}
+
 export function useFeatures() {
   const bridge = getBridge();
   const [features, setFeatures] = useState<FeatureFlags>(DEFAULT_FEATURES);
@@ -96,28 +101,33 @@ export function useFeatures() {
       console.log('[useFeatures] Loaded config:', config);
 
       if (config) {
-        setTerminalType(config.terminalType || 'main');
-        setParentTerminalId(config.parentTerminalId || null);
+        const resolvedTerminalTypeValue = config.terminal_type || config.terminalType || null;
+        const resolvedTerminalType = isTerminalType(resolvedTerminalTypeValue)
+          ? resolvedTerminalTypeValue
+          : null;
+        const resolvedParentTerminalId =
+          config.parent_terminal_id || config.parentTerminalId || null;
+        const loadedFeatures = config.enabled_features || config.features || {};
 
-        // Merge loaded features with defaults to ensure all keys exist
-        // If features object is empty or missing keys, defaults will fill them in
-        const loadedFeatures = config.features || {};
         const mergedFeatures = {
-          ...DEFAULT_FEATURES, // Start with all defaults enabled
-          ...loadedFeatures,   // Override with any loaded features
+          ...DEFAULT_FEATURES,
+          ...mapServerToLocal<FeatureFlags>(
+            loadedFeatures,
+            FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>
+          ),
         };
 
+        setTerminalType(resolvedTerminalType);
+        setParentTerminalId(resolvedParentTerminalId);
         console.log('[useFeatures] Merged features:', mergedFeatures);
         setFeatures(mergedFeatures);
       } else {
-        // No config returned, use defaults
-        console.log('[useFeatures] No config, using defaults');
+        console.log('[useFeatures] No config, keeping fail-closed defaults');
         setFeatures(DEFAULT_FEATURES);
       }
     } catch (e: any) {
       console.error('[useFeatures] Failed to load features:', e);
       setError(e?.message || 'Failed to load features');
-      // Keep default features on error
       setFeatures(DEFAULT_FEATURES);
     } finally {
       setLoading(false);
@@ -160,17 +170,22 @@ export function useFeatures() {
 
       console.log('[useFeatures] Terminal config updated:', data);
 
-      if (data?.terminal_type) {
-        setTerminalType(data.terminal_type);
+      const nextTerminalType = data?.terminal_type ?? data?.terminalType ?? null;
+      if (isTerminalType(nextTerminalType) || nextTerminalType === null) {
+        setTerminalType(nextTerminalType);
       }
-      if (data?.parent_terminal_id !== undefined) {
-        setParentTerminalId(data.parent_terminal_id);
+      const nextParentTerminalId = data?.parent_terminal_id ?? data?.parentTerminalId;
+      if (nextParentTerminalId !== undefined) {
+        setParentTerminalId(nextParentTerminalId);
       }
-      if (data?.enabled_features) {
-        // Merge with existing features using shared mapping
-        setFeatures((prev) => ({
-          ...prev,
-          ...mapServerToLocal<FeatureFlags>(data.enabled_features, FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>),
+      const nextFeatures = data?.enabled_features ?? data?.features;
+      if (nextFeatures) {
+        setFeatures(() => ({
+          ...DEFAULT_FEATURES,
+          ...mapServerToLocal<FeatureFlags>(
+            nextFeatures,
+            FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>
+          ),
         }));
       }
     };
@@ -197,7 +212,7 @@ export function useFeatures() {
     // Convenience checks
     isFeatureEnabled,
     isMobileWaiter: terminalType === 'mobile_waiter',
-    isMainTerminal: terminalType === 'main' || terminalType === null,
+    isMainTerminal: terminalType === 'main',
 
     // Loading state
     loading,

@@ -21,6 +21,7 @@ use crate::{order_ownership, print, printers, receipt_renderer};
 ///
 /// Inserts into `order_payments`, updates the order's `payment_status`
 /// and `payment_method`, and enqueues a sync entry.
+#[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 

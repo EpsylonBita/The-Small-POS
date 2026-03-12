@@ -12,38 +12,23 @@ import CashRegisterSection from '../peripherals/CashRegisterSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
+import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../../services/terminal-credentials';
 import { getBridge } from '../../../lib';
+import {
+  decodeConnectionString,
+  looksLikeRawApiKey,
+  normalizeAdminDashboardUrl,
+} from '../../utils/connection-code';
+import { getErrorMessage } from '../../utils/privileged-actions';
 
 interface Props {
   isOpen: boolean
   onClose: () => void
-}
-
-const normalizeAdminDashboardUrl = (rawUrl: string): string => {
-  const trimmed = (rawUrl || '').trim()
-  if (!trimmed) return ''
-
-  let normalized = trimmed
-  if (!/^https?:\/\//i.test(normalized)) {
-    const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(normalized)
-    normalized = `${isLocalhost ? 'http' : 'https'}://${normalized}`
-  }
-
-  try {
-    const parsed = new URL(normalized)
-    parsed.search = ''
-    parsed.hash = ''
-    const cleanPath = parsed.pathname.replace(/\/+$/, '').replace(/\/api$/i, '')
-    parsed.pathname = cleanPath || '/'
-    return parsed.toString().replace(/\/$/, '')
-  } catch {
-    return normalized.replace(/\/+$/, '').replace(/\/api$/i, '')
-  }
 }
 
 const parseBooleanSetting = (value: unknown): boolean => {
@@ -66,6 +51,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
   const bridge = getBridge()
+  const allowManualCredentials = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV)
+  const [connectionCode, setConnectionCode] = useState('')
   const [terminalId, setTerminalId] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [adminDashboardUrl, setAdminDashboardUrl] = useState('')
@@ -111,20 +98,21 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [scannerBaudRate, setScannerBaudRate] = useState('9600')
   const [cardReaderEnabled, setCardReaderEnabled] = useState(false)
   const [loyaltyEnabled, setLoyaltyEnabled] = useState(false)
+  const { runWithPrivilegedConfirmation, confirmationModal } =
+    usePrivilegedActionConfirmation()
 
   const { status: hardwareStatus } = useHardwareManager()
 
   useEffect(() => {
     if (!isOpen) return
+    setConnectionCode('')
     const lsTerminal = getCachedTerminalCredentials().terminalId || ''
-    const lsApiKey = getCachedTerminalCredentials().apiKey || ''
     setTerminalId(lsTerminal)
-    setApiKey(lsApiKey)
+    setApiKey('')
     setAdminDashboardUrl(normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || ''))
     setPin('')
     void refreshTerminalCredentialCache().then((resolved) => {
       if (resolved.terminalId) setTerminalId(resolved.terminalId)
-      if (resolved.apiKey) setApiKey(resolved.apiKey)
     })
 
     void (async () => {
@@ -146,14 +134,13 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         let remoteGhostFeatureEnabled: boolean | null = null
         try {
           try {
-            await bridge.invoke('admin-sync-terminal-config')
+            await bridge.terminalConfig.syncFromAdmin()
           } catch (nativeSyncError) {
             console.warn('[ConnectionSettings] Native admin terminal sync failed (non-fatal):', nativeSyncError)
           }
 
           const resolvedCreds = await refreshTerminalCredentialCache()
           const resolvedTerminalId = (resolvedCreds.terminalId || '').trim()
-          const resolvedApiKey = (resolvedCreds.apiKey || '').trim()
           const storedAdminUrl = normalizeAdminDashboardUrl(
             (
               (await bridge.settings.getAdminUrl()) ||
@@ -162,12 +149,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             ).toString()
           )
 
-          if (resolvedTerminalId && resolvedApiKey && storedAdminUrl) {
-            await bridge.settings.updateTerminalCredentials({
-              terminalId: resolvedTerminalId,
-              apiKey: resolvedApiKey,
-              adminUrl: storedAdminUrl,
-            })
+          if (resolvedTerminalId && storedAdminUrl) {
             const settingsResult = await posApiGet(`/pos/settings/${encodeURIComponent(resolvedTerminalId)}`)
             const payload: any = settingsResult?.data
             const rawRemoteGhostFeature =
@@ -240,12 +222,46 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   }, [bridge.printer, isOpen])
 
   const handleSaveConnection = async () => {
-    if (!terminalId || !apiKey) {
+    let nextTerminalId = terminalId.trim()
+    let nextApiKey = apiKey.trim()
+    let nextAdminDashboardUrl = normalizeAdminDashboardUrl(adminDashboardUrl)
+    let nextSupabaseUrl: string | undefined
+    let nextSupabaseAnonKey: string | undefined
+
+    const trimmedConnectionCode = connectionCode.trim()
+    if (trimmedConnectionCode) {
+      const decoded = decodeConnectionString(trimmedConnectionCode)
+      if (!decoded) {
+        if (looksLikeRawApiKey(trimmedConnectionCode)) {
+          toast.error(t('onboarding.rawApiKeyDetected'))
+        } else {
+          toast.error(t('onboarding.invalidConnectionString'))
+        }
+        return
+      }
+
+      nextTerminalId = decoded.terminalId.trim()
+      nextApiKey = decoded.apiKey.trim()
+      nextAdminDashboardUrl = normalizeAdminDashboardUrl(decoded.adminUrl)
+      nextSupabaseUrl = decoded.supabaseUrl
+      nextSupabaseAnonKey = decoded.supabaseAnonKey
+
+      setTerminalId(nextTerminalId)
+      setAdminDashboardUrl(nextAdminDashboardUrl)
+      if (allowManualCredentials) {
+        setApiKey(nextApiKey)
+      }
+    } else if (!allowManualCredentials) {
+      toast.error(t('onboarding.validationError', { defaultValue: 'Please enter the connection string' }))
+      return
+    }
+
+    if (!nextTerminalId || !nextApiKey) {
       toast.error(t('modals.connectionSettings.enterBoth'))
       return
     }
 
-    const normalizedAdminDashboardUrl = normalizeAdminDashboardUrl(adminDashboardUrl)
+    const normalizedAdminDashboardUrl = normalizeAdminDashboardUrl(nextAdminDashboardUrl)
     if (!normalizedAdminDashboardUrl) {
       toast.error(t('modals.connectionSettings.enterAdminUrl', { defaultValue: 'Enter a valid Admin Dashboard URL' }))
       return
@@ -253,84 +269,45 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
     // Check if terminal ID or API key changed
     const oldTerminalId = getCachedTerminalCredentials().terminalId
-    const oldApiKey = getCachedTerminalCredentials().apiKey
     const oldAdminDashboardUrl = normalizeAdminDashboardUrl(localStorage.getItem('admin_dashboard_url') || '')
-    const hasChanged = oldTerminalId !== terminalId || oldApiKey !== apiKey
+    const hasChanged = oldTerminalId !== nextTerminalId
     const hasAdminUrlChanged = oldAdminDashboardUrl !== normalizedAdminDashboardUrl
 
-    localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
-    updateTerminalCredentialCache({ terminalId, apiKey })
-
     try {
-      // Persist under the correct category ('terminal'), not 'pos'
-      await bridge.settings.updateLocal({
-        settingType: 'terminal',
-        settings: {
-          terminal_id: terminalId,
-          pos_api_key: apiKey,
-          admin_dashboard_url: normalizedAdminDashboardUrl,
-        }
+      console.log('[ConnectionSettings] Updating terminal credentials...')
+      localStorage.removeItem('activeShift')
+      localStorage.removeItem('staff')
+
+      await bridge.settings.updateTerminalCredentials({
+        terminalId: nextTerminalId,
+        apiKey: nextApiKey,
+        adminUrl: normalizedAdminDashboardUrl,
+        adminDashboardUrl: normalizedAdminDashboardUrl,
+        supabaseUrl: nextSupabaseUrl,
+        supabaseAnonKey: nextSupabaseAnonKey,
       })
-    } catch (e) {
-      console.warn('Failed to persist connection settings to main process:', e)
-    }
+      const syncResult = await bridge.terminalConfig.syncFromAdmin()
+      const runtimeConfig = syncResult?.data?.config
 
-    // Try to pull branch_id from Admin-provisioned terminal config via main process
-    try {
-      // Ask main to refresh terminal settings (Supabase -> local cache)
-      await bridge.terminalConfig.refresh()
-      const bid = await bridge.terminalConfig.getBranchId()
-      if (bid) {
-        updateTerminalCredentialCache({ branchId: bid })
-        try {
-          await bridge.settings.updateLocal({
-            settingType: 'terminal',
-            settings: { branch_id: bid }
-          })
-        } catch (e) {
-          console.warn('Failed to persist branch_id to main process:', e)
-        }
-      } else {
-        console.warn('[ConnectionSettings] Could not resolve branch_id for terminal', terminalId)
-      }
-    } catch (e) {
-      console.warn('[ConnectionSettings] Branch resolution failed:', e)
-    }
+      localStorage.setItem('admin_dashboard_url', normalizedAdminDashboardUrl)
+      updateTerminalCredentialCache({
+        terminalId: runtimeConfig?.terminal_id || nextTerminalId,
+        branchId:
+          runtimeConfig?.branch_id ||
+          (await bridge.terminalConfig.getBranchId().catch(() => '')),
+        organizationId:
+          runtimeConfig?.organization_id ||
+          (await bridge.terminalConfig.getOrganizationId().catch(() => '')),
+      })
 
-    // If terminal credentials changed, trigger full sync from Admin Dashboard
-    if (hasChanged) {
-      try {
-        console.log('[ConnectionSettings] Terminal ID or API key changed, clearing shifts and updating credentials...')
-
-        // Clear any active shifts from old terminal
-        localStorage.removeItem('activeShift')
-        localStorage.removeItem('staff')
-
-        let resolvedAdminDashboardUrl = ''
-        try {
-          resolvedAdminDashboardUrl =
-            ((await bridge.settings.getAdminUrl()) || '').toString()
-        } catch (resolveError) {
-          console.warn('[ConnectionSettings] Failed to resolve admin dashboard URL before credential update:', resolveError)
-        }
-
-        // Update terminal credentials in the sync service
-        await bridge.settings.updateTerminalCredentials({
-          terminalId,
-          apiKey,
-          adminUrl: normalizeAdminDashboardUrl(resolvedAdminDashboardUrl) || normalizedAdminDashboardUrl
-        })
-
-        toast.success(t('modals.connectionSettings.connectionSaved') + ' - Syncing data...')
-      } catch (e) {
-        console.warn('Failed to update credentials or trigger sync:', e)
-        toast.success(t('modals.connectionSettings.connectionSaved'))
-      }
-    } else if (hasAdminUrlChanged) {
-      toast.success(t('modals.connectionSettings.connectionSaved', { defaultValue: 'Connection settings saved' }))
-      console.log('[ConnectionSettings] Admin dashboard URL updated without credential reset:', normalizedAdminDashboardUrl)
-    } else {
-      toast.success(t('modals.connectionSettings.connectionSaved'))
+      toast.success(
+        hasChanged || hasAdminUrlChanged
+          ? t('modals.connectionSettings.connectionSaved') + ' - Syncing data...'
+          : t('modals.connectionSettings.connectionSaved')
+      )
+    } catch (e: any) {
+      console.warn('Failed to update credentials or trigger sync:', e)
+      toast.error(e?.message || t('modals.connectionSettings.networkError'))
     }
   }
 
@@ -449,23 +426,41 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       }
 
       // Try to parse the clipboard content
-      // Format: "Terminal ID: terminal-xxx\nAPI Key: yyy" or just two lines
-      const lines = clipboardText.split('\n').map(line => line.trim()).filter(line => line)
+      const trimmedClipboard = clipboardText.trim()
+      const decoded = decodeConnectionString(trimmedClipboard)
+      if (decoded) {
+        setConnectionCode(trimmedClipboard)
+        setTerminalId(decoded.terminalId)
+        setAdminDashboardUrl(normalizeAdminDashboardUrl(decoded.adminUrl))
+        if (allowManualCredentials) {
+          setApiKey(decoded.apiKey)
+        }
+        toast.success(t('onboarding.connectionString'))
+        return
+      }
 
+      if (!allowManualCredentials) {
+        if (looksLikeRawApiKey(trimmedClipboard)) {
+          toast.error(t('onboarding.rawApiKeyDetected'))
+        } else {
+          toast.error(t('onboarding.invalidConnectionString'))
+        }
+        return
+      }
+
+      // DEV-only fallback: "Terminal ID: terminal-xxx\nAPI Key: yyy" or just two lines
+      const lines = trimmedClipboard.split('\n').map(line => line.trim()).filter(line => line)
       let foundTerminalId = ''
       let foundApiKey = ''
 
-      // Parse each line
       for (const line of lines) {
         if (line.toLowerCase().includes('terminal id:')) {
           foundTerminalId = line.split(':').slice(1).join(':').trim()
         } else if (line.toLowerCase().includes('api key:')) {
           foundApiKey = line.split(':').slice(1).join(':').trim()
         } else if (!foundTerminalId && line.startsWith('terminal-')) {
-          // If it looks like a terminal ID (starts with "terminal-")
           foundTerminalId = line
         } else if (!foundApiKey && foundTerminalId && line.length > 10) {
-          // If we already have terminal ID and this looks like an API key
           foundApiKey = line
         }
       }
@@ -487,6 +482,10 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   }
 
   const handleTest = async () => {
+    if (!allowManualCredentials) {
+      toast.error(t('onboarding.connectionStringHelp'))
+      return
+    }
     if (!terminalId || !apiKey) {
       toast.error(t('modals.connectionSettings.enterToTest'))
       return
@@ -527,8 +526,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const handleFactoryResetFinalConfirm = async () => {
     setIsResetting(true)
     try {
-      // Call the factory reset handler in main process
-      const result = await bridge.settings.factoryReset()
+      const result = await runWithPrivilegedConfirmation({
+        scope: 'system_control',
+        action: () => bridge.settings.factoryReset(),
+        title: t('settings.database.factoryResetPinTitle', 'Confirm factory reset'),
+        subtitle: t(
+          'settings.database.factoryResetPinSubtitle',
+          'Enter the admin PIN to continue with the factory reset.'
+        ),
+      })
 
       if (result?.success) {
         // Clear all localStorage
@@ -540,7 +546,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         // Restart the app to go back to onboarding
         setTimeout(async () => {
           try {
-            await bridge.app.restart()
+            await runWithPrivilegedConfirmation({
+              scope: 'system_control',
+              action: () => bridge.app.restart(),
+              title: t('settings.database.restartPinTitle', 'Confirm restart'),
+              subtitle: t(
+                'settings.database.restartPinSubtitle',
+                'Enter the admin PIN to restart the POS.'
+              ),
+            })
           } catch (e) {
             console.error('Failed to restart app, falling back to reload:', e)
             window.location.reload()
@@ -551,7 +565,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       }
     } catch (e) {
       console.error('Failed to perform factory reset', e)
-      toast.error(t('settings.database.clearFailed'))
+      toast.error(
+        getErrorMessage(e, t('settings.database.clearFailed'))
+      )
     } finally {
       setIsResetting(false)
     }
@@ -589,49 +605,69 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           {showConnectionSettings && (
             <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border`}>
               <div className="pt-3">
-                <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.terminalId')}</label>
-                <input
-                  value={terminalId}
-                  onChange={e => setTerminalId(e.target.value)}
-                  className="liquid-glass-modal-input"
-                  placeholder={t('modals.connectionSettings.terminalPlaceholder')}
-                />
-              </div>
-              <div>
                 <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
-                  {t('modals.connectionSettings.adminDashboardUrl', { defaultValue: 'Admin Dashboard URL' })}
+                  {t('onboarding.connectionString', { defaultValue: 'Connection Code' })}
                 </label>
-                <input
-                  value={adminDashboardUrl}
-                  onChange={e => setAdminDashboardUrl(e.target.value)}
-                  className="liquid-glass-modal-input"
-                  placeholder={t('modals.connectionSettings.adminDashboardUrlPlaceholder', { defaultValue: 'https://admin-dashboard.example.com' })}
+                <p className="text-xs liquid-glass-modal-text-muted mb-3">
+                  {t('onboarding.connectionStringHelp', {
+                    defaultValue: 'Paste the connection code from Admin Dashboard (Branches → POS → Regenerate credentials).',
+                  })}
+                </p>
+                <textarea
+                  value={connectionCode}
+                  onChange={e => setConnectionCode(e.target.value)}
+                  className="liquid-glass-modal-input min-h-[90px] font-mono text-xs"
+                  placeholder={t('onboarding.connectionStringPlaceholder', { defaultValue: 'Paste connection code here...' })}
                 />
               </div>
-              <div>
-                <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.apiKey')}</label>
-                <div className="relative">
-                  <input
-                    value={apiKey}
-                    onChange={e => setApiKey(e.target.value)}
-                    type={showApiKey ? 'text' : 'password'}
-                    className="liquid-glass-modal-input pr-10"
-                    placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
-                  />
-                  <button
-                    type="button"
-                    aria-label={showApiKey ? t('common.hide') : t('common.show')}
-                    onClick={() => setShowApiKey(v => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-white/20 dark:hover:bg-gray-700/40"
-                  >
-                    {showApiKey ? (
-                      <EyeOff className="w-4 h-4 text-gray-400" />
-                    ) : (
-                      <Eye className="w-4 h-4 text-gray-400" />
-                    )}
-                  </button>
-                </div>
-              </div>
+              {allowManualCredentials && (
+                <>
+                  <div>
+                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.terminalId')}</label>
+                    <input
+                      value={terminalId}
+                      onChange={e => setTerminalId(e.target.value)}
+                      className="liquid-glass-modal-input"
+                      placeholder={t('modals.connectionSettings.terminalPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
+                      {t('modals.connectionSettings.adminDashboardUrl', { defaultValue: 'Admin Dashboard URL' })}
+                    </label>
+                    <input
+                      value={adminDashboardUrl}
+                      onChange={e => setAdminDashboardUrl(e.target.value)}
+                      className="liquid-glass-modal-input"
+                      placeholder={t('modals.connectionSettings.adminDashboardUrlPlaceholder', { defaultValue: 'https://admin-dashboard.example.com' })}
+                    />
+                  </div>
+                  <div>
+                    <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>{t('modals.connectionSettings.apiKey')}</label>
+                    <div className="relative">
+                      <input
+                        value={apiKey}
+                        onChange={e => setApiKey(e.target.value)}
+                        type={showApiKey ? 'text' : 'password'}
+                        className="liquid-glass-modal-input pr-10"
+                        placeholder={t('modals.connectionSettings.apiKeyPlaceholder')}
+                      />
+                      <button
+                        type="button"
+                        aria-label={showApiKey ? t('common.hide') : t('common.show')}
+                        onClick={() => setShowApiKey(v => !v)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md hover:bg-white/20 dark:hover:bg-gray-700/40"
+                      >
+                        {showApiKey ? (
+                          <EyeOff className="w-4 h-4 text-gray-400" />
+                        ) : (
+                          <Eye className="w-4 h-4 text-gray-400" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={handlePasteBoth}
@@ -641,9 +677,11 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <Clipboard className="w-4 h-4" />
                   {t('modals.connectionSettings.pasteBoth')}
                 </button>
-                <button onClick={handleTest} className={liquidGlassModalButton('secondary', 'md')}>
-                  {t('modals.connectionSettings.test')}
-                </button>
+                {allowManualCredentials && (
+                  <button onClick={handleTest} className={liquidGlassModalButton('secondary', 'md')}>
+                    {t('modals.connectionSettings.test')}
+                  </button>
+                )}
                 <button onClick={handleSaveConnection} className={liquidGlassModalButton('primary', 'md')}>
                   {t('modals.connectionSettings.save')}
                 </button>
@@ -1579,6 +1617,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
       }
     />
+    {confirmationModal}
     </>
   )
 }

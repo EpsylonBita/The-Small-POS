@@ -123,8 +123,7 @@ fn build_staff_cash_breakdown_row(
         if driver_totals.0 > 0.0 || driver_totals.1 > 0.0 {
             driver_totals
         } else {
-            let sql = format!(
-                "SELECT
+            let sql = "SELECT
                     COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'cash' THEN op.amount ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN op.status = 'completed' AND op.method = 'card' THEN op.amount ELSE 0 END), 0)
                  FROM orders o
@@ -132,10 +131,9 @@ fn build_staff_cash_breakdown_row(
                  WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
                    AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-                   AND COALESCE(o.order_type, 'dine-in') = 'delivery'"
-            );
+                   AND COALESCE(o.order_type, 'dine-in') = 'delivery'";
 
-            conn.query_row(&sql, params![staff_shift_id], |row| {
+            conn.query_row(sql, params![staff_shift_id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .map_err(|e| format!("fallback driver cash breakdown totals: {e}"))?
@@ -625,6 +623,7 @@ fn load_non_driver_order_totals(
     Ok((order_count, cash_amount, card_amount, total_amount))
 }
 
+#[allow(clippy::type_complexity)]
 fn load_driver_order_totals(
     conn: &Connection,
     shift_id: &str,
@@ -908,7 +907,7 @@ fn build_staff_report(
         let cash_to_return = cash_breakdown_row
             .and_then(|row| row.get("cashToReturn"))
             .and_then(Value::as_f64)
-            .or_else(|| shift.expected_cash)
+            .or(shift.expected_cash)
             .unwrap_or(shift.opening_cash + cash_collected - expenses_total);
 
         let drawer_value = drawer_snapshot.unwrap_or_else(|| {
@@ -959,7 +958,7 @@ fn build_staff_report(
                     .and_then(|row| row.get("cashToReturn"))
                     .and_then(Value::as_f64)
             })
-            .or_else(|| shift.expected_cash)
+            .or(shift.expected_cash)
             .unwrap_or(shift.opening_cash + cash_amount - expenses_total);
 
         let drawer_value = drawer_snapshot.unwrap_or_else(|| {
@@ -2860,41 +2859,6 @@ fn apply_local_day_rollover(db: &DbState, report_date: &str, now: &str) -> Resul
     }
 }
 
-pub fn finalize_end_of_day(db: &DbState, report_date: &str) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    info!(report_date = %report_date, "Starting end-of-day data cleanup");
-
-    // Temporarily disable foreign_keys so deleting staff_shifts does not
-    // cascade-delete z_reports (which we need to preserve).
-    conn.execute_batch("PRAGMA foreign_keys = OFF")
-        .map_err(|e| format!("disable FK: {e}"))?;
-    if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE") {
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
-        return Err(format!("begin cleanup transaction: {e}"));
-    }
-
-    let result: Result<Value, String> = Ok(finalize_end_of_day_counts(&conn, report_date));
-
-    match result {
-        Ok(counts) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit cleanup: {e}"))?;
-            // Re-enable foreign keys
-            let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
-            info!(report_date = %report_date, "End-of-day cleanup complete: {}", counts);
-            Ok(counts)
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            // Re-enable foreign keys even on failure
-            let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
-            error!(error = %e, "End-of-day cleanup failed, rolled back");
-            Err(e)
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Z-report HTML generation (used by print worker)
 // ---------------------------------------------------------------------------
@@ -3961,11 +3925,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Gap 8: Data clearing (finalize_end_of_day)
+    // Gap 8: Data clearing (local day rollover)
     // ---------------------------------------------------------------
 
     #[test]
-    fn test_finalize_end_of_day_clears_operational_data() {
+    fn test_apply_local_day_rollover_clears_operational_data() {
         let db = test_db();
         seed_closed_shift(&db);
 
@@ -3982,7 +3946,8 @@ mod tests {
             assert_eq!(payments, 3, "should have 3 payments before cleanup");
         }
 
-        let result = finalize_end_of_day(&db, "2026-02-16").expect("cleanup should succeed");
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("cleanup should succeed");
 
         // Verify counts returned
         assert_eq!(result["orders"], 3, "should clear 3 orders");
@@ -4008,7 +3973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finalize_end_of_day_preserves_z_reports() {
+    fn test_apply_local_day_rollover_preserves_z_reports() {
         let db = test_db();
         let shift_id = seed_closed_shift(&db);
 
@@ -4025,7 +3990,7 @@ mod tests {
         }
 
         // Cleanup
-        finalize_end_of_day(&db, "2026-02-16").expect("cleanup");
+        apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z").expect("cleanup");
 
         // z_reports should still be there
         let conn = db.conn.lock().unwrap();
@@ -4043,7 +4008,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finalize_preserves_unsynced_sync_queue() {
+    fn test_local_day_rollover_preserves_unsynced_sync_queue() {
         let db = test_db();
         seed_closed_shift(&db);
 
@@ -4062,7 +4027,8 @@ mod tests {
             ).expect("insert pending entry");
         }
 
-        let result = finalize_end_of_day(&db, "2026-02-16").expect("cleanup");
+        let result =
+            apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z").expect("cleanup");
 
         // Only synced entry should be deleted
         assert_eq!(

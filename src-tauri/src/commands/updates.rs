@@ -164,7 +164,7 @@ fn updater_artifact_path(
     let remote_filename = update
         .download_url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("update.bin");
 

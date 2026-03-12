@@ -44,6 +44,8 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
     try {
       const ok = await onSubmit(pin)
       if (!ok) setError(t('auth.login.error'))
+    } catch (error: any) {
+      setError(error?.message || t('auth.login.error'))
     } finally {
       setLoading(false)
     }
@@ -125,17 +127,17 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
 
           <div className="grid grid-cols-3 gap-3 mb-4">
             {[...'123456789'].map(n => (
-              <button key={n} onClick={() => handleNumber(n)} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold">
+              <button key={n} onClick={() => handleNumber(n)} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
                 {n}
               </button>
             ))}
-            <button onClick={handleClear} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold">
+            <button onClick={handleClear} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
               {t('common.clear')}
             </button>
-            <button onClick={() => handleNumber('0')} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold">
+            <button onClick={() => handleNumber('0')} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
               0
             </button>
-            <button onClick={handleBack} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold">
+            <button onClick={handleBack} className="bg-white hover:bg-gray-50 border rounded-xl py-3 font-semibold text-gray-900">
               <DeleteIcon size={18} aria-hidden="true" />
             </button>
           </div>
@@ -148,4 +150,3 @@ export const PINLoginModal: React.FC<PINLoginModalProps> = ({ isOpen, onClose, o
 }
 
 export default PINLoginModal
-

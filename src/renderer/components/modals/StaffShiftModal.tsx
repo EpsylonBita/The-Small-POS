@@ -13,7 +13,6 @@ import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
-import { SUPABASE_CONFIG } from '../../../shared/supabase-config';
 import { getBridge } from '../../../lib';
 
 // IPC result shapes from bridge calls
@@ -85,11 +84,44 @@ function normalizeContextId(value: unknown): string | undefined {
   return trimmed;
 }
 
+function mapScheduledStaffToMember(member: any): StaffMember {
+  const roleRecord = member?.role || member?.roles?.[0] || null;
+  const primaryRole: StaffRole = {
+    role_id: String(roleRecord?.id ?? member?.role_id ?? ''),
+    role_name: String(roleRecord?.name ?? member?.role_name ?? 'staff'),
+    role_display_name: String(
+      roleRecord?.displayName ??
+        roleRecord?.display_name ??
+        member?.role_display_name ??
+        'Staff',
+    ),
+    role_color: String(roleRecord?.color ?? member?.role_color ?? '#6B7280'),
+    is_primary: true,
+  };
+
+  return {
+    id: String(member?.id ?? '').trim(),
+    name:
+      String(member?.name ?? '').trim() ||
+      `${member?.firstName ?? member?.first_name ?? ''} ${member?.lastName ?? member?.last_name ?? ''}`.trim() ||
+      'Staff',
+    first_name: String(member?.firstName ?? member?.first_name ?? ''),
+    last_name: String(member?.lastName ?? member?.last_name ?? ''),
+    email: String(member?.email ?? ''),
+    role_id: primaryRole.role_id,
+    role_name: primaryRole.role_name,
+    role_display_name: primaryRole.role_display_name,
+    roles: primaryRole.role_id ? [primaryRole] : [],
+    can_login_pos: member?.can_login_pos ?? true,
+    is_active: member?.is_active ?? true,
+    hourly_rate: member?.hourly_rate,
+  };
+}
+
 type CheckInStep = 'select-staff' | 'enter-pin' | 'select-role' | 'enter-cash';
 
 export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false, isMobileWaiter = false }: StaffShiftModalProps) {
   const bridge = getBridge();
-  console.log('🔄 StaffShiftModal loaded - VERSION 2.0 with SUPABASE_CONFIG');
   const { t } = useTranslation();
   const { staff, activeShift, refreshActiveShift, setStaff, setActiveShiftImmediate } = useShift();
 
@@ -537,116 +569,31 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
       console.log('[loadStaff] Using branchId:', branchId);
 
-      // Use IPC to fetch staff from main process (where Supabase config is available)
-      let staffList: StaffMember[] = [];
+      const today = new Date();
+      const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
 
-      // Try bridge handler first
-      try {
-        console.log('[loadStaff] Trying bridge handler shift:list-staff-for-checkin...');
-        const result = await bridge.invoke('shift:list-staff-for-checkin', branchId);
+      const result = await bridge.staffSchedule.list({
+        start_date: dateStr,
+        end_date: dateStr,
+        branch_id: branchId,
+      });
 
-        // Handle IPC response format
-        const data = result?.data || result;
-        if (Array.isArray(data)) {
-          staffList = data;
-          console.log('[loadStaff] bridge returned', staffList.length, 'staff members');
-        } else if (result?.error) {
-          throw new Error(result.error);
-        } else {
-          throw new Error('Invalid staff list response');
-        }
-      } catch (ipcError: any) {
-        console.warn('[loadStaff] bridge handler failed, falling back to direct fetch:', ipcError?.message || ipcError);
-        // Fall back to direct fetch if bridge fails (for backward compatibility)
-        staffList = await loadStaffDirectFetch(branchId);
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to fetch staff schedule');
       }
 
-      // Load roles for staff members via IPC
-      if (staffList.length > 0) {
-        const staffIds = staffList.map(s => s.id);
-        try {
-          console.log('[loadStaff] Loading roles via bridge for', staffIds.length, 'staff members');
-          const rolesResult = await bridge.invoke('shift:get-staff-roles', staffIds);
-          const rolesByStaff = rolesResult?.data || rolesResult || {};
+      const payload = (result.data ?? {}) as {
+        success?: boolean;
+        staff?: any[];
+        error?: string;
+      };
 
-          // Assign roles to staff members
-          staffList.forEach(staff => {
-            const roleCandidates = [
-              ...(Array.isArray(staff.roles) ? staff.roles : []),
-              ...(Array.isArray(rolesByStaff[staff.id]) ? rolesByStaff[staff.id] : [])
-            ];
-
-            if (roleCandidates.length === 0 && staff.role_id) {
-              roleCandidates.push({
-                role_id: staff.role_id,
-                role_name: staff.role_name || 'staff',
-                role_display_name: staff.role_display_name || 'Staff',
-                role_color: '#6B7280',
-                is_primary: true
-              });
-            }
-
-            const seenRoleIds = new Set<string>();
-            const dedupedRoles: StaffRole[] = [];
-            roleCandidates.forEach((role: any) => {
-              const roleId = (role?.role_id || '').toString();
-              if (!roleId || seenRoleIds.has(roleId)) {
-                return;
-              }
-              seenRoleIds.add(roleId);
-              dedupedRoles.push({
-                role_id: roleId,
-                role_name: role?.role_name || 'staff',
-                role_display_name: role?.role_display_name || 'Staff',
-                role_color: role?.role_color || '#6B7280',
-                is_primary: !!role?.is_primary,
-              });
-            });
-
-            if (dedupedRoles.length > 0) {
-              const hasPrimary = dedupedRoles.some((role) => role.is_primary);
-              if (!hasPrimary) {
-                dedupedRoles[0].is_primary = true;
-              }
-              staff.roles = dedupedRoles;
-            }
-          });
-        } catch (rolesError) {
-          console.warn('[loadStaff] Failed to load roles via IPC:', rolesError);
-          // Fallback: use primary role from staff data
-          staffList.forEach(staff => {
-            if (staff.role_id && (!staff.roles || staff.roles.length === 0)) {
-              staff.roles = [{
-                role_id: staff.role_id,
-                role_name: staff.role_name || 'staff',
-                role_display_name: staff.role_display_name || 'Staff',
-                role_color: '#6B7280',
-                is_primary: true
-              }];
-            }
-          });
-        }
+      if (payload.success === false) {
+        throw new Error(payload.error || 'Failed to fetch staff schedule');
       }
 
-      const normalizedStaffList: StaffMember[] = (staffList || [])
-        .map((staff: any) => {
-          const fullName = `${staff?.first_name ?? ''} ${staff?.last_name ?? ''}`.trim();
-          const name = (staff?.name || fullName || 'Staff').toString().trim() || 'Staff';
-          return {
-            ...staff,
-            id: String(staff?.id ?? '').trim(),
-            name,
-            first_name: String(staff?.first_name ?? ''),
-            last_name: String(staff?.last_name ?? ''),
-            email: String(staff?.email ?? ''),
-            role_id: String(staff?.role_id ?? ''),
-            role_name: String(staff?.role_name ?? 'staff'),
-            role_display_name: String(staff?.role_display_name ?? 'Staff'),
-            roles: Array.isArray(staff?.roles) ? staff.roles : [],
-            can_login_pos: staff?.can_login_pos ?? true,
-            is_active: staff?.is_active ?? true,
-          };
-        })
+      const normalizedStaffList: StaffMember[] = (Array.isArray(payload.staff) ? payload.staff : [])
+        .map(mapScheduledStaffToMember)
         .filter((staff) => !!staff.id);
 
       console.log('[loadStaff] Final staff list:', normalizedStaffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
@@ -664,54 +611,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } finally {
       setLoading(false);
     }
-  };
-
-  // Fallback direct fetch for backward compatibility with older builds
-  const loadStaffDirectFetch = async (branchId: string): Promise<StaffMember[]> => {
-    const supabaseUrl = SUPABASE_CONFIG.url;
-    const supabaseKey = SUPABASE_CONFIG.anonKey;
-
-    console.log('[loadStaffDirectFetch] Supabase config:', {
-      url: supabaseUrl?.substring(0, 30) + '...',
-      hasKey: !!supabaseKey
-    });
-
-    if (!supabaseUrl || !supabaseKey) {
-      throw new Error('Supabase configuration missing');
-    }
-
-    const rpcRes = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_list_staff_for_checkin`, {
-      method: 'POST',
-      headers: {
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ p_branch_id: branchId })
-    });
-
-    if (!rpcRes.ok) {
-      const txt = await rpcRes.text();
-      throw new Error(`Failed to fetch staff via RPC: ${rpcRes.status} ${rpcRes.statusText} - ${txt}`);
-    }
-
-    const data = await rpcRes.json();
-    console.log('[loadStaffDirectFetch] Fetched staff data:', data?.length || 0, 'members');
-
-    return (data || []).map((s: any) => ({
-      id: s.id,
-      name: (s.name || `${s.first_name ?? ''} ${s.last_name ?? ''}` || 'Staff').trim(),
-      first_name: s.first_name,
-      last_name: s.last_name,
-      email: s.email,
-      role_id: s.role_id,
-      role_name: s.role_name || s.roles?.name || 'staff',
-      role_display_name: s.role_display_name || s.roles?.display_name || 'Staff',
-      roles: [],
-      can_login_pos: (s.can_login_pos ?? true),
-      is_active: (s.is_active ?? true),
-      hourly_rate: s.hourly_rate
-    }));
   };
 
   const loadExpenses = async (shiftId?: string) => {
@@ -937,22 +836,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         } catch { }
       }
 
-      // Resolve organization_id
-      let organizationId: string | undefined = getSetting?.('terminal', 'organization_id') as string | undefined;
-      if (!organizationId) {
-        try {
-          const oid = await bridge.terminalConfig.getOrganizationId();
-          if (oid) organizationId = oid as string;
-        } catch { }
-      }
-      if (!organizationId) {
-        try {
-          const val = await bridge.terminalConfig.getSetting('terminal', 'organization_id');
-          if (val) organizationId = val as string;
-        } catch { }
-      }
-      organizationId = normalizeContextId(organizationId);
-
       // Validate branchId before attempting check-in
       if (!branchId || (typeof branchId === 'string' && branchId.trim() === '')) {
         console.error('[StaffShiftModal] Cannot check in: branchId is not configured');
@@ -1006,8 +889,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           return;
         }
 
-        // If main-process auth returned an explicit failure, trust it and
-        // avoid renderer direct-RPC fallback that depends on renderer env config.
+        // If main-process auth returned an explicit failure, trust it.
         if (normalizedAuth && normalizedAuth.success === false) {
           const errorText = String(normalizedAuth.error || '').toLowerCase();
           if (errorText.includes('invalid pin') || errorText.includes('not found') || errorText.includes('access denied')) {
@@ -1019,73 +901,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           return;
         }
 
-        console.log('IPC PIN auth returned unexpected payload (will try direct RPC next):', authRes);
-        // Do not return here; fall through to direct RPC
+        console.log('IPC PIN auth returned unexpected payload:', authRes);
+        setError(t('modals.staffShift.verifyPinFailed'));
+        setEnteredPin('');
+        return;
       } catch (e) {
-        console.warn('IPC PIN auth error, falling back to direct Supabase RPC:', e);
-      }
-
-      // Fallback: Use the same server-side RPC to verify PIN and create a session
-      const supabaseUrl = SUPABASE_CONFIG.url;
-      const supabaseKey = SUPABASE_CONFIG.anonKey;
-
-      if (!supabaseUrl || !supabaseKey) {
-        throw new Error('Supabase configuration missing');
-      }
-
-      console.log('[StaffShiftModal] PIN submit - direct RPC with', { staffId: selectedStaff.id, branchId, organizationId, terminalId });
-      const response = await fetch(`${supabaseUrl}/rest/v1/rpc/pos_checkin_staff`, {
-        method: 'POST',
-        headers: {
-          'apikey': supabaseKey,
-          'Authorization': `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          p_staff_id: selectedStaff.id,
-          p_staff_pin: enteredPin.trim(),
-          // Sanitize UUIDs: empty strings cannot be cast to UUID by PostgreSQL
-          p_branch_id: branchId && branchId.trim() ? branchId : null,
-          p_organization_id: organizationId && organizationId.trim() ? organizationId : null,
-          p_terminal_id: terminalId || null,
-          p_session_hours: 8
-        })
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text().catch(() => '');
-        throw new Error(`PIN verification failed (${response.status}): ${errorBody || response.statusText}`);
-      }
-
-      const results = await response.json();
-
-      // Debug logging
-      console.log('pos_checkin_staff Response:', results);
-      console.log('Selected Staff ID:', selectedStaff.id);
-
-      // PostgREST returns an array for TABLE-returning functions
-      const result = Array.isArray(results) && results.length > 0 ? results[0] : null;
-
-      console.log('Parsed Result:', result);
-
-      if (!result || !result.success || result.staff_id !== selectedStaff.id) {
-        console.log('pos_checkin_staff failed:', {
-          hasResult: !!result,
-          success: result?.success,
-          staffIdMatch: result?.staff_id === selectedStaff.id,
-          resultStaffId: result?.staff_id,
-          selectedStaffId: selectedStaff.id
-        });
-        setError(t('modals.staffShift.invalidPIN'));
+        console.warn('IPC PIN auth error:', e);
+        setError(t('modals.staffShift.verifyPinFailed'));
         setEnteredPin('');
         return;
       }
-
-      // Success
-      const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
-      setRoleType(staffRole);
-      setCheckInStep('select-role');
-      setError('');
     } catch (err) {
       console.error('PIN verification error:', err);
       setError(t('modals.staffShift.verifyPinFailed'));

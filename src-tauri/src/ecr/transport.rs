@@ -303,6 +303,7 @@ impl BluetoothTransport {
 
 impl EcrTransport for BluetoothTransport {
     fn connect(&mut self) -> Result<(), String> {
+        self.state = TransportState::Error;
         Err(format!(
             "Bluetooth transport not yet implemented (device: {}). Use Serial or Network connection instead.",
             self.address
@@ -323,7 +324,7 @@ impl EcrTransport for BluetoothTransport {
     }
 
     fn is_connected(&self) -> bool {
-        false
+        self.state == TransportState::Connected
     }
 
     fn state(&self) -> TransportState {

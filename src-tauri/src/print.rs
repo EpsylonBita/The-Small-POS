@@ -36,6 +36,23 @@ use crate::receipt_renderer::{
 
 /// Directory name under the app data dir where receipt files are written.
 const RECEIPTS_DIR: &str = "receipts";
+const AUTO_PRINT_RECEIPT_ONLY: &[&str] = &["order_receipt"];
+const AUTO_PRINT_DELIVERY_ONLY: &[&str] = &["delivery_slip"];
+
+fn is_receipt_like_entity_type(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "order_receipt" | "delivery_slip" | "kitchen_ticket"
+    )
+}
+
+pub fn auto_print_entity_types_for_order_type(order_type: &str) -> &'static [&'static str] {
+    if order_type.eq_ignore_ascii_case("delivery") {
+        AUTO_PRINT_DELIVERY_ONLY
+    } else {
+        AUTO_PRINT_RECEIPT_ONLY
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Enqueue
@@ -67,9 +84,10 @@ pub fn enqueue_print_job_with_payload(
         && entity_type != "z_report"
         && entity_type != "shift_checkout"
         && entity_type != "delivery_slip"
+        && entity_type != "test_print"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, or delivery_slip"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, or test_print"
         ));
     }
 
@@ -193,19 +211,23 @@ pub fn list_print_jobs(db: &DbState, status_filter: Option<&str>) -> Result<Valu
 // Status updates
 // ---------------------------------------------------------------------------
 
-/// Mark a print job as printed with an output path.
-pub fn mark_print_job_printed(db: &DbState, job_id: &str, output_path: &str) -> Result<(), String> {
+/// Mark a print job as dispatched to a printer transport.
+pub fn mark_print_job_dispatched(
+    db: &DbState,
+    job_id: &str,
+    output_path: &str,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
     let affected = conn
         .execute(
-            "UPDATE print_jobs SET status = 'printed', output_path = ?1,
+            "UPDATE print_jobs SET status = 'dispatched', output_path = ?1,
                     last_attempt_at = ?2, updated_at = ?2
              WHERE id = ?3 AND status IN ('pending', 'printing')",
             params![output_path, now, job_id],
         )
-        .map_err(|e| format!("mark printed: {e}"))?;
+        .map_err(|e| format!("mark dispatched: {e}"))?;
 
     if affected == 0 {
         return Err(format!(
@@ -213,13 +235,14 @@ pub fn mark_print_job_printed(db: &DbState, job_id: &str, output_path: &str) -> 
         ));
     }
 
-    info!(job_id = %job_id, "Print job marked printed");
+    info!(job_id = %job_id, "Print job marked dispatched");
     Ok(())
 }
 
 /// Set a non-fatal warning on a print job (e.g. drawer kick failed).
 ///
-/// This does NOT change the job's status — it stays "printed".  Warnings are
+/// This does NOT change the job's status — it stays in its current successful state.
+/// Warnings are
 /// surfaced in the job list for operational visibility.
 pub fn set_print_job_warning(
     db: &DbState,
@@ -805,6 +828,7 @@ pub fn resolve_layout_config(
     entity_type: &str,
 ) -> Result<LayoutConfig, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let receipt_like_entity = is_receipt_like_entity_type(entity_type);
     let paper_mm = profile
         .get("paperWidthMm")
         .or_else(|| profile.get("paper_width_mm"))
@@ -815,10 +839,13 @@ pub fn resolve_layout_config(
         .or_else(|| profile.get("receipt_template"))
         .and_then(Value::as_str);
     let template_override = setting_text(&conn, "receipt", "template_override");
-    let template = template_override
-        .as_deref()
-        .map(|value| ReceiptTemplate::from_value(Some(value)))
-        .unwrap_or_else(|| ReceiptTemplate::from_value(profile_template));
+    let template = if let Some(value) = template_override.as_deref() {
+        ReceiptTemplate::from_value(Some(value))
+    } else if receipt_like_entity && profile_template.is_none() {
+        ReceiptTemplate::Classic
+    } else {
+        ReceiptTemplate::from_value(profile_template)
+    };
     if let Some(override_value) = template_override.as_deref() {
         info!(
             entity_type = %entity_type,
@@ -875,7 +902,7 @@ pub fn resolve_layout_config(
     let qr_data = setting_text(&conn, "receipt", "qr_url")
         .or_else(|| setting_text(&conn, "restaurant", "website"));
     let show_qr_code = setting_bool(&conn, "receipt", "show_qr_code");
-    let show_logo = setting_bool(&conn, "receipt", "show_logo");
+    let mut show_logo = setting_bool(&conn, "receipt", "show_logo");
     let logo_url = setting_text(&conn, "receipt", "logo_source")
         .or_else(|| setting_text(&conn, "organization", "logo_url"));
     let copy_label = setting_text(&conn, "receipt", "copy_label").or_else(|| {
@@ -891,7 +918,9 @@ pub fn resolve_layout_config(
         .or_else(|| profile.get("printer_name"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let detected_brand = printers::detect_printer_brand(printer_name);
+    let detected_brand = printers::detect_printer_brand_for_profile(profile);
+    let capability_snapshot = printers::read_capability_snapshot(profile);
+    let verification_status = printers::capability_verification_status(profile);
 
     let connection_json_value = profile
         .get("connectionJson")
@@ -899,6 +928,21 @@ pub fn resolve_layout_config(
         .and_then(Value::as_str)
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
     let connection = connection_json_value.as_ref().and_then(Value::as_object);
+    let connection_type = connection
+        .and_then(|obj| obj.get("type"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            profile
+                .get("printerType")
+                .or_else(|| profile.get("printer_type"))
+                .and_then(Value::as_str)
+        })
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "system".to_string());
+    let raw_transport_printer = matches!(
+        connection_type.as_str(),
+        "network" | "wifi" | "usb" | "bluetooth"
+    );
 
     let parse_u16 = |value: Option<&Value>| -> Option<u16> {
         match value {
@@ -919,15 +963,63 @@ pub fn resolve_layout_config(
     let profile_render_mode = connection
         .and_then(|obj| obj.get("render_mode"))
         .and_then(Value::as_str);
-    let classic_customer_render_mode = ClassicCustomerRenderMode::from_value(
-        setting_render_mode.as_deref().or(profile_render_mode),
+    let capability_override_active = matches!(
+        capability_snapshot.status.as_str(),
+        "verified" | "degraded" | "candidate"
     );
-
-    let emulation_mode = ReceiptEmulationMode::from_value(
-        connection
-            .and_then(|obj| obj.get("emulation"))
-            .and_then(Value::as_str),
-    );
+    let verified_render_mode = if capability_override_active {
+        capability_snapshot.render_mode.as_deref()
+    } else {
+        None
+    };
+    let classic_customer_render_mode = if let Some(value) = verified_render_mode {
+        ClassicCustomerRenderMode::from_value(Some(value))
+    } else if let Some(value) = setting_render_mode.as_deref() {
+        ClassicCustomerRenderMode::from_value(Some(value))
+    } else if let Some(value) = profile_render_mode {
+        ClassicCustomerRenderMode::from_value(Some(value))
+    } else if receipt_like_entity && raw_transport_printer && !capability_override_active {
+        ClassicCustomerRenderMode::Text
+    } else if receipt_like_entity {
+        ClassicCustomerRenderMode::RasterExact
+    } else {
+        ClassicCustomerRenderMode::Text
+    };
+    let emulation_setting = connection
+        .and_then(|obj| obj.get("emulation"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let emulation_mode = if capability_override_active {
+        capability_snapshot
+            .emulation
+            .as_deref()
+            .map(|value| ReceiptEmulationMode::from_value(Some(value)))
+            .unwrap_or_else(|| {
+                if raw_transport_printer {
+                    // Star printers need Auto so is_star_line_mode() returns
+                    // true based on detected brand.  Standard ESC/POS commands
+                    // (GS !, GS V, ESC t) produce garbled output on Star.
+                    if detected_brand == crate::printers::PrinterBrand::Star {
+                        ReceiptEmulationMode::Auto
+                    } else {
+                        ReceiptEmulationMode::Escpos
+                    }
+                } else {
+                    ReceiptEmulationMode::from_value(emulation_setting)
+                }
+            })
+    } else if raw_transport_printer {
+        // Star printers need Auto so is_star_line_mode() returns true based
+        // on detected brand, even when the profile is not yet verified.
+        if detected_brand == crate::printers::PrinterBrand::Star {
+            ReceiptEmulationMode::Auto
+        } else {
+            ReceiptEmulationMode::Escpos
+        }
+    } else {
+        ReceiptEmulationMode::from_value(emulation_setting)
+    };
 
     let physical_width_dots = match paper_mm {
         w if w <= 58 => 384u16,
@@ -959,29 +1051,56 @@ pub fn resolve_layout_config(
         .map(|value| CommandProfile::from_value(Some(value)))
         .unwrap_or(CommandProfile::FullStyle);
 
-    let font_type = profile
+    let requested_font_type = profile
         .get("fontType")
         .or_else(|| profile.get("font_type"))
         .and_then(Value::as_str)
         .map(|value| FontType::from_value(Some(value)))
         .unwrap_or(FontType::A);
-    let layout_density = profile
+    let requested_layout_density = profile
         .get("layoutDensity")
         .or_else(|| profile.get("layout_density"))
         .and_then(Value::as_str)
         .map(|value| LayoutDensity::from_value(Some(value)))
         .unwrap_or(LayoutDensity::Compact);
-    let header_emphasis = profile
+    let requested_header_emphasis = profile
         .get("headerEmphasis")
         .or_else(|| profile.get("header_emphasis"))
         .and_then(Value::as_str)
         .map(|value| HeaderEmphasis::from_value(Some(value)))
         .unwrap_or(HeaderEmphasis::Strong);
+    let lock_receipt_like_typography = receipt_like_entity && template == ReceiptTemplate::Classic;
+    let font_type = if lock_receipt_like_typography {
+        FontType::A
+    } else {
+        requested_font_type
+    };
+    let layout_density = if lock_receipt_like_typography {
+        LayoutDensity::Compact
+    } else {
+        requested_layout_density
+    };
+    let header_emphasis = if lock_receipt_like_typography {
+        HeaderEmphasis::Strong
+    } else {
+        requested_header_emphasis
+    };
 
     let app_language = setting_text(&conn, "general", "language").unwrap_or_default();
+    // Known brands (Star, Epson) support logo raster even if the profile
+    // hasn't been verified yet.  Only suppress logo for truly unknown printers
+    // where we can't be sure the firmware handles raster images.
+    let brand_supports_logo = matches!(
+        detected_brand,
+        crate::printers::PrinterBrand::Star | crate::printers::PrinterBrand::Epson
+    );
+    if receipt_like_entity && !capability_snapshot.supports_logo && !brand_supports_logo {
+        show_logo = false;
+    }
     info!(
         printer_name = %printer_name,
         detected_brand = %detected_brand.label(),
+        verification_status = %verification_status,
         app_language = %app_language,
         "Auto-detection: brand and language"
     );
@@ -1021,6 +1140,8 @@ pub fn resolve_layout_config(
         .or_else(|| profile.get("escpos_code_page"))
         .and_then(Value::as_u64)
         .map(|v| v as u8);
+    let code_page_brand =
+        receipt_renderer::effective_code_page_brand(detected_brand, emulation_mode);
 
     let escpos_code_page = if manual_code_page.is_some() {
         info!(
@@ -1029,10 +1150,11 @@ pub fn resolve_layout_config(
         );
         manual_code_page
     } else {
-        let auto_cp = receipt_renderer::resolve_auto_code_page(detected_brand, &character_set);
+        let auto_cp = receipt_renderer::resolve_auto_code_page(code_page_brand, &character_set);
         if auto_cp.is_some() {
             info!(
-                brand = %detected_brand.label(),
+                detected_brand = %detected_brand.label(),
+                code_page_brand = %code_page_brand.label(),
                 character_set = %character_set,
                 auto_code_page = ?auto_cp,
                 "Auto-resolved code page for brand"
@@ -1053,6 +1175,15 @@ pub fn resolve_layout_config(
     } else {
         currency_symbol
     };
+
+    let text_scale = setting_text(&conn, "receipt", "text_scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.25)
+        .clamp(0.8, 2.0);
+    let logo_scale = setting_text(&conn, "receipt", "logo_scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .clamp(0.5, 2.0);
 
     Ok(LayoutConfig {
         paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
@@ -1088,6 +1219,8 @@ pub fn resolve_layout_config(
         printable_width_dots,
         left_margin_dots,
         raster_threshold,
+        text_scale,
+        logo_scale,
     })
 }
 
@@ -1104,6 +1237,21 @@ fn paper_logo_max_height_dots(paper: crate::escpos::PaperWidth) -> u32 {
         crate::escpos::PaperWidth::Mm58 => 160,
         crate::escpos::PaperWidth::Mm80 => 220,
         crate::escpos::PaperWidth::Mm112 => 280,
+    }
+}
+
+fn paper_logo_max_height_dots_for_brand(
+    paper: crate::escpos::PaperWidth,
+    brand: crate::printers::PrinterBrand,
+) -> u32 {
+    if brand == crate::printers::PrinterBrand::Star {
+        match paper {
+            crate::escpos::PaperWidth::Mm58 => 384,
+            crate::escpos::PaperWidth::Mm80 => 480,
+            crate::escpos::PaperWidth::Mm112 => 640,
+        }
+    } else {
+        paper_logo_max_height_dots(paper)
     }
 }
 
@@ -1211,6 +1359,116 @@ fn read_logo_source_bytes(source: &str) -> Result<Vec<u8>, String> {
     fs::read(&path_value).map_err(|e| format!("logo file read failed ({path_value}): {e}"))
 }
 
+fn decode_logo_to_grayscale(image_bytes: &[u8]) -> Result<image::GrayImage, String> {
+    if image_bytes.len() > 4 {
+        let head = &image_bytes[..4];
+        if head.starts_with(b"<!DO")
+            || head.starts_with(b"<htm")
+            || head.starts_with(b"<HTM")
+            || head.starts_with(b"<?xm")
+        {
+            return Err("Logo URL returned HTML/XML instead of an image".to_string());
+        }
+    }
+
+    let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
+    let rgba = decoded.to_rgba8();
+    let (src_w, src_h) = rgba.dimensions();
+    if src_w == 0 || src_h == 0 {
+        return Err("logo image has invalid dimensions".to_string());
+    }
+
+    let mut white_bg =
+        image::RgbaImage::from_pixel(src_w, src_h, image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
+    Ok(image::DynamicImage::ImageRgba8(white_bg).to_luma8())
+}
+
+fn receipt_like_logo_max_width_dots(paper: crate::escpos::PaperWidth) -> u32 {
+    match paper {
+        crate::escpos::PaperWidth::Mm58 => 176,
+        crate::escpos::PaperWidth::Mm80 => 260,
+        crate::escpos::PaperWidth::Mm112 => 360,
+    }
+}
+
+fn receipt_like_logo_max_height_dots(paper: crate::escpos::PaperWidth) -> u32 {
+    match paper {
+        crate::escpos::PaperWidth::Mm58 => 110,
+        crate::escpos::PaperWidth::Mm80 => 160,
+        crate::escpos::PaperWidth::Mm112 => 210,
+    }
+}
+
+pub(crate) fn load_receipt_like_logo_image(
+    cfg: &LayoutConfig,
+) -> Result<Option<image::GrayImage>, String> {
+    if !cfg.show_logo {
+        return Ok(None);
+    }
+
+    let Some(source) = cfg
+        .logo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    // Check in-memory GrayImage cache to skip expensive decode + resize.
+    let cache_key = format!(
+        "img|{}|{:?}|{}|{:.2}",
+        source, cfg.paper_width, cfg.printable_width_dots, cfg.logo_scale
+    );
+    if let Ok(cache) = logo_image_cache().lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            info!(
+                cache_key = %cache_key,
+                w = cached.width(),
+                h = cached.height(),
+                "Receipt-like logo image cache hit"
+            );
+            return Ok(Some(cached.clone()));
+        }
+    }
+
+    let image_bytes = read_logo_source_bytes(source)?;
+    let gray = decode_logo_to_grayscale(&image_bytes)?;
+    let (src_w, src_h) = gray.dimensions();
+
+    let content_cap = u32::from(cfg.printable_width_dots)
+        .saturating_sub(32)
+        .max(64);
+    let max_width = ((receipt_like_logo_max_width_dots(cfg.paper_width) as f32 * cfg.logo_scale)
+        as u32)
+        .min(content_cap);
+    let max_height =
+        (receipt_like_logo_max_height_dots(cfg.paper_width) as f32 * cfg.logo_scale) as u32;
+
+    let mut target_w = src_w.min(max_width).max(1);
+    let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
+    if target_h > max_height {
+        target_h = max_height;
+        target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
+    }
+
+    let resized = if target_w != src_w || target_h != src_h {
+        image::DynamicImage::ImageLuma8(gray)
+            .thumbnail(target_w, target_h)
+            .to_luma8()
+    } else {
+        gray
+    };
+
+    // Store in GrayImage cache for subsequent prints.
+    if let Ok(mut cache) = logo_image_cache().lock() {
+        cache.insert(cache_key, resized.clone());
+    }
+
+    Ok(Some(resized))
+}
+
 fn rasterize_logo_to_escpos_prefix(
     image_bytes: &[u8],
     paper: crate::escpos::PaperWidth,
@@ -1227,17 +1485,8 @@ fn rasterize_logo_to_escpos_prefix(
         }
     }
 
-    let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
-    // Composite transparent backgrounds onto white before converting to grayscale.
-    let rgba = decoded.to_rgba8();
-    let (src_w, src_h) = rgba.dimensions();
-    if src_w == 0 || src_h == 0 {
-        return Err("logo image has invalid dimensions".to_string());
-    }
-    let mut white_bg =
-        image::RgbaImage::from_pixel(src_w, src_h, image::Rgba([255, 255, 255, 255]));
-    image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
-    let gray = image::DynamicImage::ImageRgba8(white_bg).to_luma8();
+    let gray = decode_logo_to_grayscale(image_bytes)?;
+    let (src_w, src_h) = gray.dimensions();
 
     let max_width = paper_logo_max_width_dots(paper).max(8);
     let mut target_w = src_w.min(max_width);
@@ -1317,10 +1566,10 @@ fn rasterize_logo_to_escpos_prefix(
     Ok(result)
 }
 
-/// Rasterize a logo image to GS v 0 raster format — compatible with Star and
-/// most modern thermal printers.  Unlike the column-format ESC * 33 used by
-/// `rasterize_logo_to_escpos_prefix`, GS v 0 sends a single block of raster
-/// data which Star mC-Print3 (and similar) handles correctly.
+/// Rasterize a logo image to raster format — Star raster (`ESC * r`) for Star
+/// printers, GS v 0 for everything else.  Unlike the column-format ESC * 33
+/// used by `rasterize_logo_to_escpos_prefix`, raster mode sends a single block
+/// of image data which Star mC-Print3 (and similar) handles correctly.
 fn rasterize_logo_to_escpos_raster(
     image_bytes: &[u8],
     paper: crate::escpos::PaperWidth,
@@ -1337,25 +1586,14 @@ fn rasterize_logo_to_escpos_raster(
         }
     }
 
-    let decoded = image::load_from_memory(image_bytes).map_err(|e| format!("logo decode: {e}"))?;
-
-    // Composite transparent backgrounds onto white before converting to grayscale.
-    // Without this, PNG transparency → black in luma, causing a black background.
-    let rgba = decoded.to_rgba8();
-    let (src_w, src_h) = rgba.dimensions();
-    if src_w == 0 || src_h == 0 {
-        return Err("logo image has invalid dimensions".to_string());
-    }
+    let gray = decode_logo_to_grayscale(image_bytes)?;
+    let (src_w, src_h) = gray.dimensions();
     if src_w > 1200 || src_h > 1200 {
         warn!(
             src_w, src_h,
             "Logo source image is very large — consider resizing to \u{2264}600\u{00D7}600 for faster first-print"
         );
     }
-    let mut white_bg =
-        image::RgbaImage::from_pixel(src_w, src_h, image::Rgba([255, 255, 255, 255]));
-    image::imageops::overlay(&mut white_bg, &rgba, 0, 0);
-    let gray = image::DynamicImage::ImageRgba8(white_bg).to_luma8();
 
     let max_width = paper_logo_max_width_dots(paper).max(8);
     let use_star_raster = brand == crate::printers::PrinterBrand::Star;
@@ -1366,7 +1604,7 @@ fn rasterize_logo_to_escpos_raster(
         target_w = 1;
     }
     let mut target_h = ((src_h as f32 * (target_w as f32 / src_w as f32)).round() as u32).max(1);
-    let max_h = paper_logo_max_height_dots(paper);
+    let max_h = paper_logo_max_height_dots_for_brand(paper, brand);
     if target_h > max_h {
         target_h = max_h;
         target_w = ((src_w as f32 * (target_h as f32 / src_h as f32)).round() as u32).max(1);
@@ -1375,12 +1613,21 @@ fn rasterize_logo_to_escpos_raster(
     // For Star raster: use full paper width and center the image data in each row.
     // Star raster mode ignores ESC alignment commands.
     let paper_width_bytes = (max_width.div_ceil(8)) as u16;
-    let raster_w = if use_star_raster {
-        // Full paper width for Star (centered)
-        paper_width_bytes as u32 * 8
+    let image_width_bytes = target_w.div_ceil(8) as u16;
+    let left_pad_bytes = if use_star_raster {
+        paper_width_bytes.saturating_sub(image_width_bytes) / 2
     } else {
-        target_w.div_ceil(8) * 8
+        0
     };
+    // Star raster protocol requires each row to be exactly the full paper
+    // width.  Using a partial width causes the printer to misalign subsequent
+    // rows, producing garbled output and meters of wasted paper.
+    let width_bytes = if use_star_raster {
+        paper_width_bytes
+    } else {
+        image_width_bytes
+    };
+    let raster_w = width_bytes as u32 * 8;
 
     info!(
         src_w, src_h, target_w, target_h, raster_w,
@@ -1402,19 +1649,6 @@ fn rasterize_logo_to_escpos_raster(
 
     let width = resized.width();
     let height = resized.height();
-    let width_bytes = if use_star_raster {
-        paper_width_bytes
-    } else {
-        (target_w.div_ceil(8)) as u16
-    };
-
-    // For Star centering: offset to center image within the full paper width row
-    let left_pad_bytes = if use_star_raster {
-        let image_bytes_per_row = target_w.div_ceil(8) as u16;
-        (width_bytes.saturating_sub(image_bytes_per_row)) / 2
-    } else {
-        0
-    };
 
     // Build raster data: each row is width_bytes bytes, MSB first
     let mut raster_data = Vec::with_capacity((width_bytes as u32 * height) as usize);
@@ -1504,9 +1738,28 @@ fn rasterize_logo_to_escpos_raster(
     info!(
         raster_data_bytes = raster_data.len(),
         total_bytes = result.len(),
+        width_bytes,
+        effective_height,
         format = format_label,
         "Logo raster prefix generated"
     );
+
+    // Safety guard: reject absurdly large raster data that would produce
+    // meters of paper output.  60 KB is generous for a logo on 80 mm paper.
+    const MAX_LOGO_RASTER_BYTES: usize = 60_000;
+    if result.len() > MAX_LOGO_RASTER_BYTES {
+        warn!(
+            bytes = result.len(),
+            max = MAX_LOGO_RASTER_BYTES,
+            "Logo raster exceeds safety limit — skipping logo to prevent runaway output"
+        );
+        return Err(format!(
+            "Logo raster too large ({} bytes, max {})",
+            result.len(),
+            MAX_LOGO_RASTER_BYTES
+        ));
+    }
+
     Ok(result)
 }
 
@@ -1520,10 +1773,20 @@ fn logo_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// In-memory cache for decoded + resized logo GrayImages (used by raster-exact path).
+/// Avoids the expensive image decode + resize (~2-5 s for large logos) on every print.
+fn logo_image_cache() -> &'static Mutex<HashMap<String, image::GrayImage>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, image::GrayImage>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Clear the logo raster cache (e.g. after printer profile or logo URL change).
 #[allow(dead_code)]
 pub fn clear_logo_cache() {
     if let Ok(mut cache) = logo_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = logo_image_cache().lock() {
         cache.clear();
     }
     // Also remove disk-cached raster files.
@@ -1550,7 +1813,9 @@ fn raster_cache_path(cache_key: &str) -> PathBuf {
     std::env::temp_dir().join(format!("thesmall_logo_raster_{:016x}.bin", h.finish()))
 }
 
-fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>, String> {
+pub(crate) fn build_logo_prefix_for_layout(
+    layout: &LayoutConfig,
+) -> Result<Option<Vec<u8>>, String> {
     if !layout.show_logo {
         return Ok(None);
     }
@@ -1563,10 +1828,16 @@ fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>
         return Ok(None);
     };
 
+    info!(
+        brand = ?layout.detected_brand,
+        paper = ?layout.paper_width,
+        "Building logo prefix"
+    );
+
     // Check cache first — avoids re-decoding + rasterizing the same logo.
     let cache_key = format!(
-        "{}|{:?}|{:?}",
-        source, layout.paper_width, layout.detected_brand
+        "v9|{}|{:?}|{:?}|{:.2}",
+        source, layout.paper_width, layout.detected_brand, layout.logo_scale
     );
     if let Ok(cache) = logo_cache().lock() {
         if let Some(cached) = cache.get(&cache_key) {
@@ -1611,10 +1882,16 @@ fn build_logo_prefix_for_layout(layout: &LayoutConfig) -> Result<Option<Vec<u8>>
 
     let bytes = read_logo_source_bytes(source)?;
 
-    // Star printers can't handle ESC * 33 column bit-image — use Star raster mode
+    // Star printers can't handle ESC * 33 column bit-image.  Use the
+    // Star-specific ESC * r raster protocol instead (Star Line Mode).
+    // GS v 0 is NOT supported by Star mC-Print3 and similar models.
     let prefix = if layout.detected_brand == crate::printers::PrinterBrand::Star {
-        info!("Using Star Line Mode raster for logo");
-        rasterize_logo_to_escpos_raster(&bytes, layout.paper_width, layout.detected_brand)?
+        info!("Using Star raster (ESC * r) for Star printer logo");
+        rasterize_logo_to_escpos_raster(
+            &bytes,
+            layout.paper_width,
+            crate::printers::PrinterBrand::Star,
+        )?
     } else {
         rasterize_logo_to_escpos_prefix(&bytes, layout.paper_width)?
     };
@@ -3070,36 +3347,42 @@ fn dispatch_to_printer(
         warnings = rendered.warnings.len(),
         "Dispatch: ESC/POS rendered (before logo)"
     );
-    match build_logo_prefix_for_layout(&layout) {
-        Ok(Some(prefix)) => {
-            info!(
-                logo_prefix_bytes = prefix.len(),
-                "Dispatch: logo prefix generated"
-            );
-            // Prepend logo raster before the receipt body.
-            // The receipt body already starts with ESC @ (init) which resets
-            // all formatting. For Star printers, add an extra LF after raster
-            // exit to ensure the printer fully transitions back to text mode.
-            let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len() + 1);
-            combined.extend_from_slice(&prefix); // logo raster (includes raster enter/exit)
-            if rendered.body_mode != receipt_renderer::EscPosBodyMode::RasterExact {
-                combined.push(0x0A); // LF — flush raster exit, ensure text mode
+    let embed_logo_in_body = rendered.body_mode == receipt_renderer::EscPosBodyMode::RasterExact
+        && is_receipt_like_entity_type(entity_type);
+    if embed_logo_in_body {
+        info!("Dispatch: receipt-like raster job uses embedded logo composition");
+    } else {
+        match build_logo_prefix_for_layout(&layout) {
+            Ok(Some(prefix)) => {
+                info!(
+                    logo_prefix_bytes = prefix.len(),
+                    "Dispatch: logo prefix generated"
+                );
+                // Prepend logo raster before the receipt body.
+                // The receipt body already starts with ESC @ (init) which resets
+                // all formatting. For Star printers, add an extra LF after raster
+                // exit to ensure the printer fully transitions back to text mode.
+                let mut combined = Vec::with_capacity(rendered.bytes.len() + prefix.len() + 1);
+                combined.extend_from_slice(&prefix); // logo raster (includes raster enter/exit)
+                if rendered.body_mode != receipt_renderer::EscPosBodyMode::RasterExact {
+                    combined.push(0x0A); // LF — flush raster exit, ensure text mode
+                }
+                combined.extend_from_slice(&rendered.bytes); // full receipt (ESC @ + body)
+                rendered.bytes = combined;
+                info!(
+                    total_bytes = rendered.bytes.len(),
+                    "Dispatch: total bytes after logo"
+                );
             }
-            combined.extend_from_slice(&rendered.bytes); // full receipt (ESC @ + body)
-            rendered.bytes = combined;
-            info!(
-                total_bytes = rendered.bytes.len(),
-                "Dispatch: total bytes after logo"
-            );
-        }
-        Ok(None) => {
-            info!("Dispatch: no logo configured");
-        }
-        Err(err) => {
-            rendered.warnings.push(receipt_renderer::RenderWarning {
-                code: "logo_text_fallback".to_string(),
-                message: format!("Logo rendering failed; using text header fallback ({err})"),
-            });
+            Ok(None) => {
+                info!("Dispatch: no logo configured");
+            }
+            Err(err) => {
+                rendered.warnings.push(receipt_renderer::RenderWarning {
+                    code: "logo_text_fallback".to_string(),
+                    message: format!("Logo rendering failed; using text header fallback ({err})"),
+                });
+            }
         }
     }
 
@@ -3126,8 +3409,7 @@ fn dispatch_to_printer(
                 "delivery_slip" => "POS Delivery Slip",
                 _ => "POS Receipt",
             };
-            let _dispatch =
-                printers::print_raw_to_windows(printer_name, &rendered.bytes, doc_name)?;
+            let _dispatch = printers::print_raw_for_profile(&profile, &rendered.bytes, doc_name)?;
             Ok((profile, rendered.warnings))
         }
         other => Err(format!("Unsupported driver_type: {other}")),
@@ -3162,11 +3444,11 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
         );
     }
 
-    // Purge old failed/printed jobs (older than 24 hours) to prevent queue bloat
+    // Purge old failed/completed jobs (older than 24 hours) to prevent queue bloat
     let purged = conn
         .execute(
             "DELETE FROM print_jobs
-             WHERE status IN ('failed', 'printed')
+             WHERE status IN ('failed', 'printed', 'dispatched')
                AND julianday(?1) - julianday(updated_at) > 1.0",
             params![now],
         )
@@ -3182,7 +3464,7 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
     Ok(affected)
 }
 
-/// Process pending print jobs: generate receipt files and mark as printed.
+/// Process pending print jobs: generate receipt files and dispatch them.
 ///
 /// This is called by the background worker loop.  It processes one batch of
 /// pending jobs each tick.  Returns the number of jobs processed.
@@ -3287,8 +3569,8 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                 // Try to dispatch to hardware printer from structured render path.
                 match dispatch_to_printer(db, &entity_type, profile_id.as_deref(), &document) {
                     Ok((resolved_profile, render_warnings)) => {
-                        if let Err(e) = mark_print_job_printed(db, &job_id, &path) {
-                            error!(job_id = %job_id, error = %e, "Failed to mark print job as printed");
+                        if let Err(e) = mark_print_job_dispatched(db, &job_id, &path) {
+                            error!(job_id = %job_id, error = %e, "Failed to mark print job as dispatched");
                             return Ok(());
                         }
 
@@ -3591,6 +3873,88 @@ mod tests {
             .expect("logo prefix present");
         // ESC * 33 (24-dot double-density column-format bit image)
         assert!(prefix.windows(3).any(|window| window == [0x1B, b'*', 33]));
+    }
+
+    #[test]
+    fn test_build_logo_prefix_for_star_layout_keeps_logo_compact() {
+        let mut encoded = Vec::new();
+        let logo = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            400,
+            400,
+            image::Luma([0]),
+        ));
+        logo.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        );
+        let layout = LayoutConfig {
+            show_logo: true,
+            logo_url: Some(data_url),
+            paper_width: crate::escpos::PaperWidth::Mm80,
+            detected_brand: crate::printers::PrinterBrand::Star,
+            ..LayoutConfig::default()
+        };
+        let prefix = build_logo_prefix_for_layout(&layout)
+            .expect("logo prefix result")
+            .expect("logo prefix present");
+
+        // Star logos use Star raster mode (ESC * r A).
+        // GS v 0 is NOT supported by Star printers.
+        assert!(
+            prefix
+                .windows(4)
+                .any(|window| window == [0x1B, b'*', b'r', b'A']),
+            "expected Star raster header (ESC * r A) for Star printer logo"
+        );
+        assert!(
+            !prefix
+                .windows(4)
+                .any(|window| window == [0x1D, b'v', b'0', 0x00]),
+            "GS v 0 raster should NOT be used for Star printer logo"
+        );
+        assert!(
+            prefix.len() < 60_000,
+            "expected compact Star logo raster, got {} bytes",
+            prefix.len()
+        );
+    }
+
+    #[test]
+    fn test_load_receipt_like_logo_image_from_data_url() {
+        let mut encoded = Vec::new();
+        let logo = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            240,
+            180,
+            image::Luma([0]),
+        ));
+        logo.write_to(
+            &mut std::io::Cursor::new(&mut encoded),
+            image::ImageFormat::Png,
+        )
+        .expect("encode png");
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(encoded)
+        );
+        let layout = LayoutConfig {
+            show_logo: true,
+            logo_url: Some(data_url),
+            paper_width: crate::escpos::PaperWidth::Mm80,
+            printable_width_dots: 576,
+            ..LayoutConfig::default()
+        };
+
+        let image = load_receipt_like_logo_image(&layout)
+            .expect("load logo image")
+            .expect("logo image should be present");
+
+        assert!(image.width() <= 260);
+        assert!(image.height() <= 160);
     }
 
     #[test]
@@ -3991,6 +4355,46 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_layout_config_defaults_receipt_like_docs_to_classic_raster_exact() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80
+        });
+
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Classic);
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::RasterExact
+        );
+        assert_eq!(layout.font_type, FontType::A);
+        assert_eq!(layout.layout_density, LayoutDensity::Compact);
+        assert_eq!(layout.header_emphasis, HeaderEmphasis::Strong);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_receipt_like_classic_locks_typography() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "fontType": "b",
+            "layoutDensity": "spacious",
+            "headerEmphasis": "normal"
+        });
+
+        let layout =
+            resolve_layout_config(&db, &profile, "kitchen_ticket").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Classic);
+        assert_eq!(layout.font_type, FontType::A);
+        assert_eq!(layout.layout_density, LayoutDensity::Compact);
+        assert_eq!(layout.header_emphasis, HeaderEmphasis::Strong);
+    }
+
+    #[test]
     fn test_resolve_layout_config_honors_template_override_setting() {
         let db = test_db();
         {
@@ -4104,6 +4508,105 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_layout_config_uses_star_code_page_when_star_line_is_forced() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "192.168.1.19",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"network\",\"ip\":\"192.168.1.19\",\"emulation\":\"star_line\",\"capabilities\":{\"status\":\"verified\",\"resolvedTransport\":\"raw_tcp\",\"resolvedAddress\":\"192.168.1.19:9100\",\"emulation\":\"star_line\",\"renderMode\":\"text\",\"supportsCut\":true,\"supportsLogo\":false}}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::StarLine);
+        assert_eq!(layout.escpos_code_page, Some(15));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_defaults_unverified_raw_network_to_escpos_text() {
+        let db = test_db();
+        // Star brand detected from printer name → should use Auto (not Escpos)
+        // so that is_star_line_mode() returns true for Star printers.
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "Star MCP31 LAN",
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"network\",\"ip\":\"192.168.1.19\"}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::Auto);
+        assert_eq!(layout.detected_brand, crate::printers::PrinterBrand::Star);
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::Text
+        );
+        // Star code page 15 (PC737 Greek) instead of ESC/POS code page 14
+        assert_eq!(layout.escpos_code_page, Some(15));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_honors_candidate_capability_snapshot_for_draft_tests() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "192.168.1.19",
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"network\",\"ip\":\"192.168.1.19\",\"emulation\":\"auto\",\"render_mode\":\"raster_exact\",\"capabilities\":{\"status\":\"candidate\",\"resolvedTransport\":\"raw_tcp\",\"resolvedAddress\":\"192.168.1.19:9100\",\"emulation\":\"star_line\",\"renderMode\":\"text\",\"supportsCut\":true,\"supportsLogo\":false}}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::StarLine);
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::Text
+        );
+        assert_eq!(layout.escpos_code_page, Some(15));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_keeps_unknown_network_on_escpos() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "127.0.0.1",
+            "printerType": "network",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"network\",\"ip\":\"127.0.0.1\",\"port\":9}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::Escpos);
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::Text
+        );
+        assert_eq!(layout.escpos_code_page, Some(14));
+    }
+
+    #[test]
+    fn test_resolve_layout_config_uses_standard_code_page_when_star_printer_forces_escpos() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "printerName": "Star MCP31",
+            "characterSet": "PC737_GREEK",
+            "connectionJson": "{\"type\":\"system\",\"systemName\":\"Star MCP31\",\"emulation\":\"escpos\"}"
+        });
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.emulation_mode, ReceiptEmulationMode::Escpos);
+        assert_eq!(layout.escpos_code_page, Some(14));
+    }
+
+    #[test]
     fn test_resolve_layout_config_uses_full_80mm_width_for_mcp31_by_default() {
         let db = test_db();
         let profile = serde_json::json!({
@@ -4193,15 +4696,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mark_printed() {
+    fn test_mark_dispatched() {
         let db = test_db();
 
         let result = enqueue_print_job(&db, "order_receipt", "ord-2", None).unwrap();
         let job_id = result["jobId"].as_str().unwrap();
 
-        mark_print_job_printed(&db, job_id, "/tmp/receipt.html").unwrap();
+        mark_print_job_dispatched(&db, job_id, "/tmp/receipt.html").unwrap();
 
-        let jobs = list_print_jobs(&db, Some("printed")).unwrap();
+        let jobs = list_print_jobs(&db, Some("dispatched")).unwrap();
         let arr = jobs.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["outputPath"], "/tmp/receipt.html");
@@ -4351,8 +4854,8 @@ mod tests {
         let result = enqueue_print_job(&db, "order_receipt", "ord-warn", None).unwrap();
         let job_id = result["jobId"].as_str().unwrap();
 
-        // Mark as printed first (warnings apply to printed jobs)
-        mark_print_job_printed(&db, job_id, "/tmp/receipt.html").unwrap();
+        // Mark as dispatched first (warnings apply to successful jobs)
+        mark_print_job_dispatched(&db, job_id, "/tmp/receipt.html").unwrap();
 
         // Set a warning
         set_print_job_warning(
@@ -4364,12 +4867,12 @@ mod tests {
         .unwrap();
 
         // Verify warning is visible in the job list
-        let jobs = list_print_jobs(&db, Some("printed")).unwrap();
+        let jobs = list_print_jobs(&db, Some("dispatched")).unwrap();
         let arr = jobs.as_array().unwrap();
         let job = arr.iter().find(|j| j["id"] == job_id).unwrap();
         assert_eq!(job["warningCode"], "drawer_kick_failed");
         assert_eq!(job["warningMessage"], "TCP connect failed: timeout");
-        assert_eq!(job["status"], "printed"); // status unchanged
+        assert_eq!(job["status"], "dispatched"); // status unchanged
     }
 
     #[test]
@@ -4379,16 +4882,16 @@ mod tests {
         let result = enqueue_print_job(&db, "order_receipt", "ord-ts", None).unwrap();
         let job_id = result["jobId"].as_str().unwrap();
 
-        // Mark as printed
-        mark_print_job_printed(&db, job_id, "/tmp/receipt.html").unwrap();
+        // Mark as dispatched
+        mark_print_job_dispatched(&db, job_id, "/tmp/receipt.html").unwrap();
 
         // Verify last_attempt_at is set
-        let jobs = list_print_jobs(&db, Some("printed")).unwrap();
+        let jobs = list_print_jobs(&db, Some("dispatched")).unwrap();
         let arr = jobs.as_array().unwrap();
         let job = arr.iter().find(|j| j["id"] == job_id).unwrap();
         assert!(
             job["lastAttemptAt"].as_str().is_some(),
-            "lastAttemptAt should be set after printing"
+            "lastAttemptAt should be set after dispatch"
         );
     }
 

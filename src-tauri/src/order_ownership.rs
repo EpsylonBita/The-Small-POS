@@ -368,8 +368,6 @@ pub fn get_order_payment_totals(
         "mixed".to_string()
     } else if card_amount > 0.0 {
         "card".to_string()
-    } else if total_paid > 0.0 {
-        "cash".to_string()
     } else {
         "cash".to_string()
     };
@@ -384,13 +382,7 @@ pub fn is_final_order_status(status: &str) -> bool {
     )
 }
 
-pub fn is_cancelled_order_status(status: &str) -> bool {
-    matches!(
-        status.trim().to_ascii_lowercase().as_str(),
-        "cancelled" | "canceled" | "refunded"
-    )
-}
-
+#[allow(clippy::type_complexity)]
 pub fn load_order_attribution_snapshot(
     conn: &Connection,
     order_id: &str,
@@ -475,6 +467,7 @@ pub fn load_order_attribution_snapshot(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_order_attribution(
     conn: &Connection,
     order_id: &str,

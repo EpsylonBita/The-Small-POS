@@ -5,19 +5,49 @@
 //! state for use across Tauri commands.
 
 use rusqlite::{params, Connection};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::{error, info, warn};
 
 /// Tauri managed state holding the database connection.
+///
+/// # Single-Mutex Design
+///
+/// SQLite enforces a single-writer constraint: only one thread may write at a
+/// time, and concurrent readers are only possible when WAL mode is used with
+/// separate connections. Because this POS application uses a single
+/// `rusqlite::Connection` (matching the Electron POS's `better-sqlite3`
+/// pattern), a single `Mutex<Connection>` serializes all access.
+///
+/// # Deadlock Prevention
+///
+/// `std::sync::Mutex` is **not** reentrant. Any function that acquires the
+/// lock must **never** call another function that also acquires it while the
+/// guard is held. The recommended pattern is:
+///
+/// 1. Acquire the lock in a scoped block `{ let conn = db.conn.lock()...; ... }`
+/// 2. Drop the guard (end of block) **before** calling helpers that need
+///    their own lock.
+///
+/// See `diagnostics::get_system_health` for an example of this drop-and-reacquire
+/// pattern.
+///
+/// # Performance Considerations
+///
+/// A single mutex is adequate for the POS workload (low concurrency, small
+/// transactions). If contention becomes measurable — e.g. background sync
+/// blocking UI reads — consider migrating to an `r2d2` connection pool with
+/// separate read-only and read-write connections, or switching to
+/// `tokio::sync::Mutex` with `spawn_blocking` for DB calls.
 pub struct DbState {
     pub conn: Mutex<Connection>,
     pub db_path: PathBuf,
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 25;
+const CURRENT_SCHEMA_VERSION: i32 = 30;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -182,6 +212,21 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 25 {
         migrate_v25(conn)?;
+    }
+    if current < 26 {
+        migrate_v26(conn)?;
+    }
+    if current < 27 {
+        migrate_v27(conn)?;
+    }
+    if current < 28 {
+        migrate_v28(conn)?;
+    }
+    if current < 29 {
+        migrate_v29(conn)?;
+    }
+    if current < 30 {
+        migrate_v30(conn)?;
     }
 
     Ok(())
@@ -1665,6 +1710,275 @@ fn migrate_v25(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v26:
+/// - restore classic receipt template defaults for receipt/kitchen profiles
+/// - restore raster_exact render mode defaults in connection_json for receipt/kitchen profiles
+fn migrate_v26(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE printer_profiles
+         SET receipt_template = 'classic'
+         WHERE role IN ('receipt', 'kitchen')",
+        [],
+    )
+    .map_err(|e| format!("migration v26 restore classic templates: {e}"))?;
+
+    conn.execute(
+        "UPDATE printer_profiles
+         SET connection_json = CASE
+             WHEN connection_json IS NULL OR TRIM(connection_json) = ''
+                 THEN json_object('render_mode', 'raster_exact')
+             WHEN json_valid(connection_json)
+                 THEN json_set(connection_json, '$.render_mode', 'raster_exact')
+             ELSE connection_json
+         END
+         WHERE role IN ('receipt', 'kitchen')",
+        [],
+    )
+    .map_err(|e| format!("migration v26 restore raster_exact render mode: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (26)", [])
+        .map_err(|e| format!("migration v26 mark schema version: {e}"))?;
+
+    info!("Applied migration v26 (classic receipt defaults restored)");
+    Ok(())
+}
+
+/// Migration v27:
+/// - normalize raw LAN/Wi-Fi printer emulation from `auto` to `escpos`
+fn migrate_v27(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE printer_profiles
+         SET connection_json = json_set(connection_json, '$.emulation', 'escpos')
+         WHERE json_valid(connection_json)
+           AND LOWER(COALESCE(json_extract(connection_json, '$.type'), printer_type, 'system')) IN ('network', 'wifi')
+           AND LOWER(COALESCE(json_extract(connection_json, '$.emulation'), 'auto')) = 'auto'",
+        [],
+    )
+    .map_err(|e| format!("migration v27 normalize network emulation: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (27)", [])
+        .map_err(|e| format!("migration v27 mark schema version: {e}"))?;
+
+    info!("Applied migration v27 (network printer auto emulation normalized to escpos)");
+    Ok(())
+}
+
+fn default_printer_capabilities_json() -> Value {
+    serde_json::json!({
+        "status": "unverified",
+        "resolvedTransport": Value::Null,
+        "resolvedAddress": Value::Null,
+        "emulation": Value::Null,
+        "renderMode": Value::Null,
+        "baudRate": Value::Null,
+        "supportsCut": false,
+        "supportsLogo": false,
+        "lastVerifiedAt": Value::Null
+    })
+}
+
+fn migrate_v28(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        BEGIN;
+
+        DROP TABLE IF EXISTS print_jobs_v28;
+        CREATE TABLE print_jobs_v28 (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL
+                CHECK (entity_type IN ('order_receipt', 'kitchen_ticket', 'z_report', 'shift_checkout', 'delivery_slip')),
+            entity_id TEXT NOT NULL,
+            printer_profile_id TEXT,
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'printing', 'printed', 'dispatched', 'failed')),
+            output_path TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            next_retry_at TEXT,
+            last_error TEXT,
+            warning_code TEXT,
+            warning_message TEXT,
+            last_attempt_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            entity_payload_json TEXT
+        );
+        INSERT OR IGNORE INTO print_jobs_v28
+            SELECT id, entity_type, entity_id, printer_profile_id, status,
+                   output_path, retry_count, max_retries, next_retry_at, last_error,
+                   warning_code, warning_message, last_attempt_at, created_at, updated_at,
+                   entity_payload_json
+            FROM print_jobs;
+        DROP TABLE print_jobs;
+        ALTER TABLE print_jobs_v28 RENAME TO print_jobs;
+
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_status
+            ON print_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_created_at
+            ON print_jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_entity
+            ON print_jobs(entity_type, entity_id);
+
+        COMMIT;
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v28 failed during print_jobs rebuild: {e}");
+        format!("migration v28 rebuild print_jobs: {e}")
+    })?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, connection_json FROM printer_profiles")
+        .map_err(|e| format!("migration v28 prepare printer_profiles: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|e| format!("migration v28 query printer_profiles: {e}"))?;
+    let profiles: Vec<(String, Option<String>)> = rows.filter_map(Result::ok).collect();
+    drop(stmt);
+
+    for (id, connection_json) in profiles {
+        let mut parsed = connection_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let capabilities = parsed
+            .entry("capabilities".to_string())
+            .or_insert_with(default_printer_capabilities_json);
+        if !capabilities.is_object() {
+            *capabilities = default_printer_capabilities_json();
+        } else if let Some(obj) = capabilities.as_object_mut() {
+            let defaults = default_printer_capabilities_json()
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            for (key, value) in defaults {
+                obj.entry(key).or_insert(value);
+            }
+            if !matches!(
+                obj.get("status").and_then(Value::as_str),
+                Some("verified" | "degraded" | "unverified")
+            ) {
+                obj.insert(
+                    "status".to_string(),
+                    Value::String("unverified".to_string()),
+                );
+            }
+        }
+
+        conn.execute(
+            "UPDATE printer_profiles SET connection_json = ?1 WHERE id = ?2",
+            params![Value::Object(parsed).to_string(), id],
+        )
+        .map_err(|e| format!("migration v28 update printer profile {id}: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (28)", [])
+        .map_err(|e| format!("migration v28 mark schema version: {e}"))?;
+
+    info!("Applied migration v28 (print job dispatched state + printer capability defaults)");
+    Ok(())
+}
+
+fn migrate_v29(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT id, connection_json FROM printer_profiles")
+        .map_err(|e| format!("migration v29 prepare printer_profiles: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .map_err(|e| format!("migration v29 query printer_profiles: {e}"))?;
+    let profiles: Vec<(String, Option<String>)> = rows.filter_map(Result::ok).collect();
+    drop(stmt);
+
+    for (id, connection_json) in profiles {
+        let mut parsed = connection_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+
+        let connection_type = parsed
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let capability_status = parsed
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .and_then(|obj| obj.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("unverified")
+            .trim()
+            .to_ascii_lowercase();
+        let emulation = parsed
+            .get("emulation")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+
+        if matches!(connection_type.as_str(), "network" | "wifi")
+            && capability_status == "unverified"
+            && emulation == "escpos"
+        {
+            parsed.insert("emulation".to_string(), Value::String("auto".to_string()));
+            conn.execute(
+                "UPDATE printer_profiles SET connection_json = ?1 WHERE id = ?2",
+                params![Value::Object(parsed).to_string(), id],
+            )
+            .map_err(|e| format!("migration v29 update printer profile {id}: {e}"))?;
+        }
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (29)", [])
+        .map_err(|e| format!("migration v29 mark schema version: {e}"))?;
+
+    info!("Applied migration v29 (reverted unverified raw network emulation normalization)");
+    Ok(())
+}
+
+/// Migration v30: Add missing indexes on commonly-queried columns.
+///
+/// Adds indexes for faster lookups on orders (supabase_id, order_number)
+/// and sync_queue (entity_type + status composite). The order_payments
+/// order_id index already exists from v4 but is included defensively with
+/// IF NOT EXISTS.
+fn migrate_v30(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        BEGIN;
+
+        -- Faster order lookup by Supabase remote ID (used during sync reconciliation)
+        CREATE INDEX IF NOT EXISTS idx_orders_supabase_id ON orders(supabase_id);
+
+        -- Faster order lookup by human-readable order number (used in search/display)
+        CREATE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number);
+
+        -- Composite index for sync queue polling by entity type + status
+        CREATE INDEX IF NOT EXISTS idx_sync_queue_entity_status ON sync_queue(entity_type, status);
+
+        -- Defensive: order_payments order_id index (already created in v4)
+        CREATE INDEX IF NOT EXISTS idx_order_payments_order_id ON order_payments(order_id);
+
+        INSERT INTO schema_version (version) VALUES (30);
+
+        COMMIT;
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v30 failed: {e}");
+        format!("migration v30: {e}")
+    })?;
+
+    info!("Applied migration v30 (missing indexes on orders, sync_queue, order_payments)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -3033,6 +3347,302 @@ mod tests {
         assert_eq!(def_enabled, 1);
         assert_eq!(def_charset, "PC437_USA");
         assert_eq!(def_template, Some("modern".to_string()));
+    }
+
+    #[test]
+    fn test_migration_v26_restores_classic_raster_exact_for_receipt_and_kitchen_profiles() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE printer_profiles (
+                id TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                receipt_template TEXT,
+                connection_json TEXT
+            );
+            ",
+        )
+        .expect("create minimal migration tables");
+
+        conn.execute(
+            "INSERT INTO printer_profiles (id, role, receipt_template, connection_json)
+             VALUES ('pp-receipt', 'receipt', 'modern', '{\"type\":\"network\",\"render_mode\":\"text\"}')",
+            [],
+        )
+        .expect("insert receipt profile");
+        conn.execute(
+            "INSERT INTO printer_profiles (id, role, receipt_template, connection_json)
+             VALUES ('pp-kitchen', 'kitchen', NULL, NULL)",
+            [],
+        )
+        .expect("insert kitchen profile");
+        conn.execute(
+            "INSERT INTO printer_profiles (id, role, receipt_template, connection_json)
+             VALUES ('pp-label', 'label', 'modern', '{\"type\":\"network\",\"render_mode\":\"text\"}')",
+            [],
+        )
+        .expect("insert non-receipt profile");
+
+        migrate_v26(&conn).expect("migration v26");
+
+        let (receipt_template, receipt_connection): (String, String) = conn
+            .query_row(
+                "SELECT receipt_template, connection_json FROM printer_profiles WHERE id = 'pp-receipt'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read receipt profile");
+        assert_eq!(receipt_template, "classic");
+        let receipt_json: serde_json::Value =
+            serde_json::from_str(&receipt_connection).expect("parse receipt connection json");
+        assert_eq!(
+            receipt_json
+                .get("render_mode")
+                .and_then(|value| value.as_str()),
+            Some("raster_exact")
+        );
+
+        let (kitchen_template, kitchen_connection): (String, String) = conn
+            .query_row(
+                "SELECT receipt_template, connection_json FROM printer_profiles WHERE id = 'pp-kitchen'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read kitchen profile");
+        assert_eq!(kitchen_template, "classic");
+        let kitchen_json: serde_json::Value =
+            serde_json::from_str(&kitchen_connection).expect("parse kitchen connection json");
+        assert_eq!(
+            kitchen_json
+                .get("render_mode")
+                .and_then(|value| value.as_str()),
+            Some("raster_exact")
+        );
+
+        let (label_template, label_connection): (String, String) = conn
+            .query_row(
+                "SELECT receipt_template, connection_json FROM printer_profiles WHERE id = 'pp-label'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read non-receipt profile");
+        assert_eq!(label_template, "modern");
+        assert_eq!(
+            label_connection,
+            "{\"type\":\"network\",\"render_mode\":\"text\"}"
+        );
+    }
+
+    #[test]
+    fn test_migration_v27_normalizes_network_auto_emulation_to_escpos() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE printer_profiles (
+                id TEXT PRIMARY KEY,
+                printer_type TEXT,
+                connection_json TEXT
+            );
+            ",
+        )
+        .expect("create minimal migration tables");
+
+        conn.execute(
+            "INSERT INTO printer_profiles (id, printer_type, connection_json)
+             VALUES ('pp-network', 'network', '{\"type\":\"network\",\"ip\":\"192.168.1.19\",\"emulation\":\"auto\"}')",
+            [],
+        )
+        .expect("insert network profile");
+        conn.execute(
+            "INSERT INTO printer_profiles (id, printer_type, connection_json)
+             VALUES ('pp-system', 'system', '{\"type\":\"system\",\"systemName\":\"Star MCP31\",\"emulation\":\"auto\"}')",
+            [],
+        )
+        .expect("insert system profile");
+
+        migrate_v27(&conn).expect("migration v27");
+
+        let network_connection: String = conn
+            .query_row(
+                "SELECT connection_json FROM printer_profiles WHERE id = 'pp-network'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read network profile");
+        let network_json: serde_json::Value =
+            serde_json::from_str(&network_connection).expect("parse network connection");
+        assert_eq!(
+            network_json
+                .get("emulation")
+                .and_then(|value| value.as_str()),
+            Some("escpos")
+        );
+
+        let system_connection: String = conn
+            .query_row(
+                "SELECT connection_json FROM printer_profiles WHERE id = 'pp-system'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read system profile");
+        let system_json: serde_json::Value =
+            serde_json::from_str(&system_connection).expect("parse system connection");
+        assert_eq!(
+            system_json
+                .get("emulation")
+                .and_then(|value| value.as_str()),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn test_migration_v28_adds_dispatched_status_and_capabilities_defaults() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE print_jobs (
+                id TEXT PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                printer_profile_id TEXT,
+                status TEXT NOT NULL,
+                output_path TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 3,
+                next_retry_at TEXT,
+                last_error TEXT,
+                warning_code TEXT,
+                warning_message TEXT,
+                last_attempt_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                entity_payload_json TEXT
+            );
+            CREATE TABLE printer_profiles (
+                id TEXT PRIMARY KEY,
+                connection_json TEXT
+            );
+            ",
+        )
+        .expect("create minimal migration tables");
+
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES ('pj-1', 'order_receipt', 'ord-1', 'printed', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert legacy print job");
+        conn.execute(
+            "INSERT INTO printer_profiles (id, connection_json)
+             VALUES ('pp-1', '{\"type\":\"network\",\"ip\":\"192.168.1.19\",\"emulation\":\"escpos\"}')",
+            [],
+        )
+        .expect("insert printer profile");
+
+        migrate_v28(&conn).expect("migration v28");
+
+        conn.execute(
+            "INSERT INTO print_jobs (id, entity_type, entity_id, status, created_at, updated_at)
+             VALUES ('pj-2', 'order_receipt', 'ord-2', 'dispatched', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("print_jobs should accept dispatched status");
+
+        let connection_json: String = conn
+            .query_row(
+                "SELECT connection_json FROM printer_profiles WHERE id = 'pp-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated printer profile");
+        let parsed: Value = serde_json::from_str(&connection_json).expect("parse migrated json");
+        let capabilities = parsed
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .expect("capabilities object should exist");
+        assert_eq!(
+            capabilities.get("status").and_then(Value::as_str),
+            Some("unverified")
+        );
+        assert_eq!(
+            capabilities
+                .get("resolvedTransport")
+                .expect("resolvedTransport should exist"),
+            &Value::Null
+        );
+    }
+
+    #[test]
+    fn test_migration_v29_reverts_unverified_network_escpos_back_to_auto() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE printer_profiles (
+                id TEXT PRIMARY KEY,
+                connection_json TEXT
+            );
+            ",
+        )
+        .expect("create minimal migration tables");
+
+        conn.execute(
+            "INSERT INTO printer_profiles (id, connection_json)
+             VALUES ('pp-network', '{\"type\":\"network\",\"ip\":\"192.168.1.19\",\"emulation\":\"escpos\",\"capabilities\":{\"status\":\"unverified\"}}')",
+            [],
+        )
+        .expect("insert unverified network profile");
+        conn.execute(
+            "INSERT INTO printer_profiles (id, connection_json)
+             VALUES ('pp-verified', '{\"type\":\"network\",\"ip\":\"192.168.1.20\",\"emulation\":\"escpos\",\"capabilities\":{\"status\":\"verified\"}}')",
+            [],
+        )
+        .expect("insert verified network profile");
+
+        migrate_v29(&conn).expect("migration v29");
+
+        let network_connection: String = conn
+            .query_row(
+                "SELECT connection_json FROM printer_profiles WHERE id = 'pp-network'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read reverted profile");
+        let network_json: Value =
+            serde_json::from_str(&network_connection).expect("parse reverted network connection");
+        assert_eq!(
+            network_json.get("emulation").and_then(Value::as_str),
+            Some("auto")
+        );
+
+        let verified_connection: String = conn
+            .query_row(
+                "SELECT connection_json FROM printer_profiles WHERE id = 'pp-verified'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read verified profile");
+        let verified_json: Value =
+            serde_json::from_str(&verified_connection).expect("parse verified connection");
+        assert_eq!(
+            verified_json.get("emulation").and_then(Value::as_str),
+            Some("escpos")
+        );
     }
 
     #[test]

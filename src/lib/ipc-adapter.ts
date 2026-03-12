@@ -14,6 +14,8 @@
 import { detectPlatform } from './platform-detect';
 import type {
   AuthSetupPinRequest,
+  PrivilegedActionConfirmRequest,
+  PrivilegedActionConfirmResponse,
   DiagnosticsAboutInfo,
   DiagnosticsExportOptions,
   DiagnosticsExportResponse,
@@ -31,6 +33,7 @@ import type {
   SyncRemoveInvalidOrdersResponse,
   SyncValidatePendingOrdersResponse,
   TerminalConfigGetSettingRequest,
+  TerminalRuntimeConfig,
   ZReportSubmitResponse,
 } from './ipc-contracts';
 
@@ -44,6 +47,10 @@ export interface IpcResult<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
+}
+
+export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
+  status?: number;
 }
 
 // -- Auth / Staff Auth -------------------------------------------------------
@@ -86,6 +93,71 @@ export interface UpdateTerminalCredentialsPayload {
   organizationId?: string;
   supabaseUrl?: string;
   supabaseAnonKey?: string;
+}
+
+export interface AppointmentBridgeListParams {
+  date?: string;
+  date_from?: string;
+  date_to?: string;
+  staff_id?: string;
+  status?: string;
+  include_services?: boolean;
+  search?: string;
+}
+
+export interface ReservationBridgeListParams {
+  date?: string;
+  status?: string;
+  search?: string;
+  table_id?: string;
+}
+
+export interface ServiceBridgeListParams {
+  category_id?: string;
+  is_active?: boolean | string;
+  search?: string;
+}
+
+export interface ServiceCategoryBridgeListParams {
+  is_active?: boolean | string;
+}
+
+export interface ResourceBridgeListParams {
+  resource_type?: string;
+  is_active?: boolean | string;
+}
+
+export interface RoomBridgeListParams {
+  status?: string;
+  floor?: number | string;
+  room_type?: string;
+}
+
+export interface TableBridgeListParams {
+  status?: string;
+  min_capacity?: number | string;
+  max_capacity?: number | string;
+}
+
+export interface StaffScheduleListParams {
+  start_date: string;
+  end_date: string;
+  branch_id?: string;
+  role?: string;
+}
+
+export interface StaffScheduleCheckAvailabilityParams {
+  start_time: string;
+  end_time: string;
+  staff_id?: string;
+  service_id?: string;
+}
+
+export interface StaffScheduleClockPayload {
+  staff_id: string;
+  action: 'clock_in' | 'clock_out';
+  pin?: string;
+  notes?: string;
 }
 
 type SettingsGetInput = string | SettingsGetRequest;
@@ -213,6 +285,32 @@ function buildDiagnosticsExportArgs(options?: DiagnosticsExportOptions): unknown
   }
 
   return Object.keys(payload).length ? [payload] : [];
+}
+
+function buildQueryString(params?: object): string {
+  if (!params) {
+    return '';
+  }
+
+  const search = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      search.set(key, trimmed);
+      continue;
+    }
+    if (typeof value === 'boolean' || typeof value === 'number') {
+      search.set(key, String(value));
+    }
+  }
+
+  const encoded = search.toString();
+  return encoded ? `?${encoded}` : '';
 }
 
 function toSyncFinancialQueueId(value: unknown): number {
@@ -602,6 +700,9 @@ export interface PlatformBridge {
     hasPermission(permission: string): Promise<boolean>;
     getSessionStats(): Promise<any>;
     setupPin(request: AuthSetupPinInput): Promise<IpcResult>;
+    confirmPrivilegedAction(
+      request: PrivilegedActionConfirmRequest
+    ): Promise<PrivilegedActionConfirmResponse>;
   };
 
   // -- Staff auth ------------------------------------------------------------
@@ -674,8 +775,6 @@ export interface PlatformBridge {
     requeueOrphanedFinancial(): Promise<IpcResult>;
     testParentConnection(): Promise<IpcResult>;
     rediscoverParent(): Promise<IpcResult>;
-    fetchTables(): Promise<any>;
-    fetchReservations(): Promise<any>;
     validatePendingOrders(): Promise<SyncValidatePendingOrdersResponse>;
     removeInvalidOrders(orderIds: string[]): Promise<SyncRemoveInvalidOrdersResponse>;
     fetchSuppliers(): Promise<any>;
@@ -732,7 +831,58 @@ export interface PlatformBridge {
     refresh(): Promise<IpcResult>;
     getOrganizationId(): Promise<string>;
     getBusinessType(): Promise<string>;
-    getFullConfig(): Promise<any>;
+    getFullConfig(): Promise<TerminalRuntimeConfig>;
+    syncFromAdmin(): Promise<IpcResult<{ config?: TerminalRuntimeConfig }>>;
+  };
+
+  appointments: {
+    list(params?: AppointmentBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+    get(appointmentId: string): Promise<AdminApiBridgeResponse<any>>;
+    create(payload: Record<string, unknown>): Promise<AdminApiBridgeResponse<any>>;
+    updateStatus(
+      appointmentId: string,
+      payload: Record<string, unknown>,
+    ): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  reservations: {
+    list(params?: ReservationBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+    get(reservationId: string): Promise<AdminApiBridgeResponse<any>>;
+    create(payload: Record<string, unknown>): Promise<AdminApiBridgeResponse<any>>;
+    update(
+      reservationId: string,
+      payload: Record<string, unknown>,
+    ): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  services: {
+    list(params?: ServiceBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+    categories(params?: ServiceCategoryBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  resources: {
+    list(params?: ResourceBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  rooms: {
+    list(params?: RoomBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  tables: {
+    list(params?: TableBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+    get(tableId: string): Promise<AdminApiBridgeResponse<any>>;
+    updateStatus(
+      tableId: string,
+      status: string,
+    ): Promise<AdminApiBridgeResponse<any>>;
+  };
+
+  staffSchedule: {
+    list(params: StaffScheduleListParams): Promise<AdminApiBridgeResponse<any>>;
+    checkAvailability(
+      params: StaffScheduleCheckAvailabilityParams,
+    ): Promise<AdminApiBridgeResponse<any>>;
+    clock(payload: StaffScheduleClockPayload): Promise<AdminApiBridgeResponse<any>>;
   };
 
   // -- Shifts ----------------------------------------------------------------
@@ -744,8 +894,6 @@ export interface PlatformBridge {
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
     getActiveByTerminalLoose(terminalId: string): Promise<any>;
     getActiveCashierByTerminal(branchId: string, terminalId: string): Promise<any>;
-    listStaffForCheckin(): Promise<any>;
-    getStaffRoles(): Promise<any>;
     getSummary(shiftId: string, options?: { skipBackfill?: boolean }): Promise<any>;
     recordExpense(params: RecordExpenseParams): Promise<IpcResult>;
     getExpenses(shiftId: string): Promise<any[]>;
@@ -828,6 +976,7 @@ export interface PlatformBridge {
     cancelJob(jobId: string): Promise<IpcResult>;
     retryJob(jobId: string): Promise<IpcResult>;
     test(printerId: string): Promise<IpcResult>;
+    testDraft(profileDraftOrPayload: any, sampleKind?: string): Promise<IpcResult>;
     testGreekDirect(printerId: string): Promise<IpcResult>;
     getAutoConfig(printerId: string): Promise<any>;
     recommendProfile(payload: {
@@ -1051,6 +1200,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'auth:has-permission': 'auth.hasPermission',
   'auth:get-session-stats': 'auth.getSessionStats',
   'auth:setup-pin': 'auth.setupPin',
+  'auth:confirm-privileged-action': 'auth.confirmPrivilegedAction',
 
   // Staff auth
   'staff-auth:authenticate-pin': 'staffAuth.authenticatePin',
@@ -1095,6 +1245,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'payment:void': 'payments.voidPayment',
   'payment:get-order-payments': 'payments.getOrderPayments',
   'payment:get-receipt-preview': 'payments.getReceiptPreview',
+  'receipt:sample-preview': 'receipt.samplePreview',
 
   // Sync
   'sync:get-status': 'sync.getStatus',
@@ -1115,8 +1266,6 @@ export const CHANNEL_MAP: Record<string, string> = {
   'sync:requeue-orphaned-financial': 'sync.requeueOrphanedFinancial',
   'sync:test-parent-connection': 'sync.testParentConnection',
   'sync:rediscover-parent': 'sync.rediscoverParent',
-  'sync:fetch-tables': 'sync.fetchTables',
-  'sync:fetch-reservations': 'sync.fetchReservations',
   'sync:validate-pending-orders': 'sync.validatePendingOrders',
   'sync:remove-invalid-orders': 'sync.removeInvalidOrders',
   'sync:fetch-suppliers': 'sync.fetchSuppliers',
@@ -1170,6 +1319,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'terminal-config:get-organization-id': 'terminalConfig.getOrganizationId',
   'terminal-config:get-business-type': 'terminalConfig.getBusinessType',
   'terminal-config:get-full-config': 'terminalConfig.getFullConfig',
+  'terminal-config:sync-from-admin': 'terminalConfig.syncFromAdmin',
 
   // Shifts
   'shift:open': 'shifts.open',
@@ -1178,8 +1328,6 @@ export const CHANNEL_MAP: Record<string, string> = {
   'shift:get-active-by-terminal': 'shifts.getActiveByTerminal',
   'shift:get-active-by-terminal-loose': 'shifts.getActiveByTerminalLoose',
   'shift:get-active-cashier-by-terminal': 'shifts.getActiveCashierByTerminal',
-  'shift:list-staff-for-checkin': 'shifts.listStaffForCheckin',
-  'shift:get-staff-roles': 'shifts.getStaffRoles',
   'shift:get-summary': 'shifts.getSummary',
   'shift:record-expense': 'shifts.recordExpense',
   'shift:get-expenses': 'shifts.getExpenses',
@@ -1249,6 +1397,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'printer:cancel-job': 'printer.cancelJob',
   'printer:retry-job': 'printer.retryJob',
   'printer:test': 'printer.test',
+  'printer:test-draft': 'printer.testDraft',
   'printer:test-greek-direct': 'printer.testGreekDirect',
   'printer:get-auto-config': 'printer.getAutoConfig',
   'printer:recommend-profile': 'printer.recommendProfile',
@@ -1422,8 +1571,18 @@ export class TauriBridge implements PlatformBridge {
     };
   }
 
+  private static readonly COMMAND_OVERRIDES: Record<string, string> = {
+    'terminal-config:sync-from-admin': 'terminal_config_sync_from_admin',
+    'loyalty:get-balance': 'loyalty_get_customer_balance',
+    'loyalty:lookup-phone': 'loyalty_lookup_by_phone',
+    'loyalty:lookup-card': 'loyalty_lookup_by_card',
+    'loyalty:earn': 'loyalty_earn_points',
+    'loyalty:redeem': 'loyalty_redeem_points',
+    'loyalty:transactions': 'loyalty_get_transactions',
+  };
+
   private toCmd(channel: string): string {
-    return channel.replace(/[:\-]/g, '_');
+    return TauriBridge.COMMAND_OVERRIDES[channel] ?? channel.replace(/[:\-]/g, '_');
   }
 
   // Raw invoke -- packs positional args into { arg0, arg1, ... } to match
@@ -1439,6 +1598,26 @@ export class TauriBridge implements PlatformBridge {
   // Shorthand for namespaced invoke
   private inv(channel: string, ...args: any[]) {
     return this.invoke(channel, ...args);
+  }
+
+  private async adminFetch<T = unknown>(
+    path: string,
+    opts?: { method?: string; body?: unknown; headers?: Record<string, string> },
+  ): Promise<AdminApiBridgeResponse<T>> {
+    const result = await this.inv('api:fetch-from-admin', path, opts);
+    if (!result?.success) {
+      return {
+        success: false,
+        error: result?.error || 'Failed to fetch from admin API',
+        status: result?.status,
+      };
+    }
+
+    return {
+      success: true,
+      data: (result?.data ?? result) as T,
+      status: result?.status,
+    };
   }
 
   app = {
@@ -1461,6 +1640,8 @@ export class TauriBridge implements PlatformBridge {
     hasPermission: (p: string) => this.inv('auth:has-permission', p),
     getSessionStats: () => this.inv('auth:get-session-stats'),
     setupPin: (request: AuthSetupPinInput) => this.inv('auth:setup-pin', buildAuthSetupPinArg(request)),
+    confirmPrivilegedAction: (request: PrivilegedActionConfirmRequest) =>
+      this.inv('auth:confirm-privileged-action', request),
   };
 
   staffAuth = {
@@ -1510,6 +1691,11 @@ export class TauriBridge implements PlatformBridge {
     getReceiptPreview: (orderId: string) => this.inv('payment:get-receipt-preview', orderId),
   };
 
+  receipt = {
+    samplePreview: (overrides?: { textScale?: number; logoScale?: number }) =>
+      this.inv('receipt:sample-preview', overrides),
+  };
+
   sync = {
     getStatus: () => this.inv('sync:get-status'),
     force: () => this.inv('sync:force'),
@@ -1533,8 +1719,6 @@ export class TauriBridge implements PlatformBridge {
     requeueOrphanedFinancial: () => this.inv('sync:requeue-orphaned-financial'),
     testParentConnection: () => this.inv('sync:test-parent-connection'),
     rediscoverParent: () => this.inv('sync:rediscover-parent'),
-    fetchTables: () => this.inv('sync:fetch-tables'),
-    fetchReservations: () => this.inv('sync:fetch-reservations'),
     validatePendingOrders: () => this.inv('sync:validate-pending-orders'),
     removeInvalidOrders: (orderIds: string[]) => this.inv('sync:remove-invalid-orders', orderIds),
     fetchSuppliers: () => this.inv('sync:fetch-suppliers'),
@@ -1596,6 +1780,70 @@ export class TauriBridge implements PlatformBridge {
     getOrganizationId: () => this.inv('terminal-config:get-organization-id'),
     getBusinessType: () => this.inv('terminal-config:get-business-type'),
     getFullConfig: () => this.inv('terminal-config:get-full-config'),
+    syncFromAdmin: () => this.inv('terminal-config:sync-from-admin'),
+  };
+
+  appointments = {
+    list: (params?: AppointmentBridgeListParams) =>
+      this.adminFetch(`/api/pos/appointments${buildQueryString(params)}`),
+    get: (appointmentId: string) => this.adminFetch(`/api/pos/appointments/${appointmentId}`),
+    create: (payload: Record<string, unknown>) =>
+      this.adminFetch('/api/pos/appointments', { method: 'POST', body: payload }),
+    updateStatus: (appointmentId: string, payload: Record<string, unknown>) =>
+      this.adminFetch(`/api/pos/appointments/${appointmentId}/status`, {
+        method: 'PATCH',
+        body: payload,
+      }),
+  };
+
+  reservations = {
+    list: (params?: ReservationBridgeListParams) =>
+      this.adminFetch(`/api/pos/reservations${buildQueryString(params)}`),
+    get: (reservationId: string) => this.adminFetch(`/api/pos/reservations/${reservationId}`),
+    create: (payload: Record<string, unknown>) =>
+      this.adminFetch('/api/pos/reservations', { method: 'POST', body: payload }),
+    update: (reservationId: string, payload: Record<string, unknown>) =>
+      this.adminFetch(`/api/pos/reservations/${reservationId}`, {
+        method: 'PATCH',
+        body: payload,
+      }),
+  };
+
+  services = {
+    list: (params?: ServiceBridgeListParams) =>
+      this.adminFetch(`/api/pos/services${buildQueryString(params)}`),
+    categories: (params?: ServiceCategoryBridgeListParams) =>
+      this.adminFetch(`/api/pos/service-categories${buildQueryString(params)}`),
+  };
+
+  resources = {
+    list: (params?: ResourceBridgeListParams) =>
+      this.adminFetch(`/api/pos/resources${buildQueryString(params)}`),
+  };
+
+  rooms = {
+    list: (params?: RoomBridgeListParams) =>
+      this.adminFetch(`/api/pos/rooms${buildQueryString(params)}`),
+  };
+
+  tables = {
+    list: (params?: TableBridgeListParams) =>
+      this.adminFetch(`/api/pos/tables${buildQueryString(params)}`),
+    get: (tableId: string) => this.adminFetch(`/api/pos/tables/${tableId}`),
+    updateStatus: (tableId: string, status: string) =>
+      this.adminFetch(`/api/pos/tables/${tableId}`, {
+        method: 'PATCH',
+        body: { status },
+      }),
+  };
+
+  staffSchedule = {
+    list: (params: StaffScheduleListParams) =>
+      this.adminFetch(`/api/pos/staff-schedule${buildQueryString(params)}`),
+    checkAvailability: (params: StaffScheduleCheckAvailabilityParams) =>
+      this.adminFetch(`/api/pos/staff-schedule/check${buildQueryString(params)}`),
+    clock: (payload: StaffScheduleClockPayload) =>
+      this.adminFetch('/api/pos/staff-schedule/clock', { method: 'POST', body: payload }),
   };
 
   shifts = {
@@ -1606,8 +1854,6 @@ export class TauriBridge implements PlatformBridge {
     getActiveByTerminal: (b: string, t: string) => this.inv('shift:get-active-by-terminal', b, t),
     getActiveByTerminalLoose: (t: string) => this.inv('shift:get-active-by-terminal-loose', t),
     getActiveCashierByTerminal: (b: string, t: string) => this.inv('shift:get-active-cashier-by-terminal', b, t),
-    listStaffForCheckin: (branchId?: string) => this.inv('shift:list-staff-for-checkin', branchId),
-    getStaffRoles: (staffIds?: string[]) => this.inv('shift:get-staff-roles', staffIds),
     getSummary: (id: string, opts?: { skipBackfill?: boolean }) => this.inv('shift:get-summary', id, opts),
     recordExpense: (p: RecordExpenseParams) => this.inv('shift:record-expense', p),
     getExpenses: (id: string) => this.inv('shift:get-expenses', id),
@@ -1687,6 +1933,22 @@ export class TauriBridge implements PlatformBridge {
     cancelJob: (id: string) => this.inv('printer:cancel-job', id),
     retryJob: (id: string) => this.inv('printer:retry-job', id),
     test: (id: string) => this.inv('printer:test', id),
+    testDraft: (profileDraftOrPayload: any, sampleKind?: string) => {
+      const payload =
+        sampleKind !== undefined ||
+        !profileDraftOrPayload ||
+        typeof profileDraftOrPayload !== 'object' ||
+        Array.isArray(profileDraftOrPayload) ||
+        !(
+          'profileDraft' in profileDraftOrPayload ||
+          'draft' in profileDraftOrPayload ||
+          'printer' in profileDraftOrPayload ||
+          'sampleKind' in profileDraftOrPayload
+        )
+          ? { profileDraft: profileDraftOrPayload, ...(sampleKind ? { sampleKind } : {}) }
+          : profileDraftOrPayload;
+      return this.inv('printer:test-draft', payload);
+    },
     testGreekDirect: (id: string) => this.inv('printer:test-greek-direct', id),
     getAutoConfig: (id: string) => this.inv('printer:get-auto-config', id),
     recommendProfile: (payload: { name: string; type?: string; address?: string; paperSizeHint?: string }) =>

@@ -80,6 +80,7 @@ const InventoryPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<StockStatus>('all');
@@ -95,6 +96,7 @@ const InventoryPage: React.FC = () => {
 
   const fetchInventory = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const invoke = getIpcInvoke();
       if (invoke) {
@@ -115,9 +117,12 @@ const InventoryPage: React.FC = () => {
       const rows = Array.isArray(result.data?.data) ? result.data.data : [];
       const normalized: InventoryItem[] = rows.map(normalizeInventoryItem);
       setInventory(normalized.filter((item: InventoryItem) => item.is_active));
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch inventory:', error);
-      toast.error(t('inventory.errors.loadFailed', 'Failed to load inventory'));
+      const message = t('inventory.errors.loadFailed', 'Failed to load inventory');
+      setError(message);
+      toast.error(message);
       setInventory([]);
     } finally {
       setLoading(false);
@@ -229,6 +234,28 @@ const InventoryPage: React.FC = () => {
         </button>
       </div>
 
+      {error && !loading && (
+        <div className={`mb-6 rounded-2xl border px-4 py-4 ${isDark ? 'bg-red-950/30 border-red-900 text-red-100' : 'bg-red-50 border-red-200 text-red-700'}`}>
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 mt-0.5" />
+              <div>
+                <p className="font-semibold">{t('inventory.errors.loadFailedTitle', 'Inventory unavailable')}</p>
+                <p className={`text-sm ${isDark ? 'text-red-200/80' : 'text-red-600'}`}>{error}</p>
+              </div>
+            </div>
+            <button
+              onClick={fetchInventory}
+              className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium border ${isDark ? 'border-red-700 hover:bg-red-900/40' : 'border-red-300 hover:bg-red-100'}`}
+            >
+              {t('common.retry', 'Retry')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!error && (
+        <>
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className={`p-4 rounded-xl border border-t-2 ${isDark ? 'bg-zinc-950 border-zinc-800 border-t-blue-400' : 'bg-white border-gray-200 border-t-blue-500'}`}>
@@ -395,6 +422,8 @@ const InventoryPage: React.FC = () => {
             </div>
           )}
         </div>
+      )}
+        </>
       )}
 
       {/* Adjust Stock Modal */}

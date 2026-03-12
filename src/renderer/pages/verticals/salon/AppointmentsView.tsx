@@ -17,13 +17,13 @@ import { formatDate, formatTime } from '../../../utils/format';
 import { Calendar, Clock, User, Scissors, Search, ChevronLeft, ChevronRight, RefreshCw, CheckCircle, Play, XCircle, X, Plus, Ban } from 'lucide-react';
 import { FloatingActionButton } from '../../../components/ui/FloatingActionButton';
 import { CustomerSearchModal } from '../../../components/modals/CustomerSearchModal';
-import { supabase } from '../../../lib/supabase';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../../../lib';
 import type { Appointment, AppointmentStatus, AppointmentFilters } from '../../../services/AppointmentsService';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
 } from '../../../services/terminal-credentials';
+import { posApiGet } from '../../../utils/api-helpers';
 
 type ViewMode = 'timeline' | 'list';
 type QuickFilter = 'today' | 'tomorrow' | 'week';
@@ -136,158 +136,80 @@ export const AppointmentsView: React.FC = memo(() => {
       console.log('[AppointmentsView] Loading staff and services for branch:', branchId, 'org:', effectiveOrgId);
 
       try {
-        let resolvedStaff: { id: string; name: string }[] = [];
-        let resolvedServices: { id: string; name: string; duration: number }[] = [];
+        const scheduleParams = {
+          start_date: formData.date,
+          end_date: formData.date,
+        };
 
-        const invoke = isBrowser() ? null : bridge.invoke.bind(bridge);
+        const staffResult = isBrowser()
+          ? await posApiGet<{ success?: boolean; staff?: any[]; error?: string }>(
+              `/api/pos/staff-schedule?start_date=${encodeURIComponent(scheduleParams.start_date)}&end_date=${encodeURIComponent(scheduleParams.end_date)}`,
+            )
+          : await bridge.staffSchedule.list(scheduleParams);
 
-        // Prefer terminal-authenticated admin APIs in Electron.
-        if (invoke) {
-          let staffRows: any[] = [];
+        const staffPayload = (staffResult.data ?? {}) as {
+          success?: boolean;
+          staff?: any[];
+          error?: string;
+        };
 
-          // Primary: existing IPC handler used by shift check-in (very stable path).
-          if (branchId) {
-            const staffRpc = await invoke('shift:list-staff-for-checkin', branchId);
-            const rpcPayload = staffRpc?.data ?? staffRpc;
-            const rpcRows = Array.isArray(rpcPayload?.data)
-              ? rpcPayload.data
-              : Array.isArray(rpcPayload)
-                ? rpcPayload
-                : [];
-            if (staffRpc?.success !== false) {
-              staffRows = rpcRows;
-            } else {
-              console.warn('[AppointmentsView] shift:list-staff-for-checkin failed:', staffRpc?.error || staffRpc);
-            }
-          }
+        let resolvedStaff = Array.isArray(staffPayload.staff)
+          ? staffPayload.staff
+              .map((member: any) => ({
+                id: String(member?.id ?? ''),
+                name:
+                  String(member?.name ?? '').trim() ||
+                  `${member?.firstName ?? member?.first_name ?? ''} ${member?.lastName ?? member?.last_name ?? ''}`.trim() ||
+                  'Staff',
+              }))
+              .filter((member: { id: string; name: string }) => !!member.id)
+          : [];
 
-          // Secondary: POS sync API (requires admin route whitelist).
-          if (!staffRows.length) {
-            const staffResp = await invoke('api:fetch-from-admin', '/api/pos/sync/staff?limit=1000');
-            const payload = staffResp?.data ?? staffResp;
-            const payloadSuccess = payload?.success !== false;
-            if (staffResp?.success !== false && payloadSuccess) {
-              staffRows = Array.isArray(payload?.data) ? payload.data : [];
-            } else {
-              console.warn('[AppointmentsView] Staff sync API failed:', staffResp?.error || payload?.error || staffResp);
-            }
-          }
-
-          resolvedStaff = (staffRows || [])
-            .filter((s: any) => {
-              const active = s?.is_active ?? s?.isActive ?? s?.active;
-              const canPos = s?.can_login_pos ?? s?.canLoginPos ?? true;
-              return active !== false && canPos !== false;
-            })
-            .map((s: any) => {
-              const fullName =
-                `${s?.first_name ?? s?.firstName ?? ''} ${s?.last_name ?? s?.lastName ?? ''}`.trim() ||
-                s?.name ||
-                s?.full_name ||
-                s?.fullName ||
-                s?.display_name ||
-                '';
-              return {
-                id: String(s?.id ?? ''),
-                name: fullName || 'Staff',
-              };
-            })
-            .filter((s: { id: string; name: string }) => !!s.id);
-
-          if (resolvedStaff.length) {
-            setStaffList(resolvedStaff);
-          }
-
-          let serviceRows: any[] = [];
-          const servicesResp = await invoke('api:fetch-from-admin', '/api/pos/services?is_active=true');
-          if (servicesResp?.success && servicesResp?.data?.success !== false) {
-            serviceRows = Array.isArray(servicesResp?.data?.services) ? servicesResp.data.services : [];
-          } else {
-            const fallback = await invoke('api:fetch-from-admin', '/api/pos/sync/services?limit=1000');
-            if (fallback?.success && fallback?.data?.success !== false) {
-              serviceRows = Array.isArray(fallback?.data?.data) ? fallback.data.data : [];
-            } else {
-              console.warn('[AppointmentsView] Services API failed:', fallback?.error || fallback?.data?.error || fallback);
-            }
-          }
-
-          resolvedServices = (serviceRows || [])
-            .filter((s: any) => {
-              const active = s?.is_active ?? s?.isActive ?? s?.active;
-              const status = s?.status;
-              const rowBranch = s?.branch_id ?? s?.branchId ?? null;
-              return active !== false && status !== 'inactive' && (!rowBranch || !branchId || rowBranch === branchId);
-            })
-            .map((s: any) => ({
-              id: String(s?.id ?? ''),
-              name: s?.name || s?.title || 'Service',
-              duration: Number(s?.duration_minutes ?? s?.duration ?? s?.durationMinutes ?? 30) || 30,
-            }))
-            .filter((s: { id: string; name: string; duration: number }) => !!s.id);
-
-          if (resolvedServices.length) {
-            setServicesList(resolvedServices);
-          }
-
-          // If both loaded, we're done.
-          if (resolvedStaff.length > 0 && resolvedServices.length > 0) {
-            return;
-          }
-        }
-
-        // Fallback path (or fill missing lists) via direct Supabase.
-        const { data: staffData, error: staffError } = await (supabase as any)
-          .from('staff')
-          .select('id, first_name, last_name, is_active, can_login_pos')
-          .eq('organization_id', effectiveOrgId);
-
-        console.log('[AppointmentsView] Staff query result:', { count: staffData?.length || 0, staffError });
-
-        if (resolvedStaff.length === 0) {
-          const fallbackStaff = (staffData || [])
-            .filter((s: any) => (s?.is_active ?? true) !== false && (s?.can_login_pos ?? true) !== false)
-            .map((s: any) => ({
-              id: String(s?.id ?? ''),
-              name: `${s?.first_name || ''} ${s?.last_name || ''}`.trim() || 'Staff',
-            }))
-            .filter((s: { id: string; name: string }) => !!s.id);
-          if (fallbackStaff.length) {
-            setStaffList(fallbackStaff);
-            resolvedStaff = fallbackStaff;
-          }
-        }
-
-        const { data: servicesData, error: servicesError } = await (supabase as any)
-          .from('services')
-          .select('id, name, duration_minutes, is_active, status, branch_id')
-          .eq('organization_id', effectiveOrgId);
-
-        console.log('[AppointmentsView] Services query result:', { count: servicesData?.length || 0, servicesError });
-
-        if (resolvedServices.length === 0) {
-          const fallbackServices = (servicesData || [])
-            .filter((s: any) => {
-              const active = s?.is_active ?? true;
-              const rowBranch = s?.branch_id ?? null;
-              return active !== false && s?.status !== 'inactive' && (!rowBranch || !branchId || rowBranch === branchId);
-            })
-            .map((s: any) => ({
-              id: String(s?.id ?? ''),
-              name: s?.name || 'Service',
-              duration: Number(s?.duration_minutes ?? 30) || 30,
-            }))
-            .filter((s: { id: string; name: string; duration: number }) => !!s.id);
-          if (fallbackServices.length) {
-            setServicesList(fallbackServices);
-            resolvedServices = fallbackServices;
-          }
-        }
-
-        // Final fallback for staff from staff already discovered in loaded appointments.
         if (resolvedStaff.length === 0 && staff.length > 0) {
-          setStaffList(staff);
           resolvedStaff = staff;
         }
+
+        setStaffList(resolvedStaff);
+
+        const servicesResult = isBrowser()
+          ? await posApiGet<{ success?: boolean; services?: any[]; error?: string }>(
+              '/api/pos/services?is_active=true',
+            )
+          : await bridge.services.list({ is_active: true });
+
+        const servicesPayload = (servicesResult.data ?? {}) as {
+          success?: boolean;
+          services?: any[];
+          error?: string;
+        };
+
+        const resolvedServices = Array.isArray(servicesPayload.services)
+          ? servicesPayload.services
+              .filter((service: any) => {
+                const active = service?.is_active ?? service?.isActive ?? true;
+                const status = service?.status;
+                const rowBranch = service?.branch_id ?? service?.branchId ?? null;
+                return (
+                  active !== false &&
+                  status !== 'inactive' &&
+                  (!rowBranch || !branchId || rowBranch === branchId)
+                );
+              })
+              .map((service: any) => ({
+                id: String(service?.id ?? ''),
+                name: service?.name || service?.title || 'Service',
+                duration:
+                  Number(
+                    service?.duration_minutes ??
+                      service?.duration ??
+                      service?.durationMinutes ??
+                      30,
+                  ) || 30,
+              }))
+              .filter((service: { id: string; name: string; duration: number }) => !!service.id)
+          : [];
+
+        setServicesList(resolvedServices);
       } catch (err) {
         console.error('[AppointmentsView] Failed to load dropdown data:', err);
       }
@@ -296,7 +218,7 @@ export const AppointmentsView: React.FC = memo(() => {
     if (showCreateModal) {
       loadDropdownData();
     }
-  }, [bridge, branchId, effectiveOrgId, showCreateModal]);
+  }, [bridge, branchId, effectiveOrgId, formData.date, showCreateModal]);
 
   // Helper: format a Date as YYYY-MM-DD using local timezone
   const toLocalDateStr = (d: Date): string => {
@@ -387,6 +309,51 @@ export const AppointmentsView: React.FC = memo(() => {
 
       const endDate = new Date(startDate);
       endDate.setMinutes(endDate.getMinutes() + duration);
+
+      const availabilityResult = isBrowser()
+        ? await posApiGet<{
+            success?: boolean;
+            available?: Array<{ staffId?: string; isAvailable?: boolean }>;
+            unavailable?: Array<{ staffId?: string; reason?: string }>;
+            error?: string;
+          }>(
+            `/api/pos/staff-schedule/check?start_time=${encodeURIComponent(startDate.toISOString())}&end_time=${encodeURIComponent(endDate.toISOString())}&staff_id=${encodeURIComponent(formData.staffId)}&service_id=${encodeURIComponent(formData.serviceId)}`,
+          )
+        : await bridge.staffSchedule.checkAvailability({
+            start_time: startDate.toISOString(),
+            end_time: endDate.toISOString(),
+            staff_id: formData.staffId,
+            service_id: formData.serviceId,
+          });
+
+      if (!availabilityResult.success) {
+        toast.error(availabilityResult.error || 'Failed to validate staff availability');
+        return;
+      }
+
+      const availabilityPayload = (availabilityResult.data ?? {}) as {
+        success?: boolean;
+        available?: Array<{ staffId?: string; isAvailable?: boolean }>;
+        unavailable?: Array<{ staffId?: string; reason?: string }>;
+        error?: string;
+      };
+
+      if (availabilityPayload.success === false) {
+        toast.error(availabilityPayload.error || 'Failed to validate staff availability');
+        return;
+      }
+
+      const matchedAvailable = (availabilityPayload.available || []).find(
+        (entry) => entry?.staffId === formData.staffId && entry?.isAvailable !== false,
+      );
+      if (!matchedAvailable) {
+        const unavailableReason =
+          (availabilityPayload.unavailable || []).find(
+            (entry) => entry?.staffId === formData.staffId,
+          )?.reason || 'Staff is not available for the selected slot';
+        toast.error(unavailableReason);
+        return;
+      }
 
       await createAppointment({
         customerId: formData.customerId || undefined,
@@ -835,6 +802,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
   organizationId,
 }) => {
   const { t } = useTranslation();
+  const bridge = getBridge();
   const [calendarDate, setCalendarDate] = useState(new Date());
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [timePeriod, setTimePeriod] = useState<'morning' | 'afternoon' | 'evening'>('morning');
@@ -888,30 +856,50 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
       if (!selectedDay || !branchId) return;
       setLoadingSlots(true);
       try {
-        // Build local day boundaries to avoid timezone shift via .toISOString()
         const yyyy = selectedDay.getFullYear();
         const mm = String(selectedDay.getMonth() + 1).padStart(2, '0');
         const dd = String(selectedDay.getDate()).padStart(2, '0');
-        const dayStartLocal = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);
-        const dayEndLocal = new Date(`${yyyy}-${mm}-${dd}T23:59:59.999`);
+        const date = `${yyyy}-${mm}-${dd}`;
 
-        const { data } = await (supabase as any)
-          .from('appointments')
-          .select('staff_id, start_time, end_time, status')
-          .eq('branch_id', branchId)
-          .gte('start_time', dayStartLocal.toISOString())
-          .lte('start_time', dayEndLocal.toISOString())
-          .neq('status', 'cancelled')
-          .neq('status', 'no_show');
-        
-        if (data) {
-          setExistingAppointments(data.map((a: { staff_id: string; start_time: string; end_time: string; status: string }) => ({
-            staffId: a.staff_id,
-            startTime: a.start_time,
-            endTime: a.end_time,
-            status: a.status,
-          })));
+        const result = isBrowser()
+          ? await posApiGet<{ success?: boolean; appointments?: any[]; error?: string }>(
+              `/api/pos/appointments?date=${encodeURIComponent(date)}${formData.staffId ? `&staff_id=${encodeURIComponent(formData.staffId)}` : ''}`,
+            )
+          : await bridge.appointments.list({
+              date,
+              staff_id: formData.staffId || undefined,
+            });
+
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to fetch appointments for selected day');
         }
+
+        const payload = (result.data ?? {}) as {
+          success?: boolean;
+          appointments?: Array<{
+            staff_id: string;
+            start_time: string;
+            end_time: string;
+            status: string;
+          }>;
+          error?: string;
+        };
+
+        if (payload.success === false) {
+          throw new Error(payload.error || 'Failed to fetch appointments for selected day');
+        }
+
+        const rows = Array.isArray(payload.appointments) ? payload.appointments : [];
+        setExistingAppointments(
+          rows
+            .filter((appointment) => !['cancelled', 'no_show'].includes(appointment.status))
+            .map((appointment) => ({
+              staffId: appointment.staff_id,
+              startTime: appointment.start_time,
+              endTime: appointment.end_time,
+              status: appointment.status,
+            })),
+        );
       } catch (err) {
         console.error('Failed to fetch day appointments:', err);
       } finally {
@@ -919,7 +907,7 @@ const CreateAppointmentModalContent: React.FC<CreateAppointmentModalContentProps
       }
     };
     fetchDayAppointments();
-  }, [selectedDay, branchId]);
+  }, [selectedDay, branchId, bridge, formData.staffId]);
 
   // Check if time slot is booked
   const isTimeSlotBooked = (time: string): boolean => {
