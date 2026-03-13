@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 30;
+const CURRENT_SCHEMA_VERSION: i32 = 31;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -227,6 +227,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 30 {
         migrate_v30(conn)?;
+    }
+    if current < 31 {
+        migrate_v31(conn)?;
     }
 
     Ok(())
@@ -1976,6 +1979,41 @@ fn migrate_v30(conn: &Connection) -> Result<(), String> {
     })?;
 
     info!("Applied migration v30 (missing indexes on orders, sync_queue, order_payments)");
+    Ok(())
+}
+
+/// Migration v31: payment_items table for split-by-items tracking.
+fn migrate_v31(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        BEGIN;
+
+        CREATE TABLE IF NOT EXISTS payment_items (
+            id TEXT PRIMARY KEY,
+            payment_id TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            item_index INTEGER NOT NULL,
+            item_name TEXT NOT NULL,
+            item_quantity INTEGER NOT NULL DEFAULT 1,
+            item_amount REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(payment_id) REFERENCES order_payments(id) ON DELETE CASCADE,
+            FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_items_payment_id ON payment_items(payment_id);
+        CREATE INDEX IF NOT EXISTS idx_payment_items_order_id ON payment_items(order_id);
+
+        INSERT INTO schema_version (version) VALUES (31);
+
+        COMMIT;
+        ",
+    )
+    .map_err(|e| {
+        error!("Migration v31 failed: {e}");
+        format!("migration v31: {e}")
+    })?;
+
+    info!("Applied migration v31 (payment_items table for split payments)");
     Ok(())
 }
 

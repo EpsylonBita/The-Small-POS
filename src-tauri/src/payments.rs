@@ -173,15 +173,89 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         )
         .map_err(|e| format!("insert payment: {e}"))?;
 
-        // Update order payment status
+        // Insert payment items if provided (split-by-items mode)
+        if let Some(items_array) = payload.get("items").and_then(Value::as_array) {
+            for item_val in items_array {
+                let item_id = Uuid::new_v4().to_string();
+                let item_index = item_val
+                    .get("itemIndex")
+                    .or_else(|| item_val.get("item_index"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let item_name = item_val
+                    .get("itemName")
+                    .or_else(|| item_val.get("item_name"))
+                    .or_else(|| item_val.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Item");
+                let item_quantity = item_val
+                    .get("itemQuantity")
+                    .or_else(|| item_val.get("item_quantity"))
+                    .or_else(|| item_val.get("quantity"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1) as i32;
+                let item_amount = item_val
+                    .get("itemAmount")
+                    .or_else(|| item_val.get("item_amount"))
+                    .or_else(|| item_val.get("amount"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+
+                conn.execute(
+                    "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![item_id, payment_id, order_id, item_index, item_name, item_quantity, item_amount],
+                )
+                .map_err(|e| format!("insert payment item: {e}"))?;
+            }
+        }
+
+        // Compute payment status based on total paid vs order total
+        let total_paid: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0) FROM order_payments
+                 WHERE order_id = ?1 AND status = 'completed'",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+
+        let order_total: f64 = conn
+            .query_row(
+                "SELECT COALESCE(total_amount, 0) FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+
+        let completed_payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1 AND status = 'completed'",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let new_payment_status = if total_paid >= order_total - 0.01 {
+            "paid"
+        } else {
+            "partially_paid"
+        };
+
+        let effective_method = if completed_payment_count > 1 {
+            "split"
+        } else {
+            &method
+        };
+
         conn.execute(
             "UPDATE orders SET
-                payment_status = 'paid',
-                payment_method = ?1,
-                payment_transaction_id = ?2,
-                updated_at = ?3
-             WHERE id = ?4",
-            params![method, payment_id, now, order_id],
+                payment_status = ?1,
+                payment_method = ?2,
+                payment_transaction_id = ?3,
+                updated_at = ?4
+             WHERE id = ?5",
+            params![new_payment_status, effective_method, payment_id, now, order_id],
         )
         .map_err(|e| format!("update order payment: {e}"))?;
 
@@ -222,6 +296,7 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             "transactionRef": transaction_ref,
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
+            "items": payload.get("items"),
         })
         .to_string();
 
@@ -333,6 +408,50 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
     }
 
     Ok(serde_json::json!(payments))
+}
+
+/// Get items already paid for in an order (used by split-by-items UI).
+pub fn get_paid_items(db: &DbState, order_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT pi.id, pi.payment_id, pi.order_id, pi.item_index,
+                    pi.item_name, pi.item_quantity, pi.item_amount, pi.created_at,
+                    op.method AS payment_method, op.status AS payment_status
+             FROM payment_items pi
+             JOIN order_payments op ON op.id = pi.payment_id
+             WHERE pi.order_id = ?1 AND op.status = 'completed'
+             ORDER BY pi.item_index ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![order_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "paymentId": row.get::<_, String>(1)?,
+                "orderId": row.get::<_, String>(2)?,
+                "itemIndex": row.get::<_, i32>(3)?,
+                "itemName": row.get::<_, String>(4)?,
+                "itemQuantity": row.get::<_, i32>(5)?,
+                "itemAmount": row.get::<_, f64>(6)?,
+                "createdAt": row.get::<_, String>(7)?,
+                "paymentMethod": row.get::<_, String>(8)?,
+                "paymentStatus": row.get::<_, String>(9)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        match row {
+            Ok(item) => items.push(item),
+            Err(e) => warn!("skipping malformed payment_item row: {e}"),
+        }
+    }
+
+    Ok(serde_json::json!(items))
 }
 
 // ---------------------------------------------------------------------------

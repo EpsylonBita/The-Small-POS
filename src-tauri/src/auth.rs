@@ -7,7 +7,7 @@
 //! table is used only for audit/persistence across restarts.
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -27,6 +27,7 @@ const SESSION_MAX_DURATION_HOURS: i64 = 2;
 pub(crate) const PRIVILEGED_ACTION_TTL_SECONDS: i64 = 300;
 const LOCKOUT_ATTEMPTS_KEY: &str = "lockout_attempts";
 const LOCKOUT_LAST_ATTEMPT_KEY: &str = "lockout_last_attempt";
+const STAFF_AUTH_CACHE_CATEGORY: &str = "staff_auth_cache";
 
 /// Permissions granted to administrators.
 const ADMIN_PERMISSIONS: &[&str] = &[
@@ -97,6 +98,36 @@ impl StaffSession {
 struct LockoutEntry {
     attempts: u32,
     last_attempt: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StaffCheckInVerifyRequest {
+    #[serde(alias = "staffId")]
+    staff_id: String,
+    #[serde(alias = "branchId")]
+    branch_id: String,
+    pin: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StaffAuthDirectoryCache {
+    #[serde(default, alias = "branchId")]
+    branch_id: String,
+    #[serde(default)]
+    staff: Vec<StaffAuthCacheEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StaffAuthCacheEntry {
+    id: String,
+    #[serde(default)]
+    can_login_pos: Option<bool>,
+    #[serde(default)]
+    has_pin: Option<bool>,
+    #[serde(default)]
+    pin_hash: Option<String>,
+    #[serde(default)]
+    is_active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -227,6 +258,31 @@ fn extract_scope(arg: &Value) -> Option<PrivilegedActionScope> {
         }
     }
     None
+}
+
+fn staff_auth_cache_key(branch_id: &str) -> String {
+    format!("branch_{}", branch_id.trim())
+}
+
+fn load_staff_auth_cache(
+    db: &db::DbState,
+    branch_id: &str,
+) -> Result<StaffAuthDirectoryCache, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let Some(raw) = db::get_setting(&conn, STAFF_AUTH_CACHE_CATEGORY, &staff_auth_cache_key(branch_id))
+    else {
+        return Err("missing staff auth cache".to_string());
+    };
+
+    serde_json::from_str(&raw).map_err(|e| format!("invalid staff auth cache: {e}"))
+}
+
+fn check_in_verify_failure(code: &str, error: &str) -> Value {
+    serde_json::json!({
+        "success": false,
+        "reasonCode": code,
+        "error": error,
+    })
 }
 
 fn grant_key(session_id: &str, scope: PrivilegedActionScope) -> String {
@@ -508,6 +564,87 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
         Ok((role, user_id)) => Ok(create_session(auth, role, user_id)),
         Err(e) => Err(e),
     }
+}
+
+/// Verify a selected staff member's POS PIN against the cached branch-scoped
+/// auth directory. This is used for shift check-in and must not mutate the
+/// global app-login auth session.
+pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String> {
+    let payload = arg0.ok_or("Missing staff check-in payload")?;
+    let request: StaffCheckInVerifyRequest =
+        serde_json::from_value(payload).map_err(|_| "Invalid staff check-in payload".to_string())?;
+
+    let staff_id = request.staff_id.trim();
+    let branch_id = request.branch_id.trim();
+    let pin = request.pin.trim();
+
+    if staff_id.is_empty() || branch_id.is_empty() || pin.is_empty() {
+        return Ok(check_in_verify_failure(
+            "staff_auth_unavailable",
+            "Staff auth data unavailable offline. Please sync staff while online.",
+        ));
+    }
+
+    let cache = match load_staff_auth_cache(db, branch_id) {
+        Ok(cache) => cache,
+        Err(_) => {
+            return Ok(check_in_verify_failure(
+                "staff_auth_unavailable",
+                "Staff auth data unavailable offline. Please sync staff while online.",
+            ))
+        }
+    };
+
+    if !cache.branch_id.trim().is_empty() && cache.branch_id.trim() != branch_id {
+        return Ok(check_in_verify_failure(
+            "staff_auth_unavailable",
+            "Staff auth data unavailable offline. Please sync staff while online.",
+        ));
+    }
+
+    let maybe_staff = cache.staff.iter().find(|entry| {
+        entry.id.trim().eq_ignore_ascii_case(staff_id)
+    });
+
+    let Some(staff) = maybe_staff else {
+        return Ok(check_in_verify_failure(
+            "staff_not_available_offline",
+            "Selected staff member is not available in the local POS staff cache.",
+        ));
+    };
+
+    if staff.is_active == Some(false) || staff.can_login_pos == Some(false) {
+        return Ok(check_in_verify_failure(
+            "pos_login_disabled",
+            "This staff member is not allowed to log in on POS.",
+        ));
+    }
+
+    if staff.has_pin == Some(false) {
+        return Ok(check_in_verify_failure(
+            "pin_not_configured",
+            "No POS PIN is configured for this staff member.",
+        ));
+    }
+
+    let Some(hash) = staff.pin_hash.as_deref().map(str::trim).filter(|hash| !hash.is_empty()) else {
+        return Ok(check_in_verify_failure(
+            "pin_not_configured",
+            "No POS PIN is configured for this staff member.",
+        ));
+    };
+
+    let pin_ok =
+        bcrypt::verify(pin, hash).map_err(|e| format!("Failed to verify staff PIN: {e}"))?;
+    if !pin_ok {
+        return Ok(check_in_verify_failure("invalid_pin", "Invalid PIN"));
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "staffId": staff_id,
+        "branchId": branch_id,
+    }))
 }
 
 /// Handle auth:logout — invalidate the current session.
@@ -828,6 +965,27 @@ mod tests {
         db::set_setting(&conn, "staff", key, &hash).expect("store pin hash");
     }
 
+    fn set_staff_auth_cache(
+        db_state: &db::DbState,
+        branch_id: &str,
+        staff_entries: serde_json::Value,
+    ) {
+        let conn = db_state.conn.lock().expect("db lock");
+        let payload = serde_json::json!({
+            "version": 1,
+            "branch_id": branch_id,
+            "synced_at": Utc::now().to_rfc3339(),
+            "staff": staff_entries,
+        });
+        db::set_setting(
+            &conn,
+            STAFF_AUTH_CACHE_CATEGORY,
+            &staff_auth_cache_key(branch_id),
+            &payload.to_string(),
+        )
+        .expect("store staff auth cache");
+    }
+
     fn set_terminal_id(db_state: &db::DbState, terminal_id: &str) {
         let conn = db_state.conn.lock().expect("db lock");
         db::set_setting(&conn, "terminal", "terminal_id", terminal_id).expect("store terminal id");
@@ -953,6 +1111,160 @@ mod tests {
         .expect_err("invalid login should fail after reset");
         assert_eq!(err, "Invalid PIN");
         assert_eq!(lockout_attempts(&db_state), 1);
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_accepts_valid_cached_staff_pin() {
+        let db_state = test_db_state();
+        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "can_login_pos": true,
+                    "has_pin": true,
+                    "pin_hash": hash,
+                    "is_active": true
+                }
+            ]),
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should succeed");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(result.get("staffId").and_then(Value::as_str), Some("staff-1"));
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_rejects_wrong_pin() {
+        let db_state = test_db_state();
+        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "can_login_pos": true,
+                    "has_pin": true,
+                    "pin_hash": hash
+                }
+            ]),
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "9999"
+            })),
+            &db_state,
+        )
+        .expect("verification should return structured failure");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            result.get("reasonCode").and_then(Value::as_str),
+            Some("invalid_pin")
+        );
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_rejects_missing_pin_configuration() {
+        let db_state = test_db_state();
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "can_login_pos": true,
+                    "has_pin": false,
+                    "pin_hash": null
+                }
+            ]),
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should return structured failure");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            result.get("reasonCode").and_then(Value::as_str),
+            Some("pin_not_configured")
+        );
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_rejects_pos_disabled_staff() {
+        let db_state = test_db_state();
+        let hash = bcrypt::hash("4321", 4).expect("hash test pin");
+        set_staff_auth_cache(
+            &db_state,
+            "branch-1",
+            serde_json::json!([
+                {
+                    "id": "staff-1",
+                    "can_login_pos": false,
+                    "has_pin": true,
+                    "pin_hash": hash
+                }
+            ]),
+        );
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should return structured failure");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            result.get("reasonCode").and_then(Value::as_str),
+            Some("pos_login_disabled")
+        );
+    }
+
+    #[test]
+    fn verify_staff_check_in_pin_rejects_when_cache_is_missing() {
+        let db_state = test_db_state();
+
+        let result = verify_staff_check_in_pin(
+            Some(serde_json::json!({
+                "staffId": "staff-1",
+                "branchId": "branch-1",
+                "pin": "4321"
+            })),
+            &db_state,
+        )
+        .expect("verification should return structured failure");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            result.get("reasonCode").and_then(Value::as_str),
+            Some("staff_auth_unavailable")
+        );
     }
 
     #[test]

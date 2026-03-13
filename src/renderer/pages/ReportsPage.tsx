@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
 import { useShift } from '../contexts/shift-context';
+import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import ZReportModal from '../components/modals/ZReportModal';
 import { toast } from 'react-hot-toast';
 import { formatCurrency, formatDate } from '../utils/format';
@@ -50,6 +51,10 @@ const ReportsPage: React.FC = () => {
   const [orderTypeBreakdown, setOrderTypeBreakdown] = useState<OrderTypeBreakdown | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [showZReport, setShowZReport] = useState<boolean>(false);
+  const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(staff?.branchId || null);
+  const pendingReportDate = isPendingLocalSubmit
+    ? endOfDayStatus.pendingReportDate || undefined
+    : undefined;
 
   // Locale-aware currency formatter
   const formatMoney = (amount: number) => formatCurrency(amount);
@@ -392,6 +397,8 @@ const ReportsPage: React.FC = () => {
             isOpen={showZReport}
             onClose={() => setShowZReport(false)}
             branchId={staff?.branchId || ''}
+            date={pendingReportDate}
+            lockDate={!!pendingReportDate}
           />
         )}
 

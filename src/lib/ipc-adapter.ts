@@ -16,11 +16,14 @@ import type {
   AuthSetupPinRequest,
   PrivilegedActionConfirmRequest,
   PrivilegedActionConfirmResponse,
+  StaffCheckInPinVerifyRequest,
+  StaffCheckInPinVerifyResponse,
   DiagnosticsAboutInfo,
   DiagnosticsExportOptions,
   DiagnosticsExportResponse,
   DiagnosticsOpenExportDirResponse,
   DiagnosticsSystemHealth,
+  EndOfDayStatusResponse,
   ScreenCaptureGetSourcesRequest,
   ScreenCaptureGetSourcesResponse,
   ScreenCaptureSignalPollingResponse,
@@ -51,6 +54,28 @@ export interface IpcResult<T = unknown> {
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
   status?: number;
+}
+
+export interface ReceiptSamplePreviewRequest {
+  profileDraft?: Record<string, unknown>;
+  receiptSettings?: {
+    showLogo?: boolean;
+    logoSource?: string;
+    textScale?: number;
+    logoScale?: number;
+  };
+}
+
+export interface ReceiptSamplePreviewResponse {
+  success: boolean;
+  kind?: 'html' | 'image';
+  html?: string;
+  dataUrl?: string;
+  effectiveTemplate?: 'classic' | 'modern';
+  effectiveRenderMode?: 'text' | 'raster_exact';
+  supportsTextScale?: boolean;
+  isExactPreview?: boolean;
+  error?: string;
 }
 
 // -- Auth / Staff Auth -------------------------------------------------------
@@ -708,6 +733,7 @@ export interface PlatformBridge {
   // -- Staff auth ------------------------------------------------------------
   staffAuth: {
     authenticatePin(pin: string): Promise<IpcResult>;
+    verifyCheckInPin(request: StaffCheckInPinVerifyRequest): Promise<StaffCheckInPinVerifyResponse>;
     getSession(): Promise<any>;
     getCurrent(): Promise<any>;
     hasPermission(permission: string): Promise<boolean>;
@@ -753,6 +779,12 @@ export interface PlatformBridge {
     voidPayment(paymentId: string, reason: string, voidedBy?: string): Promise<IpcResult>;
     getOrderPayments(orderId: string): Promise<any[]>;
     getReceiptPreview(orderId: string): Promise<IpcResult<{ html: string }>>;
+    getPaidItems(orderId: string): Promise<any[]>;
+    printSplitReceipt(paymentId: string): Promise<IpcResult>;
+  };
+
+  receipt: {
+    samplePreview(payload?: ReceiptSamplePreviewRequest): Promise<ReceiptSamplePreviewResponse>;
   };
 
   // -- Sync ------------------------------------------------------------------
@@ -939,6 +971,7 @@ export interface PlatformBridge {
     getPaymentMethodBreakdown(params: { branchId: string; date?: string }): Promise<any>;
     getOrderTypeBreakdown(params: { branchId: string; date?: string }): Promise<any>;
     generateZReport(params: { branchId: string; date?: string }): Promise<any>;
+    getEndOfDayStatus(params: { branchId: string }): Promise<EndOfDayStatusResponse>;
     getDailyStaffPerformance(params: { branchId: string; date?: string }): Promise<any>;
     printZReport(params: { zReportId?: string; snapshot?: any; terminalName?: string }): Promise<IpcResult>;
     submitZReport(params: { branchId: string; date?: string }): Promise<ZReportSubmitResponse>;
@@ -1245,6 +1278,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   'payment:void': 'payments.voidPayment',
   'payment:get-order-payments': 'payments.getOrderPayments',
   'payment:get-receipt-preview': 'payments.getReceiptPreview',
+  'payment:get-paid-items': 'payments.getPaidItems',
+  'payment:print-split-receipt': 'payments.printSplitReceipt',
   'receipt:sample-preview': 'receipt.samplePreview',
 
   // Sync
@@ -1360,6 +1395,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'report:get-payment-method-breakdown': 'reports.getPaymentMethodBreakdown',
   'report:get-order-type-breakdown': 'reports.getOrderTypeBreakdown',
   'report:generate-z-report': 'reports.generateZReport',
+  'report:get-end-of-day-status': 'reports.getEndOfDayStatus',
   'report:get-daily-staff-performance': 'reports.getDailyStaffPerformance',
   'report:print-z-report': 'reports.printZReport',
   'report:submit-z-report': 'reports.submitZReport',
@@ -1646,6 +1682,8 @@ export class TauriBridge implements PlatformBridge {
 
   staffAuth = {
     authenticatePin: (pin: string) => this.inv('staff-auth:authenticate-pin', pin),
+    verifyCheckInPin: (request: StaffCheckInPinVerifyRequest) =>
+      this.inv('staff-auth:verify-check-in-pin', request),
     getSession: () => this.inv('staff-auth:get-session'),
     getCurrent: () => this.inv('staff-auth:get-current'),
     hasPermission: (p: string) => this.inv('staff-auth:has-permission', p),
@@ -1689,11 +1727,13 @@ export class TauriBridge implements PlatformBridge {
     voidPayment: (id: string, reason: string, by?: string) => this.inv('payment:void', id, reason, by),
     getOrderPayments: (orderId: string) => this.inv('payment:get-order-payments', orderId),
     getReceiptPreview: (orderId: string) => this.inv('payment:get-receipt-preview', orderId),
+    getPaidItems: (orderId: string) => this.inv('payment:get-paid-items', orderId),
+    printSplitReceipt: (paymentId: string) => this.inv('payment:print-split-receipt', paymentId),
   };
 
   receipt = {
-    samplePreview: (overrides?: { textScale?: number; logoScale?: number }) =>
-      this.inv('receipt:sample-preview', overrides),
+    samplePreview: (payload?: ReceiptSamplePreviewRequest) =>
+      this.inv('receipt:sample-preview', payload),
   };
 
   sync = {
@@ -1898,6 +1938,7 @@ export class TauriBridge implements PlatformBridge {
     getPaymentMethodBreakdown: (p: { branchId: string; date?: string }) => this.inv('report:get-payment-method-breakdown', p),
     getOrderTypeBreakdown: (p: { branchId: string; date?: string }) => this.inv('report:get-order-type-breakdown', p),
     generateZReport: (p: { branchId: string; date?: string }) => this.inv('report:generate-z-report', p),
+    getEndOfDayStatus: (p: { branchId: string }) => this.inv('report:get-end-of-day-status', p),
     getDailyStaffPerformance: (p: { branchId: string; date?: string }) => this.inv('report:get-daily-staff-performance', p),
     printZReport: (p: { zReportId?: string; snapshot?: any; terminalName?: string }) => this.inv('report:print-z-report', p),
     submitZReport: (p: { branchId: string; date?: string }) => this.inv('report:submit-z-report', p),

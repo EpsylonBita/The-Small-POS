@@ -1106,7 +1106,23 @@
       "paid": "Paid",
       "addPayment": "Add Payment",
       "paymentAdded": "Payment {{number}} of {{total}} added",
-      "splitComplete": "Split payment completed"
+      "splitComplete": "Split payment completed",
+      "byAmount": "By Amount",
+      "byItems": "By Items",
+      "addPerson": "Add Person",
+      "removePerson": "Remove",
+      "confirm": "Confirm Split Payment",
+      "cancel": "Cancel",
+      "combinedReceipt": "Combined Receipt",
+      "individualReceipts": "Individual Receipts",
+      "personLabel": "Person {{number}}",
+      "assignItems": "Assign Items",
+      "unassignedItems": "Unassigned Items",
+      "quickSplit5050": "50/50",
+      "quickSplitEqual": "Equal Split",
+      "quickSplit3Way": "3-Way",
+      "partiallyPaid": "Partially Paid",
+      "processing": "Processing split payments..."
     },
     "tip": {
       "title": "Add Tip",
@@ -1188,7 +1204,8 @@
       "reconcileDrawer": "Reconcile Drawer",
       "addExpense": "Add Expense",
       "viewExpenses": "View Expenses",
-      "addNote": "Add Note"
+      "addNote": "Add Note",
+      "completeZReport": "Complete Z Report"
     },
     "labels": {
       "active": "Active",
@@ -1204,6 +1221,8 @@
       "confirmStart": "Start a new shift?",
       "confirmEnd": "End current shift?",
       "confirmEndWithDifference": "There is a cash difference of €{{amount}}. End shift anyway?",
+      "pendingZReportTitle": "Previous day still needs a Z Report",
+      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it.",
       "enterOpeningCash": "Enter opening cash amount",
       "enterClosingCash": "Enter closing cash amount",
       "invalidAmount": "Invalid amount",
@@ -2105,6 +2124,8 @@
     },
     "blocker": {
       "title": "Current blocker",
+      "recoveryTitle": "Recovery in progress",
+      "recoveryDetail": "This queue item is retryable and will be reprocessed automatically.",
       "entity": "Entity",
       "retryProgress": "Retry",
       "status": "Status",
@@ -2261,7 +2282,10 @@
       "paymentFailed": "Payment failed. Please try again.",
       "cashSuccess": "Cash payment successful!",
       "cardSuccess": "Card payment successful!",
-      "cardFailed": "Card payment failed. Please try again."
+      "cardFailed": "Card payment failed. Please try again.",
+      "loadingMethods": "Loading payment methods",
+      "loadingMethodsHint": "Checking terminal payment configuration...",
+      "splitSimple": "SPLIT"
     },
     "customerSearch": {
       "title": "Search Customer",
@@ -2345,6 +2369,10 @@
       "openingCash": "Opening Cash",
       "authenticating": "Authenticating...",
       "invalidPIN": "Invalid PIN",
+        "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
+        "posLoginDisabled": "This staff member is not allowed to log in on POS.",
+        "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
+        "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first.",
       "noStaffSelected": "Please select a staff member",
       "shiftStarted": "Shift started successfully",
       "shiftEnded": "Shift ended successfully",
@@ -2511,6 +2539,7 @@
     "zReport": {
       "title": "Z Report - {{date}}",
       "selectDate": "Select report date",
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
       "periodSince": "Period since: {{date}} {{time}}",
       "loadFailed": "Failed to load Z Report",
       "loading": "Loading report…",
@@ -4374,5 +4403,33 @@
     "tryRetry": "Click the \"Retry\" button to try again",
     "refreshPage": "Refresh the page to restart the application",
     "contactSupport": "If the problem persists, contact support"
+  },
+  "splitPayment": {
+    "title": "Split Payment",
+    "orderTotal": "Order Total",
+    "byAmount": "By Amount",
+    "byItems": "By Items",
+    "person": "Person",
+    "halfHalf": "50 / 50",
+    "threeWay": "3-Way Equal",
+    "custom": "Custom",
+    "addPerson": "Add Person",
+    "removePerson": "Remove person",
+    "remaining": "Remaining",
+    "total": "Total",
+    "assigned": "Assigned",
+    "cash": "Cash",
+    "card": "Card",
+    "orderItems": "Order Items",
+    "people": "People",
+    "unassigned": "-- Unassigned --",
+    "unassignedWarning": "{{count}} item(s) not assigned",
+    "noItems": "No items assigned",
+    "receiptCombined": "Combined",
+    "receiptIndividual": "Individual",
+    "confirm": "Confirm Split",
+    "processing": "Processing...",
+    "success": "Split payment completed successfully",
+    "failed": "Split payment failed. Please try again."
   }
 }

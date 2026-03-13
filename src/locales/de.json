@@ -1106,7 +1106,23 @@
       "paid": "Bezahlt",
       "addPayment": "Zahlung hinzufügen",
       "paymentAdded": "Zahlung {{number}} von {{total}} hinzugefügt",
-      "splitComplete": "Geteilte Zahlung abgeschlossen"
+      "splitComplete": "Geteilte Zahlung abgeschlossen",
+      "byAmount": "Nach Betrag",
+      "byItems": "Nach Artikeln",
+      "addPerson": "Person hinzufügen",
+      "removePerson": "Entfernen",
+      "confirm": "Geteilte Zahlung bestätigen",
+      "cancel": "Abbrechen",
+      "combinedReceipt": "Gesamtbeleg",
+      "individualReceipts": "Einzelbelege",
+      "personLabel": "Person {{number}}",
+      "assignItems": "Artikel zuweisen",
+      "unassignedItems": "Nicht zugewiesen",
+      "quickSplit5050": "50/50",
+      "quickSplitEqual": "Gleiche Teilung",
+      "quickSplit3Way": "Dreiteilig",
+      "partiallyPaid": "Teilweise bezahlt",
+      "processing": "Geteilte Zahlungen werden verarbeitet..."
     },
     "tip": {
       "title": "Trinkgeld hinzufügen",
@@ -2261,7 +2277,9 @@
       "paymentFailed": "Zahlung fehlgeschlagen. Bitte versuchen Sie es erneut.",
       "cashSuccess": "Barzahlung erfolgreich!",
       "cardSuccess": "Kartenzahlung erfolgreich!",
-      "cardFailed": "Kartenzahlung fehlgeschlagen. Bitte versuchen Sie es erneut."
+      "cardFailed": "Kartenzahlung fehlgeschlagen. Bitte versuchen Sie es erneut.",
+      "loadingMethods": "Zahlungsmethoden werden geladen",
+      "loadingMethodsHint": "Terminal-Zahlungskonfiguration wird geprüft..."
     },
     "customerSearch": {
       "title": "Kunde suchen",

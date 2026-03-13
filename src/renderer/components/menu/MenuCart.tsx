@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine } from 'lucide-react';
+import { ShoppingCart, Trash2, AlertTriangle, Ban, Ticket, X, Loader2, Plus, ScanLine, Gift } from 'lucide-react';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOnBarcodeScan } from '../../contexts/barcode-scanner-context';
 import { useLoyaltyReader } from '../../hooks/useLoyaltyReader';
@@ -12,7 +12,7 @@ import toast from 'react-hot-toast';
 const LINE_PRICE_HOLD_DURATION_MS = 5000;
 const LINE_PRICE_HOLD_TICK_MS = 100;
 
-interface CartItem {
+export interface CartItem {
   id: string | number;
   name: string;
   quantity: number;
@@ -39,6 +39,15 @@ interface CartItem {
     isWithout?: boolean;
   }>;
   notes?: string;
+  is_offer_reward?: boolean;
+  auto_added_by_offer?: boolean;
+  offer_id?: string;
+  offer_name?: string;
+  reward_item_id?: string;
+  reward_item_category_id?: string | null;
+  reward_source_item_id?: string | null;
+  reward_source_category_id?: string | null;
+  reward_signature?: string;
 }
 
 export interface AppliedCoupon {
@@ -74,6 +83,8 @@ interface MenuCartProps {
   couponDiscount?: number;
   isValidatingCoupon?: boolean;
   couponError?: string | null;
+  offerDiscountAmount?: number;
+  matchedOfferNames?: string[];
   // Manual item props
   onAddManualItem?: (price: number, name?: string) => void;
   onLinePriceChange?: (itemId: string | number, newUnitPrice: number) => void;
@@ -103,6 +114,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   couponDiscount = 0,
   isValidatingCoupon = false,
   couponError,
+  offerDiscountAmount = 0,
+  matchedOfferNames = [],
   onAddManualItem,
   onLinePriceChange,
 }) => {
@@ -539,7 +552,7 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const discountControlEnabled = Boolean(onDiscountChange || onManualDiscountChange);
   const isAppliedDiscountOverMax =
     effectiveDiscountMode === 'percentage' && effectiveDiscountPercentage > maxDiscountPercentage;
-  const totalAfterDiscount = subtotal - discountAmount - couponDiscount;
+  const totalAfterDiscount = Math.max(subtotal - offerDiscountAmount - discountAmount - couponDiscount, 0);
   const editingLineItem = editingLineItemId === null
     ? null
     : cartItems.find(item => item.id === editingLineItemId) ?? null;
@@ -670,12 +683,17 @@ export const MenuCart: React.FC<MenuCartProps> = ({
               const isHoldingLinePrice = holdingLineItemId === item.id;
               const isPriceOverridden =
                 item.isPriceOverridden || ((item.originalUnitPrice ?? itemUnitPrice) !== itemUnitPrice);
+              const isRewardLine = item.is_offer_reward === true;
 
               return (
               <div
                 key={item.id}
                 className={`p-3 rounded-xl border transition-all duration-200 bg-black/[0.03] dark:bg-white/[0.06] border-black/8 dark:border-white/10 hover:border-blue-400/50 dark:hover:border-blue-400/40 hover:bg-black/[0.05] dark:hover:bg-white/[0.09] ${onEditItem ? 'cursor-pointer' : ''}`}
-                onClick={() => onEditItem?.(item)}
+                onClick={() => {
+                  if (!isRewardLine) {
+                    onEditItem?.(item);
+                  }
+                }}
               >
                 <div className="flex justify-between items-start mb-2">
                   <div className="flex-1">
@@ -689,13 +707,26 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     <h4 className="font-semibold antialiased liquid-glass-modal-text">
                       {item.name}
                     </h4>
+                    {isRewardLine && (
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                          <Gift className="h-3 w-3" />
+                          {t('menu.cart.autoOfferReward', 'Auto reward')}
+                        </span>
+                        {item.offer_name && (
+                          <span className="text-[11px] antialiased liquid-glass-modal-text-muted">
+                            {item.offer_name}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="font-semibold antialiased text-emerald-600 dark:text-emerald-400">
                       {formatCurrency(item.totalPrice || 0)}
                     </span>
                     {/* Delete button - positioned away from main click area */}
-                    {onRemoveItem && (
+                    {onRemoveItem && !isRewardLine && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -718,6 +749,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (isRewardLine) {
+                          return;
+                        }
                         if (item.quantity <= 1) {
                           onRemoveItem?.(item.id);
                         } else {
@@ -735,7 +769,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                           onUpdateCart(updatedItems);
                         }
                       }}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text"
+                      disabled={isRewardLine}
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       −
                     </button>
@@ -743,6 +778,9 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (isRewardLine) {
+                          return;
+                        }
                         const updatedItems = cartItems.map(ci =>
                           ci.id === item.id
                             ? {
@@ -756,40 +794,47 @@ export const MenuCart: React.FC<MenuCartProps> = ({
                         );
                         onUpdateCart(updatedItems);
                       }}
-                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text"
+                      disabled={isRewardLine}
+                      className="w-7 h-7 rounded-full flex items-center justify-center font-bold transition-colors bg-black/8 dark:bg-white/12 hover:bg-black/15 dark:hover:bg-white/20 liquid-glass-modal-text disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       +
                     </button>
                   </div>
-                  <button
-                    type="button"
-                    onPointerDown={(event) =>
-                      startLinePriceHold(
-                        event,
-                        item.id,
-                        itemUnitPrice || 0,
-                        `${item.quantity}:${itemUnitPrice || 0}:${item.totalPrice || 0}`
-                      )
-                    }
-                    onPointerUp={handleLinePricePointerEnd}
-                    onPointerCancel={handleLinePricePointerEnd}
-                    onLostPointerCapture={handleLinePricePointerEnd}
-                    onContextMenu={(event) => event.preventDefault()}
-                    onClick={(event) => event.stopPropagation()}
-                    className={`relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
-                      isHoldingLinePrice
-                        ? 'bg-blue-500/15 text-blue-600 dark:text-blue-300'
-                        : 'liquid-glass-modal-text hover:bg-black/8 dark:hover:bg-white/10'
-                    }`}
-                  >
-                    <span className="relative z-[1]">× {formatCurrency(itemUnitPrice || 0)}</span>
-                    {isHoldingLinePrice && (
-                      <span
-                        className="absolute left-0 bottom-0 h-[2px] bg-blue-500/70 rounded-full"
-                        style={{ width: `${linePriceHoldProgress}%` }}
-                      />
-                    )}
-                  </button>
+                  {isRewardLine ? (
+                    <span className="rounded-md bg-emerald-500/10 px-2.5 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                      {t('menu.cart.freeLabel', 'Free')}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onPointerDown={(event) =>
+                        startLinePriceHold(
+                          event,
+                          item.id,
+                          itemUnitPrice || 0,
+                          `${item.quantity}:${itemUnitPrice || 0}:${item.totalPrice || 0}`
+                        )
+                      }
+                      onPointerUp={handleLinePricePointerEnd}
+                      onPointerCancel={handleLinePricePointerEnd}
+                      onLostPointerCapture={handleLinePricePointerEnd}
+                      onContextMenu={(event) => event.preventDefault()}
+                      onClick={(event) => event.stopPropagation()}
+                      className={`relative overflow-hidden px-2.5 py-1 rounded-md text-sm font-medium antialiased transition-colors ${
+                        isHoldingLinePrice
+                          ? 'bg-blue-500/15 text-blue-600 dark:text-blue-300'
+                          : 'liquid-glass-modal-text hover:bg-black/8 dark:hover:bg-white/10'
+                      }`}
+                    >
+                      <span className="relative z-[1]">× {formatCurrency(itemUnitPrice || 0)}</span>
+                      {isHoldingLinePrice && (
+                        <span
+                          className="absolute left-0 bottom-0 h-[2px] bg-blue-500/70 rounded-full"
+                          style={{ width: `${linePriceHoldProgress}%` }}
+                        />
+                      )}
+                    </button>
+                  )}
                 </div>
                 {isPriceOverridden && (
                   <div className="mt-2 flex items-center justify-end" onClick={(e) => e.stopPropagation()}>
@@ -974,6 +1019,23 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             {formatCurrency(subtotal)}
           </span>
         </div>
+
+        {offerDiscountAmount > 0 && (
+          <div className="flex justify-between items-center text-sm font-medium antialiased">
+            <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+              <Gift className="w-3.5 h-3.5" />
+              {matchedOfferNames.length > 0
+                ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
+                    names: matchedOfferNames.join(', '),
+                  })
+                : t('menu.cart.offerDiscount', 'Offers')}
+              :
+            </span>
+            <span className="text-emerald-600 dark:text-emerald-400">
+              -{formatCurrency(offerDiscountAmount)}
+            </span>
+          </div>
+        )}
 
         {/* Discount Display */}
         {discountAmount > 0 && (

@@ -12,7 +12,11 @@ export interface ShiftManagerRef {
   openCheckin: () => void;
 }
 
-export const ShiftManager = forwardRef<ShiftManagerRef>((props, ref) => {
+interface ShiftManagerProps {
+  suppressAutoCheckin?: boolean;
+}
+
+export const ShiftManager = forwardRef<ShiftManagerRef, ShiftManagerProps>(({ suppressAutoCheckin = false }, ref) => {
   const { t } = useI18n();
   const { staff, activeShift, isShiftActive } = useShift();
   const { isFeatureEnabled, isMobileWaiter } = useFeatures();
@@ -23,7 +27,7 @@ export const ShiftManager = forwardRef<ShiftManagerRef>((props, ref) => {
 
   // Auto-prompt check-in when logged in without active shift
   useEffect(() => {
-    if (staff && !isShiftActive && !hasPromptedCheckIn) {
+    if (staff && !isShiftActive && !hasPromptedCheckIn && !suppressAutoCheckin) {
       // Small delay to ensure UI is ready
       const timer = setTimeout(() => {
         setShiftModalMode('checkin');
@@ -38,7 +42,7 @@ export const ShiftManager = forwardRef<ShiftManagerRef>((props, ref) => {
     if (!staff) {
       setHasPromptedCheckIn(false);
     }
-  }, [staff, isShiftActive, hasPromptedCheckIn]);
+  }, [staff, isShiftActive, hasPromptedCheckIn, suppressAutoCheckin]);
 
   // Expose checkout method via ref
   useImperativeHandle(ref, () => ({

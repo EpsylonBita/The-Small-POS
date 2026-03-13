@@ -697,6 +697,7 @@ pub fn run() {
             commands::auth::auth_setup_pin,
             // Staff auth
             commands::auth::staff_auth_authenticate_pin,
+            commands::auth::staff_auth_verify_check_in_pin,
             commands::auth::staff_auth_get_session,
             commands::auth::staff_auth_get_current,
             commands::auth::staff_auth_has_permission,
@@ -822,6 +823,8 @@ pub fn run() {
             commands::payments::payment_update_payment_status,
             commands::payments::payment_get_order_payments,
             commands::payments::payment_get_receipt_preview,
+            commands::payments::payment_get_paid_items,
+            commands::payments::payment_print_split_receipt,
             // Refunds / Adjustments
             commands::payments::refund_payment,
             commands::payments::refund_void_payment,
@@ -985,6 +988,7 @@ pub fn run() {
             commands::analytics::report_get_payment_method_breakdown,
             commands::analytics::report_get_order_type_breakdown,
             commands::analytics::report_generate_z_report,
+            commands::analytics::report_get_end_of_day_status,
             commands::analytics::report_get_daily_staff_performance,
             commands::analytics::report_print_z_report,
             commands::analytics::report_submit_z_report,

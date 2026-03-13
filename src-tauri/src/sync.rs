@@ -284,6 +284,35 @@ impl QueueFailureSnapshot {
             "classification": self.classification,
         })
     }
+
+    fn next_retry_timestamp(&self) -> Option<DateTime<Utc>> {
+        self.next_retry_at
+            .as_deref()
+            .and_then(parse_retry_timestamp)
+    }
+
+    fn has_future_retry(&self, now: DateTime<Utc>) -> bool {
+        self.next_retry_timestamp().map(|ts| ts > now).unwrap_or(false)
+    }
+
+    fn blocker_rank(&self, now: DateTime<Utc>) -> i32 {
+        let status = self.status.to_lowercase();
+        let is_future_retry = self.has_future_retry(now);
+
+        if status == "failed" || self.classification == "permanent" {
+            return 0;
+        }
+        if status == "in_progress" {
+            return 1;
+        }
+        if status == "pending" && !is_future_retry {
+            return 2;
+        }
+        if status == "pending" {
+            return 3;
+        }
+        4
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1754,6 +1783,18 @@ fn disable_stuck_receipt_cleanup_for_session() -> bool {
     !STUCK_RECEIPT_CLEANUP_UNSUPPORTED.swap(true, Ordering::SeqCst)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptStatusRecoveryHint {
+    DirectOrderFallback,
+    RetryLocalQueue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedRemoteDisposition {
+    Retryable,
+    Permanent,
+}
+
 fn is_permanent_order_sync_error(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("invalid menu items")
@@ -1765,9 +1806,22 @@ fn is_permanent_order_sync_error(error: &str) -> bool {
         || lower.contains("total mismatch")
         || lower.contains("order totals do not match")
         || lower.contains("validation failed")
+        || lower.contains("permanent direct fallback failure")
         || lower.contains("invalid customer")
         || lower.contains("invalid driver")
         || lower.contains("missing required parameter")
+}
+
+fn is_legacy_unclaimed_receipt_timeout_message(error: &str) -> bool {
+    error
+        .to_lowercase()
+        .contains("legacy pos_ingest_queue receipt was not claimed within")
+}
+
+fn parse_retry_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 fn is_transient_order_sync_error(error: &str) -> bool {
@@ -1835,36 +1889,37 @@ fn extract_last_queue_failure_snapshot(
                     OR status = 'failed'
                )
              ORDER BY
-               CASE
-                 WHEN status = 'in_progress' THEN 0
-                 WHEN status = 'pending' THEN 1
-                 ELSE 2
-               END,
                COALESCE(updated_at, created_at) DESC,
                id DESC
-             LIMIT 1",
+             LIMIT 25",
         )
         .ok()?;
 
-    stmt.query_row([], |row| {
-        let entity_type: String = row.get(1)?;
-        let last_error: String = row.get(8)?;
-        Ok(QueueFailureSnapshot {
-            queue_id: row.get(0)?,
-            entity_type: entity_type.clone(),
-            entity_id: row.get(2)?,
-            operation: row.get(3)?,
-            status: row.get(4)?,
-            retry_count: row.get(5)?,
-            max_retries: row.get(6)?,
-            next_retry_at: row.get(7)?,
-            classification: classify_queue_failure(&entity_type, &last_error).to_string(),
-            last_error,
+    let candidates: Vec<QueueFailureSnapshot> = stmt
+        .query_map([], |row| {
+            let entity_type: String = row.get(1)?;
+            let last_error: String = row.get(8)?;
+            Ok(QueueFailureSnapshot {
+                queue_id: row.get(0)?,
+                entity_type: entity_type.clone(),
+                entity_id: row.get(2)?,
+                operation: row.get(3)?,
+                status: row.get(4)?,
+                retry_count: row.get(5)?,
+                max_retries: row.get(6)?,
+                next_retry_at: row.get(7)?,
+                classification: classify_queue_failure(&entity_type, &last_error).to_string(),
+                last_error,
+            })
         })
-    })
-    .optional()
-    .ok()
-    .flatten()
+        .ok()?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    let now = Utc::now();
+    candidates
+        .into_iter()
+        .min_by_key(|snapshot| snapshot.blocker_rank(now))
 }
 
 fn should_emit_deduped_warn(fingerprint: &str, now: DateTime<Utc>) -> bool {
@@ -2305,10 +2360,278 @@ fn move_receipt_back_to_pending(
     Ok(moved)
 }
 
+fn receipt_status_recovery_hint(
+    response: &Value,
+    error_message: &str,
+) -> ReceiptStatusRecoveryHint {
+    if let Some(hint) = response.get("recovery_hint").and_then(Value::as_str) {
+        match hint.trim().to_lowercase().as_str() {
+            "direct_order_fallback" => return ReceiptStatusRecoveryHint::DirectOrderFallback,
+            "retry_local_queue" => return ReceiptStatusRecoveryHint::RetryLocalQueue,
+            _ => {}
+        }
+    }
+
+    if response
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .map(|value| value.eq_ignore_ascii_case("legacy_receipt_unclaimed_timeout"))
+        .unwrap_or(false)
+        || is_legacy_unclaimed_receipt_timeout_message(error_message)
+    {
+        return ReceiptStatusRecoveryHint::DirectOrderFallback;
+    }
+
+    ReceiptStatusRecoveryHint::RetryLocalQueue
+}
+
+fn load_queued_remote_receipt_items(db: &DbState, receipt_id: &str) -> Result<Vec<SyncItem>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, entity_id, operation, payload, idempotency_key,
+                    retry_count, max_retries, next_retry_at,
+                    COALESCE(retry_delay_ms, 5000), remote_receipt_id
+             FROM sync_queue
+             WHERE entity_type = 'order'
+               AND status = 'queued_remote'
+               AND remote_receipt_id = ?1
+             ORDER BY id ASC",
+        )
+        .map_err(|e| format!("queued remote receipt items prepare: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![receipt_id], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+        ))
+    })
+        .map_err(|e| format!("queued remote receipt items query: {e}"))?;
+
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+fn release_queued_remote_item(
+    db: &DbState,
+    item: &SyncItem,
+    error: &str,
+    disposition: QueuedRemoteDisposition,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (id, _, entity_id, _, _, _, retry_count, max_retries, _, retry_delay_ms, _) = item;
+
+    match disposition {
+        QueuedRemoteDisposition::Permanent => {
+            let final_retry_count = (*retry_count + 1).max(*max_retries);
+            conn.execute(
+                "UPDATE sync_queue
+                 SET status = 'failed',
+                     retry_count = ?1,
+                     remote_receipt_id = NULL,
+                     next_retry_at = NULL,
+                     last_error = ?2,
+                     updated_at = datetime('now')
+                 WHERE id = ?3",
+                params![final_retry_count, error, id],
+            )
+            .map_err(|e| format!("release queued remote item permanently: {e}"))?;
+            conn.execute(
+                "UPDATE orders
+                 SET sync_status = 'failed',
+                     updated_at = datetime('now')
+                 WHERE id = ?1",
+                params![entity_id],
+            )
+            .map_err(|e| format!("mark order failed after remote release: {e}"))?;
+        }
+        QueuedRemoteDisposition::Retryable => {
+            if is_backpressure_error(error) {
+                let delay_ms =
+                    (extract_retry_after_seconds(error).unwrap_or(5).max(1) * 1000)
+                        .clamp(1_000, MAX_RETRY_DELAY_MS);
+                let next_retry_at = schedule_next_retry(delay_ms, *id);
+                conn.execute(
+                    "UPDATE sync_queue
+                     SET status = 'pending',
+                         remote_receipt_id = NULL,
+                         next_retry_at = ?1,
+                         retry_delay_ms = ?2,
+                         last_error = ?3,
+                         updated_at = datetime('now')
+                     WHERE id = ?4",
+                    params![next_retry_at, delay_ms, error, id],
+                )
+                .map_err(|e| format!("release queued remote item for backpressure retry: {e}"))?;
+                conn.execute(
+                    "UPDATE orders
+                     SET sync_status = 'pending',
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    params![entity_id],
+                )
+                .map_err(|e| format!("mark order pending after backpressure retry: {e}"))?;
+                return Ok(());
+            }
+
+            let new_retry = *retry_count + 1;
+            let exhausted = new_retry >= *max_retries;
+            let new_status = if exhausted { "failed" } else { "pending" };
+            let next_delay =
+                ((*retry_delay_ms).max(DEFAULT_RETRY_DELAY_MS) * 2).min(MAX_RETRY_DELAY_MS);
+            let next_retry_at = if exhausted {
+                None
+            } else {
+                Some(schedule_next_retry(next_delay, *id))
+            };
+
+            conn.execute(
+                "UPDATE sync_queue
+                 SET status = ?1,
+                     retry_count = ?2,
+                     remote_receipt_id = NULL,
+                     next_retry_at = ?3,
+                     retry_delay_ms = ?4,
+                     last_error = ?5,
+                     updated_at = datetime('now')
+                 WHERE id = ?6",
+                params![new_status, new_retry, next_retry_at, next_delay, error, id],
+            )
+            .map_err(|e| format!("release queued remote item for retry: {e}"))?;
+            conn.execute(
+                "UPDATE orders
+                 SET sync_status = CASE WHEN ?1 = 'failed' THEN 'failed' ELSE 'pending' END,
+                     updated_at = datetime('now')
+                 WHERE id = ?2",
+                params![new_status, entity_id],
+            )
+            .map_err(|e| format!("mark order pending after remote retry: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ReceiptRecoveryOutcome {
+    synced_rows: usize,
+    requeued_rows: usize,
+    failed_rows: usize,
+}
+
+impl ReceiptRecoveryOutcome {
+    fn handled_rows(&self) -> usize {
+        self.synced_rows + self.requeued_rows + self.failed_rows
+    }
+}
+
+async fn recover_legacy_unclaimed_receipt_via_direct_fallback(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    fallback_branch_id: &str,
+    receipt_id: &str,
+    original_error: &str,
+) -> Result<ReceiptRecoveryOutcome, String> {
+    let receipt_items = load_queued_remote_receipt_items(db, receipt_id)?;
+    if receipt_items.is_empty() {
+        return Ok(ReceiptRecoveryOutcome::default());
+    }
+
+    let mut outcome = ReceiptRecoveryOutcome::default();
+    let mut eligible_items: Vec<&SyncItem> = Vec::new();
+    let mut non_insert_items: Vec<&SyncItem> = Vec::new();
+
+    for item in &receipt_items {
+        if item.3.trim().eq_ignore_ascii_case("insert") {
+            eligible_items.push(item);
+        } else {
+            non_insert_items.push(item);
+        }
+    }
+
+    if !eligible_items.is_empty() {
+        match sync_order_batch_via_direct_api(db, admin_url, api_key, fallback_branch_id, &eligible_items).await {
+            Ok(direct_outcome) => {
+                for item in &eligible_items {
+                    if direct_outcome.synced_queue_ids.contains(&item.0) {
+                        outcome.synced_rows += 1;
+                        continue;
+                    }
+
+                    if let Some(error) = direct_outcome.permanent_failures.get(&item.0) {
+                        release_queued_remote_item(
+                            db,
+                            item,
+                            error,
+                            QueuedRemoteDisposition::Permanent,
+                        )?;
+                        outcome.failed_rows += 1;
+                        continue;
+                    }
+
+                    if let Some(error) = direct_outcome.transient_failures.get(&item.0) {
+                        release_queued_remote_item(
+                            db,
+                            item,
+                            error,
+                            QueuedRemoteDisposition::Retryable,
+                        )?;
+                        outcome.requeued_rows += 1;
+                        continue;
+                    }
+
+                    release_queued_remote_item(
+                        db,
+                        item,
+                        original_error,
+                        QueuedRemoteDisposition::Retryable,
+                    )?;
+                    outcome.requeued_rows += 1;
+                }
+            }
+            Err(error) => {
+                let retry_error = format!("Transient direct fallback failure: {error}");
+                for item in &eligible_items {
+                    release_queued_remote_item(
+                        db,
+                        item,
+                        &retry_error,
+                        QueuedRemoteDisposition::Retryable,
+                    )?;
+                    outcome.requeued_rows += 1;
+                }
+            }
+        }
+    }
+
+    for item in non_insert_items {
+        release_queued_remote_item(
+            db,
+            item,
+            original_error,
+            QueuedRemoteDisposition::Retryable,
+        )?;
+        outcome.requeued_rows += 1;
+    }
+
+    Ok(outcome)
+}
+
 async fn poll_order_receipt_statuses(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
+    fallback_branch_id: &str,
 ) -> Result<usize, String> {
     let receipt_ids = receipt_poll_candidates(db)?;
     if receipt_ids.is_empty() {
@@ -2332,6 +2655,7 @@ async fn poll_order_receipt_statuses(
                     .get("error_message")
                     .and_then(Value::as_str)
                     .unwrap_or("remote receipt processing failed");
+                let recovery_hint = receipt_status_recovery_hint(&resp, error_message);
                 match status.as_str() {
                     "completed" => {
                         let updated = mark_receipt_completed(db, &receipt_id)?;
@@ -2345,35 +2669,85 @@ async fn poll_order_receipt_statuses(
                         }
                     }
                     "dead_letter" => {
-                        let moved = move_receipt_back_to_pending(
-                            db,
-                            &receipt_id,
-                            error_message,
-                            DEFAULT_RETRY_DELAY_MS,
-                        )?;
-                        if moved > 0 {
-                            warn!(
-                                receipt_id = %receipt_id,
-                                rows = moved,
-                                error = error_message,
-                                "Remote order receipt dead-lettered; moved back to local pending queue"
-                            );
+                        if recovery_hint == ReceiptStatusRecoveryHint::DirectOrderFallback {
+                            let recovery = recover_legacy_unclaimed_receipt_via_direct_fallback(
+                                db,
+                                admin_url,
+                                api_key,
+                                fallback_branch_id,
+                                &receipt_id,
+                                error_message,
+                            )
+                            .await?;
+                            if recovery.handled_rows() > 0 {
+                                if recovery.synced_rows > 0 {
+                                    completed_rows += recovery.synced_rows;
+                                }
+                                warn!(
+                                    receipt_id = %receipt_id,
+                                    synced_rows = recovery.synced_rows,
+                                    requeued_rows = recovery.requeued_rows,
+                                    failed_rows = recovery.failed_rows,
+                                    error = error_message,
+                                    "Legacy unclaimed remote receipt recovered via direct-order fallback"
+                                );
+                            }
+                        } else {
+                            let moved = move_receipt_back_to_pending(
+                                db,
+                                &receipt_id,
+                                error_message,
+                                DEFAULT_RETRY_DELAY_MS,
+                            )?;
+                            if moved > 0 {
+                                warn!(
+                                    receipt_id = %receipt_id,
+                                    rows = moved,
+                                    error = error_message,
+                                    "Remote order receipt dead-lettered; moved back to local pending queue"
+                                );
+                            }
                         }
                     }
                     "failed" => {
-                        let moved = move_receipt_back_to_pending(
-                            db,
-                            &receipt_id,
-                            error_message,
-                            DEFAULT_RETRY_DELAY_MS,
-                        )?;
-                        if moved > 0 {
-                            warn!(
-                                receipt_id = %receipt_id,
-                                rows = moved,
-                                error = error_message,
-                                "Remote order receipt failed; moved back to local queue for retry/failure handling"
-                            );
+                        if recovery_hint == ReceiptStatusRecoveryHint::DirectOrderFallback {
+                            let recovery = recover_legacy_unclaimed_receipt_via_direct_fallback(
+                                db,
+                                admin_url,
+                                api_key,
+                                fallback_branch_id,
+                                &receipt_id,
+                                error_message,
+                            )
+                            .await?;
+                            if recovery.handled_rows() > 0 {
+                                if recovery.synced_rows > 0 {
+                                    completed_rows += recovery.synced_rows;
+                                }
+                                warn!(
+                                    receipt_id = %receipt_id,
+                                    synced_rows = recovery.synced_rows,
+                                    requeued_rows = recovery.requeued_rows,
+                                    failed_rows = recovery.failed_rows,
+                                    error = error_message,
+                                    "Remote order receipt failed after legacy claim-timeout; recovered via direct-order fallback"
+                                );
+                            }
+                        } else {
+                            let moved = move_receipt_back_to_pending(
+                                db,
+                                &receipt_id,
+                                error_message,
+                                DEFAULT_RETRY_DELAY_MS,
+                            )?;
+                            if moved > 0 {
+                                warn!(
+                                    receipt_id = %receipt_id,
+                                    rows = moved,
+                                    error = error_message,
+                                    "Remote order receipt failed; moved back to local queue for retry/failure handling"
+                                );
+                            }
                         }
                     }
                     "pending" | "processing" => {
@@ -3071,7 +3445,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     // Poll queued remote receipts first and reconcile remote-assigned IDs
     // before sending new batches.
     let mut total_progress: usize = 0;
-    let receipt_updates = poll_order_receipt_statuses(db, &admin_url, &api_key).await?;
+    let receipt_updates =
+        poll_order_receipt_statuses(db, &admin_url, &api_key, &branch_id).await?;
     total_progress += receipt_updates;
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
@@ -3926,6 +4301,7 @@ fn mark_order_synced_via_direct_fallback(
         "UPDATE sync_queue
          SET status = 'synced',
              synced_at = ?1,
+             remote_receipt_id = NULL,
              last_error = NULL,
              next_retry_at = NULL,
              updated_at = ?1
@@ -4631,6 +5007,13 @@ async fn sync_payment_items(
         }
         // Include terminal_id as metadata for traceability
         body["metadata"] = serde_json::json!({ "terminal_id": terminal_id });
+
+        // Include payment_items if present in the sync payload (split-by-items)
+        if let Some(items_arr) = data.get("items") {
+            if items_arr.is_array() && !items_arr.as_array().unwrap_or(&vec![]).is_empty() {
+                body["items"] = items_arr.clone();
+            }
+        }
 
         // Mark as syncing before the HTTP call
         if let Ok(conn) = db.conn.lock() {
@@ -5529,6 +5912,46 @@ mod tests {
         .unwrap()
     }
 
+    fn insert_minimal_order(db: &DbState, order_id: &str, sync_status: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES (?1, '[]', 10.0, 'pending', ?2, datetime('now'), datetime('now'))",
+            params![order_id, sync_status],
+        )
+        .unwrap();
+    }
+
+    fn insert_queue_failure_row(
+        db: &DbState,
+        entity_id: &str,
+        status: &str,
+        last_error: &str,
+        next_retry_at: Option<&str>,
+    ) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, next_retry_at, retry_delay_ms,
+                 last_error, updated_at
+             ) VALUES (
+                 'order', ?1, 'insert', '{}', ?2,
+                 ?3, 1, 5, ?4, 1000,
+                 ?5, datetime('now')
+             )",
+            params![
+                entity_id,
+                format!("order:{entity_id}:failure"),
+                status,
+                next_retry_at,
+                last_error
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
     #[test]
     fn test_categorize_sync_item_routes_financial_rows_out_of_order_path() {
         assert_eq!(categorize_sync_item("order"), SyncItemCategory::Order);
@@ -6296,6 +6719,196 @@ mod tests {
         assert_eq!(remote_receipt_id, None);
         assert_eq!(last_error.as_deref(), Some("remote failed"));
         assert_eq!(order_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_receipt_status_recovery_hint_prefers_structured_direct_fallback() {
+        let response = serde_json::json!({
+            "reason_code": "legacy_receipt_unclaimed_timeout",
+            "recovery_hint": "direct_order_fallback"
+        });
+
+        assert_eq!(
+            receipt_status_recovery_hint(&response, "some other error"),
+            ReceiptStatusRecoveryHint::DirectOrderFallback
+        );
+    }
+
+    #[test]
+    fn test_receipt_status_recovery_hint_falls_back_to_legacy_timeout_message() {
+        assert_eq!(
+            receipt_status_recovery_hint(
+                &serde_json::json!({}),
+                "legacy pos_ingest_queue receipt was not claimed within 30s"
+            ),
+            ReceiptStatusRecoveryHint::DirectOrderFallback
+        );
+
+        assert_eq!(
+            receipt_status_recovery_hint(
+                &serde_json::json!({}),
+                "remote receipt processing failed"
+            ),
+            ReceiptStatusRecoveryHint::RetryLocalQueue
+        );
+    }
+
+    #[test]
+    fn test_extract_last_queue_failure_snapshot_deprioritizes_future_retry_pending_rows() {
+        let db = test_db();
+        let future_retry_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
+        insert_queue_failure_row(
+            &db,
+            "ord-retry-later",
+            "pending",
+            "Transient direct fallback failure: timed out",
+            Some(future_retry_at.as_str()),
+        );
+        let failed_queue_id = insert_queue_failure_row(
+            &db,
+            "ord-hard-fail",
+            "failed",
+            "validation failed",
+            None,
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let snapshot = extract_last_queue_failure_snapshot(&conn).expect("queue failure snapshot");
+        assert_eq!(snapshot.queue_id, failed_queue_id);
+        assert_eq!(snapshot.status, "failed");
+        assert_eq!(snapshot.classification, "permanent");
+    }
+
+    #[test]
+    fn test_release_queued_remote_item_retryable_schedules_retry_and_clears_receipt_claim() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-release-retry", "queued");
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, remote_receipt_id, retry_delay_ms
+             ) VALUES (
+                'order', 'ord-release-retry', 'insert', '{}', 'order:ord-release-retry:insert',
+                'queued_remote', 1, 5, 'receipt-retry', 1000
+             )",
+            [],
+        )
+        .unwrap();
+        let queue_id = conn.last_insert_rowid();
+        drop(conn);
+
+        let item = load_sync_item(&db, queue_id);
+        release_queued_remote_item(
+            &db,
+            &item,
+            "Transient direct fallback failure: timed out",
+            QueuedRemoteDisposition::Retryable,
+        )
+        .expect("release queued remote item");
+
+        let conn = db.conn.lock().unwrap();
+        let (status, retry_count, next_retry_at, remote_receipt_id, last_error, order_sync_status): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM sync_queue WHERE id = ?1),
+                    (SELECT retry_count FROM sync_queue WHERE id = ?1),
+                    (SELECT next_retry_at FROM sync_queue WHERE id = ?1),
+                    (SELECT remote_receipt_id FROM sync_queue WHERE id = ?1),
+                    (SELECT last_error FROM sync_queue WHERE id = ?1),
+                    (SELECT sync_status FROM orders WHERE id = 'ord-release-retry')",
+                params![queue_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(retry_count, 2);
+        assert!(next_retry_at.is_some());
+        assert_eq!(remote_receipt_id, None);
+        assert_eq!(
+            last_error.as_deref(),
+            Some("Transient direct fallback failure: timed out")
+        );
+        assert_eq!(order_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_mark_order_synced_via_direct_fallback_clears_remote_receipt_and_last_error() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-direct-synced", "queued");
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, remote_receipt_id, last_error
+             ) VALUES (
+                'order', 'ord-direct-synced', 'insert', '{}', 'order:ord-direct-synced:insert',
+                'queued_remote', 1, 5, 'receipt-direct', 'legacy pos_ingest_queue receipt was not claimed within 30s'
+             )",
+            [],
+        )
+        .unwrap();
+        let queue_id = conn.last_insert_rowid();
+        drop(conn);
+
+        mark_order_synced_via_direct_fallback(
+            &db,
+            queue_id,
+            "ord-direct-synced",
+            "remote-order-123",
+        )
+        .expect("mark order synced via direct fallback");
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, remote_receipt_id, last_error, order_sync_status, supabase_id): (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM sync_queue WHERE id = ?1),
+                    (SELECT remote_receipt_id FROM sync_queue WHERE id = ?1),
+                    (SELECT last_error FROM sync_queue WHERE id = ?1),
+                    (SELECT sync_status FROM orders WHERE id = 'ord-direct-synced'),
+                    (SELECT supabase_id FROM orders WHERE id = 'ord-direct-synced')",
+                params![queue_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "synced");
+        assert_eq!(remote_receipt_id, None);
+        assert_eq!(last_error, None);
+        assert_eq!(order_sync_status, "synced");
+        assert_eq!(supabase_id.as_deref(), Some("remote-order-123"));
     }
 
     #[test]

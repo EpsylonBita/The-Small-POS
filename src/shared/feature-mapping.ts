@@ -25,7 +25,8 @@ export const FEATURE_KEY_MAPPING = {
   orderModification: 'orderModification',
   staffPayments: 'staffPayments',
   // Variations from DB / admin UI
-  payment_processing: 'cardPayments',
+  // Legacy payment_processing enables both cash and card. Resolve it in
+  // higher-level feature normalization instead of collapsing it to one flag.
   receipt_printing: 'cashDrawer',
   table_management: 'orderCreation',
   inventory_view: 'reports',

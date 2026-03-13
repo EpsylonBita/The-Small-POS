@@ -59,8 +59,20 @@ interface StaffMember {
   roles: StaffRole[]; // All roles for this staff member
   can_login_pos: boolean;
   is_active: boolean;
+  has_pin?: boolean;
+  pin_hash?: string | null;
   hourly_rate?: number;
 }
+
+interface StaffAuthCachePayload {
+  version: number;
+  branch_id: string;
+  synced_at: string;
+  staff: StaffMember[];
+}
+
+const STAFF_AUTH_CACHE_CATEGORY = 'staff_auth_cache';
+const STAFF_AUTH_CACHE_VERSION = 1;
 
 const INVALID_CONTEXT_VALUES = new Set([
   '',
@@ -82,6 +94,62 @@ function normalizeContextId(value: unknown): string | undefined {
     return undefined;
   }
   return trimmed;
+}
+
+function extractErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object') {
+    const candidate = error as Record<string, unknown>;
+    const directMessage = candidate.message ?? candidate.error ?? candidate.reason;
+    if (typeof directMessage === 'string' && directMessage.trim()) {
+      return directMessage;
+    }
+  }
+
+  return fallback;
+}
+
+function buildStaffAuthCacheKey(branchId: string): string {
+  return `branch_${branchId.trim()}`;
+}
+
+function parseBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0') {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function hasOwnKey(value: unknown, key: string): boolean {
+  return !!value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function includesStaffAuthMetadata(members: unknown[]): boolean {
+  return members.some((member) =>
+    hasOwnKey(member, 'pin_hash') ||
+    hasOwnKey(member, 'has_pin') ||
+    hasOwnKey(member, 'can_login_pos'),
+  );
+}
+
+function normalizeLegacyProbeError(error: string): string {
+  return error.trim().toLowerCase();
 }
 
 function mapScheduledStaffToMember(member: any): StaffMember {
@@ -112,8 +180,10 @@ function mapScheduledStaffToMember(member: any): StaffMember {
     role_name: primaryRole.role_name,
     role_display_name: primaryRole.role_display_name,
     roles: primaryRole.role_id ? [primaryRole] : [],
-    can_login_pos: member?.can_login_pos ?? true,
-    is_active: member?.is_active ?? true,
+    can_login_pos: parseBoolean(member?.can_login_pos, true),
+    is_active: parseBoolean(member?.is_active, true),
+    has_pin: typeof member?.has_pin === 'boolean' ? member.has_pin : undefined,
+    pin_hash: typeof member?.pin_hash === 'string' ? member.pin_hash : null,
     hourly_rate: member?.hourly_rate,
   };
 }
@@ -141,6 +211,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [selectedStaff, setSelectedStaff] = useState<StaffMember | null>(null);
   const [enteredPin, setEnteredPin] = useState('');
   const [roleType, setRoleType] = useState<'cashier' | 'manager' | 'driver' | 'kitchen' | 'server'>('cashier');
+  const [staffAuthMetadataStatus, setStaffAuthMetadataStatus] = useState<'available' | 'missing'>('available');
 
   // PIN Input reference for focus management
   const pinInputRef = useRef<HTMLInputElement>(null);
@@ -520,13 +591,61 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setStaffActiveShifts(map);
   };
 
+  const persistStaffAuthCache = async (branchId: string, staffList: StaffMember[]) => {
+    const payload: StaffAuthCachePayload = {
+      version: STAFF_AUTH_CACHE_VERSION,
+      branch_id: branchId,
+      synced_at: new Date().toISOString(),
+      staff: staffList.map((member) => ({
+        ...member,
+        roles: member.roles ?? [],
+        has_pin: typeof member.has_pin === 'boolean' ? member.has_pin : !!member.pin_hash,
+        pin_hash: member.pin_hash ?? null,
+      })),
+    };
+
+    await bridge.settings.updateLocal({
+      category: STAFF_AUTH_CACHE_CATEGORY,
+      settings: {
+        [buildStaffAuthCacheKey(branchId)]: JSON.stringify(payload),
+      },
+    });
+  };
+
+  const loadCachedStaffAuth = async (branchId: string): Promise<StaffMember[]> => {
+    const rawValue = await bridge.settings.get({
+      category: STAFF_AUTH_CACHE_CATEGORY,
+      key: buildStaffAuthCacheKey(branchId),
+      defaultValue: '',
+    });
+
+    if (typeof rawValue !== 'string' || !rawValue.trim()) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(rawValue) as Partial<StaffAuthCachePayload> & { staff?: unknown[] };
+      const cachedBranchId = typeof parsed.branch_id === 'string' ? parsed.branch_id.trim() : '';
+      if (cachedBranchId && cachedBranchId !== branchId.trim()) {
+        return [];
+      }
+
+      return (Array.isArray(parsed.staff) ? parsed.staff : [])
+        .map(mapScheduledStaffToMember)
+        .filter((member) => !!member.id);
+    } catch (error) {
+      console.warn('[StaffShiftModal] Failed to parse cached staff auth directory:', error);
+      return [];
+    }
+  };
+
   const loadStaff = async () => {
     setLoading(true);
     setError('');
+    setStaffAuthMetadataStatus('available');
+    let branchId: string | undefined;
     try {
       // Determine branch for this terminal; prefer settings hook, then IPC
-      let branchId: string | undefined;
-
       // 1) Try hook-provided settings (fast path)
       branchId = getSetting?.('terminal', 'branch_id') as string | undefined;
 
@@ -592,10 +711,50 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         throw new Error(payload.error || 'Failed to fetch staff schedule');
       }
 
-      const normalizedStaffList: StaffMember[] = (Array.isArray(payload.staff) ? payload.staff : [])
+      const rawStaffList = Array.isArray(payload.staff) ? payload.staff : [];
+      const authMetadataAvailable = includesStaffAuthMetadata(rawStaffList);
+
+      let cachedStaffAuthById = new Map<string, StaffMember>();
+      if (!authMetadataAvailable) {
+        setStaffAuthMetadataStatus('missing');
+        try {
+          const cachedStaff = await loadCachedStaffAuth(branchId);
+          cachedStaffAuthById = new Map(cachedStaff.map((member) => [member.id, member]));
+        } catch (cacheError) {
+          console.warn('[StaffShiftModal] Failed to load cached staff auth directory for merge:', cacheError);
+        }
+      }
+
+      const normalizedStaffList: StaffMember[] = rawStaffList
         .map(mapScheduledStaffToMember)
+        .map((member) => {
+          if (authMetadataAvailable) {
+            return member;
+          }
+
+          const cachedMember = cachedStaffAuthById.get(member.id);
+          if (!cachedMember) {
+            return member;
+          }
+
+          return {
+            ...member,
+            can_login_pos: cachedMember.can_login_pos,
+            has_pin: typeof cachedMember.has_pin === 'boolean' ? cachedMember.has_pin : member.has_pin,
+            pin_hash: cachedMember.pin_hash ?? member.pin_hash,
+          };
+        })
         .filter((staff) => !!staff.id);
 
+      if (authMetadataAvailable) {
+        try {
+          await persistStaffAuthCache(branchId, normalizedStaffList);
+        } catch (cacheError) {
+          console.warn('[StaffShiftModal] Failed to persist staff auth cache:', cacheError);
+        }
+      } else {
+        console.warn('[StaffShiftModal] Admin staff-schedule response is missing POS auth metadata; preserving existing local auth cache');
+      }
       console.log('[loadStaff] Final staff list:', normalizedStaffList.map(s => ({ name: s.name, rolesCount: s.roles?.length })));
 
       // Create a new array reference to trigger React re-render
@@ -607,6 +766,24 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       }
     } catch (err) {
       console.error('Failed to load staff:', err);
+      if (branchId) {
+        try {
+          const cachedStaff = await loadCachedStaffAuth(branchId);
+          if (cachedStaff.length > 0) {
+            console.log('[StaffShiftModal] Loaded cached staff auth directory for offline check-in');
+            setAvailableStaff([...cachedStaff]);
+            setError('');
+            try {
+              await loadActiveShiftsForStaff(cachedStaff);
+            } catch (activeShiftError) {
+              console.warn('Active shifts load from cache failed', activeShiftError);
+            }
+            return;
+          }
+        } catch (cacheError) {
+          console.warn('[StaffShiftModal] Failed to load cached staff auth directory:', cacheError);
+        }
+      }
       setError(err instanceof Error ? err.message : t('modals.staffShift.failedToLoad'));
     } finally {
       setLoading(false);
@@ -799,6 +976,126 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setCheckInStep('enter-pin');
   };
 
+  const getCheckInPinErrorMessage = (
+    result: { reasonCode?: unknown; error?: unknown } | undefined,
+  ): string => {
+    const reasonCode = typeof result?.reasonCode === 'string' ? result.reasonCode : '';
+    switch (reasonCode) {
+      case 'invalid_pin':
+        return t('modals.staffShift.invalidPIN');
+      case 'pin_not_configured':
+        return t(
+          'modals.staffShift.pinNotConfigured',
+          'No POS PIN is configured for this staff member. Please set it in Admin first.',
+        );
+      case 'pos_login_disabled':
+        return t(
+          'modals.staffShift.posLoginDisabled',
+          'This staff member is not allowed to log in on POS.',
+        );
+      case 'staff_auth_unavailable':
+      case 'staff_not_available_offline':
+        return t(
+          'modals.staffShift.staffAuthUnavailable',
+          'Staff auth data is not available offline yet. Open the staff list while online first.',
+        );
+      default:
+        return String(result?.error || t('modals.staffShift.verifyPinFailed'));
+    }
+  };
+
+  const verifyLegacyAdminStaffPinOnline = async (
+    staffId: string,
+    pin: string,
+  ): Promise<{ success: boolean; reasonCode?: string; error?: string }> => {
+    try {
+      const statusResult = await bridge.adminApi.fetchFromAdmin(
+        `/api/pos/staff-schedule/clock?staff_id=${encodeURIComponent(staffId)}`,
+      );
+
+      if (!statusResult?.success) {
+        return {
+          success: false,
+          reasonCode: 'staff_auth_unavailable',
+          error: String(statusResult?.error || 'Failed to read legacy staff clock status'),
+        };
+      }
+
+      const statusPayload = statusResult.data as {
+        success?: boolean;
+        clockStatus?: { isClockedIn?: boolean | null } | null;
+      } | undefined;
+
+      if (statusPayload?.success === false) {
+        return {
+          success: false,
+          reasonCode: 'staff_auth_unavailable',
+          error: 'Failed to read legacy staff clock status',
+        };
+      }
+
+      const isClockedIn = statusPayload?.clockStatus?.isClockedIn === true;
+      const probeAction: 'clock_in' | 'clock_out' = isClockedIn ? 'clock_in' : 'clock_out';
+
+      const probeResult = await bridge.staffSchedule.clock({
+        staff_id: staffId,
+        action: probeAction,
+        pin,
+        notes: 'legacy_auth_probe',
+      });
+
+      if (probeResult?.success) {
+        console.warn('[StaffShiftModal] Legacy staff PIN probe unexpectedly succeeded with side effects', {
+          staffId,
+          probeAction,
+        });
+        return {
+          success: false,
+          reasonCode: 'staff_auth_unavailable',
+          error: 'Legacy Admin PIN verification mutated remote shift state unexpectedly.',
+        };
+      }
+
+      const errorText = typeof probeResult?.error === 'string' ? probeResult.error : '';
+      const normalizedError = normalizeLegacyProbeError(errorText);
+
+      if (
+        (!isClockedIn && normalizedError.includes('no active shift found to clock out')) ||
+        (isClockedIn && normalizedError.includes('already clocked in'))
+      ) {
+        return { success: true };
+      }
+
+      if (normalizedError.includes('invalid pin') || normalizedError.includes('pin is required')) {
+        return {
+          success: false,
+          reasonCode: 'invalid_pin',
+          error: errorText || 'Invalid PIN',
+        };
+      }
+
+      if (normalizedError.includes('staff member not found')) {
+        return {
+          success: false,
+          reasonCode: 'staff_not_available_offline',
+          error: errorText || 'Staff member not found',
+        };
+      }
+
+      return {
+        success: false,
+        reasonCode: 'staff_auth_unavailable',
+        error: errorText || 'Legacy Admin PIN verification failed',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        reasonCode: 'staff_auth_unavailable',
+        error: extractErrorMessage(error, 'Legacy Admin PIN verification failed'),
+      };
+    }
+  };
+
   const handlePinSubmit = async () => {
     if (!selectedStaff) return;
 
@@ -844,34 +1141,50 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         return;
       }
 
+      if (staffAuthMetadataStatus === 'missing' && !selectedStaff.pin_hash) {
+        const legacyProbe = await verifyLegacyAdminStaffPinOnline(
+          selectedStaff.id,
+          enteredPin.trim(),
+        );
+
+        if (legacyProbe.success) {
+          const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
+          setRoleType(staffRole);
+          setCheckInStep('select-role');
+          setError('');
+          return;
+        }
+
+        const errorMessage =
+          legacyProbe.reasonCode === 'staff_auth_unavailable'
+            ? t(
+                'modals.staffShift.staffAuthServerUpgradeRequired',
+                'This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.',
+              )
+            : getCheckInPinErrorMessage(legacyProbe);
+
+        setError(errorMessage);
+        setEnteredPin('');
+        return;
+      }
+
       try {
         console.log('[StaffShiftModal] PIN submit - IPC call with', { staffId: selectedStaff?.id, branchId, terminalId });
-        const authRes = await bridge.invoke(
-          'staff-auth:authenticate-pin',
-          enteredPin.trim(),
-          selectedStaff?.id,
-          terminalId,
-          branchId
-        );
-        // Main-process handlers may return either raw service payload
-        // or wrapped IPC response: { success, data }.
-        const normalizedAuth = authRes?.data && typeof authRes.data === 'object' ? authRes.data : authRes;
+        const authRes = await bridge.staffAuth.verifyCheckInPin({
+          staffId: selectedStaff.id,
+          branchId,
+          pin: enteredPin.trim(),
+        });
+        const normalizedAuth = authRes;
         const authSucceeded = normalizedAuth?.success === true;
-        const returnedStaffId = normalizedAuth?.staffId ?? normalizedAuth?.staff_id ?? normalizedAuth?.staff?.id;
-        const selectedStaffId = selectedStaff?.id;
+
         console.log('[StaffShiftModal] PIN IPC normalized auth', {
-          wrapped: !!authRes?.data,
           authSucceeded,
-          returnedStaffId,
-          selectedStaffId,
+          reasonCode: normalizedAuth?.reasonCode,
           error: normalizedAuth?.error
         });
-        const staffMatches =
-          !returnedStaffId ||
-          !selectedStaffId ||
-          String(returnedStaffId).trim().toLowerCase() === String(selectedStaffId).trim().toLowerCase();
 
-        if (authSucceeded && staffMatches) {
+        if (authSucceeded) {
           const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
           setRoleType(staffRole);
           setCheckInStep('select-role');
@@ -879,24 +1192,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           return; // done
         }
 
-        if (authSucceeded && !staffMatches) {
-          console.warn('[StaffShiftModal] PIN auth staff mismatch', {
-            selectedStaffId,
-            returnedStaffId,
-          });
-          setError(t('modals.staffShift.invalidPIN'));
-          setEnteredPin('');
-          return;
-        }
-
-        // If main-process auth returned an explicit failure, trust it.
         if (normalizedAuth && normalizedAuth.success === false) {
-          const errorText = String(normalizedAuth.error || '').toLowerCase();
-          if (errorText.includes('invalid pin') || errorText.includes('not found') || errorText.includes('access denied')) {
-            setError(t('modals.staffShift.invalidPIN'));
-          } else {
-            setError(t('modals.staffShift.verifyPinFailed'));
-          }
+          setError(getCheckInPinErrorMessage(normalizedAuth));
           setEnteredPin('');
           return;
         }
@@ -906,8 +1203,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         setEnteredPin('');
         return;
       } catch (e) {
-        console.warn('IPC PIN auth error:', e);
-        setError(t('modals.staffShift.verifyPinFailed'));
+        const errorMessage = extractErrorMessage(e, t('modals.staffShift.verifyPinFailed'));
+        console.warn('IPC PIN auth error:', errorMessage);
+        if (errorMessage.toLowerCase().includes('invalid pin') || errorMessage.toLowerCase().includes('pin is required')) {
+          setError(t('modals.staffShift.invalidPIN'));
+        } else {
+          setError(errorMessage);
+        }
         setEnteredPin('');
         return;
       }

@@ -7,6 +7,11 @@ import toast from 'react-hot-toast';
 import { PluginIcon, isExternalPlatform } from '../../utils/plugin-icons';
 import { OrderRoutingBadge } from './OrderRoutingBadge';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
+import {
+  normalizeOrderCustomerName,
+  normalizeOrderTypeForDisplay,
+  resolveOrderDisplayTitle,
+} from '../../utils/orderDisplay';
 import { openExternalUrl } from '../../utils/electron-api';
 import { getBridge } from '../../../lib';
 
@@ -203,12 +208,24 @@ export const OrderCard = memo<OrderCardProps>(({
 
   const orderCreatedAt = order.created_at || order.createdAt;
   const isRedGlow = shouldShowRedGlow(orderCreatedAt);
-  const orderTypeNormalized = (order.order_type || order.orderType || '').toString();
-  const customerNameNormalized = order.customer_name || order.customerName || '';
+  const orderTypeNormalized = normalizeOrderTypeForDisplay(
+    (order.order_type || order.orderType || '').toString(),
+  );
+  const rawCustomerName = order.customer_name || order.customerName || '';
+  const customerNameNormalized = normalizeOrderCustomerName(rawCustomerName) || '';
   const customerPhoneNormalized = order.customer_phone || order.customerPhone || '';
   const deliveryAddressNormalized = order.delivery_address || order.address || (order as any).deliveryAddress || '';
   const paymentMethodNormalized = (order.payment_method || order.paymentMethod || '').toString().trim().toLowerCase();
   const [resolvedAddress, setResolvedAddress] = useState<string>('');
+  const orderTypeLabel = orderTypeNormalized
+    ? t(`orders.type.${orderTypeNormalized}`, { defaultValue: orderTypeNormalized })
+    : '';
+  const nonDeliveryTitle = resolveOrderDisplayTitle({
+    orderType: orderTypeNormalized,
+    customerName: rawCustomerName,
+    pickupLabel: t('orders.type.pickup', { defaultValue: 'Pickup' }),
+    fallbackLabel: orderTypeLabel || t('orderCard.customer', { defaultValue: 'Customer' }),
+  });
 
   // Format address for display - only show street/road and number, not city, postal code, or floor
   const formatAddressForDisplay = (fullAddress: string): string => {
@@ -400,7 +417,7 @@ export const OrderCard = memo<OrderCardProps>(({
                       <PluginIcon plugin={orderPlugin} size={18} className="shrink-0" showTooltip={false} />
                     )}
                     <div className={`text-sm sm:text-base font-bold truncate min-w-0 ${resolvedTheme === 'light' ? 'text-gray-800' : 'text-white/90'}`}>
-                      {customerNameNormalized || t(`orders.type.${orderTypeNormalized}`) || orderTypeNormalized || t('orderCard.customer') || 'Customer'}
+                      {nonDeliveryTitle}
                     </div>
                   </div>
                 {/* Show phone number */}

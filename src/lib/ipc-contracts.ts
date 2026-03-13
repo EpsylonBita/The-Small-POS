@@ -32,6 +32,20 @@ export interface PrivilegedActionErrorPayload {
   ttlSeconds?: number | null;
 }
 
+export interface StaffCheckInPinVerifyRequest {
+  staffId: string;
+  branchId: string;
+  pin: string;
+}
+
+export interface StaffCheckInPinVerifyResponse {
+  success: boolean;
+  staffId?: string;
+  branchId?: string;
+  reasonCode?: string;
+  error?: string;
+}
+
 // -- Settings / Terminal Config ----------------------------------------------
 
 export interface SettingsConfiguredResponse {
@@ -157,6 +171,22 @@ export type ZReportSyncState =
   | 'applied'
   | 'failed'
   | string;
+
+export type EndOfDayStatus =
+  | 'idle'
+  | 'pending_local_submit'
+  | 'submitted_pending_admin'
+  | string;
+
+export interface EndOfDayStatusResponse {
+  status: EndOfDayStatus;
+  pendingReportDate?: string | null;
+  cutoffAt?: string | null;
+  periodStartAt?: string | null;
+  latestZReportId?: string | null;
+  latestZReportSyncState?: string | null;
+  canOpenPendingZReport?: boolean;
+}
 
 export interface ZReportSubmitResponse {
   success: boolean;

@@ -8,6 +8,8 @@ import { MenuItemModal } from '../menu/MenuItemModal';
 import { ComboChoiceModal } from '../menu/ComboChoiceModal';
 import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
+import { SplitPaymentModal } from './SplitPaymentModal';
+import type { SplitPaymentResult } from './SplitPaymentModal';
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
@@ -26,6 +28,12 @@ import {
   resolveDeliveryFee,
 } from '../../utils/delivery-fee';
 import {
+  isOfferRewardLine,
+  mapRewardActionsWithSignatures,
+  validateCatalogOffers,
+  type OfferRewardLineMetadata,
+} from '../../utils/catalog-offers';
+import {
   buildSavedAddressQuery,
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
@@ -33,6 +41,21 @@ import {
 import { posApiPost } from '../../utils/api-helpers';
 import { getBridge } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
+import type { CatalogOfferEvaluationResult, MatchedCatalogOffer, OfferEvaluationCartItem } from '../../../../../shared/types/catalog-offer';
+import type { CartItem as MenuCartItem } from '../menu/MenuCart';
+
+type MenuModalCartItem = MenuCartItem & {
+  menuItemId?: string;
+  basePrice?: number;
+  is_manual?: boolean;
+  is_combo?: boolean;
+  combo_id?: string;
+  combo_type?: string;
+  combo_items?: unknown[];
+  category_id?: string | null;
+  categoryId?: string | null;
+  category?: { id?: string | null } | string | null;
+} & Partial<OfferRewardLineMetadata>;
 
 interface MenuModalProps {
   isOpen: boolean;
@@ -110,8 +133,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
-  const [cartItems, setCartItems] = useState<any[]>([]);
+  const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
+  const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
+  const [splitOrderId, setSplitOrderId] = useState<string | null>(null);
   const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
   const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false);
@@ -123,6 +149,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const effectiveProcessing = isProcessingOrder || isLocalProcessing;
   const [menuSearchQuery, setMenuSearchQuery] = useState('');
   const menuSearchRef = useRef<HTMLInputElement>(null);
+  const offerValidationRequestIdRef = useRef(0);
 
   // Capture keyboard input and redirect to search bar when typing printable characters
   useEffect(() => {
@@ -353,6 +380,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       // Clear combos/coupon state
       setAppliedCoupon(null);
       setCouponError(null);
+      setOfferEvaluation(null);
       setSelectedCombo(null);
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
@@ -819,6 +847,137 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     setCouponError(null);
   };
 
+  const buildMenuOfferCartItems = useCallback((items: MenuModalCartItem[]): OfferEvaluationCartItem[] => {
+    return items.flatMap((item) => {
+      if (
+        item.is_offer_reward === true ||
+        (item as any).is_manual === true ||
+        (item as any).is_combo === true
+      ) {
+        return [];
+      }
+
+      const menuItemId = (item as any).menuItemId || (item as any).menu_item_id || (item as any).id;
+      if (typeof menuItemId !== 'string' || !menuItemId.trim()) {
+        return [];
+      }
+
+      const categoryId =
+        (item as any).category_id ||
+        (item as any).categoryId ||
+        (item as any).category?.id ||
+        null;
+      const unitPrice = item.unitPrice ?? item.price ?? 0;
+
+      return [{
+        item_id: menuItemId,
+        quantity: Math.max(1, item.quantity || 1),
+        unit_price: Math.max(0, unitPrice),
+        category_id: typeof categoryId === 'string' && categoryId.trim() ? categoryId : null,
+      }];
+    });
+  }, []);
+
+  const createMenuRewardLine = useCallback((
+    action: CatalogOfferEvaluationResult['reward_actions'][number],
+    signature: string,
+  ): MenuModalCartItem & OfferRewardLineMetadata => {
+    const rewardQuantity = Math.max(1, action.quantity || 1);
+
+    return {
+      id: `offer-reward-${signature}`,
+      menuItemId: action.item_id,
+      name: action.item_name_en || action.item_name || 'Reward item',
+      price: 0,
+      quantity: rewardQuantity,
+      customizations: [],
+      notes: '',
+      totalPrice: 0,
+      basePrice: action.unit_price,
+      unitPrice: 0,
+      originalUnitPrice: action.unit_price,
+      isPriceOverridden: false,
+      categoryName: undefined,
+      is_offer_reward: true,
+      auto_added_by_offer: true,
+      offer_id: action.offer_id,
+      offer_name: action.offer_name,
+      reward_item_id: action.item_id,
+      reward_item_category_id: action.category_id ?? null,
+      reward_source_item_id: action.source_item_id ?? null,
+      reward_source_category_id: action.source_category_id ?? null,
+      reward_signature: signature,
+    };
+  }, []);
+
+  const paidCartItems = React.useMemo(
+    () => cartItems.filter((item) => !isOfferRewardLine(item)) as MenuModalCartItem[],
+    [cartItems],
+  );
+  const menuOfferValidationItems = React.useMemo(
+    () => buildMenuOfferCartItems(paidCartItems),
+    [buildMenuOfferCartItems, paidCartItems],
+  );
+  const menuOfferValidationSignature = React.useMemo(
+    () => JSON.stringify(menuOfferValidationItems),
+    [menuOfferValidationItems],
+  );
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const requestId = offerValidationRequestIdRef.current + 1;
+    offerValidationRequestIdRef.current = requestId;
+
+    if (menuOfferValidationItems.length === 0) {
+      setOfferEvaluation(null);
+      if (cartItems.some((item) => isOfferRewardLine(item))) {
+        setCartItems(paidCartItems);
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncOffers = async () => {
+      try {
+        const evaluation = await validateCatalogOffers({
+          catalogType: 'menu',
+          cartItems: menuOfferValidationItems,
+        });
+
+        if (cancelled || offerValidationRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const rewardLines = mapRewardActionsWithSignatures(evaluation?.reward_actions ?? []).map(
+          ({ action, signature }) => createMenuRewardLine(action, signature),
+        );
+
+        setOfferEvaluation(evaluation);
+        setCartItems((prev) => {
+          const currentPaidItems = prev.filter((item) => !isOfferRewardLine(item));
+          return [...currentPaidItems, ...rewardLines];
+        });
+      } catch (error) {
+        if (cancelled || offerValidationRequestIdRef.current !== requestId) {
+          return;
+        }
+        console.error('[MenuModal] Failed to validate catalog offers:', error);
+        setOfferEvaluation(null);
+        setCartItems((prev) => prev.filter((item) => !isOfferRewardLine(item)));
+      }
+    };
+
+    void syncOffers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [createMenuRewardLine, isOpen, menuOfferValidationSignature]);
+
   // Add manual item to cart (or toggle ghost mode via secret code)
   const handleAddManualItem = (price: number, name?: string) => {
     // Secret code: name "x" + price 1 toggles ghost mode
@@ -875,7 +1034,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Calculate coupon discount
   const calculateCouponDiscount = (): number => {
     if (!appliedCoupon) return 0;
-    const subtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+    const subtotal = Math.max(
+      cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) - (offerEvaluation?.discount_total ?? 0),
+      0,
+    );
     const { discountAmount } = calculateManualDiscount(subtotal);
     const afterManualDiscount = subtotal - discountAmount;
     if (appliedCoupon.discount_type === 'percentage') {
@@ -899,12 +1061,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
          : getDeliveryFeeStatus(orderType, effectiveDeliveryZoneInfo, isValidatingDeliveryFee || isResolvingSelectedAddressCoordinates);
   const deliveryFeeResolved = deliveryFeeStatus === 'resolved';
   const cartSubtotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+  const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
+  const matchedOfferNames: string[] = Array.from(
+    new Set(
+      (offerEvaluation?.matched_offers ?? [])
+        .map((offer: MatchedCatalogOffer) => offer.offer_name)
+        .filter((offerName): offerName is string => typeof offerName === 'string' && offerName.trim().length > 0),
+    ),
+  );
+  const subtotalAfterOfferDiscounts = Math.max(cartSubtotal - offerDiscountAmount, 0);
   const {
     discountAmount: currentManualDiscountAmount,
     discountPercentage: currentDiscountPercentage,
-  } = calculateManualDiscount(cartSubtotal);
+  } = calculateManualDiscount(subtotalAfterOfferDiscounts);
   const currentCouponDiscountAmount = calculateCouponDiscount();
-  const totalDiscountAmount = currentManualDiscountAmount + currentCouponDiscountAmount;
+  const totalDiscountAmount = offerDiscountAmount + currentManualDiscountAmount + currentCouponDiscountAmount;
   const discountedSubtotal = cartSubtotal - totalDiscountAmount;
   const finalOrderTotal = discountedSubtotal + resolvedDeliveryFee;
 
@@ -1132,6 +1303,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handleEditCartItem = async (item: any) => {
+    if (item?.is_offer_reward === true) {
+      return;
+    }
     try {
       // Fetch the menu item from the database
       const menuItem = await menuService.getMenuItemById(item.menuItemId || item.id);
@@ -1150,7 +1324,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   };
 
   const handleRemoveCartItem = (itemId: string | number) => {
-    setCartItems(prev => prev.filter(item => item.id !== itemId));
+    setCartItems(prev => prev.filter(item => item.id !== itemId && !isOfferRewardLine(item)));
     toast.success(t('modals.menu.itemRemoved'));
   };
 
@@ -1250,6 +1424,67 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setIsLocalProcessing(false);
       return false;
     }
+  };
+
+  /**
+   * Called when the user taps "Split" inside PaymentModal.
+   * Creates the order first (with payment_status='pending'), then opens
+   * SplitPaymentModal so the user can allocate amounts to each person.
+   */
+  const handleSplitPayment = async () => {
+    setIsLocalProcessing(true);
+    try {
+      if (onOrderComplete) {
+        // Create the order with a pending payment status
+        await onOrderComplete({
+          items: cartItems,
+          total: discountedSubtotal,
+          customer: selectedCustomer,
+          address: selectedAddress || null,
+          orderType,
+          notes: '',
+          paymentData: { method: 'pending', status: 'pending', amount: 0 },
+          discountPercentage: currentDiscountPercentage,
+          discountAmount: currentManualDiscountAmount,
+          manualDiscountMode,
+          manualDiscountValue,
+          total_discount_amount: totalDiscountAmount,
+          is_ghost: false,
+          ghost_source: null,
+          ghost_metadata: null,
+          deliveryFee: resolvedDeliveryFee,
+          deliveryZoneInfo: effectiveDeliveryZoneInfo,
+          ...(appliedCoupon ? {
+            coupon_id: appliedCoupon.id,
+            coupon_code: appliedCoupon.code,
+            coupon_discount_amount: currentCouponDiscountAmount,
+          } : {}),
+        });
+      }
+      // Close PaymentModal, open SplitPaymentModal
+      setShowPaymentModal(false);
+      setShowSplitPaymentModal(true);
+    } catch (error) {
+      console.error('[MenuModal.handleSplitPayment] Error creating order for split:', error);
+      toast.error(t('modals.menu.orderFailed'));
+    } finally {
+      setIsLocalProcessing(false);
+    }
+  };
+
+  /**
+   * Called when the split payment modal completes successfully.
+   * Resets all cart state and closes the menu modal.
+   */
+  const handleSplitComplete = (_result: SplitPaymentResult) => {
+    setCartItems([]);
+    setSelectedCategory("all");
+    setSelectedSubcategory("");
+    setManualDiscountMode('percentage');
+    setManualDiscountValue(0);
+    setShowSplitPaymentModal(false);
+    setSplitOrderId(null);
+    onClose();
   };
 
   // Generate modal title based on mode
@@ -1425,6 +1660,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               couponDiscount={currentCouponDiscountAmount}
               isValidatingCoupon={isValidatingCoupon}
               couponError={couponError}
+              offerDiscountAmount={offerDiscountAmount}
+              matchedOfferNames={matchedOfferNames}
               onAddManualItem={editMode ? undefined : handleAddManualItem}
               onLinePriceChange={handleLinePriceChange}
             />
@@ -1473,7 +1710,28 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           orderType={orderType}
           minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0}
           onPaymentComplete={handlePaymentComplete}
+          onSplitPayment={handleSplitPayment}
           isProcessing={effectiveProcessing}
+        />
+      )}
+
+      {/* Split Payment Modal */}
+      {isOpen && (
+        <SplitPaymentModal
+          isOpen={showSplitPaymentModal}
+          onClose={() => {
+            setShowSplitPaymentModal(false);
+            setSplitOrderId(null);
+          }}
+          orderId={splitOrderId || ''}
+          orderTotal={finalOrderTotal}
+          items={cartItems.map((item) => ({
+            name: item.name,
+            quantity: item.quantity,
+            totalPrice: (item.price || 0) * item.quantity,
+            price: item.price || 0,
+          }))}
+          onSplitComplete={handleSplitComplete}
         />
       )}
 

@@ -506,10 +506,26 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     syncStatus.syncInProgress ||
     financialPendingCount > 0;
 
+  const queueFailure = syncStatus.lastQueueFailure;
+  const queueFailureNextRetryTs = queueFailure?.nextRetryAt
+    ? toTimestamp(queueFailure.nextRetryAt)
+    : null;
+  const hasScheduledRetryableQueueFailure =
+    !!queueFailure &&
+    queueFailure.status.toLowerCase() === 'pending' &&
+    (queueFailure.classification === 'transient' ||
+      queueFailure.classification === 'backpressure') &&
+    queueFailureNextRetryTs !== null &&
+    queueFailureNextRetryTs > Date.now();
+
   const hasBlockedQueue =
-    !!syncStatus.lastQueueFailure &&
-    (syncStatus.lastQueueFailure.classification === 'permanent' ||
-      syncStatus.lastQueueFailure.status.toLowerCase() === 'failed');
+    !!queueFailure &&
+    !hasScheduledRetryableQueueFailure &&
+    (queueFailure.classification === 'permanent' ||
+      queueFailure.status.toLowerCase() === 'failed' ||
+      queueFailure.status.toLowerCase() === 'in_progress' ||
+      queueFailureNextRetryTs === null ||
+      queueFailureNextRetryTs <= Date.now());
 
   const lastSyncTimestamp = toTimestamp(syncStatus.lastSync);
   const telemetrySyncTimestamp = toTimestamp(systemHealth?.lastSyncTime);
@@ -525,7 +541,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     hasErrors ||
     hasPending ||
     hasBlockedQueue ||
-    syncStatus.lastQueueFailure !== null;
+    queueFailure !== null;
   const missingTelemetryWhileActionable =
     syncStatus.isOnline &&
     actionableLocalState &&
@@ -938,7 +954,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                 </div>
               </div>
 
-              {syncStatus.lastQueueFailure && (
+              {queueFailure && hasBlockedQueue && (
                 <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
@@ -946,23 +962,22 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                     </span>
                     <span
                       className={`text-[10px] font-extrabold uppercase tracking-wide ${
-                        syncStatus.lastQueueFailure.classification ===
+                        queueFailure.classification ===
                         'backpressure'
                           ? 'text-amber-600 dark:text-amber-400'
-                          : syncStatus.lastQueueFailure.classification ===
+                          : queueFailure.classification ===
                               'permanent'
                             ? 'text-red-600 dark:text-red-400'
-                            : syncStatus.lastQueueFailure.classification ===
+                            : queueFailure.classification ===
                                 'transient'
                               ? 'text-orange-600 dark:text-orange-400'
                               : 'text-slate-500 dark:text-slate-300'
                       }`}
                     >
                       {t(
-                        `sync.blocker.classification.${syncStatus.lastQueueFailure.classification}`,
+                        `sync.blocker.classification.${queueFailure.classification}`,
                         {
-                          defaultValue:
-                            syncStatus.lastQueueFailure.classification,
+                          defaultValue: queueFailure.classification,
                         },
                       )}
                     </span>
@@ -972,22 +987,21 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                       {t('sync.blocker.entity', { defaultValue: 'Entity' })}:{' '}
                     </span>
                     <span className="font-mono">
-                      {ENTITY_TYPE_KEYS[syncStatus.lastQueueFailure.entityType]
+                      {ENTITY_TYPE_KEYS[queueFailure.entityType]
                         ? t(
                             ENTITY_TYPE_KEYS[
-                              syncStatus.lastQueueFailure.entityType
+                              queueFailure.entityType
                             ],
                             {
-                              defaultValue:
-                                syncStatus.lastQueueFailure.entityType,
+                              defaultValue: queueFailure.entityType,
                             },
                           )
-                        : syncStatus.lastQueueFailure.entityType}{' '}
-                      {syncStatus.lastQueueFailure.entityId}
+                        : queueFailure.entityType}{' '}
+                      {queueFailure.entityId}
                     </span>
                   </div>
                   <div className="text-[11px] font-semibold text-red-600 dark:text-red-300 break-words">
-                    {syncStatus.lastQueueFailure.lastError}
+                    {queueFailure.lastError}
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
                     <div className="text-slate-600 dark:text-slate-300">
@@ -998,8 +1012,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         :{' '}
                       </span>
                       <span className="font-mono">
-                        {syncStatus.lastQueueFailure.retryCount}/
-                        {syncStatus.lastQueueFailure.maxRetries}
+                        {queueFailure.retryCount}/{queueFailure.maxRetries}
                       </span>
                     </div>
                     <div className="text-slate-600 dark:text-slate-300">
@@ -1010,22 +1023,120 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                         :{' '}
                       </span>
                       <span className="font-mono">
-                        {syncStatus.lastQueueFailure.status}
+                        {queueFailure.status}
                       </span>
                     </div>
-                    {syncStatus.lastQueueFailure.nextRetryAt && (
+                    {queueFailure.nextRetryAt && (
                       <div className="col-span-2 text-amber-600 dark:text-amber-400 font-semibold">
                         {t('sync.blocker.nextRetry', {
                           defaultValue: 'Next retry',
                         })}
                         :{' '}
-                        {new Date(
-                          syncStatus.lastQueueFailure.nextRetryAt,
-                        ).toLocaleTimeString()}
+                        {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
                       </div>
                     )}
                   </div>
-                  {syncStatus.lastQueueFailure.entityType === 'order' && (
+                  {queueFailure.entityType === 'order' && (
+                    <button
+                      onClick={handleRetryBlockedOrder}
+                      disabled={
+                        retryingBlockedOrder || syncStatus.syncInProgress
+                      }
+                      className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-blue-500/20 hover:bg-blue-500/30 text-blue-700 dark:text-blue-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {retryingBlockedOrder
+                        ? t('sync.blocker.retrying', {
+                            defaultValue: 'Retrying...',
+                          })
+                        : t('sync.blocker.retryOrderNow', {
+                            defaultValue: 'Retry Order Now',
+                          })}
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {queueFailure && hasScheduledRetryableQueueFailure && (
+                <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2 border border-amber-500/30">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="space-y-0.5">
+                      <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide block">
+                        {t('sync.blocker.recoveryTitle', {
+                          defaultValue: 'Recovery in progress',
+                        })}
+                      </span>
+                      <span className="text-[10px] text-slate-600 dark:text-slate-300">
+                        {t('sync.blocker.recoveryDetail', {
+                          defaultValue:
+                            'This queue item is retryable and will be reprocessed automatically.',
+                        })}
+                      </span>
+                    </div>
+                    <span
+                      className={`text-[10px] font-extrabold uppercase tracking-wide ${
+                        queueFailure.classification === 'backpressure'
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-orange-600 dark:text-orange-400'
+                      }`}
+                    >
+                      {t(
+                        `sync.blocker.classification.${queueFailure.classification}`,
+                        {
+                          defaultValue: queueFailure.classification,
+                        },
+                      )}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-700 dark:text-slate-200">
+                    <span className="font-semibold">
+                      {t('sync.blocker.entity', { defaultValue: 'Entity' })}:{' '}
+                    </span>
+                    <span className="font-mono">
+                      {ENTITY_TYPE_KEYS[queueFailure.entityType]
+                        ? t(ENTITY_TYPE_KEYS[queueFailure.entityType], {
+                            defaultValue: queueFailure.entityType,
+                          })
+                        : queueFailure.entityType}{' '}
+                      {queueFailure.entityId}
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 break-words">
+                    {queueFailure.lastError}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold">
+                        {t('sync.blocker.retryProgress', {
+                          defaultValue: 'Retry',
+                        })}
+                        :{' '}
+                      </span>
+                      <span className="font-mono">
+                        {queueFailure.retryCount}/{queueFailure.maxRetries}
+                      </span>
+                    </div>
+                    <div className="text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold">
+                        {t('sync.blocker.status', {
+                          defaultValue: 'Status',
+                        })}
+                        :{' '}
+                      </span>
+                      <span className="font-mono">
+                        {queueFailure.status}
+                      </span>
+                    </div>
+                    {queueFailure.nextRetryAt && (
+                      <div className="col-span-2 text-amber-600 dark:text-amber-400 font-semibold">
+                        {t('sync.blocker.nextRetry', {
+                          defaultValue: 'Next retry',
+                        })}
+                        :{' '}
+                        {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
+                      </div>
+                    )}
+                  </div>
+                  {queueFailure.entityType === 'order' && (
                     <button
                       onClick={handleRetryBlockedOrder}
                       disabled={

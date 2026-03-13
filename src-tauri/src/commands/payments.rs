@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::{db, payload_arg0_as_string, payments, refunds, resolve_order_id};
 
@@ -213,6 +213,36 @@ pub async fn payment_get_receipt_preview(
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
     payments::get_receipt_preview(&db, &order_id)
+}
+
+#[tauri::command]
+pub async fn payment_get_paid_items(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let order_id = parse_order_id_payload(arg0)?;
+    payments::get_paid_items(&db, &order_id)
+}
+
+#[tauri::command]
+pub async fn payment_print_split_receipt(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payment_id = parse_payment_id_payload(arg0)?;
+    // Use split_receipt entity type for the print pipeline
+    let enqueue_result = crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None)?;
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    if let Err(e) = crate::print::process_pending_jobs(&db, &data_dir) {
+        tracing::warn!(payment_id = %payment_id, error = %e, "Immediate split receipt print failed, worker will retry");
+    }
+
+    Ok(enqueue_result)
 }
 
 #[tauri::command]

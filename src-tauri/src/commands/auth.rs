@@ -164,6 +164,14 @@ pub async fn staff_auth_authenticate_pin(
 }
 
 #[tauri::command]
+pub async fn staff_auth_verify_check_in_pin(
+    arg0: Option<Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<Value, String> {
+    auth::verify_staff_check_in_pin(arg0, &db)
+}
+
+#[tauri::command]
 pub async fn staff_auth_get_session(
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, String> {

@@ -54,6 +54,39 @@ const DEFAULT_FEATURES: FeatureFlags = {
   settings: false,
 };
 
+const DEFAULT_FEATURES_BY_TERMINAL_TYPE: Record<TerminalType, FeatureFlags> = {
+  main: {
+    cashDrawer: true,
+    zReportExecution: true,
+    cashPayments: true,
+    cardPayments: true,
+    orderCreation: true,
+    orderModification: true,
+    discounts: true,
+    refunds: true,
+    expenses: true,
+    staffPayments: true,
+    reports: true,
+    settings: true,
+  },
+  mobile_waiter: {
+    cashDrawer: false,
+    zReportExecution: false,
+    cashPayments: true,
+    cardPayments: true,
+    orderCreation: true,
+    orderModification: true,
+    discounts: false,
+    refunds: false,
+    expenses: false,
+    staffPayments: false,
+    reports: false,
+    settings: false,
+  },
+};
+
+let terminalFeatureRecoveryPromise: Promise<Record<string, unknown> | null> | null = null;
+
 /**
  * useFeatures Hook
  *
@@ -79,6 +112,177 @@ function isTerminalType(value: unknown): value is TerminalType {
   return value === 'main' || value === 'mobile_waiter';
 }
 
+function hasOwn(source: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(source, key);
+}
+
+function getBooleanFeature(source: Record<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    if (hasOwn(source, key) && typeof source[key] === 'boolean') {
+      return source[key] as boolean;
+    }
+  }
+
+  return undefined;
+}
+
+function getFallbackPaymentDefaults(
+  terminalType: TerminalType | null
+): Pick<FeatureFlags, 'cashPayments' | 'cardPayments'> {
+  return terminalType
+    ? DEFAULT_FEATURES_BY_TERMINAL_TYPE[terminalType]
+    : DEFAULT_FEATURES_BY_TERMINAL_TYPE.main;
+}
+
+function getFallbackFeatureDefaults(terminalType: TerminalType | null): FeatureFlags | null {
+  return terminalType ? DEFAULT_FEATURES_BY_TERMINAL_TYPE[terminalType] : null;
+}
+
+function hasKnownPaymentFeatureSource(rawFeatures: Record<string, unknown>): boolean {
+  return (
+    getBooleanFeature(rawFeatures, ['cash_payments', 'cashPayments']) !== undefined ||
+    getBooleanFeature(rawFeatures, ['card_payments', 'cardPayments']) !== undefined ||
+    getBooleanFeature(rawFeatures, ['payment_processing', 'paymentProcessing']) !== undefined
+  );
+}
+
+function extractRuntimeConfig(config: unknown): {
+  rawConfig: Record<string, unknown>;
+  terminalType: TerminalType | null;
+  parentTerminalId: string | null;
+  loadedFeatures: Record<string, unknown>;
+} | null {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    return null;
+  }
+
+  const rawConfig = config as Record<string, unknown>;
+  const resolvedTerminalTypeValue = rawConfig.terminal_type || rawConfig.terminalType || null;
+  const terminalType = isTerminalType(resolvedTerminalTypeValue)
+    ? resolvedTerminalTypeValue
+    : null;
+  const parentTerminalId =
+    typeof rawConfig.parent_terminal_id === 'string'
+      ? rawConfig.parent_terminal_id
+      : typeof rawConfig.parentTerminalId === 'string'
+        ? rawConfig.parentTerminalId
+        : null;
+  const enabledFeaturesCandidate = rawConfig.enabled_features ?? rawConfig.features;
+  const loadedFeatures =
+    enabledFeaturesCandidate &&
+    typeof enabledFeaturesCandidate === 'object' &&
+    !Array.isArray(enabledFeaturesCandidate)
+      ? enabledFeaturesCandidate as Record<string, unknown>
+      : {};
+
+  return {
+    rawConfig,
+    terminalType,
+    parentTerminalId,
+    loadedFeatures,
+  };
+}
+
+function shouldRecoverTerminalFeatures(
+  rawConfig: Record<string, unknown>,
+  rawFeatures: Record<string, unknown>,
+  terminalType: TerminalType | null,
+  resolvedFeatures: FeatureFlags
+): boolean {
+  const syncHealth = rawConfig.sync_health;
+  const hasFeaturePayload = Object.keys(rawFeatures).length > 0;
+  const hasPaymentFeatureSource = hasKnownPaymentFeatureSource(rawFeatures);
+  const noPaymentsAvailable = !resolvedFeatures.cashPayments && !resolvedFeatures.cardPayments;
+
+  return (
+    !hasFeaturePayload ||
+    !hasPaymentFeatureSource ||
+    (!terminalType && noPaymentsAvailable) ||
+    ((syncHealth === 'stale' || syncHealth === 'offline') && noPaymentsAvailable)
+  );
+}
+
+async function recoverTerminalRuntimeConfig(
+  bridge: ReturnType<typeof getBridge>
+): Promise<Record<string, unknown> | null> {
+  if (!terminalFeatureRecoveryPromise) {
+    terminalFeatureRecoveryPromise = (async () => {
+      try {
+        const syncResult = await bridge.terminalConfig.syncFromAdmin();
+        const directSyncResult = syncResult as { config?: Record<string, unknown> } | null;
+        const syncedConfigCandidate = directSyncResult?.config ?? syncResult?.data?.config;
+        if (syncedConfigCandidate && typeof syncedConfigCandidate === 'object' && !Array.isArray(syncedConfigCandidate)) {
+          return syncedConfigCandidate as Record<string, unknown>;
+        }
+
+        const refreshedConfig = await bridge.terminalConfig.getFullConfig();
+        if (refreshedConfig && typeof refreshedConfig === 'object' && !Array.isArray(refreshedConfig)) {
+          return refreshedConfig as Record<string, unknown>;
+        }
+      } catch (error) {
+        console.warn('[useFeatures] Failed to recover terminal config from admin:', error);
+      }
+
+      return null;
+    })().finally(() => {
+      terminalFeatureRecoveryPromise = null;
+    });
+  }
+
+  return terminalFeatureRecoveryPromise;
+}
+
+function resolveFeatureFlags(
+  rawFeatures: Record<string, unknown>,
+  terminalType: TerminalType | null
+): FeatureFlags {
+  const mappedFeatures = {
+    ...DEFAULT_FEATURES,
+    ...mapServerToLocal<FeatureFlags>(
+      rawFeatures as Record<string, boolean>,
+      FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>
+    ),
+  };
+
+  const fallbackFeatureDefaults = getFallbackFeatureDefaults(terminalType);
+  const fallbackPaymentDefaults = getFallbackPaymentDefaults(terminalType);
+  const explicitCashDrawer = getBooleanFeature(rawFeatures, ['cash_drawer', 'cashDrawer', 'receipt_printing']);
+  const explicitZReportExecution = getBooleanFeature(rawFeatures, ['z_report_execution', 'zReportExecution']);
+  const hasExplicitCash = hasOwn(rawFeatures, 'cash_payments') || hasOwn(rawFeatures, 'cashPayments');
+  const hasExplicitCard = hasOwn(rawFeatures, 'card_payments') || hasOwn(rawFeatures, 'cardPayments');
+  const legacyPaymentProcessing = getBooleanFeature(rawFeatures, ['payment_processing', 'paymentProcessing']);
+  const explicitOrderCreation = getBooleanFeature(rawFeatures, ['order_creation', 'orderCreation', 'table_management']);
+  const explicitOrderModification = getBooleanFeature(rawFeatures, ['order_modification', 'orderModification']);
+  const explicitDiscounts = getBooleanFeature(rawFeatures, ['discounts']);
+  const explicitRefunds = getBooleanFeature(rawFeatures, ['refunds']);
+  const explicitExpenses = getBooleanFeature(rawFeatures, ['expenses']);
+  const explicitStaffPayments = getBooleanFeature(rawFeatures, ['staff_payments', 'staffPayments', 'staff_management']);
+  const explicitReports = getBooleanFeature(rawFeatures, ['reports', 'reportsView', 'reports_view', 'inventory_view']);
+  const explicitSettings = getBooleanFeature(rawFeatures, ['settings', 'settingsAccess', 'settings_access']);
+
+  return {
+    ...mappedFeatures,
+    cashDrawer: explicitCashDrawer ?? fallbackFeatureDefaults?.cashDrawer ?? mappedFeatures.cashDrawer,
+    zReportExecution:
+      explicitZReportExecution ?? fallbackFeatureDefaults?.zReportExecution ?? mappedFeatures.zReportExecution,
+    cashPayments: hasExplicitCash
+      ? mappedFeatures.cashPayments
+      : legacyPaymentProcessing ?? fallbackPaymentDefaults.cashPayments,
+    cardPayments: hasExplicitCard
+      ? mappedFeatures.cardPayments
+      : legacyPaymentProcessing ?? fallbackPaymentDefaults.cardPayments,
+    orderCreation: explicitOrderCreation ?? fallbackFeatureDefaults?.orderCreation ?? mappedFeatures.orderCreation,
+    orderModification:
+      explicitOrderModification ?? fallbackFeatureDefaults?.orderModification ?? mappedFeatures.orderModification,
+    discounts: explicitDiscounts ?? fallbackFeatureDefaults?.discounts ?? mappedFeatures.discounts,
+    refunds: explicitRefunds ?? fallbackFeatureDefaults?.refunds ?? mappedFeatures.refunds,
+    expenses: explicitExpenses ?? fallbackFeatureDefaults?.expenses ?? mappedFeatures.expenses,
+    staffPayments: explicitStaffPayments ?? fallbackFeatureDefaults?.staffPayments ?? mappedFeatures.staffPayments,
+    reports: explicitReports ?? fallbackFeatureDefaults?.reports ?? mappedFeatures.reports,
+    settings: explicitSettings ?? fallbackFeatureDefaults?.settings ?? mappedFeatures.settings,
+  };
+}
+
 export function useFeatures() {
   const bridge = getBridge();
   const [features, setFeatures] = useState<FeatureFlags>(DEFAULT_FEATURES);
@@ -96,26 +300,33 @@ export function useFeatures() {
       setError(null);
 
       // Get full terminal configuration
-      const config = await bridge.terminalConfig.getFullConfig();
+      const initialConfig = await bridge.terminalConfig.getFullConfig();
 
-      console.log('[useFeatures] Loaded config:', config);
+      console.log('[useFeatures] Loaded config:', initialConfig);
 
-      if (config) {
-        const resolvedTerminalTypeValue = config.terminal_type || config.terminalType || null;
-        const resolvedTerminalType = isTerminalType(resolvedTerminalTypeValue)
-          ? resolvedTerminalTypeValue
-          : null;
-        const resolvedParentTerminalId =
-          config.parent_terminal_id || config.parentTerminalId || null;
-        const loadedFeatures = config.enabled_features || config.features || {};
+      let extractedConfig = extractRuntimeConfig(initialConfig);
 
-        const mergedFeatures = {
-          ...DEFAULT_FEATURES,
-          ...mapServerToLocal<FeatureFlags>(
-            loadedFeatures,
-            FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>
-          ),
-        };
+      if (extractedConfig) {
+        let {
+          rawConfig,
+          terminalType: resolvedTerminalType,
+          parentTerminalId: resolvedParentTerminalId,
+          loadedFeatures,
+        } = extractedConfig;
+        let mergedFeatures = resolveFeatureFlags(loadedFeatures, resolvedTerminalType);
+
+        if (shouldRecoverTerminalFeatures(rawConfig, loadedFeatures, resolvedTerminalType, mergedFeatures)) {
+          const recoveredConfig = await recoverTerminalRuntimeConfig(bridge);
+          const recoveredRuntimeConfig = extractRuntimeConfig(recoveredConfig);
+          if (recoveredRuntimeConfig) {
+            console.log('[useFeatures] Recovered config from admin sync:', recoveredConfig);
+            rawConfig = recoveredRuntimeConfig.rawConfig;
+            resolvedTerminalType = recoveredRuntimeConfig.terminalType;
+            resolvedParentTerminalId = recoveredRuntimeConfig.parentTerminalId;
+            loadedFeatures = recoveredRuntimeConfig.loadedFeatures;
+            mergedFeatures = resolveFeatureFlags(loadedFeatures, resolvedTerminalType);
+          }
+        }
 
         setTerminalType(resolvedTerminalType);
         setParentTerminalId(resolvedParentTerminalId);
@@ -171,6 +382,9 @@ export function useFeatures() {
       console.log('[useFeatures] Terminal config updated:', data);
 
       const nextTerminalType = data?.terminal_type ?? data?.terminalType ?? null;
+      const resolvedTerminalType = isTerminalType(nextTerminalType)
+        ? nextTerminalType
+        : terminalType;
       if (isTerminalType(nextTerminalType) || nextTerminalType === null) {
         setTerminalType(nextTerminalType);
       }
@@ -180,13 +394,7 @@ export function useFeatures() {
       }
       const nextFeatures = data?.enabled_features ?? data?.features;
       if (nextFeatures) {
-        setFeatures(() => ({
-          ...DEFAULT_FEATURES,
-          ...mapServerToLocal<FeatureFlags>(
-            nextFeatures,
-            FEATURE_KEY_MAPPING as Record<string, keyof FeatureFlags>
-          ),
-        }));
+        setFeatures(() => resolveFeatureFlags(nextFeatures, resolvedTerminalType));
       }
     };
 
@@ -197,7 +405,7 @@ export function useFeatures() {
       mounted = false;
       offEvent('terminal-config-updated', handleConfigUpdate);
     };
-  }, [loadFeatures]);
+  }, [loadFeatures, terminalType]);
 
   // Mapping logic moved to shared/feature-mapping.ts to avoid drift between main and renderer
 

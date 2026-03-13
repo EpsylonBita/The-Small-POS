@@ -19,14 +19,44 @@ interface ZReportModalProps {
   onClose: () => void;
   branchId: string;
   date?: string; // yyyy-mm-dd
+  lockDate?: boolean;
 }
 
-const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, date }) => {
+function extractErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object') {
+    const candidate = error as Record<string, unknown>;
+    const directMessage = candidate.message ?? candidate.error ?? candidate.reason;
+    if (typeof directMessage === 'string' && directMessage.trim()) {
+      return directMessage;
+    }
+  }
+
+  return fallback;
+}
+
+const ZReportModal: React.FC<ZReportModalProps> = ({
+  isOpen,
+  onClose,
+  branchId,
+  date,
+  lockDate = false,
+}) => {
   const bridge = getBridge();
   const { clearShift } = useShift();
   const { t } = useTranslation();
-  const { isFeatureEnabled, isMobileWaiter, parentTerminalId } = useFeatures();
-  const canExecuteZReport = isFeatureEnabled('zReportExecution');
+  const { isFeatureEnabled, isMainTerminal, isMobileWaiter, loading: featuresLoading, parentTerminalId } = useFeatures();
+  const canExecuteZReport =
+    isFeatureEnabled('zReportExecution') ||
+    (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
+  const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
   const [selectedDate, setSelectedDate] = useState<string>(date || new Date().toISOString().slice(0, 10));
   const [zReport, setZReport] = useState<ZReportData | null>(null);
@@ -142,6 +172,11 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
     return `${hh}h ${mm.toString().padStart(2, '0')}m`;
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedDate(date || new Date().toISOString().slice(0, 10));
+  }, [date, isOpen]);
+
 
 
   useEffect(() => {
@@ -158,7 +193,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
         setZReport(report || null);
       } catch (e: unknown) {
         if (!mounted) return;
-        setError(e instanceof Error ? e.message : t('modals.zReport.loadFailed'));
+        setError(extractErrorMessage(e, t('modals.zReport.loadFailed')));
       } finally {
         if (!mounted) return;
         setLoading(false);
@@ -190,7 +225,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
             onChange={(e) => setSelectedDate(e.target.value)}
             className="liquid-glass-modal-input font-semibold"
             aria-label={t('modals.zReport.selectDate')}
+            disabled={lockDate}
           />
+          {lockDate && (
+            <div className="mt-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
+              {t('modals.zReport.pendingDateLocked')}
+            </div>
+          )}
           {/* Period indicator - shows when the current period started */}
           {zReport && zReport.periodStart && (
             <div className="mt-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
@@ -910,7 +951,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
                 // Log full error details for debugging (Requirements 3.4)
                 console.error('[ZReportModal] Submit error caught:', e);
                 // Display specific error message to user
-                const errorMessage = e instanceof Error ? e.message : t('modals.zReport.submissionFailed');
+                const errorMessage = extractErrorMessage(e, t('modals.zReport.submissionFailed'));
                 setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
               } finally {
                 // Always reset button state (Requirements 5.2, 5.4)
@@ -923,7 +964,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
           >
             {submitting ? t('modals.zReport.submitting') : t('modals.zReport.submitToAdmin')}
           </button>
-        ) : (
+        ) : showMainTerminalWarning ? (
           <div className="flex items-center gap-2">
             <button
               disabled
@@ -936,6 +977,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({ isOpen, onClose, branchId, 
               {t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')}
             </span>
           </div>
+        ) : (
+          <button
+            disabled
+            className="px-3 py-2 rounded-md text-sm bg-gray-400 cursor-not-allowed text-white opacity-50"
+            aria-busy="true"
+          >
+            {t('common.loading', 'Loading...')}
+          </button>
         )}
         {submitResult && <span className="ml-2 text-xs text-slate-600 dark:text-slate-300 font-medium">{submitResult}</span>}
         </div>

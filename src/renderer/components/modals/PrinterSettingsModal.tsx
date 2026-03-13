@@ -6,6 +6,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components'
 import { liquidGlassModalButton } from '../../styles/designSystem'
 import { Activity, AlertTriangle, ChefHat, ChevronDown, Info, Pencil, Printer, Receipt, Tag, Trash2, Wine } from 'lucide-react'
 import { getBridge, offEvent, onEvent } from '../../../lib'
+import type { ReceiptSamplePreviewRequest, ReceiptSamplePreviewResponse } from '../../../lib'
 import PrinterSetupWizard from './PrinterSetupWizard'
 import { ReceiptScaleSlider } from '../ui/ReceiptScaleSlider'
 
@@ -440,9 +441,13 @@ const PrinterSettingsModal: React.FC<Props> = ({
   const toggleSection = (key: string) => setOpenSections(prev => ({ ...prev, [key as keyof typeof prev]: !prev[key as keyof typeof prev] }))
 
   // Live preview state
-  const [previewHtml, setPreviewHtml] = useState<string>('')
+  const [preview, setPreview] = useState<ReceiptSamplePreviewResponse | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [textScaleAutoSwitchNotice, setTextScaleAutoSwitchNotice] = useState(false)
   const previewTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const previewRequestIdRef = useRef(0)
+  const textScaleAutoSwitchToastShownRef = useRef(false)
 
   // Load printers and statuses
   const loadPrinters = useCallback(async () => {
@@ -580,41 +585,6 @@ const PrinterSettingsModal: React.FC<Props> = ({
     return () => unsubscribe?.()
   }, [isOpen, api])
 
-  // Fetch preview when textScale or logoScale changes (debounced)
-  useEffect(() => {
-    if (viewMode !== 'add' && viewMode !== 'edit') return
-    if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current)
-    previewTimeoutRef.current = setTimeout(async () => {
-      setPreviewLoading(true)
-      try {
-        const bridgeAny = bridge as any
-        const result: any = await bridgeAny.receipt?.samplePreview?.({ textScale: formData.textScale, logoScale: formData.logoScale })
-        if (result?.success && result?.html) {
-          setPreviewHtml(result.html)
-        }
-      } catch (e) {
-        console.warn('Preview failed:', e)
-      } finally {
-        setPreviewLoading(false)
-      }
-    }, 200)
-    return () => { if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current) }
-  }, [formData.textScale, formData.logoScale, viewMode, bridge])
-
-  // Fetch initial preview on form open
-  useEffect(() => {
-    if (viewMode === 'add' || viewMode === 'edit') {
-      (async () => {
-        try {
-          const bridgeAny = bridge as any
-          const result: any = await bridgeAny.receipt?.samplePreview?.({ textScale: formData.textScale, logoScale: formData.logoScale })
-          if (result?.success && result?.html) setPreviewHtml(result.html)
-        } catch (_e) { /* preview is best-effort */ }
-      })()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode])
-
   // Discover printers (network, USB, system)
   const handleDiscover = async (types?: PrinterType[]) => {
     setScanning(true)
@@ -704,8 +674,27 @@ const PrinterSettingsModal: React.FC<Props> = ({
     setViewMode('add')
   }
 
+  const buildCapabilitiesForSave = useCallback((printer?: PrinterConfig | null): PrinterCapabilities => {
+    if (!printer) return defaultCapabilities()
+    const existing = readCapabilities(printer.connectionDetails)
+    const connectionChanged =
+      printer.type !== formData.type ||
+      (printer.connectionDetails?.ip || '') !== formData.ip ||
+      (printer.connectionDetails?.port || 9100) !== formData.port ||
+      (printer.connectionDetails?.address || '') !== formData.bluetoothAddress ||
+      (printer.connectionDetails?.channel || 1) !== formData.bluetoothChannel ||
+      (printer.connectionDetails?.vendorId || 0) !== formData.usbVendorId ||
+      (printer.connectionDetails?.productId || 0) !== formData.usbProductId ||
+      (printer.connectionDetails?.systemName || '') !== (formData.type === 'system' ? formData.systemPrinterName : formData.usbSystemName) ||
+      (printer.connectionDetails?.path || '') !== formData.usbPath ||
+      (printer.connectionDetails?.render_mode || 'text') !== formData.classicRenderMode ||
+      (printer.connectionDetails?.emulation || 'auto') !== formData.emulationMode
+
+    return connectionChanged ? defaultCapabilities() : existing
+  }, [formData])
+
   // Build connection details from form
-  const buildConnectionDetails = (): ConnectionDetails => {
+  const buildConnectionDetails = useCallback((): ConnectionDetails => {
     const details: ConnectionDetails = { type: formData.type }
     switch (formData.type) {
       case 'network':
@@ -754,7 +743,93 @@ const PrinterSettingsModal: React.FC<Props> = ({
       }
     }
     return details
-  }
+  }, [formData, selectedPrinter])
+
+  const buildProfileDraft = useCallback(() => ({
+    name: formData.name.trim() || 'Receipt Preview',
+    type: formData.type,
+    connectionDetails: buildConnectionDetails(),
+    paperSize: formData.paperSize,
+    characterSet: formData.characterSet,
+    greekRenderMode: formData.greekRenderMode,
+    escposCodePage: formData.escposCodePage ? parseInt(formData.escposCodePage, 10) : null,
+    receiptTemplate: formData.receiptTemplate,
+    fontType: formData.fontType,
+    layoutDensity: formData.layoutDensity,
+    headerEmphasis: formData.headerEmphasis,
+    role: formData.role,
+    isDefault: formData.isDefault,
+    fallbackPrinterId: formData.fallbackPrinterId || undefined,
+    enabled: formData.enabled,
+  }), [buildConnectionDetails, formData])
+
+  const effectiveLogoSource = useMemo(() => {
+    const customSource = logoSourceOverride.trim()
+    if (customSource) return customSource
+    const fallbackSource = orgLogoSource.trim()
+    return fallbackSource || ''
+  }, [logoSourceOverride, orgLogoSource])
+
+  const previewRequest = useMemo<ReceiptSamplePreviewRequest | null>(() => {
+    if ((viewMode !== 'add' && viewMode !== 'edit') || !logoLoaded) return null
+    return {
+      profileDraft: buildProfileDraft(),
+      receiptSettings: {
+        showLogo: logoEnabled,
+        logoSource: effectiveLogoSource,
+        textScale: formData.textScale,
+        logoScale: formData.logoScale,
+      },
+    }
+  }, [
+    buildProfileDraft,
+    effectiveLogoSource,
+    formData.logoScale,
+    formData.textScale,
+    logoEnabled,
+    logoLoaded,
+    viewMode,
+  ])
+
+  useEffect(() => {
+    if ((viewMode === 'add' || viewMode === 'edit') && !previewRequest) return
+    if (viewMode !== 'add' && viewMode !== 'edit') {
+      setPreview(null)
+      setPreviewError(null)
+      setPreviewLoading(false)
+      return
+    }
+    if (!previewRequest) return
+    if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current)
+    const requestId = ++previewRequestIdRef.current
+    previewTimeoutRef.current = setTimeout(async () => {
+      setPreviewLoading(true)
+      setPreviewError(null)
+      try {
+        const result = await bridge.receipt.samplePreview(previewRequest) as ReceiptSamplePreviewResponse
+        if (requestId !== previewRequestIdRef.current) return
+        if (result?.success) {
+          setPreview(result)
+          setPreviewError(null)
+        } else {
+          setPreview(null)
+          setPreviewError(result?.error || t('settings.printer.previewUnavailable', 'Preview unavailable'))
+        }
+      } catch (e) {
+        if (requestId !== previewRequestIdRef.current) return
+        console.warn('Preview failed:', e)
+        setPreview(null)
+        setPreviewError(t('settings.printer.previewUnavailable', 'Preview unavailable'))
+      } finally {
+        if (requestId === previewRequestIdRef.current) {
+          setPreviewLoading(false)
+        }
+      }
+    }, 200)
+    return () => {
+      if (previewTimeoutRef.current) clearTimeout(previewTimeoutRef.current)
+    }
+  }, [bridge, previewRequest, t, viewMode])
 
   // Save printer (add or update)
   const handleSave = async () => {
@@ -777,23 +852,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
 
     setLoading(true)
     try {
-      const config = {
-        name: formData.name,
-        type: formData.type,
-        connectionDetails: buildConnectionDetails(),
-        paperSize: formData.paperSize,
-        characterSet: formData.characterSet,
-        greekRenderMode: formData.greekRenderMode,
-        escposCodePage: formData.escposCodePage ? parseInt(formData.escposCodePage, 10) : null,
-        receiptTemplate: formData.receiptTemplate,
-        fontType: formData.fontType,
-        layoutDensity: formData.layoutDensity,
-        headerEmphasis: formData.headerEmphasis,
-        role: formData.role,
-        isDefault: formData.isDefault,
-        fallbackPrinterId: formData.fallbackPrinterId || undefined,
-        enabled: formData.enabled,
-      }
+      const config = buildProfileDraft()
 
       let result
       if (selectedPrinter) {
@@ -1035,8 +1094,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
       textScale: 1.25,
       logoScale: 1.0,
     })
+    setPreview(null)
+    setPreviewError(null)
     setSelectedPrinter(null)
     setAutoConfig(null)
+    setTextScaleAutoSwitchNotice(false)
   }
 
   // Get role label
@@ -1083,29 +1145,43 @@ const PrinterSettingsModal: React.FC<Props> = ({
     return status?.state === 'online' || status?.state === 'degraded' || status?.state === 'unverified'
   }
 
-  const buildCapabilitiesForSave = (printer?: PrinterConfig | null): PrinterCapabilities => {
-    if (!printer) return defaultCapabilities()
-    const existing = readCapabilities(printer.connectionDetails)
-    const connectionChanged =
-      printer.type !== formData.type ||
-      (printer.connectionDetails?.ip || '') !== formData.ip ||
-      (printer.connectionDetails?.port || 9100) !== formData.port ||
-      (printer.connectionDetails?.address || '') !== formData.bluetoothAddress ||
-      (printer.connectionDetails?.channel || 1) !== formData.bluetoothChannel ||
-      (printer.connectionDetails?.vendorId || 0) !== formData.usbVendorId ||
-      (printer.connectionDetails?.productId || 0) !== formData.usbProductId ||
-      (printer.connectionDetails?.systemName || '') !== (formData.type === 'system' ? formData.systemPrinterName : formData.usbSystemName) ||
-      (printer.connectionDetails?.path || '') !== formData.usbPath ||
-      (printer.connectionDetails?.render_mode || 'text') !== formData.classicRenderMode ||
-      (printer.connectionDetails?.emulation || 'auto') !== formData.emulationMode
-
-    return connectionChanged ? defaultCapabilities() : existing
-  }
-
   // Get printers by role
   const getPrintersByRole = (role: PrinterRole): PrinterConfig[] => {
     return printers.filter(p => p.role === role && p.enabled)
   }
+
+  const handleClassicRenderModeChange = useCallback((nextMode: ClassicRenderMode) => {
+    if (nextMode === 'text') {
+      setTextScaleAutoSwitchNotice(false)
+    }
+    setFormData(prev => ({ ...prev, classicRenderMode: nextMode }))
+  }, [])
+
+  const handleTextScaleChange = useCallback((nextValue: number) => {
+    const shouldAutoSwitch =
+      formData.role === 'receipt' &&
+      formData.receiptTemplate === 'classic' &&
+      formData.classicRenderMode === 'text'
+
+    if (shouldAutoSwitch) {
+      setFormData(prev => ({
+        ...prev,
+        textScale: nextValue,
+        classicRenderMode: 'raster_exact',
+      }))
+      setTextScaleAutoSwitchNotice(true)
+      if (!textScaleAutoSwitchToastShownRef.current) {
+        toast(t(
+          'settings.printer.textScaleAutoSwitchToast',
+          'Precise receipt sizing uses Raster Exact. The draft preview switched automatically.',
+        ))
+        textScaleAutoSwitchToastShownRef.current = true
+      }
+      return
+    }
+
+    setFormData(prev => ({ ...prev, textScale: nextValue }))
+  }, [formData.classicRenderMode, formData.receiptTemplate, formData.role, t])
 
   // Render role assignment summary
   const renderRolesSummary = () => {
@@ -1366,6 +1442,30 @@ const PrinterSettingsModal: React.FC<Props> = ({
     const resetsVerification = Boolean(selectedPrinter) &&
       normalizeVerificationStatus(savedCapabilities.status) === 'verified' &&
       normalizeVerificationStatus(nextCapabilities.status) === 'unverified'
+    const textScaleDisabled = formData.receiptTemplate === 'modern'
+    const previewBusy = previewLoading || !logoLoaded
+    const previewBadgeClass = preview?.isExactPreview
+      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+      : 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+    const previewBadgeText = preview?.isExactPreview
+      ? t('settings.printer.previewExact', 'Exact preview')
+      : t('settings.printer.previewApproximate', 'Approximate preview')
+    const previewDetails = preview
+      ? `${preview.effectiveTemplate || formData.receiptTemplate} / ${preview.effectiveRenderMode || formData.classicRenderMode}`
+      : `${formData.receiptTemplate} / ${formData.classicRenderMode}`
+    const textScaleHint = textScaleDisabled
+      ? t(
+        'settings.printer.textScaleModernUnavailable',
+        'Modern layout uses fixed typography. Switch to Classic Raster Exact to adjust receipt text size.',
+      )
+      : formData.role === 'receipt' &&
+        formData.receiptTemplate === 'classic' &&
+        formData.classicRenderMode === 'text'
+      ? t(
+        'settings.printer.textScaleTextModeHint',
+        'Classic Text mode ignores exact text sizing on paper. Moving this control switches the draft to Raster Exact.',
+      )
+      : t('settings.printer.textScaleHint', 'Adjust the overall text size on printed receipts.')
 
     // Section header helper
     const renderSectionHeader = (key: string, labelKey: string, labelDefault: string) => (
@@ -1620,7 +1720,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
                     </label>
                     <select
                       value={formData.classicRenderMode}
-                      onChange={e => setFormData(prev => ({ ...prev, classicRenderMode: e.target.value as ClassicRenderMode }))}
+                      onChange={e => handleClassicRenderModeChange(e.target.value as ClassicRenderMode)}
                       className="liquid-glass-modal-input"
                     >
                       <option value="text">{t('settings.printer.classicRenderModeText', 'Text (ESC/POS font)')}</option>
@@ -1712,10 +1812,19 @@ const PrinterSettingsModal: React.FC<Props> = ({
                   max={2.0}
                   step={0.05}
                   defaultValue={1.25}
-                  onChange={(v) => setFormData(prev => ({ ...prev, textScale: v }))}
-                  hint={t('settings.printer.textScaleHint', 'Adjust the overall text size on printed receipts.')}
+                  onChange={handleTextScaleChange}
+                  hint={textScaleHint}
                   resetLabel={t('settings.printer.resetToDefault', 'Reset')}
+                  disabled={textScaleDisabled}
                 />
+                {textScaleAutoSwitchNotice && formData.role === 'receipt' && formData.receiptTemplate === 'classic' && (
+                  <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 p-3 text-xs text-blue-100">
+                    {t(
+                      'settings.printer.textScaleAutoSwitchInline',
+                      'Using the receipt text-size control switches Classic Text to Raster Exact so the preview and printed output can honor the requested size.',
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1805,13 +1914,13 @@ const PrinterSettingsModal: React.FC<Props> = ({
                 />
 
                 {/* Logo preview thumbnail */}
-                {logoLoaded && (logoSourceOverride.trim() || orgLogoSource.trim()) && (
+                {logoLoaded && effectiveLogoSource && (
                   <div className="rounded-md bg-black/20 border border-white/10 p-2">
                     <div className="text-xs liquid-glass-modal-text-muted mb-2">
                       {t('settings.printer.logoPreview', 'Preview')}
                     </div>
                     <img
-                      src={logoSourceOverride.trim() || orgLogoSource.trim()}
+                      src={effectiveLogoSource}
                       alt="Receipt logo preview"
                       className="max-h-20 object-contain bg-white rounded p-1"
                     />
@@ -2038,25 +2147,47 @@ const PrinterSettingsModal: React.FC<Props> = ({
 
           {/* Right: Live Preview */}
           <div className="w-[340px] flex-shrink-0 flex flex-col">
-            <div className="text-xs font-semibold text-white/70 uppercase tracking-wider mb-2">
-              {t('settings.printer.livePreview', 'Live Preview')}
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-white/70 uppercase tracking-wider">
+                {t('settings.printer.livePreview', 'Live Preview')}
+              </div>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${previewBadgeClass}`}>
+                {previewBadgeText}
+              </span>
+            </div>
+            <div className="mb-2 text-[11px] text-white/45">
+              {previewDetails}
             </div>
             <div className="flex-1 bg-white/5 rounded-lg border border-white/10 overflow-hidden relative">
-              {previewLoading && (
+              {previewBusy && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/20 z-10">
                   <span className="text-xs text-white/50">{t('settings.printer.previewLoading', 'Loading preview...')}</span>
                 </div>
               )}
-              {previewHtml ? (
+              {previewError ? (
+                <div className="flex items-center justify-center h-full min-h-[500px] px-4 text-center text-xs text-amber-200">
+                  {previewError}
+                </div>
+              ) : preview?.kind === 'image' && preview.dataUrl ? (
+                <div className="h-full min-h-[500px] overflow-auto bg-black/15 p-3">
+                  <img
+                    src={preview.dataUrl}
+                    alt={t('settings.printer.livePreview', 'Live Preview') as string}
+                    className="block w-full h-auto rounded-md bg-white"
+                  />
+                </div>
+              ) : preview?.kind === 'html' && preview.html ? (
                 <iframe
-                  srcDoc={previewHtml}
+                  srcDoc={preview.html}
                   className="w-full h-full border-0"
                   sandbox="allow-same-origin"
                   style={{ minHeight: '500px' }}
                 />
               ) : (
                 <div className="flex items-center justify-center h-full min-h-[500px] text-xs text-white/30">
-                  {t('settings.printer.previewLoading', 'Loading preview...')}
+                  {previewBusy
+                    ? t('settings.printer.previewLoading', 'Loading preview...')
+                    : t('settings.printer.previewUnavailable', 'Preview unavailable')}
                 </div>
               )}
             </div>

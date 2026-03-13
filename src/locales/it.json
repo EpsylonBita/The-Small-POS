@@ -1096,7 +1096,7 @@
       "footer": "Vi aspettiamo presto"
     },
     "split": {
-      "title": "Pagamento diviso",
+      "title": "Pagamento Diviso",
       "splitBy": "Dividi per",
       "numberOfPeople": "Numero di persone",
       "customSplit": "Divisione personalizzata",
@@ -1106,7 +1106,23 @@
       "paid": "Pagato",
       "addPayment": "Aggiungi pagamento",
       "paymentAdded": "Pagamento {{number}} di {{total}} aggiunto",
-      "splitComplete": "Pagamento diviso completato"
+      "splitComplete": "Pagamento diviso completato",
+      "byAmount": "Per Importo",
+      "byItems": "Per Articoli",
+      "addPerson": "Aggiungi Persona",
+      "removePerson": "Rimuovi",
+      "confirm": "Conferma Pagamento Diviso",
+      "cancel": "Annulla",
+      "combinedReceipt": "Ricevuta Unica",
+      "individualReceipts": "Ricevute Individuali",
+      "personLabel": "Persona {{number}}",
+      "assignItems": "Assegna Articoli",
+      "unassignedItems": "Non Assegnati",
+      "quickSplit5050": "50/50",
+      "quickSplitEqual": "Divisione Equa",
+      "quickSplit3Way": "In tre",
+      "partiallyPaid": "Parzialmente Pagato",
+      "processing": "Elaborazione pagamenti divisi..."
     },
     "tip": {
       "title": "Aggiungi mancia",
@@ -2261,7 +2277,9 @@
       "paymentFailed": "Pagamento non riuscito. Riprovare.",
       "cashSuccess": "Pagamento in contanti riuscito!",
       "cardSuccess": "Pagamento con carta riuscito!",
-      "cardFailed": "Pagamento con carta non riuscito. Riprovare."
+      "cardFailed": "Pagamento con carta non riuscito. Riprovare.",
+      "loadingMethods": "Caricamento metodi di pagamento",
+      "loadingMethodsHint": "Verifica configurazione pagamento del terminale..."
     },
     "customerSearch": {
       "title": "Cerca cliente",

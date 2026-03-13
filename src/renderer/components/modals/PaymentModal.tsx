@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CreditCard, Banknote, AlertTriangle } from 'lucide-react';
+import { CreditCard, Banknote, AlertTriangle, Split } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -23,6 +23,8 @@ interface PaymentModalProps {
     cashReceived?: number;
     change?: number;
   }) => void | Promise<void | boolean>;
+  /** When provided, a "Split" button is rendered alongside Cash/Card in the payment selection step. */
+  onSplitPayment?: () => void;
 }
 
 type ModalStep = 'minimum_warning' | 'payment_selection' | 'cash_input';
@@ -36,10 +38,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   isProcessing = false,
   orderType,
   minimumOrderAmount = 0, // Default to 0 (no minimum) if not provided
-  onPaymentComplete
+  onPaymentComplete,
+  onSplitPayment
 }) => {
   const { t } = useTranslation();
-  const { isFeatureEnabled, isMobileWaiter } = useFeatures();
+  const { isFeatureEnabled, isMobileWaiter, loading: isFeatureLoading } = useFeatures();
   const canUseCash = isFeatureEnabled('cashPayments');
   const canUseCard = isFeatureEnabled('cardPayments');
   const hasAnyPaymentMethod = canUseCash || canUseCard;
@@ -246,7 +249,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
         {currentStep === 'payment_selection' && (
           <div className="relative">
-            {!hasAnyPaymentMethod ? (
+            {isFeatureLoading ? (
+              <div className="flex items-center gap-3 p-4 rounded-xl bg-white/5 border border-white/10 w-full">
+                <div className="w-5 h-5 rounded-full border-2 border-white/20 border-t-white/70 animate-spin flex-shrink-0" />
+                <div>
+                  <h3 className="font-semibold liquid-glass-modal-text">
+                    {t('modals.payment.loadingMethods', 'Loading payment methods')}
+                  </h3>
+                  <p className="text-sm liquid-glass-modal-text-muted">
+                    {t('modals.payment.loadingMethodsHint', 'Checking terminal payment configuration...')}
+                  </p>
+                </div>
+              </div>
+            ) : !hasAnyPaymentMethod ? (
               <div className="flex items-center gap-3 p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 w-full">
                 <AlertTriangle className="w-6 h-6 text-amber-400 flex-shrink-0" />
                 <div>
@@ -259,7 +274,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-6">
+              <div className={`grid gap-6 ${onSplitPayment ? 'grid-cols-3' : 'grid-cols-2'}`}>
                 {/* Cash Option */}
                 <button
                   onClick={() => canUseCash && handlePaymentMethodSelect('cash')}
@@ -317,6 +332,31 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     </p>
                   )}
                 </button>
+
+                {/* Split Option — shown only when onSplitPayment callback is provided */}
+                {onSplitPayment && (
+                  <button
+                    onClick={() => { onSplitPayment(); }}
+                    disabled={isProcessingPayment}
+                    className={`group relative flex flex-col items-center justify-center p-10 rounded-2xl border-2 transition-all duration-300 overflow-hidden
+                      ${isProcessingPayment
+                        ? 'border-gray-400/20 bg-gray-500/5 opacity-50 cursor-not-allowed'
+                        : 'border-purple-400/30 bg-gradient-to-br from-purple-500/10 to-purple-600/5 hover:from-purple-500/20 hover:to-purple-600/10 hover:border-purple-400/50 hover:scale-105 hover:shadow-xl hover:shadow-purple-500/20 active:scale-100'
+                      }`}
+                  >
+                    <Split
+                      className={`w-20 h-20 mb-3 transition-all duration-300 group-hover:scale-110
+                        ${isProcessingPayment ? 'text-gray-400' : 'text-purple-400 group-hover:text-purple-300'}`}
+                      strokeWidth={1.5}
+                    />
+
+                    <span className={`text-2xl font-bold tracking-wide uppercase transition-colors duration-300
+                      ${isProcessingPayment ? 'text-gray-400' : 'text-purple-400 group-hover:text-purple-300'}`}
+                    >
+                      {t('modals.payment.splitSimple', 'SPLIT')}
+                    </span>
+                  </button>
+                )}
               </div>
             )}
 

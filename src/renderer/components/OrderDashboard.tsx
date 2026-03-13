@@ -39,6 +39,7 @@ import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { openExternalUrl } from '../utils/electron-api';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { pickMeaningfulOrderCustomerName } from '../utils/orderDisplay';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -1366,11 +1367,30 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         : 0;
 
       const total = subtotal - totalDiscountAmount + deliveryFee;
+      const isTableOrder = orderType === 'dine-in' || Boolean(tableNumber?.trim());
+      const persistedCustomerName = isTableOrder
+        ? pickMeaningfulOrderCustomerName(
+            orderData.customer?.name,
+            orderData.customer?.full_name,
+            customerInfo?.name,
+            existingCustomer?.name,
+          )
+        : selectedOrderType === 'pickup'
+          ? pickMeaningfulOrderCustomerName(
+              orderData.customer?.name,
+              orderData.customer?.full_name,
+            )
+          : pickMeaningfulOrderCustomerName(
+              orderData.customer?.name,
+              orderData.customer?.full_name,
+              customerInfo?.name,
+              existingCustomer?.name,
+            );
 
       // Create order object
       const orderToCreate = {
         customer_id: orderData.customer?.id !== 'pickup-customer' ? orderData.customer?.id : null,
-        customer_name: orderData.customer?.name || orderData.customer?.full_name || customerInfo?.name || existingCustomer?.name || t('customer.defaultCustomer'),
+        customer_name: persistedCustomerName ?? undefined,
         customer_phone: orderData.customer?.phone_number || orderData.customer?.phone || customerInfo?.phone || existingCustomer?.phone || '',
         items: orderData.items?.map((item: any) => ({
           id: item.id || item.menuItemId || item.menu_item_id,

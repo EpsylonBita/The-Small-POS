@@ -38,6 +38,8 @@ export { CustomerInfoModal } from './modals/CustomerInfoModal';
 export { AddCustomerModal } from './modals/AddCustomerModal';
 export { AddNewAddressModal } from './modals/AddNewAddressModal';
 export { PaymentModal } from './modals/PaymentModal';
+export { SplitPaymentModal } from './modals/SplitPaymentModal';
+export type { SplitPaymentResult, SplitPortion, CartItem } from './modals/SplitPaymentModal';
 export { default as DriverAssignmentModal } from './modals/DriverAssignmentModal';
 export { default as OrderCancellationModal } from './modals/OrderCancellationModal';
 export { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';

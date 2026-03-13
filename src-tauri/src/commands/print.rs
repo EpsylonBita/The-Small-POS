@@ -3345,41 +3345,219 @@ pub async fn receipt_sample_preview(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
-    let text_scale_override = payload
-        .get("textScale")
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32);
-    let logo_scale_override = payload
-        .get("logoScale")
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32);
+    build_receipt_sample_preview_response(&db, &payload)
+}
 
-    let profile = printers::resolve_printer_profile_for_role(&db, None, Some("receipt"))?
-        .unwrap_or_else(|| serde_json::json!({}));
-    let mut layout = print::resolve_layout_config(&db, &profile, "order_receipt")?;
+fn preview_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|entry| {
+            entry.as_str().and_then(|text| {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+        })
+}
 
-    if let Some(ts) = text_scale_override {
-        layout.text_scale = ts.clamp(0.8, 2.0);
+fn preview_f32_field(value: &serde_json::Value, keys: &[&str]) -> Option<f32> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|entry| {
+            entry
+                .as_f64()
+                .or_else(|| {
+                    entry
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                })
+                .map(|number| number as f32)
+        })
+}
+
+fn preview_bool_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|entry| match entry {
+            serde_json::Value::Bool(flag) => Some(*flag),
+            serde_json::Value::Number(number) => number.as_i64().map(|value| value != 0),
+            serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
+fn receipt_preview_template_key(template: receipt_renderer::ReceiptTemplate) -> &'static str {
+    match template {
+        receipt_renderer::ReceiptTemplate::Classic => "classic",
+        receipt_renderer::ReceiptTemplate::Modern => "modern",
     }
-    if let Some(ls) = logo_scale_override {
-        layout.logo_scale = ls.clamp(0.5, 2.0);
+}
+
+fn receipt_preview_render_mode_key(
+    mode: receipt_renderer::ClassicCustomerRenderMode,
+) -> &'static str {
+    match mode {
+        receipt_renderer::ClassicCustomerRenderMode::Text => "text",
+        receipt_renderer::ClassicCustomerRenderMode::RasterExact => "raster_exact",
+    }
+}
+
+fn receipt_preview_supports_text_scale(layout: &receipt_renderer::LayoutConfig) -> bool {
+    layout.template == receipt_renderer::ReceiptTemplate::Classic
+        && layout.classic_customer_render_mode
+            == receipt_renderer::ClassicCustomerRenderMode::RasterExact
+}
+
+fn resolve_receipt_preview_profile(
+    db: &db::DbState,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let draft_payload = payload
+        .get("profileDraft")
+        .cloned()
+        .or_else(|| payload.get("draft").cloned())
+        .or_else(|| payload.get("printer").cloned())
+        .or_else(|| {
+            if payload.get("connectionDetails").is_some()
+                || payload.get("paperSize").is_some()
+                || payload.get("receiptTemplate").is_some()
+            {
+                Some(payload.clone())
+            } else {
+                None
+            }
+        });
+
+    if let Some(draft_payload) = draft_payload {
+        return normalize_draft_profile_payload(draft_payload);
     }
 
+    Ok(
+        printers::resolve_printer_profile_for_role(db, None, Some("receipt"))?
+            .unwrap_or_else(|| serde_json::json!({})),
+    )
+}
+
+fn apply_receipt_preview_overrides(
+    profile: &serde_json::Value,
+    payload: &serde_json::Value,
+    layout: &mut receipt_renderer::LayoutConfig,
+) {
+    let settings = payload
+        .get("receiptSettings")
+        .or_else(|| payload.get("receipt_settings"))
+        .unwrap_or(payload);
+
+    if let Some(text_scale_override) = preview_f32_field(settings, &["textScale", "text_scale"])
+        .or_else(|| preview_f32_field(payload, &["textScale", "text_scale"]))
+    {
+        layout.text_scale = text_scale_override.clamp(0.8, 2.0);
+    }
+    if let Some(logo_scale_override) = preview_f32_field(settings, &["logoScale", "logo_scale"])
+        .or_else(|| preview_f32_field(payload, &["logoScale", "logo_scale"]))
+    {
+        layout.logo_scale = logo_scale_override.clamp(0.5, 2.0);
+    }
+
+    let logo_supported = printers::read_capability_snapshot(profile).supports_logo
+        || matches!(
+            layout.detected_brand,
+            crate::printers::PrinterBrand::Star | crate::printers::PrinterBrand::Epson
+        );
+    if let Some(show_logo_override) = preview_bool_field(settings, &["showLogo", "show_logo"])
+        .or_else(|| preview_bool_field(payload, &["showLogo", "show_logo"]))
+    {
+        layout.show_logo = show_logo_override && logo_supported;
+        if !layout.show_logo {
+            layout.logo_url = None;
+        }
+    }
+
+    let has_logo_source_field = settings.get("logoSource").is_some()
+        || settings.get("logo_source").is_some()
+        || payload.get("logoSource").is_some()
+        || payload.get("logo_source").is_some();
+    if has_logo_source_field {
+        let logo_source_override = preview_string_field(settings, &["logoSource", "logo_source"])
+            .or_else(|| preview_string_field(payload, &["logoSource", "logo_source"]));
+        layout.logo_url = logo_source_override;
+    }
+}
+
+fn build_receipt_sample_preview_response(
+    db: &db::DbState,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let profile = resolve_receipt_preview_profile(db, payload)?;
+    let mut layout = print::resolve_layout_config(db, &profile, "order_receipt")?;
+    apply_receipt_preview_overrides(&profile, payload, &mut layout);
     let sample_doc = build_sample_receipt_doc();
     let document = receipt_renderer::ReceiptDocument::OrderReceipt(sample_doc);
-    let html = receipt_renderer::render_html(&document, &layout);
+    let is_exact_preview = layout.template == receipt_renderer::ReceiptTemplate::Classic
+        && layout.classic_customer_render_mode
+            == receipt_renderer::ClassicCustomerRenderMode::RasterExact;
+    let supports_text_scale = receipt_preview_supports_text_scale(&layout);
+    let effective_template = receipt_preview_template_key(layout.template);
+    let effective_render_mode =
+        receipt_preview_render_mode_key(layout.classic_customer_render_mode);
 
+    if !supports_text_scale {
+        layout.text_scale = receipt_renderer::LayoutConfig::default().text_scale;
+    }
+
+    if is_exact_preview {
+        let data_url =
+            receipt_renderer::render_classic_raster_exact_preview_data_url(&document, &layout)?;
+        return Ok(serde_json::json!({
+            "success": true,
+            "kind": "image",
+            "dataUrl": data_url,
+            "effectiveTemplate": effective_template,
+            "effectiveRenderMode": effective_render_mode,
+            "supportsTextScale": supports_text_scale,
+            "isExactPreview": true,
+        }));
+    }
+
+    let html = receipt_renderer::render_html(&document, &layout);
     Ok(serde_json::json!({
         "success": true,
+        "kind": "html",
         "html": html,
+        "effectiveTemplate": effective_template,
+        "effectiveRenderMode": effective_render_mode,
+        "supportsTextScale": supports_text_scale,
+        "isExactPreview": false,
     }))
 }
 
 #[cfg(test)]
 mod dto_tests {
     use super::*;
+    use rusqlite::Connection;
     use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread;
+
+    fn test_db() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: Mutex::new(conn),
+            db_path: std::env::temp_dir().join("receipt-sample-preview-tests.sqlite"),
+        }
+    }
+
+    fn preview_profile_from_frontend(payload: serde_json::Value) -> serde_json::Value {
+        normalize_draft_profile_payload(payload).expect("frontend profile payload should normalize")
+    }
 
     #[test]
     fn parse_order_id_payload_accepts_string_and_object() {
@@ -3760,6 +3938,126 @@ mod dto_tests {
         assert_eq!(parsed.items.as_array().map(|v| v.len()), Some(1));
         assert_eq!(parsed.label_type, "barcode");
         assert_eq!(parsed.printer_id.as_deref(), Some("printer-7"));
+    }
+
+    #[test]
+    fn receipt_sample_preview_prefers_profile_draft_over_saved_default_profile() {
+        let db = test_db();
+        let saved_default = preview_profile_from_frontend(serde_json::json!({
+            "name": "Saved default receipt",
+            "type": "system",
+            "connectionDetails": {
+                "type": "system",
+                "systemName": "Default Receipt",
+                "render_mode": "text",
+                "emulation": "auto"
+            },
+            "paperSize": "80mm",
+            "receiptTemplate": "modern",
+            "characterSet": "PC437_USA",
+            "fontType": "a",
+            "layoutDensity": "compact",
+            "headerEmphasis": "strong",
+            "role": "receipt",
+            "isDefault": true,
+            "enabled": true
+        }));
+        printers::create_printer_profile(&db, &saved_default).expect("saved default profile");
+
+        let preview = build_receipt_sample_preview_response(
+            &db,
+            &serde_json::json!({
+                "profileDraft": {
+                    "name": "Edited draft receipt",
+                    "type": "network",
+                    "connectionDetails": {
+                        "type": "network",
+                        "ip": "192.168.1.19",
+                        "port": 9100,
+                        "render_mode": "raster_exact",
+                        "emulation": "escpos",
+                        "capabilities": {
+                            "status": "unverified",
+                            "supportsLogo": true
+                        }
+                    },
+                    "paperSize": "58mm",
+                    "receiptTemplate": "classic",
+                    "characterSet": "PC437_USA",
+                    "fontType": "a",
+                    "layoutDensity": "compact",
+                    "headerEmphasis": "strong",
+                    "role": "receipt",
+                    "isDefault": false,
+                    "enabled": true
+                },
+                "receiptSettings": {
+                    "showLogo": false,
+                    "logoSource": "",
+                    "textScale": 1.4,
+                    "logoScale": 1.0
+                }
+            }),
+        )
+        .expect("preview response");
+
+        assert_eq!(preview["success"], true);
+        assert_eq!(preview["kind"], "image");
+        assert_eq!(preview["effectiveTemplate"], "classic");
+        assert_eq!(preview["effectiveRenderMode"], "raster_exact");
+        assert_eq!(preview["supportsTextScale"], true);
+        assert_eq!(preview["isExactPreview"], true);
+        assert!(preview["dataUrl"]
+            .as_str()
+            .expect("data url")
+            .starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn receipt_sample_preview_reports_approximate_modes_truthfully() {
+        let db = test_db();
+        let preview = build_receipt_sample_preview_response(
+            &db,
+            &serde_json::json!({
+                "profileDraft": {
+                    "name": "Modern receipt draft",
+                    "type": "system",
+                    "connectionDetails": {
+                        "type": "system",
+                        "systemName": "Modern Preview Printer",
+                        "render_mode": "text",
+                        "emulation": "auto"
+                    },
+                    "paperSize": "80mm",
+                    "receiptTemplate": "modern",
+                    "characterSet": "PC437_USA",
+                    "fontType": "a",
+                    "layoutDensity": "compact",
+                    "headerEmphasis": "strong",
+                    "role": "receipt",
+                    "isDefault": false,
+                    "enabled": true
+                },
+                "receiptSettings": {
+                    "showLogo": false,
+                    "logoSource": "",
+                    "textScale": 1.9,
+                    "logoScale": 1.0
+                }
+            }),
+        )
+        .expect("preview response");
+
+        assert_eq!(preview["success"], true);
+        assert_eq!(preview["kind"], "html");
+        assert_eq!(preview["effectiveTemplate"], "modern");
+        assert_eq!(preview["effectiveRenderMode"], "text");
+        assert_eq!(preview["supportsTextScale"], false);
+        assert_eq!(preview["isExactPreview"], false);
+        assert!(preview["html"]
+            .as_str()
+            .expect("html preview")
+            .contains("<!DOCTYPE html>"));
     }
 
     #[test]

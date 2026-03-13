@@ -13,6 +13,7 @@ import ZReportModal from './modals/ZReportModal';
 import ConnectionSettingsModal from './modals/ConnectionSettingsModal';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 import { ShiftManager, ShiftManagerRef } from './ShiftManager';
+import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import MenuManagementPage from '../pages/MenuManagementPage';
 import UsersPage from '../pages/UsersPage';
 import ReportsPage from '../pages/ReportsPage';
@@ -182,6 +183,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   const [showZReport, setShowZReport] = React.useState(false);
   const [showConnectionSettings, setShowConnectionSettings] = React.useState(false);
   const { staff, isShiftActive } = useShift();
+  const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(staff?.branchId || null);
 
   const [showExpenses, setShowExpenses] = React.useState(false);
 
@@ -190,6 +192,9 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   const [blockedModule, setBlockedModule] = useState<{ moduleId: string; requiredPlan: string } | null>(null);
 
   const shiftManagerRef = useRef<ShiftManagerRef>(null);
+  const pendingReportDate = isPendingLocalSubmit
+    ? endOfDayStatus.pendingReportDate || undefined
+    : undefined;
 
   // Use useModuleAccess hook for checking current view access
   // This provides centralized access checking for the current view
@@ -373,6 +378,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           onStartShift={handleStartShift}
           onOpenZReport={() => setShowZReport(true)}
           isZReportOpen={showZReport}
+          hasPendingLocalSubmit={isPendingLocalSubmit}
           onOpenSettings={() => {
             bridge.terminalConfig.refresh().catch(() => {
               // Ignore refresh errors and continue to settings modal.
@@ -389,7 +395,47 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
             </div>
 
           {/* Shift required overlay when no active shift */}
-          {!isShiftActive && (
+          {!isShiftActive && isPendingLocalSubmit && (
+            <div className="absolute inset-0 z-40 flex items-center justify-center p-4">
+              <div
+                role="alert"
+                aria-live="assertive"
+                className={`max-w-lg w-full rounded-2xl border ${resolvedTheme === 'dark' ? 'bg-gray-800/95 border-amber-500/40 text-white' : 'bg-white/95 border-amber-500/30 text-gray-900'} shadow-2xl`}
+              >
+                <div className="p-6">
+                  <div className="flex items-start gap-3">
+                    <div className="h-8 w-8 rounded-full bg-amber-500/15 text-amber-500 flex items-center justify-center font-bold">Z</div>
+                    <div className="flex-1">
+                      <h3 className="text-lg font-semibold">
+                        {t('shift.messages.pendingZReportTitle')}
+                      </h3>
+                      <p className="mt-1 text-sm opacity-80">
+                        {t('shift.messages.pendingZReportDetails', {
+                          date: pendingReportDate || '',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
+                    <button
+                      onClick={() => setShowZReport(true)}
+                      className="px-4 py-2 rounded-lg bg-amber-500 text-black hover:bg-amber-400 transition font-semibold"
+                    >
+                      {t('shift.actions.completeZReport')}
+                    </button>
+                    <button
+                      onClick={handleStartShift}
+                      className={`px-4 py-2 rounded-lg transition ${resolvedTheme === 'dark' ? 'bg-gray-700 text-white hover:bg-gray-600' : 'bg-gray-100 text-gray-900 hover:bg-gray-200'}`}
+                    >
+                      {t('navigation.checkIn')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {!isShiftActive && !isPendingLocalSubmit && (
             <div className="absolute inset-0 z-40 flex items-center justify-center p-4" onClick={handleStartShift}>
               <div
                 role="alert"
@@ -435,13 +481,19 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       {/* Expenses Modal */}
       <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
       {/* Z Report Modal */}
-      <ZReportModal isOpen={showZReport} onClose={() => setShowZReport(false)} branchId={staff?.branchId || ''} />
+      <ZReportModal
+        isOpen={showZReport}
+        onClose={() => setShowZReport(false)}
+        branchId={staff?.branchId || ''}
+        date={pendingReportDate}
+        lockDate={!!pendingReportDate}
+      />
       {/* Connection Settings Modal */}
       <ConnectionSettingsModal isOpen={showConnectionSettings} onClose={() => setShowConnectionSettings(false)} />
 
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}
-      <ShiftManager ref={shiftManagerRef} />
+      <ShiftManager ref={shiftManagerRef} suppressAutoCheckin={isPendingLocalSubmit} />
 
       {/* Upgrade Prompt Modal - Route guard for locked modules */}
       <UpgradePromptModal

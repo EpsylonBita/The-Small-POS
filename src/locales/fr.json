@@ -1096,7 +1096,7 @@
       "footer": "À bientôt"
     },
     "split": {
-      "title": "Paiement partagé",
+      "title": "Paiement Partagé",
       "splitBy": "Partager par",
       "numberOfPeople": "Nombre de personnes",
       "customSplit": "Partage personnalisé",
@@ -1106,7 +1106,23 @@
       "paid": "Payé",
       "addPayment": "Ajouter un paiement",
       "paymentAdded": "Paiement {{number}} sur {{total}} ajouté",
-      "splitComplete": "Paiement partagé terminé"
+      "splitComplete": "Paiement partagé terminé",
+      "byAmount": "Par Montant",
+      "byItems": "Par Articles",
+      "addPerson": "Ajouter une personne",
+      "removePerson": "Supprimer",
+      "confirm": "Confirmer le paiement partagé",
+      "cancel": "Annuler",
+      "combinedReceipt": "Reçu combiné",
+      "individualReceipts": "Reçus individuels",
+      "personLabel": "Personne {{number}}",
+      "assignItems": "Attribuer les articles",
+      "unassignedItems": "Non attribués",
+      "quickSplit5050": "50/50",
+      "quickSplitEqual": "Parts égales",
+      "quickSplit3Way": "En trois",
+      "partiallyPaid": "Partiellement payé",
+      "processing": "Traitement des paiements partagés..."
     },
     "tip": {
       "title": "Ajouter un pourboire",
@@ -2261,7 +2277,9 @@
       "paymentFailed": "Échec du paiement. Veuillez réessayer.",
       "cashSuccess": "Paiement en espèces effectué !",
       "cardSuccess": "Paiement par carte effectué !",
-      "cardFailed": "Échec du paiement par carte. Veuillez réessayer."
+      "cardFailed": "Échec du paiement par carte. Veuillez réessayer.",
+      "loadingMethods": "Chargement des modes de paiement",
+      "loadingMethodsHint": "Vérification de la configuration de paiement du terminal..."
     },
     "customerSearch": {
       "title": "Rechercher un client",

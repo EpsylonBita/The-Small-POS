@@ -1023,6 +1023,15 @@ pub async fn report_generate_z_report(
 }
 
 #[tauri::command]
+pub async fn report_get_end_of_day_status(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = normalize_report_generate_payload(arg0);
+    zreport::get_end_of_day_status(&db, &payload)
+}
+
+#[tauri::command]
 pub async fn report_submit_z_report(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,

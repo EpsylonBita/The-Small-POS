@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { X, Package, Search, Barcode, Plus, Minus, ShoppingCart, DollarSign } from 'lucide-react';
+import { X, Package, Search, Barcode, Plus, Minus, ShoppingCart, DollarSign, Gift } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { useModules } from '../../contexts/module-context';
@@ -30,6 +30,17 @@ import {
   extractSavedAddressCoordinates,
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
+import {
+  isOfferRewardLine,
+  mapRewardActionsWithSignatures,
+  validateCatalogOffers,
+  type OfferRewardLineMetadata,
+} from '../../utils/catalog-offers';
+import type {
+  CatalogOfferEvaluationResult,
+  MatchedCatalogOffer,
+  OfferEvaluationCartItem,
+} from '../../../../../shared/types/catalog-offer';
 
 // Debounce hook for search input
 function useDebounce<T>(value: T, delay: number): T {
@@ -50,6 +61,16 @@ function useDebounce<T>(value: T, delay: number): T {
 
 interface CartItem extends Product {
   cartQuantity: number;
+  is_offer_reward?: boolean;
+  auto_added_by_offer?: boolean;
+  offer_id?: string;
+  offer_name?: string;
+  reward_item_id?: string;
+  reward_item_category_id?: string | null;
+  reward_source_item_id?: string | null;
+  reward_source_category_id?: string | null;
+  reward_signature?: string;
+  originalUnitPrice?: number;
 }
 
 interface ProductCatalogModalProps {
@@ -100,6 +121,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [discountPercentage, setDiscountPercentage] = useState<number>(0);
   const [localDeliveryZoneInfo, setLocalDeliveryZoneInfo] =
@@ -117,6 +139,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   // Debounce search term to avoid excessive API calls (300ms delay)
   const debouncedSearchTerm = useDebounce(searchTerm, 300);
   const bridge = getBridge();
+  const offerValidationRequestIdRef = useRef(0);
 
   useEffect(() => {
     let disposed = false;
@@ -312,10 +335,10 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   // Add to cart function (defined before barcode handlers)
   const addToCart = useCallback((product: Product) => {
     setCartItems(prev => {
-      const existing = prev.find(item => item.id === product.id);
+      const existing = prev.find(item => item.id === product.id && item.is_offer_reward !== true);
       if (existing) {
         return prev.map(item =>
-          item.id === product.id
+          item.id === product.id && item.is_offer_reward !== true
             ? { ...item, cartQuantity: item.cartQuantity + 1 }
             : item
         );
@@ -354,7 +377,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
 
   const updateCartQuantity = (productId: string, delta: number) => {
     setCartItems(prev => prev
-      .map(item => item.id === productId
+      .map(item => item.id === productId && item.is_offer_reward !== true
         ? { ...item, cartQuantity: Math.max(0, item.cartQuantity + delta) }
         : item
       )
@@ -363,11 +386,132 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
   };
 
   const removeFromCart = (productId: string) => {
-    setCartItems(prev => prev.filter(item => item.id !== productId));
+    setCartItems(prev => prev.filter(item => item.id !== productId && item.is_offer_reward !== true));
   };
 
+  const paidCartItems = useMemo(
+    () => cartItems.filter((item) => !isOfferRewardLine(item)),
+    [cartItems],
+  );
+  const offerValidationItems = useMemo<OfferEvaluationCartItem[]>(
+    () =>
+      paidCartItems.flatMap((item) => {
+        if (typeof item.id !== 'string' || !item.id.trim()) {
+          return [];
+        }
+
+        return [{
+          item_id: item.id,
+          quantity: Math.max(1, item.cartQuantity || 1),
+          unit_price: Math.max(0, item.price || 0),
+          category_id: item.categoryId ?? null,
+        }];
+      }),
+    [paidCartItems],
+  );
+  const offerValidationSignature = useMemo(
+    () => JSON.stringify(offerValidationItems),
+    [offerValidationItems],
+  );
+
+  const createRewardCartLine = useCallback((
+    action: CatalogOfferEvaluationResult['reward_actions'][number],
+    signature: string,
+  ): CartItem & OfferRewardLineMetadata => ({
+    id: `offer-reward-${signature}`,
+    organizationId: organizationId || '',
+    branchId: branchId || '',
+    sku: '',
+    barcode: null,
+    name: action.item_name,
+    description: null,
+    categoryId: action.category_id ?? null,
+    categoryName: null,
+    price: 0,
+    cost: null,
+    quantity: 0,
+    lowStockThreshold: 0,
+    isActive: true,
+    imageUrl: null,
+    wholesalePrice: null,
+    memberPrice: null,
+    minWholesaleQuantity: null,
+    preferredSupplierId: null,
+    preferredSupplierName: null,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    cartQuantity: Math.max(1, action.quantity || 1),
+    originalUnitPrice: action.unit_price,
+    is_offer_reward: true,
+    auto_added_by_offer: true,
+    offer_id: action.offer_id,
+    offer_name: action.offer_name,
+    reward_item_id: action.item_id,
+    reward_item_category_id: action.category_id ?? null,
+    reward_source_item_id: action.source_item_id ?? null,
+    reward_source_category_id: action.source_category_id ?? null,
+    reward_signature: signature,
+  }), [branchId, organizationId]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const requestId = offerValidationRequestIdRef.current + 1;
+    offerValidationRequestIdRef.current = requestId;
+
+    if (offerValidationItems.length === 0) {
+      setOfferEvaluation(null);
+      if (cartItems.some((item) => isOfferRewardLine(item))) {
+        setCartItems(paidCartItems);
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncOffers = async () => {
+      try {
+        const evaluation = await validateCatalogOffers({
+          catalogType: 'product',
+          cartItems: offerValidationItems,
+        });
+
+        if (cancelled || offerValidationRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const rewardLines = mapRewardActionsWithSignatures(evaluation?.reward_actions ?? []).map(
+          ({ action, signature }) => createRewardCartLine(action, signature),
+        );
+
+        setOfferEvaluation(evaluation);
+        setCartItems((prev) => {
+          const currentPaidItems = prev.filter((item) => !isOfferRewardLine(item));
+          return [...currentPaidItems, ...rewardLines];
+        });
+      } catch (error) {
+        if (cancelled || offerValidationRequestIdRef.current !== requestId) {
+          return;
+        }
+        console.error('[ProductCatalogModal] Failed to validate catalog offers:', error);
+        setOfferEvaluation(null);
+        setCartItems((prev) => prev.filter((item) => !isOfferRewardLine(item)));
+      }
+    };
+
+    void syncOffers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [createRewardCartLine, isOpen, offerValidationSignature]);
+
   const subtotal = cartItems.reduce((sum, item) => sum + (item.price * item.cartQuantity), 0);
-  const discountAmount = subtotal * (discountPercentage / 100);
+  const offerDiscountAmount = offerEvaluation?.discount_total ?? 0;
+  const discountableSubtotal = Math.max(subtotal - offerDiscountAmount, 0);
+  const discountAmount = discountableSubtotal * (discountPercentage / 100);
   const effectiveDeliveryZoneInfo = deliveryZoneInfo || localDeliveryZoneInfo;
   const exactDeliveryCoordinates =
     resolvedSelectedAddressCoordinates || extractSavedAddressCoordinates(selectedAddress);
@@ -386,8 +530,15 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
     orderType === 'delivery' && deliveryFeeStatus === 'resolved'
       ? resolveDeliveryFee(effectiveDeliveryZoneInfo)
       : 0;
-  const subtotalAfterDiscount = subtotal - discountAmount;
+  const subtotalAfterDiscount = Math.max(subtotal - offerDiscountAmount - discountAmount, 0);
   const total = subtotalAfterDiscount + deliveryFee;
+  const matchedOfferNames: string[] = Array.from(
+    new Set(
+      (offerEvaluation?.matched_offers ?? [])
+        .map((offer: MatchedCatalogOffer) => offer.offer_name)
+        .filter((offerName): offerName is string => typeof offerName === 'string' && offerName.trim().length > 0),
+    ),
+  );
   const deliveryFeeText =
     deliveryFeeStatus === 'resolved'
       ? `€${deliveryFee.toFixed(2)}`
@@ -441,11 +592,12 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
       orderType,
       paymentData,
       discountPercentage,
-      discountAmount,
+      discountAmount: discountAmount + offerDiscountAmount,
       deliveryFee,
       deliveryZoneInfo: effectiveDeliveryZoneInfo,
     });
     setCartItems([]);
+    setOfferEvaluation(null);
     setDiscountPercentage(0);
   };
 
@@ -598,33 +750,56 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 cartItems.map(item => (
                   <div key={item.id} className="p-3 rounded-lg bg-white/10">
                     <div className="flex justify-between items-start mb-2">
-                      <span className="text-white font-medium truncate flex-1">{item.name}</span>
-                      <button
-                        onClick={() => removeFromCart(item.id)}
-                        className="text-red-400 hover:text-red-300 ml-2"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                      <div className="flex-1 min-w-0">
+                        <span className="text-white font-medium truncate block">{item.name}</span>
+                        {item.is_offer_reward && (
+                          <div className="mt-1 flex items-center gap-1.5">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
+                              <Gift className="w-3 h-3" />
+                              {t('menu.cart.autoOfferReward', 'Auto reward')}
+                            </span>
+                            {item.offer_name && (
+                              <span className="text-[11px] text-gray-400 truncate">{item.offer_name}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {!item.is_offer_reward && (
+                        <button
+                          onClick={() => removeFromCart(item.id)}
+                          className="text-red-400 hover:text-red-300 ml-2"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => updateCartQuantity(item.id, -1)}
-                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center"
+                          disabled={item.is_offer_reward}
+                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <Minus className="w-4 h-4 text-white" />
                         </button>
                         <span className="text-white w-8 text-center">{item.cartQuantity}</span>
                         <button
                           onClick={() => updateCartQuantity(item.id, 1)}
-                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center"
+                          disabled={item.is_offer_reward}
+                          className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           <Plus className="w-4 h-4 text-white" />
                         </button>
                       </div>
-                      <span className="text-green-400 font-medium">
-                        €{(item.price * item.cartQuantity).toFixed(2)}
-                      </span>
+                      {item.is_offer_reward ? (
+                        <span className="rounded-md bg-emerald-500/10 px-2 py-1 text-sm font-medium text-emerald-300">
+                          {t('menu.cart.freeLabel', 'Free')}
+                        </span>
+                      ) : (
+                        <span className="text-green-400 font-medium">
+                          €{(item.price * item.cartQuantity).toFixed(2)}
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))
@@ -652,6 +827,18 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
                 <span>{t('productCatalog.subtotal', 'Subtotal')}</span>
                 <span>€{subtotal.toFixed(2)}</span>
               </div>
+              {offerDiscountAmount > 0 && (
+                <div className="flex justify-between text-emerald-400 mb-1">
+                  <span>
+                    {matchedOfferNames.length > 0
+                      ? t('menu.cart.offerDiscountWithNames', 'Offers ({{names}})', {
+                          names: matchedOfferNames.join(', '),
+                        })
+                      : t('menu.cart.offerDiscount', 'Offers')}
+                  </span>
+                  <span>-€{offerDiscountAmount.toFixed(2)}</span>
+                </div>
+              )}
               {discountAmount > 0 && (
                 <div className="flex justify-between text-red-400 mb-1">
                   <span>{t('productCatalog.discountLabel', 'Discount')}</span>
@@ -693,7 +880,7 @@ export const ProductCatalogModal: React.FC<ProductCatalogModalProps> = ({
         isOpen={showPaymentModal}
         onClose={() => setShowPaymentModal(false)}
         orderTotal={total}
-        discountAmount={discountAmount}
+        discountAmount={discountAmount + offerDiscountAmount}
         deliveryFee={deliveryFee}
         orderType={orderType}
         onPaymentComplete={handlePaymentComplete}

@@ -85,9 +85,10 @@ pub fn enqueue_print_job_with_payload(
         && entity_type != "shift_checkout"
         && entity_type != "delivery_slip"
         && entity_type != "test_print"
+        && entity_type != "split_receipt"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, or test_print"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, test_print, or split_receipt"
         ));
     }
 
@@ -1069,18 +1070,19 @@ pub fn resolve_layout_config(
         .and_then(Value::as_str)
         .map(|value| HeaderEmphasis::from_value(Some(value)))
         .unwrap_or(HeaderEmphasis::Strong);
-    let lock_receipt_like_typography = receipt_like_entity && template == ReceiptTemplate::Classic;
-    let font_type = if lock_receipt_like_typography {
+    let lock_classic_ticket_typography =
+        entity_type == "kitchen_ticket" && template == ReceiptTemplate::Classic;
+    let font_type = if lock_classic_ticket_typography {
         FontType::A
     } else {
         requested_font_type
     };
-    let layout_density = if lock_receipt_like_typography {
+    let layout_density = if lock_classic_ticket_typography {
         LayoutDensity::Compact
     } else {
         requested_layout_density
     };
-    let header_emphasis = if lock_receipt_like_typography {
+    let header_emphasis = if lock_classic_ticket_typography {
         HeaderEmphasis::Strong
     } else {
         requested_header_emphasis
@@ -2230,6 +2232,237 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
     })
 }
 
+/// Build a receipt document for a single split payment.
+///
+/// The `payment_id` identifies which payment to print. If payment_items
+/// exist for this payment, only those items are shown. Otherwise all order
+/// items are included with a "Split Payment" header. Only the single
+/// payment line is shown.
+fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceiptDoc, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    // Load the payment record
+    let (order_id, method, amount, cash_received, change_given, transaction_ref): (
+        String,
+        String,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT order_id, COALESCE(method, ''), COALESCE(amount, 0),
+                    cash_received, change_given, COALESCE(transaction_ref, '')
+             FROM order_payments WHERE id = ?1 AND status = 'completed'",
+            params![payment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Payment not found or not completed: {payment_id}"))?;
+
+    // Load order header
+    let (
+        order_number,
+        order_type,
+        status,
+        created_at,
+        table_number,
+        customer_name,
+        customer_phone,
+        items_json,
+        total_amount,
+    ): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        f64,
+    ) = conn
+        .query_row(
+            "SELECT COALESCE(order_number, ''), COALESCE(order_type, ''), COALESCE(status, ''),
+                    COALESCE(created_at, ''), COALESCE(table_number, ''), COALESCE(customer_name, ''),
+                    COALESCE(customer_phone, ''), COALESCE(items, '[]'), COALESCE(total_amount, 0)
+             FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("Order not found for payment: {payment_id}"))?;
+
+    // Check for payment_items (split-by-items mode)
+    let mut pi_stmt = conn
+        .prepare(
+            "SELECT item_index, item_name, item_quantity, item_amount
+             FROM payment_items WHERE payment_id = ?1
+             ORDER BY item_index ASC",
+        )
+        .map_err(|e| format!("prepare payment_items: {e}"))?;
+
+    let payment_items: Vec<(i32, String, i32, f64)> = pi_stmt
+        .query_map(params![payment_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e| format!("query payment_items: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let menu_lookup = build_menu_category_lookup(&conn);
+
+    // Build items list: payment_items if present, otherwise all order items
+    let items: Vec<ReceiptItem> = if !payment_items.is_empty() {
+        payment_items
+            .iter()
+            .map(|(_idx, name, qty, amt)| ReceiptItem {
+                name: name.clone(),
+                quantity: *qty as f64,
+                total: *amt,
+                category_name: None,
+                subcategory_name: None,
+                category_path: None,
+                note: None,
+                customizations: Vec::new(),
+            })
+            .collect()
+    } else {
+        // No payment_items — show all order items
+        serde_json::from_str::<Value>(&items_json)
+            .ok()
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| {
+                let category_fields = resolve_item_category_fields(&item, &menu_lookup);
+                ReceiptItem {
+                    name: item
+                        .get("name")
+                        .or_else(|| item.get("itemName"))
+                        .or_else(|| item.get("menu_item_name"))
+                        .or_else(|| item.get("title"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Item")
+                        .to_string(),
+                    quantity: item.get("quantity").and_then(parse_number).unwrap_or(1.0),
+                    total: parse_item_total(&item),
+                    category_name: category_fields.category_name,
+                    subcategory_name: category_fields.subcategory_name,
+                    category_path: category_fields.category_path,
+                    note: build_item_note_text(&item),
+                    customizations: parse_item_customizations(&item),
+                }
+            })
+            .collect()
+    };
+
+    // Build totals: show items subtotal and the split payment amount
+    let items_subtotal: f64 = items.iter().map(|i| i.total).sum();
+    let totals = vec![
+        TotalsLine {
+            label: "Subtotal".to_string(),
+            amount: items_subtotal,
+            emphasize: false,
+            discount_percent: None,
+        },
+        TotalsLine {
+            label: "Split Payment".to_string(),
+            amount,
+            emphasize: true,
+            discount_percent: None,
+        },
+    ];
+
+    // Build the single payment line
+    let label = match method.as_str() {
+        "cash" => "Cash",
+        "card" => "Card",
+        _ => "Other",
+    };
+    let normalized_amount = if method == "cash" {
+        cash_received.filter(|r| *r > 0.0).unwrap_or(amount)
+    } else {
+        amount
+    };
+    let mut payments = vec![PaymentLine {
+        label: label.to_string(),
+        amount: normalized_amount,
+        detail: None,
+    }];
+    if let Some(change) = change_given {
+        if change > 0.0 {
+            payments.push(PaymentLine {
+                label: "Change".to_string(),
+                amount: change,
+                detail: None,
+            });
+        }
+    }
+
+    let masked_card = if method == "card" {
+        extract_masked_card_reference(&transaction_ref)
+    } else {
+        None
+    };
+
+    // Add a note indicating this is a split payment receipt
+    let mut order_notes = Vec::new();
+    let split_note = format!(
+        "Split Payment ({:.2} of {:.2} total)",
+        amount, total_amount
+    );
+    order_notes.push(split_note);
+
+    Ok(OrderReceiptDoc {
+        order_id: order_id.to_string(),
+        order_number: if order_number.is_empty() {
+            order_id.to_string()
+        } else {
+            order_number
+        },
+        order_type,
+        status,
+        created_at,
+        table_number: non_empty_field(table_number),
+        customer_name: non_empty_field(customer_name),
+        customer_phone: non_empty_field(customer_phone),
+        delivery_address: None,
+        delivery_city: None,
+        delivery_postal_code: None,
+        delivery_floor: None,
+        name_on_ringer: None,
+        driver_id: None,
+        driver_name: None,
+        delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
+        items,
+        totals,
+        payments,
+        adjustments: Vec::new(),
+        masked_card,
+        order_notes,
+    })
+}
+
 fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicketDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (
@@ -2859,6 +3092,11 @@ fn build_document_for_job(
                 }
             }
             Ok(ReceiptDocument::DeliverySlip(doc))
+        }
+        "split_receipt" => {
+            // entity_id is the payment_id for split receipts
+            let doc = build_split_receipt_doc(db, entity_id)?;
+            Ok(ReceiptDocument::OrderReceipt(doc))
         }
         _ => Err(format!("Unknown entity_type: {entity_type}")),
     }
@@ -4375,7 +4613,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_layout_config_receipt_like_classic_locks_typography() {
+    fn test_resolve_layout_config_kitchen_ticket_classic_locks_typography() {
         let db = test_db();
         let profile = serde_json::json!({
             "paperWidthMm": 80,
@@ -4392,6 +4630,26 @@ mod tests {
         assert_eq!(layout.font_type, FontType::A);
         assert_eq!(layout.layout_density, LayoutDensity::Compact);
         assert_eq!(layout.header_emphasis, HeaderEmphasis::Strong);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_classic_order_receipt_honors_typography_settings() {
+        let db = test_db();
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "fontType": "b",
+            "layoutDensity": "spacious",
+            "headerEmphasis": "normal"
+        });
+
+        let layout =
+            resolve_layout_config(&db, &profile, "order_receipt").expect("resolve layout config");
+
+        assert_eq!(layout.template, ReceiptTemplate::Classic);
+        assert_eq!(layout.font_type, FontType::B);
+        assert_eq!(layout.layout_density, LayoutDensity::Spacious);
+        assert_eq!(layout.header_emphasis, HeaderEmphasis::Normal);
     }
 
     #[test]

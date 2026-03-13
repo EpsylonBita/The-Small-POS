@@ -9,8 +9,9 @@
 //! from `local_settings` (category='system') so that successive Z-Reports
 //! never double-count orders or payments.
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
@@ -28,6 +29,148 @@ use crate::storage;
 fn get_period_start(conn: &Connection) -> String {
     db::get_setting(conn, "system", "last_z_report_timestamp")
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+}
+
+const PENDING_Z_REPORT_CONTEXT_KEY: &str = "pending_z_report_context";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingZReportContext {
+    branch_id: String,
+    report_date: String,
+    cutoff_at: String,
+    period_start_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct EffectiveZReportWindow {
+    report_date: String,
+    period_start_at: String,
+    cutoff_at: Option<String>,
+}
+
+fn default_report_date() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn local_report_date_from_timestamp(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
+}
+
+fn load_stored_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
+    let raw = db::get_setting(conn, "system", PENDING_Z_REPORT_CONTEXT_KEY)?;
+    let parsed: PendingZReportContext = serde_json::from_str(&raw).ok()?;
+    if parsed.branch_id == branch_id {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+fn synthesize_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
+    let period_start = get_period_start(conn);
+    let latest_closed_at: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(check_out_time, check_in_time)
+             FROM staff_shifts
+             WHERE status = 'closed'
+               AND check_in_time > ?1
+               AND (branch_id = ?2 OR branch_id IS NULL)
+             ORDER BY COALESCE(check_out_time, check_in_time) DESC
+             LIMIT 1",
+            params![period_start, branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    latest_closed_at.map(|cutoff_at| PendingZReportContext {
+        branch_id: branch_id.to_string(),
+        report_date: local_report_date_from_timestamp(&cutoff_at),
+        cutoff_at,
+        period_start_at: period_start,
+    })
+}
+
+fn load_or_synthesize_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
+    load_stored_pending_z_report_context(conn, branch_id)
+        .or_else(|| synthesize_pending_z_report_context(conn, branch_id))
+}
+
+fn persist_pending_z_report_context(
+    conn: &Connection,
+    context: &PendingZReportContext,
+) -> Result<(), String> {
+    let encoded = serde_json::to_string(context)
+        .map_err(|e| format!("serialize pending z-report context: {e}"))?;
+    db::set_setting(conn, "system", PENDING_Z_REPORT_CONTEXT_KEY, &encoded)
+}
+
+fn clear_pending_z_report_context(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM local_settings
+         WHERE setting_category = 'system'
+           AND setting_key = ?1",
+        params![PENDING_Z_REPORT_CONTEXT_KEY],
+    )
+    .map_err(|e| format!("clear pending z-report context: {e}"))?;
+    Ok(())
+}
+
+pub(crate) fn ensure_pending_z_report_context_for_branch(
+    conn: &Connection,
+    branch_id: &str,
+    cutoff_at: &str,
+) -> Result<Option<Value>, String> {
+    if branch_id.trim().is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(existing) = load_stored_pending_z_report_context(conn, branch_id) {
+        return Ok(Some(serde_json::json!(existing)));
+    }
+
+    let context = PendingZReportContext {
+        branch_id: branch_id.to_string(),
+        report_date: local_report_date_from_timestamp(cutoff_at),
+        cutoff_at: cutoff_at.to_string(),
+        period_start_at: get_period_start(conn),
+    };
+
+    persist_pending_z_report_context(conn, &context)?;
+    Ok(Some(serde_json::json!(context)))
+}
+
+fn resolve_effective_z_report_window(
+    conn: &Connection,
+    branch_id: &str,
+    payload: &Value,
+) -> EffectiveZReportWindow {
+    if let Some(context) = load_or_synthesize_pending_z_report_context(conn, branch_id) {
+        return EffectiveZReportWindow {
+            report_date: context.report_date,
+            period_start_at: context.period_start_at,
+            cutoff_at: Some(context.cutoff_at),
+        };
+    }
+
+    EffectiveZReportWindow {
+        report_date: str_field(payload, "date").unwrap_or_else(default_report_date),
+        period_start_at: get_period_start(conn),
+        cutoff_at: None,
+    }
 }
 
 fn extract_z_report_id(result: &Value) -> Option<String> {
@@ -364,6 +507,7 @@ fn load_staff_drawer_snapshot(conn: &Connection, shift_id: &str) -> Result<Optio
 fn load_drawer_rows_for_period(
     conn: &Connection,
     period_start: &str,
+    cutoff_at: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     let mut stmt = conn
         .prepare(
@@ -375,12 +519,13 @@ fn load_drawer_rows_for_period(
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
              WHERE cds.opened_at > ?1
+               AND (?2 IS NULL OR cds.opened_at <= ?2)
              ORDER BY cds.opened_at ASC",
         )
         .map_err(|e| format!("prepare drawer rows for period: {e}"))?;
 
     let rows = stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_at], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "staffShiftId": row.get::<_, String>(1)?,
@@ -450,7 +595,11 @@ fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<V
     Ok(rows)
 }
 
-fn load_sales_by_type_for_period(conn: &Connection, period_start: &str) -> Result<Value, String> {
+fn load_sales_by_type_for_period(
+    conn: &Connection,
+    period_start: &str,
+    cutoff_at: Option<&str>,
+) -> Result<Value, String> {
     let mut stmt = conn
         .prepare(
             "SELECT
@@ -464,6 +613,7 @@ fn load_sales_by_type_for_period(conn: &Connection, period_start: &str) -> Resul
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.created_at > ?1
+               AND (?2 IS NULL OR op.created_at <= ?2)
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
@@ -477,7 +627,7 @@ fn load_sales_by_type_for_period(conn: &Connection, period_start: &str) -> Resul
     let mut delivery_card = (0_i64, 0.0_f64);
 
     let rows = stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_at], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -817,6 +967,7 @@ fn load_driver_order_details(
 fn load_driver_unsettled_counts_for_period(
     conn: &Connection,
     period_start: &str,
+    cutoff_at: Option<&str>,
 ) -> Result<HashMap<String, i64>, String> {
     let mut stmt = conn
         .prepare(
@@ -824,6 +975,7 @@ fn load_driver_unsettled_counts_for_period(
              FROM driver_earnings de
              LEFT JOIN orders o ON o.id = de.order_id
              WHERE de.created_at > ?1
+               AND (?2 IS NULL OR de.created_at <= ?2)
                AND COALESCE(de.settled, 0) = 0
                AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
                AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
@@ -832,7 +984,7 @@ fn load_driver_unsettled_counts_for_period(
         .map_err(|e| format!("prepare driver unsettled counts for period: {e}"))?;
 
     let rows = stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_at], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .map_err(|e| format!("query driver unsettled counts for period: {e}"))?;
@@ -1879,6 +2031,69 @@ pub fn print_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     crate::print::enqueue_print_job(db, "z_report", &z_report_id, None)
 }
 
+pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let branch_id = str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+
+    let latest_z_report = conn
+        .query_row(
+            "SELECT id, sync_state, report_date
+             FROM z_reports
+             WHERE branch_id = ?1 OR branch_id IS NULL
+             ORDER BY generated_at DESC
+             LIMIT 1",
+            params![branch_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("query latest z-report status: {e}"))?;
+
+    if let Some(context) = load_or_synthesize_pending_z_report_context(&conn, &branch_id) {
+        return Ok(serde_json::json!({
+            "status": "pending_local_submit",
+            "pendingReportDate": context.report_date,
+            "cutoffAt": context.cutoff_at,
+            "periodStartAt": context.period_start_at,
+            "latestZReportId": latest_z_report.as_ref().map(|row| row.0.clone()),
+            "latestZReportSyncState": latest_z_report.as_ref().map(|row| row.1.clone()),
+            "canOpenPendingZReport": true,
+        }));
+    }
+
+    if let Some((latest_id, latest_sync_state, latest_report_date)) = latest_z_report {
+        if latest_sync_state != "applied" {
+            return Ok(serde_json::json!({
+                "status": "submitted_pending_admin",
+                "pendingReportDate": latest_report_date,
+                "cutoffAt": Value::Null,
+                "periodStartAt": Value::Null,
+                "latestZReportId": latest_id,
+                "latestZReportSyncState": latest_sync_state,
+                "canOpenPendingZReport": false,
+            }));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "status": "idle",
+        "pendingReportDate": Value::Null,
+        "cutoffAt": Value::Null,
+        "periodStartAt": Value::Null,
+        "latestZReportId": Value::Null,
+        "latestZReportSyncState": Value::Null,
+        "canOpenPendingZReport": false,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Multi-shift aggregation (Gap 7)
 // ---------------------------------------------------------------------------
@@ -1895,16 +2110,17 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
-
-    let date =
-        str_field(payload, "date").unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
-
-    let period_start = get_period_start(&conn);
+    let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
+    let date = window.report_date.clone();
+    let period_start = window.period_start_at.clone();
+    let cutoff_at = window.cutoff_at.clone();
+    let cutoff_param = cutoff_at.as_deref();
 
     info!(
         branch_id = %branch_id,
         date = %date,
         period_start = %period_start,
+        cutoff_at = ?cutoff_at,
         "Generating multi-shift Z-report"
     );
 
@@ -1920,12 +2136,13 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
              WHERE check_in_time > ?1
                AND (branch_id = ?2 OR branch_id IS NULL)
                AND status = 'closed'
+               AND (?3 IS NULL OR COALESCE(check_out_time, check_in_time) <= ?3)
              ORDER BY check_in_time ASC",
         )
         .map_err(|e| format!("prepare shift query: {e}"))?;
 
     let shifts: Vec<ReportStaffShift> = shift_stmt
-        .query_map(params![period_start, branch_id], |row| {
+        .query_map(params![period_start, branch_id, cutoff_param], |row| {
             Ok(ReportStaffShift {
                 id: row.get(0)?,
                 staff_id: row.get(1)?,
@@ -1958,9 +2175,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     COALESCE(SUM(tip_amount), 0) as tips
              FROM orders
              WHERE created_at > ?1
+               AND (?2 IS NULL OR created_at <= ?2)
                AND COALESCE(is_ghost, 0) = 0
                AND status NOT IN ('cancelled', 'canceled')",
-            params![period_start],
+            params![period_start, cutoff_param],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1981,6 +2199,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
              FROM order_payments op
              JOIN orders o ON o.id = op.order_id
              WHERE op.created_at > ?1
+               AND (?2 IS NULL OR op.created_at <= ?2)
                AND op.status = 'completed'
                AND COALESCE(o.is_ghost, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
@@ -1996,7 +2215,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let mut other_count = 0_i64;
 
     let pay_rows = pay_stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_param], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2030,6 +2249,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
              FROM payment_adjustments pa
              JOIN orders o ON o.id = pa.order_id
              WHERE pa.created_at > ?1
+               AND (?2 IS NULL OR pa.created_at <= ?2)
                AND COALESCE(o.is_ghost, 0) = 0
                AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
              GROUP BY pa.adjustment_type",
@@ -2040,7 +2260,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let mut voids_total = 0.0_f64;
 
     let adj_rows = adj_stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_param], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })
         .map_err(|e| format!("query adjustments: {e}"))?;
@@ -2059,8 +2279,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .query_row(
             "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
              WHERE created_at > ?1
+               AND (?2 IS NULL OR created_at <= ?2)
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
-            params![period_start],
+            params![period_start, cutoff_param],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
@@ -2072,13 +2293,14 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
              FROM shift_expenses se
              LEFT JOIN staff_shifts ss ON ss.id = se.staff_shift_id
              WHERE se.created_at > ?1
+               AND (?2 IS NULL OR se.created_at <= ?2)
                AND (se.expense_type IS NULL OR se.expense_type != 'staff_payment')
              ORDER BY se.created_at ASC",
         )
         .map_err(|e| format!("prepare expense query: {e}"))?;
 
     let expense_items: Vec<Value> = exp_stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_param], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
                 "expenseType": row.get::<_, Option<String>>(1)?,
@@ -2109,8 +2331,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END),
                     COALESCE(SUM(total_staff_payments), 0)
              FROM cash_drawer_sessions
-             WHERE opened_at > ?1",
-            params![period_start],
+             WHERE opened_at > ?1
+               AND (?2 IS NULL OR opened_at <= ?2)",
+            params![period_start, cutoff_param],
             |row| {
                 Ok(serde_json::json!({
                     "openingTotal": row.get::<_, f64>(0)?,
@@ -2162,6 +2385,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "SELECT COALESCE(order_type, 'dine-in'), COUNT(*), COALESCE(SUM(total_amount), 0)
              FROM orders
              WHERE created_at > ?1
+               AND (?2 IS NULL OR created_at <= ?2)
                AND COALESCE(is_ghost, 0) = 0
                AND status NOT IN ('cancelled', 'canceled')
              GROUP BY COALESCE(order_type, 'dine-in')",
@@ -2176,7 +2400,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let mut delivery_sales = 0.0_f64;
 
     let ot_rows = ot_stmt
-        .query_map(params![period_start], |row| {
+        .query_map(params![period_start, cutoff_param], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2211,8 +2435,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let staff_payments_total: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
-             WHERE created_at > ?1",
-            params![period_start],
+             WHERE created_at > ?1
+               AND (?2 IS NULL OR created_at <= ?2)",
+            params![period_start, cutoff_param],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
@@ -2221,9 +2446,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "SELECT COUNT(*)
              FROM shift_expenses
              WHERE created_at > ?1
+               AND (?2 IS NULL OR created_at <= ?2)
                AND status = 'pending'
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
-            params![period_start],
+            params![period_start, cutoff_param],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -2271,8 +2497,8 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "card": { "count": card_count, "total": card_sales },
         "other": { "count": other_count, "total": other_sales },
     });
-    let sales_by_type = load_sales_by_type_for_period(&conn, &period_start)?;
-    let drawer_rows = load_drawer_rows_for_period(&conn, &period_start)?;
+    let sales_by_type = load_sales_by_type_for_period(&conn, &period_start, cutoff_param)?;
+    let drawer_rows = load_drawer_rows_for_period(&conn, &period_start, cutoff_param)?;
     let cash_breakdown_lookup = driver_cash_breakdown
         .iter()
         .chain(waiter_cash_breakdown.iter())
@@ -2290,7 +2516,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .collect::<Result<Vec<_>, _>>()?;
     let driver_summary = build_driver_summary(
         &staff_reports,
-        &load_driver_unsettled_counts_for_period(&conn, &period_start)?,
+        &load_driver_unsettled_counts_for_period(&conn, &period_start, cutoff_param)?,
     );
 
     // Build Electron-compatible report_json
@@ -2497,6 +2723,11 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+    let window = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_effective_z_report_window(&conn, &branch_id, payload)
+    };
+    let cutoff_param = window.cutoff_at.as_deref();
 
     // --- Pre-condition: all staff must be checked out ---
     {
@@ -2506,12 +2737,13 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "SELECT id, COALESCE(staff_name, staff_id) as name
                  FROM staff_shifts
                  WHERE status = 'active'
-                   AND (branch_id = ?1 OR branch_id IS NULL)",
+                   AND (branch_id = ?1 OR branch_id IS NULL)
+                   AND (?2 IS NULL OR check_in_time <= ?2)",
             )
             .map_err(|e| format!("prepare active-shift check: {e}"))?;
 
         let active_names: Vec<String> = stmt
-            .query_map(params![branch_id], |row| row.get::<_, String>(1))
+            .query_map(params![branch_id, cutoff_param], |row| row.get::<_, String>(1))
             .map_err(|e| format!("query active shifts: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
@@ -2528,15 +2760,16 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     // --- Pre-condition: all orders must have settled payments ---
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let period_start = get_period_start(&conn);
         let unpaid_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM orders
                  WHERE created_at > ?1
-                   AND COALESCE(is_ghost, 0) = 0
-                   AND status NOT IN ('cancelled', 'canceled')
-                   AND payment_status NOT IN ('paid', 'completed')",
-                params![period_start],
+                   AND (?2 IS NULL OR created_at <= ?2)
+                   AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
+                    AND COALESCE(is_ghost, 0) = 0
+                    AND status NOT IN ('cancelled', 'canceled', 'refunded')
+                    AND COALESCE(payment_status, 'pending') NOT IN ('paid', 'completed', 'refunded')",
+                params![window.period_start_at, cutoff_param, branch_id],
                 |row| row.get(0),
             )
             .unwrap_or(0);
@@ -2567,18 +2800,20 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     // Step 2: Atomically advance the business-day cutoff, reset counters, and
     // clear the local operational day tables.
-    let now = Utc::now().to_rfc3339();
+    let rollover_timestamp = window
+        .cutoff_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
 
     info!(
-        timestamp = %now,
+        timestamp = %rollover_timestamp,
         z_report_id = ?z_report_id,
         "Starting local Z-report day rollover"
     );
 
     // Step 3: Finalize end-of-day (clear operational data)
-    let report_date =
-        str_field(payload, "date").unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
-    let cleanup = match apply_local_day_rollover(db, &report_date, &now) {
+    let report_date = window.report_date.clone();
+    let cleanup = match apply_local_day_rollover(db, &report_date, &rollover_timestamp) {
         Ok(cleanup) => cleanup,
         Err(error) => {
             if created_new_z_report {
@@ -2621,7 +2856,7 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         "success": true,
         "data": generated,
         "cleanup": cleanup,
-        "lastZReportTimestamp": now,
+        "lastZReportTimestamp": rollover_timestamp,
         "zReportId": z_report_id,
         "localDayClosed": true,
         "syncQueued": z_report_id.is_some(),
@@ -2808,12 +3043,16 @@ fn finalize_end_of_day_counts(conn: &Connection, report_date: &str) -> Value {
     Value::Object(cleared)
 }
 
-fn apply_local_day_rollover(db: &DbState, report_date: &str, now: &str) -> Result<Value, String> {
+fn apply_local_day_rollover(
+    db: &DbState,
+    report_date: &str,
+    rollover_timestamp: &str,
+) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     info!(
         report_date = %report_date,
-        timestamp = %now,
+        timestamp = %rollover_timestamp,
         "Applying local Z-report day rollover"
     );
 
@@ -2825,8 +3064,14 @@ fn apply_local_day_rollover(db: &DbState, report_date: &str, now: &str) -> Resul
     }
 
     let result = (|| -> Result<Value, String> {
-        db::set_setting(&conn, "system", "last_z_report_timestamp", now)?;
-        db::set_setting(&conn, "sync", "orders_since", now)?;
+        db::set_setting(
+            &conn,
+            "system",
+            "last_z_report_timestamp",
+            rollover_timestamp,
+        )?;
+        db::set_setting(&conn, "sync", "orders_since", rollover_timestamp)?;
+        clear_pending_z_report_context(&conn)?;
 
         conn.execute(
             "INSERT INTO local_settings (setting_category, setting_key, setting_value, updated_at) \
@@ -3487,6 +3732,63 @@ mod tests {
         ).expect("insert payment 5");
     }
 
+    fn seed_late_day_order(db: &DbState, created_at: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, staff_shift_id, discount_amount, tip_amount,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-late', '#late', '[]', 80.0, 'completed', 'dine-in',
+                'paid', 'shift-zr-1', 0.0, 0.0, 'pending', ?1, ?1
+             )",
+            params![created_at],
+        )
+        .expect("insert late order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+             ) VALUES (
+                'pay-late', 'ord-late', 'cash', 80.0, 'completed', 'shift-zr-1', 'EUR', ?1, ?1
+             )",
+            params![created_at],
+        )
+        .expect("insert late payment");
+    }
+
+    fn seed_next_day_active_shift(db: &DbState, check_in_time: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, check_in_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-next-day-active', 'staff-next', 'Next Day', 'branch-1', 'term-1', 'cashier',
+                100.0, ?1, 'active', 2, 'pending', ?1, ?1
+             )",
+            params![check_in_time],
+        )
+        .expect("insert next day active shift");
+    }
+
+    fn seed_other_branch_unpaid_order(db: &DbState, created_at: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, staff_shift_id, branch_id, discount_amount, tip_amount,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-other-branch-unpaid', '#other-branch', '[]', 22.0, 'completed', 'dine-in',
+                'pending', 'shift-other-branch', 'branch-2', 0.0, 0.0, 'pending', ?1, ?1
+             )",
+            params![created_at],
+        )
+        .expect("insert other branch unpaid order");
+    }
+
     fn seed_cashier_driver_zreport_day(db: &DbState) {
         let conn = db.conn.lock().unwrap();
         let cashier_shift_id = "cashier-zr-day";
@@ -4083,6 +4385,10 @@ mod tests {
             orders_since, stored,
             "orders_since cursor should advance with z-report submit"
         );
+        assert!(
+            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none(),
+            "pending z-report context should be cleared after local close"
+        );
 
         // Verify operational data was cleared
         let orders: i64 = conn
@@ -4107,6 +4413,116 @@ mod tests {
             queued_z_reports, 1,
             "z_report sync queue entry should be preserved for later admin sync"
         );
+    }
+
+    #[test]
+    fn test_get_end_of_day_status_synthesizes_pending_context_from_closed_shifts() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let status = get_end_of_day_status(&db, &serde_json::json!({
+            "branchId": "branch-1",
+        }))
+        .expect("status should load");
+
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["pendingReportDate"], "2026-02-16");
+        assert_eq!(status["cutoffAt"], "2026-02-16T18:00:00Z");
+        assert_eq!(status["canOpenPendingZReport"], true);
+    }
+
+    #[test]
+    fn test_generate_z_report_for_date_uses_frozen_cutoff_to_exclude_late_orders() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_late_day_order(&db, "2026-02-16T19:00:00Z");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            persist_pending_z_report_context(
+                &conn,
+                &PendingZReportContext {
+                    branch_id: "branch-1".to_string(),
+                    report_date: "2026-02-16".to_string(),
+                    cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+                    period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                },
+            )
+            .expect("persist frozen context");
+        }
+
+        let result = generate_z_report_for_date(&db, &serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-17",
+        }))
+        .expect("generate should succeed");
+
+        let report = &result["report"];
+        assert_eq!(report["reportDate"], "2026-02-16");
+        assert_eq!(report["totalOrders"], 3);
+        assert_eq!(report["grossSales"], 100.0);
+    }
+
+    #[test]
+    fn test_submit_z_report_ignores_next_day_active_shift_after_cutoff() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_next_day_active_shift(&db, "2026-02-17T08:00:00Z");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            persist_pending_z_report_context(
+                &conn,
+                &PendingZReportContext {
+                    branch_id: "branch-1".to_string(),
+                    report_date: "2026-02-16".to_string(),
+                    cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+                    period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                },
+            )
+            .expect("persist frozen context");
+        }
+
+        let result = submit_z_report(&db, &serde_json::json!({
+            "branchId": "branch-1",
+        }))
+        .expect("submit should succeed with next-day active shift");
+
+        assert_eq!(result["localDayClosed"], true);
+        assert_eq!(result["lastZReportTimestamp"], "2026-02-16T18:00:00Z");
+
+        let conn = db.conn.lock().unwrap();
+        let remaining_active_shifts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_active_shifts, 1, "next-day shift must remain");
+
+        let status = get_end_of_day_status(&db, &serde_json::json!({
+            "branchId": "branch-1",
+        }))
+        .expect("status should load");
+        assert_eq!(status["status"], "submitted_pending_admin");
+        assert_eq!(status["canOpenPendingZReport"], false);
+    }
+
+    #[test]
+    fn test_submit_z_report_ignores_unpaid_orders_from_other_branch() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_other_branch_unpaid_order(&db, "2026-02-16T17:00:00Z");
+
+        let result = submit_z_report(&db, &serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        }))
+        .expect("submit should ignore other-branch unpaid orders");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["localDayClosed"], true);
     }
 
     #[test]

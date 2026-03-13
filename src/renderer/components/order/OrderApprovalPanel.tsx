@@ -4,6 +4,7 @@ import { useI18n } from '../../contexts/i18n-context';
 import toast from 'react-hot-toast';
 import type { Order, OrderItem } from '../../types/orders';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
+import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
 import { Package, User, MapPin, CreditCard, Clock, Printer, X, Check, XCircle, Banknote, Tag, Ban } from 'lucide-react';
 import { getBridge } from '../../../lib';
 import { calculateSubtotalFromItems } from './order-math';
@@ -137,9 +138,16 @@ export function OrderApprovalPanel({
 
   // Normalize fields to handle different shapes
   const orderNumber = order.order_number || order.orderNumber || '';
-  const customerName = order.customer_name || order.customerName || '';
+  const orderType = normalizeOrderTypeForDisplay(
+    (order.order_type || order.orderType || '').toString(),
+  );
+  const customerName = resolveOrderDisplayTitle({
+    orderType,
+    customerName: order.customer_name || order.customerName || '',
+    pickupLabel: t('orders.type.pickup', { defaultValue: 'Pickup' }),
+    fallbackLabel: t('orderApprovalPanel.guestCustomer', { defaultValue: 'Guest' }),
+  });
   const customerPhone = order.customer_phone || order.customerPhone || '';
-  const orderType = (order.order_type || order.orderType || '').toString();
   const createdAtRaw = order.created_at || order.createdAt;
   const createdAt = createdAtRaw ? new Date(createdAtRaw) : null;
   const deliveryAddressRaw = order.delivery_address || order.address || '';
@@ -603,7 +611,7 @@ export function OrderApprovalPanel({
                       <User className="w-10 h-10 text-purple-500" />
                       <div>
                         <div className="font-semibold liquid-glass-modal-text">
-                          {customerName || t('orderApprovalPanel.guestCustomer', { defaultValue: 'Guest' })}
+                          {customerName}
                         </div>
                         {customerPhone && (
                           <div className="text-sm liquid-glass-modal-text-muted">

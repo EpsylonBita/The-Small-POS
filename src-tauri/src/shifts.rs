@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::storage;
+use crate::{storage, zreport};
 
 // ---------------------------------------------------------------------------
 // Open shift
@@ -555,6 +555,27 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             params![shift_id, sync_payload, idempotency_key],
         )
         .map_err(|e| format!("enqueue shift close sync: {e}"))?;
+
+        if !shift_branch_id.trim().is_empty() {
+            let active_shift_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM staff_shifts
+                     WHERE status = 'active'
+                       AND (branch_id = ?1 OR branch_id IS NULL)",
+                    params![shift_branch_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if active_shift_count == 0 {
+                let _ = zreport::ensure_pending_z_report_context_for_branch(
+                    &conn,
+                    &shift_branch_id,
+                    &now,
+                )?;
+            }
+        }
 
         Ok((expected, variance))
     })();
@@ -2105,6 +2126,59 @@ mod tests {
             returned, 80.0,
             "driver_cash_returned should be 80.0 (expected return)"
         );
+    }
+
+    #[test]
+    fn test_close_shift_persists_pending_z_report_context_when_last_shift_closes() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-pending-z', 'cashier-ctx', 'cashier', 'branch-ctx', 'term-ctx',
+                    '2026-03-12T08:00:00Z', 250.0, 'active', 2, 'pending', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-pending-z', 'cashier-pending-z', 'cashier-ctx', 'branch-ctx', 'term-ctx',
+                    250.0, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-pending-z",
+                "closingCash": 250.0,
+            }),
+        )
+        .expect("close shift should succeed");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let stored = db::get_setting(&conn, "system", "pending_z_report_context")
+            .expect("pending z-report context should be stored");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stored).expect("pending z-report context should be valid json");
+
+        assert_eq!(parsed["branchId"], "branch-ctx");
+        assert_eq!(parsed["periodStartAt"], "1970-01-01T00:00:00Z");
+        assert!(parsed["reportDate"].as_str().is_some());
+        assert!(parsed["cutoffAt"].as_str().is_some());
     }
 
     #[test]

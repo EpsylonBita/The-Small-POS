@@ -11,6 +11,7 @@ interface ReceiptScaleSliderProps {
   onChange: (value: number) => void;
   hint?: string;
   resetLabel?: string;
+  disabled?: boolean;
 }
 
 const defaultFormat = (v: number) => `${v.toFixed(2)}x`;
@@ -26,23 +27,26 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
   onChange,
   hint,
   resetLabel = 'Reset',
+  disabled = false,
 }) => {
   const pct = ((value - min) / (max - min)) * 100;
   const isDefault = Math.abs(value - defaultValue) < step * 0.5;
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (disabled) return;
       onChange(parseFloat(e.target.value));
     },
-    [onChange],
+    [disabled, onChange],
   );
 
   const handleReset = useCallback(() => {
+    if (disabled) return;
     onChange(defaultValue);
-  }, [onChange, defaultValue]);
+  }, [defaultValue, disabled, onChange]);
 
   return (
-    <div className="space-y-1.5">
+    <div className={`space-y-1.5 ${disabled ? 'opacity-60' : ''}`}>
       <div className="flex items-center justify-between">
         <label className="text-xs font-medium text-white/80">{label}</label>
         <div className="flex items-center gap-2">
@@ -53,7 +57,8 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
             <button
               type="button"
               onClick={handleReset}
-              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
+              disabled={disabled}
+              className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors disabled:text-white/25 disabled:hover:text-white/25"
             >
               {resetLabel}
             </button>
@@ -67,7 +72,8 @@ export const ReceiptScaleSlider: React.FC<ReceiptScaleSliderProps> = ({
         step={step}
         value={value}
         onChange={handleChange}
-        className="receipt-scale-slider w-full"
+        disabled={disabled}
+        className="receipt-scale-slider w-full disabled:cursor-not-allowed"
         style={{
           background: `linear-gradient(to right, rgb(59 130 246 / 0.7) 0%, rgb(59 130 246 / 0.7) ${pct}%, rgb(255 255 255 / 0.08) ${pct}%, rgb(255 255 255 / 0.08) 100%)`,
         }}

@@ -58,6 +58,7 @@ interface NavigationSidebarProps {
   onStartShift?: () => void;
   onOpenZReport?: () => void;
   isZReportOpen?: boolean;
+  hasPendingLocalSubmit?: boolean;
   onOpenSettings?: () => void;
 }
 
@@ -69,6 +70,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
   onStartShift,
   onOpenZReport,
   isZReportOpen,
+  hasPendingLocalSubmit = false,
   onOpenSettings
 }) => {
   const { t } = useTranslation();
@@ -240,7 +242,7 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
 
 
   const handleOpenZ = () => {
-    if (!isShiftActive) {
+    if (!isShiftActive && !hasPendingLocalSubmit) {
       onStartShift && onStartShift();
       return;
     }
@@ -378,10 +380,13 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
           {/* Z Report Button */}
           <button
             onClick={handleOpenZ}
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('blue', !!isZReportOpen, resolvedTheme)}`}
+            className={`relative w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('blue', !!isZReportOpen, resolvedTheme)}`}
             title={t('navigation.zReport')}
           >
             <span className="font-bold text-base">Z</span>
+            {hasPendingLocalSubmit && (
+              <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.8)]" />
+            )}
           </button>
 
           {/* About Button */}

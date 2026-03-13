@@ -48,6 +48,8 @@ export {
   type WindowState,
   type UpdateState,
   type PrinterConfig,
+  type ReceiptSamplePreviewRequest,
+  type ReceiptSamplePreviewResponse,
 } from './ipc-adapter';
 
 export type {
@@ -56,6 +58,9 @@ export type {
   PrivilegedActionConfirmResponse,
   PrivilegedActionErrorPayload,
   PrivilegedActionScope,
+  StaffCheckInPinVerifyRequest,
+  StaffCheckInPinVerifyResponse,
+  EndOfDayStatusResponse,
   SettingsConfiguredResponse,
   SettingsGetRequest,
   SettingsSetRequest,

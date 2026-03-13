@@ -2,11 +2,14 @@ import React, { useState, useEffect } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle, RotateCcw } from 'lucide-react';
+import { Package, MapPin, User, Clock, CreditCard, ChevronRight, X, Printer, Truck, Phone, Building, FileText, History, Banknote, Smartphone, Bell, Layers, Car, CheckCircle, RotateCcw, Split } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getOrderStatusBadgeClasses } from '../../utils/orderStatus';
 import { formatCurrency, formatDate, formatTime } from '../../utils/format';
+import { normalizeOrderTypeForDisplay, resolveOrderDisplayTitle } from '../../utils/orderDisplay';
 import RefundVoidModal from './RefundVoidModal';
+import { SplitPaymentModal } from './SplitPaymentModal';
+import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
 
 interface OrderDetailsModalProps {
@@ -32,6 +35,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [orderData, setOrderData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
+  const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
 
   useEffect(() => {
     if (isOpen && orderId && !order) {
@@ -94,9 +98,17 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const displayOrder = orderData || order || {};
   const items = displayOrder.items || displayOrder.order_items || [];
   const customer = displayOrder.customer || {};
+  const orderType = normalizeOrderTypeForDisplay(
+    displayOrder.order_type || displayOrder.orderType || 'delivery',
+  );
 
   // Get customer info from various sources (snake_case from prop, camelCase from Rust backend)
-  const customerName = customer.name || displayOrder.customer_name || displayOrder.customerName || '';
+  const customerName = resolveOrderDisplayTitle({
+    orderType,
+    customerName: customer.name || displayOrder.customer_name || displayOrder.customerName || '',
+    pickupLabel: t('orders.type.pickup', { defaultValue: 'Pickup' }),
+    fallbackLabel: t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' }),
+  });
   const customerPhone = customer.phone || displayOrder.customer_phone || displayOrder.customerPhone || '';
 
   // Build delivery address object from various field patterns
@@ -175,7 +187,6 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   // Calculate original subtotal before discount (for display purposes)
   const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
   const status = displayOrder.status || 'pending';
-  const orderType = displayOrder.order_type || displayOrder.orderType || 'delivery';
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
   const paymentStatus = displayOrder.payment_status || displayOrder.paymentStatus || 'pending';
   const createdAt = displayOrder.created_at ? new Date(displayOrder.created_at) : new Date();
@@ -363,10 +374,31 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   );
 
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
+  const canSplitPayment = paymentStatus === 'pending' || paymentStatus === 'partially_paid';
+
+  // Compute footer grid columns based on visible buttons
+  const footerButtonCount =
+    (onPrintReceipt ? 1 : 0) +
+    (canSplitPayment ? 1 : 0) +
+    (canRefund ? 1 : 0) +
+    1; // Close button is always shown
+  const footerGridCols =
+    footerButtonCount === 4 ? 'grid-cols-4' :
+    footerButtonCount === 3 ? 'grid-cols-3' :
+    'grid-cols-2';
+
+  /** Called when split payment finishes -- reload order data to reflect updated payment status. */
+  const handleSplitComplete = (_result: SplitPaymentResult) => {
+    setShowSplitPaymentModal(false);
+    // Reload order data to reflect updated payment status
+    if (orderId && !order) {
+      loadOrderData();
+    }
+  };
 
   const modalFooter = (
     <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
-      <div className={`grid gap-3 ${canRefund ? 'grid-cols-3' : 'grid-cols-2'}`}>
+      <div className={`grid gap-3 ${footerGridCols}`}>
         {onPrintReceipt && (
           <button
             onClick={onPrintReceipt}
@@ -374,6 +406,15 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           >
             <Printer className="w-4 h-4" />
             {t('modals.orderDetails.printReceipt') || 'Print Receipt'}
+          </button>
+        )}
+        {canSplitPayment && (
+          <button
+            onClick={() => setShowSplitPaymentModal(true)}
+            className="liquid-glass-modal-button w-full gap-2 bg-pink-600/10 hover:bg-pink-600/20 text-pink-400 border-pink-500/20"
+          >
+            <Split className="w-4 h-4" />
+            {t('payment.split.title', { defaultValue: 'Split Payment' })}
           </button>
         )}
         {canRefund && (
@@ -735,6 +776,23 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             loadOrderData();
           }
         }}
+      />
+    )}
+
+    {/* Split Payment Modal for existing orders with pending/partially_paid status */}
+    {showSplitPaymentModal && (
+      <SplitPaymentModal
+        isOpen={showSplitPaymentModal}
+        onClose={() => setShowSplitPaymentModal(false)}
+        orderId={orderId}
+        orderTotal={total}
+        items={items.map((item: any) => ({
+          name: item.name || item.item_name || '',
+          quantity: item.quantity || 1,
+          totalPrice: (item.price || item.unit_price || 0) * (item.quantity || 1),
+          price: item.price || item.unit_price || 0,
+        }))}
+        onSplitComplete={handleSplitComplete}
       />
     )}
     </>
