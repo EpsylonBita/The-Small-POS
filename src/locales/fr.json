@@ -1204,7 +1204,8 @@
       "reconcileDrawer": "Rapprocher le tiroir",
       "addExpense": "Ajouter une dépense",
       "viewExpenses": "Voir les dépenses",
-      "addNote": "Ajouter une note"
+      "addNote": "Ajouter une note",
+      "completeZReport": "Complete Z Report"
     },
     "labels": {
       "active": "Actif",
@@ -1226,7 +1227,9 @@
       "cashDifferenceDetected": "Écart de caisse détecté : {{amount}}",
       "shiftRequired": "Veuillez d'abord commencer un service",
       "activeShiftExists": "Un service est déjà actif",
-      "noActiveShift": "Aucun service actif trouvé"
+      "noActiveShift": "Aucun service actif trouvé",
+      "pendingZReportTitle": "Previous day still needs a Z Report",
+      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it."
     },
     "monitoring": {
       "title": "Suivi du service",
@@ -2091,7 +2094,9 @@
         "transient": "Transient",
         "permanent": "Permanent",
         "unknown": "Unknown"
-      }
+      },
+      "recoveryTitle": "Recovery in progress",
+      "recoveryDetail": "This queue item is retryable and will be reprocessed automatically."
     },
     "system": {
       "syncBacklog": "File d'attente de synchronisation",
@@ -2279,7 +2284,8 @@
       "cardSuccess": "Paiement par carte effectué !",
       "cardFailed": "Échec du paiement par carte. Veuillez réessayer.",
       "loadingMethods": "Chargement des modes de paiement",
-      "loadingMethodsHint": "Vérification de la configuration de paiement du terminal..."
+      "loadingMethodsHint": "Vérification de la configuration de paiement du terminal...",
+      "splitSimple": "SPLIT"
     },
     "customerSearch": {
       "title": "Rechercher un client",
@@ -2524,7 +2530,11 @@
       "driverStarting": "Départ",
       "driverReturns": "Retours",
       "driverTakes": "Prélève",
-      "driverRole": "Livreur"
+      "driverRole": "Livreur",
+      "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
+      "posLoginDisabled": "This staff member is not allowed to log in on POS.",
+      "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
+      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first."
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -2627,7 +2637,8 @@
       "submitFailed": "Échec : {{error}}",
       "unknownError": "Erreur inconnue",
       "submissionFailed": "Échec de la soumission",
-      "close": "Fermer"
+      "close": "Fermer",
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
     },
     "expense": {
       "title": "Enregistrer une dépense",
@@ -3082,16 +3093,16 @@
     "subtitle": "Saisissez votre PIN pour continuer",
     "clear": "Effacer",
     "loggingIn": "Connexion en cours…",
-      "loginButton": "Se connecter",
-      "footer": "The Small POS",
-      "enterWithoutPin": "Entrer sans PIN",
-      "noPinWarning": "Aucun PIN défini. Vous pouvez en définir un dans les Paramètres après connexion.",
-      "pinResetRequired": "Réinitialisation du PIN requise. Veuillez définir un nouveau PIN pour continuer.",
-      "errors": {
-        "enterPin": "Veuillez saisir votre PIN",
-        "invalidPin": "Code incorrect",
-        "loginFailed": "Échec de la connexion. Veuillez réessayer."
-      },
+    "loginButton": "Se connecter",
+    "footer": "The Small POS",
+    "enterWithoutPin": "Entrer sans PIN",
+    "noPinWarning": "Aucun PIN défini. Vous pouvez en définir un dans les Paramètres après connexion.",
+    "pinResetRequired": "Réinitialisation du PIN requise. Veuillez définir un nouveau PIN pour continuer.",
+    "errors": {
+      "enterPin": "Veuillez saisir votre PIN",
+      "invalidPin": "Code incorrect",
+      "loginFailed": "Échec de la connexion. Veuillez réessayer."
+    },
     "backspace": "Retour arrière"
   },
   "system": {
@@ -4392,5 +4403,33 @@
     "tryRetry": "Cliquez sur le bouton « Réessayer » pour réessayer",
     "refreshPage": "Rafraîchissez la page pour redémarrer l'application",
     "contactSupport": "Si le problème persiste, contactez le support"
+  },
+  "splitPayment": {
+    "title": "Split Payment",
+    "orderTotal": "Order Total",
+    "byAmount": "By Amount",
+    "byItems": "By Items",
+    "person": "Person",
+    "halfHalf": "50 / 50",
+    "threeWay": "3-Way Equal",
+    "custom": "Custom",
+    "addPerson": "Add Person",
+    "removePerson": "Remove person",
+    "remaining": "Remaining",
+    "total": "Total",
+    "assigned": "Assigned",
+    "cash": "Cash",
+    "card": "Card",
+    "orderItems": "Order Items",
+    "people": "People",
+    "unassigned": "-- Unassigned --",
+    "unassignedWarning": "{{count}} item(s) not assigned",
+    "noItems": "No items assigned",
+    "receiptCombined": "Combined",
+    "receiptIndividual": "Individual",
+    "confirm": "Confirm Split",
+    "processing": "Processing...",
+    "success": "Split payment completed successfully",
+    "failed": "Split payment failed. Please try again."
   }
 }

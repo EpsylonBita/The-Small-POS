@@ -1204,7 +1204,8 @@
       "reconcileDrawer": "Kassenlade abgleichen",
       "addExpense": "Ausgabe hinzufügen",
       "viewExpenses": "Ausgaben anzeigen",
-      "addNote": "Anmerkung hinzufügen"
+      "addNote": "Anmerkung hinzufügen",
+      "completeZReport": "Complete Z Report"
     },
     "labels": {
       "active": "Aktiv",
@@ -1226,7 +1227,9 @@
       "cashDifferenceDetected": "Kassendifferenz festgestellt: {{amount}}",
       "shiftRequired": "Bitte starten Sie zuerst eine Schicht",
       "activeShiftExists": "Es gibt bereits eine aktive Schicht",
-      "noActiveShift": "Keine aktive Schicht gefunden"
+      "noActiveShift": "Keine aktive Schicht gefunden",
+      "pendingZReportTitle": "Previous day still needs a Z Report",
+      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it."
     },
     "monitoring": {
       "title": "Schichtüberwachung",
@@ -2091,7 +2094,9 @@
         "transient": "Vorübergehend",
         "permanent": "Permanent",
         "unknown": "Unbekannt"
-      }
+      },
+      "recoveryTitle": "Recovery in progress",
+      "recoveryDetail": "This queue item is retryable and will be reprocessed automatically."
     },
     "system": {
       "syncBacklog": "Sync-Rückstand",
@@ -2279,7 +2284,8 @@
       "cardSuccess": "Kartenzahlung erfolgreich!",
       "cardFailed": "Kartenzahlung fehlgeschlagen. Bitte versuchen Sie es erneut.",
       "loadingMethods": "Zahlungsmethoden werden geladen",
-      "loadingMethodsHint": "Terminal-Zahlungskonfiguration wird geprüft..."
+      "loadingMethodsHint": "Terminal-Zahlungskonfiguration wird geprüft...",
+      "splitSimple": "SPLIT"
     },
     "customerSearch": {
       "title": "Kunde suchen",
@@ -2524,7 +2530,11 @@
       "driverStarting": "Startbetrag",
       "driverReturns": "Rückgaben",
       "driverTakes": "Entnahmen",
-      "driverRole": "Fahrer"
+      "driverRole": "Fahrer",
+      "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
+      "posLoginDisabled": "This staff member is not allowed to log in on POS.",
+      "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
+      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first."
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -2627,7 +2637,8 @@
       "submitFailed": "Fehlgeschlagen: {{error}}",
       "unknownError": "Unbekannter Fehler",
       "submissionFailed": "Einreichung fehlgeschlagen",
-      "close": "Schließen"
+      "close": "Schließen",
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
     },
     "expense": {
       "title": "Ausgabe erfassen",
@@ -4392,5 +4403,33 @@
     "tryRetry": "Klicken Sie auf „Erneut versuchen“, um es nochmals zu probieren",
     "refreshPage": "Aktualisieren Sie die Seite, um die Anwendung neu zu starten",
     "contactSupport": "Wenn das Problem weiterhin besteht, wenden Sie sich an den Support"
+  },
+  "splitPayment": {
+    "title": "Split Payment",
+    "orderTotal": "Order Total",
+    "byAmount": "By Amount",
+    "byItems": "By Items",
+    "person": "Person",
+    "halfHalf": "50 / 50",
+    "threeWay": "3-Way Equal",
+    "custom": "Custom",
+    "addPerson": "Add Person",
+    "removePerson": "Remove person",
+    "remaining": "Remaining",
+    "total": "Total",
+    "assigned": "Assigned",
+    "cash": "Cash",
+    "card": "Card",
+    "orderItems": "Order Items",
+    "people": "People",
+    "unassigned": "-- Unassigned --",
+    "unassignedWarning": "{{count}} item(s) not assigned",
+    "noItems": "No items assigned",
+    "receiptCombined": "Combined",
+    "receiptIndividual": "Individual",
+    "confirm": "Confirm Split",
+    "processing": "Processing...",
+    "success": "Split payment completed successfully",
+    "failed": "Split payment failed. Please try again."
   }
 }

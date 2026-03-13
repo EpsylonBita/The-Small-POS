@@ -1204,7 +1204,8 @@
       "reconcileDrawer": "Riconcilia cassetto",
       "addExpense": "Aggiungi spesa",
       "viewExpenses": "Visualizza spese",
-      "addNote": "Aggiungi nota"
+      "addNote": "Aggiungi nota",
+      "completeZReport": "Complete Z Report"
     },
     "labels": {
       "active": "Attivo",
@@ -1226,7 +1227,9 @@
       "cashDifferenceDetected": "Differenza cassa rilevata: {{amount}}",
       "shiftRequired": "Inizia prima un turno",
       "activeShiftExists": "Esiste già un turno attivo",
-      "noActiveShift": "Nessun turno attivo trovato"
+      "noActiveShift": "Nessun turno attivo trovato",
+      "pendingZReportTitle": "Previous day still needs a Z Report",
+      "pendingZReportDetails": "The business day for {{date}} was checked out but not closed locally yet. You can finish the Z Report now or start the next shift and come back to it."
     },
     "monitoring": {
       "title": "Monitoraggio turno",
@@ -2091,7 +2094,9 @@
         "transient": "Transient",
         "permanent": "Permanent",
         "unknown": "Unknown"
-      }
+      },
+      "recoveryTitle": "Recovery in progress",
+      "recoveryDetail": "This queue item is retryable and will be reprocessed automatically."
     },
     "system": {
       "syncBacklog": "Arretrato sincronizzazione",
@@ -2279,7 +2284,8 @@
       "cardSuccess": "Pagamento con carta riuscito!",
       "cardFailed": "Pagamento con carta non riuscito. Riprovare.",
       "loadingMethods": "Caricamento metodi di pagamento",
-      "loadingMethodsHint": "Verifica configurazione pagamento del terminale..."
+      "loadingMethodsHint": "Verifica configurazione pagamento del terminale...",
+      "splitSimple": "SPLIT"
     },
     "customerSearch": {
       "title": "Cerca cliente",
@@ -2524,7 +2530,11 @@
       "driverStarting": "Iniziale",
       "driverReturns": "Restituisce",
       "driverTakes": "Preleva",
-      "driverRole": "Fattorino"
+      "driverRole": "Fattorino",
+      "pinNotConfigured": "No POS PIN is configured for this staff member. Please set it in Admin first.",
+      "posLoginDisabled": "This staff member is not allowed to log in on POS.",
+      "staffAuthServerUpgradeRequired": "This POS is connected to an older Admin deployment that does not send staff PIN auth data yet. Deploy the latest Admin and reopen POS.",
+      "staffAuthUnavailable": "Staff auth data is not available offline yet. Open the staff list while online first."
     },
     "zReport": {
       "title": "Z-Report - {{date}}",
@@ -2627,7 +2637,8 @@
       "submitFailed": "Non riuscito: {{error}}",
       "unknownError": "Errore sconosciuto",
       "submissionFailed": "Invio non riuscito",
-      "close": "Chiudi"
+      "close": "Chiudi",
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
     },
     "expense": {
       "title": "Registra spesa",
@@ -4392,5 +4403,33 @@
     "tryRetry": "Fai clic sul pulsante \"Riprova\" per tentare di nuovo",
     "refreshPage": "Aggiorna la pagina per riavviare l'applicazione",
     "contactSupport": "Se il problema persiste, contatta il supporto"
+  },
+  "splitPayment": {
+    "title": "Split Payment",
+    "orderTotal": "Order Total",
+    "byAmount": "By Amount",
+    "byItems": "By Items",
+    "person": "Person",
+    "halfHalf": "50 / 50",
+    "threeWay": "3-Way Equal",
+    "custom": "Custom",
+    "addPerson": "Add Person",
+    "removePerson": "Remove person",
+    "remaining": "Remaining",
+    "total": "Total",
+    "assigned": "Assigned",
+    "cash": "Cash",
+    "card": "Card",
+    "orderItems": "Order Items",
+    "people": "People",
+    "unassigned": "-- Unassigned --",
+    "unassignedWarning": "{{count}} item(s) not assigned",
+    "noItems": "No items assigned",
+    "receiptCombined": "Combined",
+    "receiptIndividual": "Individual",
+    "confirm": "Confirm Split",
+    "processing": "Processing...",
+    "success": "Split payment completed successfully",
+    "failed": "Split payment failed. Please try again."
   }
 }
