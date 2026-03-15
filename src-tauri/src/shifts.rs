@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{storage, zreport};
+use crate::{business_day, order_ownership, storage, zreport};
 
 // ---------------------------------------------------------------------------
 // Open shift
@@ -262,6 +262,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let shift_terminal_id = shift_terminal_id.unwrap_or_default();
 
     let now = Utc::now().to_rfc3339();
+    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
 
     // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
     // that no order/payment can be inserted between the aggregate SELECTs and the
@@ -272,6 +273,12 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let result = (|| -> Result<(f64, f64), String> {
         #[allow(clippy::needless_late_init)]
         let expected: f64;
+
+        order_ownership::repair_historical_pickup_financial_attribution(
+            &conn,
+            &shift_branch_id,
+            &now,
+        )?;
 
         if role_type == "cashier" || role_type == "manager" {
             // Transfer active driver shifts to the next cashier BEFORE calculating expected.
@@ -306,39 +313,52 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             // This catches any missed incremental updates during the shift.
             let reconciled_cash_sales: f64 = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(op.amount), 0)
-                 FROM order_payments op
-                 JOIN orders o ON o.id = op.order_id
-                 WHERE o.staff_shift_id = ?1
+                    &format!(
+                        "SELECT COALESCE(SUM(op.amount), 0)
+                 FROM orders o
+                 LEFT JOIN order_payments op ON op.order_id = o.id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'cash'
                    AND op.status = 'completed'
-                   AND COALESCE(o.is_ghost, 0) = 0",
-                    params![shift_id],
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+                    ),
+                    params![shift_id, shift_check_in_time, now],
                     |row| row.get(0),
                 )
                 .unwrap_or(0.0);
             let reconciled_card_sales: f64 = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(op.amount), 0)
-                 FROM order_payments op
-                 JOIN orders o ON o.id = op.order_id
-                 WHERE o.staff_shift_id = ?1
+                    &format!(
+                        "SELECT COALESCE(SUM(op.amount), 0)
+                 FROM orders o
+                 LEFT JOIN order_payments op ON op.order_id = o.id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND op.method = 'card'
                    AND op.status = 'completed'
-                   AND COALESCE(o.is_ghost, 0) = 0",
-                    params![shift_id],
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+                    ),
+                    params![shift_id, shift_check_in_time, now],
                     |row| row.get(0),
                 )
                 .unwrap_or(0.0);
             let reconciled_refunds: f64 = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(pa.amount), 0)
-                 FROM payment_adjustments pa
-                 JOIN orders o ON o.id = pa.order_id
-                 WHERE o.staff_shift_id = ?1
+                    &format!(
+                        "SELECT COALESCE(SUM(pa.amount), 0)
+                 FROM orders o
+                 JOIN payment_adjustments pa ON pa.order_id = o.id
+                 LEFT JOIN order_payments op ON op.id = pa.payment_id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND pa.adjustment_type = 'refund'
-                   AND COALESCE(o.is_ghost, 0) = 0",
-                    params![shift_id],
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+                    ),
+                    params![shift_id, shift_check_in_time, now],
                     |row| row.get(0),
                 )
                 .unwrap_or(0.0);
@@ -436,10 +456,21 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 - cashier_payout;
         } else {
             // Driver / server / kitchen: expected = opening + cash collected - expenses
-            let cash_collected = compute_shift_cash_collected(&conn, &shift_id, &role_type)?;
+            let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
+                &conn,
+                &shift_id,
+                &role_type,
+                Some(shift_check_in_time.as_str()),
+                Some(now.as_str()),
+            )?;
 
             // Sum expenses for this shift
-            let expenses = compute_shift_expenses_total(&conn, &shift_id);
+            let expenses = compute_shift_expenses_total_in_window(
+                &conn,
+                &shift_id,
+                Some(shift_check_in_time.as_str()),
+                Some(now.as_str()),
+            );
             let _legacy_payment_amount = payment_amount.unwrap_or(0.0);
             expected = opening_cash + cash_collected - expenses;
         }
@@ -497,17 +528,21 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         // Compute staff earnings for this shift (all role types)
         let (order_count, total_sales, shift_cash_sales, shift_card_sales): (i64, f64, f64, f64) =
             conn.query_row(
-                "SELECT
+                &format!(
+                    "SELECT
                     COUNT(DISTINCT o.id),
                     COALESCE(SUM(o.total_amount), 0),
                     COALESCE(SUM(CASE WHEN op.method = 'cash' THEN op.amount ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN op.method = 'card' THEN op.amount ELSE 0 END), 0)
                  FROM orders o
                  LEFT JOIN order_payments op ON op.order_id = o.id AND op.status = 'completed'
-                 WHERE o.staff_shift_id = ?1
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                    AND COALESCE(o.is_ghost, 0) = 0
-                   AND o.status NOT IN ('cancelled', 'canceled')",
-                params![shift_id],
+                   AND o.status NOT IN ('cancelled', 'canceled')
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+                ),
+                params![shift_id, shift_check_in_time, now],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap_or((0, 0.0, 0.0, 0.0));
@@ -666,6 +701,7 @@ pub fn get_active_cashier_by_terminal(
 /// Get a summary of a shift: totals, payment breakdown, expenses, variance.
 pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
 
     // --- 1. Fetch the shift ---
     let (role_type, branch_id, terminal_id, check_in_time, shift): (
@@ -751,6 +787,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         )
         .unwrap_or(Value::Null);
 
+    let shift_end_param = cashier_check_out_time;
+
     // --- 3. Sales breakdown by order_type × payment_method ---
     let breakdown_sql = format!(
         "SELECT COALESCE(o.order_type, 'dine-in'), op.method,
@@ -762,6 +800,8 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            {}
+           AND {order_financial_expr} >= ?2
+           AND (?3 IS NULL OR {order_financial_expr} <= ?3)
          GROUP BY COALESCE(o.order_type, 'dine-in'), op.method",
         role_order_type_filter_sql(&role_type, "o")
     );
@@ -770,7 +810,7 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
         .map_err(|e| format!("prepare breakdown: {e}"))?;
 
     let rows: Vec<(String, String, i64, f64)> = breakdown_stmt
-        .query_map(params![shift_id], |row| {
+        .query_map(params![shift_id, check_in_time, shift_end_param], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -855,15 +895,19 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     // --- 5. Cash refunds ---
     let cash_refunds: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(pa.amount), 0)
+            &format!(
+                "SELECT COALESCE(SUM(pa.amount), 0)
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND pa.adjustment_type = 'refund'
                AND op.method = 'cash'
-               AND COALESCE(o.is_ghost, 0) = 0",
-            params![shift_id],
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND {order_financial_expr} >= ?2
+               AND (?3 IS NULL OR {order_financial_expr} <= ?3)"
+            ),
+            params![shift_id, check_in_time, shift_end_param],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
@@ -1265,13 +1309,26 @@ fn find_active_cashier_assignment(
     Ok(assignment)
 }
 
-fn compute_shift_expenses_total(conn: &rusqlite::Connection, shift_id: &str) -> f64 {
+fn compute_shift_expenses_total_in_window(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    window_start: Option<&str>,
+    window_end: Option<&str>,
+) -> f64 {
     conn.query_row(
-        "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses WHERE staff_shift_id = ?1",
-        params![shift_id],
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM shift_expenses
+         WHERE staff_shift_id = ?1
+           AND (?2 IS NULL OR created_at >= ?2)
+           AND (?3 IS NULL OR created_at <= ?3)",
+        params![shift_id, window_start, window_end],
         |row| row.get(0),
     )
     .unwrap_or(0.0)
+}
+
+fn compute_shift_expenses_total(conn: &rusqlite::Connection, shift_id: &str) -> f64 {
+    compute_shift_expenses_total_in_window(conn, shift_id, None, None)
 }
 
 fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
@@ -1282,11 +1339,14 @@ fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
     }
 }
 
-fn compute_shift_payment_totals(
+fn compute_shift_payment_totals_in_window(
     conn: &rusqlite::Connection,
     shift_id: &str,
     role_type: &str,
+    window_start: Option<&str>,
+    window_end: Option<&str>,
 ) -> Result<(i64, f64, f64, f64), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
     let sql = format!(
         "SELECT
             COUNT(DISTINCT o.id),
@@ -1298,13 +1358,23 @@ fn compute_shift_payment_totals(
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-           {}",
+           {}
+           AND (?2 IS NULL OR {financial_expr} >= ?2)
+           AND (?3 IS NULL OR {financial_expr} <= ?3)",
         role_order_type_filter_sql(role_type, "o")
     );
-    conn.query_row(&sql, params![shift_id], |row| {
+    conn.query_row(&sql, params![shift_id, window_start, window_end], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })
     .map_err(|e| format!("query shift payment totals: {e}"))
+}
+
+fn compute_shift_payment_totals(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    role_type: &str,
+) -> Result<(i64, f64, f64, f64), String> {
+    compute_shift_payment_totals_in_window(conn, shift_id, role_type, None, None)
 }
 
 fn compute_shift_payment_totals_for_order(
@@ -1686,8 +1756,19 @@ pub(crate) fn build_cashier_staff_checkout_rows(
     ) in rows
     {
         let (order_count, cash_collected, card_amount, total_amount) =
-            compute_shift_payment_totals(conn, &staff_shift_id, &role_type)?;
-        let expenses = compute_shift_expenses_total(conn, &staff_shift_id);
+            compute_shift_payment_totals_in_window(
+                conn,
+                &staff_shift_id,
+                &role_type,
+                Some(check_in_time.as_str()),
+                check_out_time.as_deref(),
+            )?;
+        let expenses = compute_shift_expenses_total_in_window(
+            conn,
+            &staff_shift_id,
+            Some(check_in_time.as_str()),
+            check_out_time.as_deref(),
+        );
         let amount_to_return = opening_cash_amount + cash_collected - expenses;
         let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
 
@@ -1753,8 +1834,19 @@ fn build_inherited_cash_staff_rows(
     let mut result = Vec::new();
     for (staff_shift_id, staff_id, staff_name, opening_amount, check_in_time) in rows {
         let (_, cash_collected, card_amount, total_amount) =
-            compute_shift_payment_totals(conn, &staff_shift_id, role_type)?;
-        let expenses = compute_shift_expenses_total(conn, &staff_shift_id);
+            compute_shift_payment_totals_in_window(
+                conn,
+                &staff_shift_id,
+                role_type,
+                Some(check_in_time.as_str()),
+                None,
+            )?;
+        let expenses = compute_shift_expenses_total_in_window(
+            conn,
+            &staff_shift_id,
+            Some(check_in_time.as_str()),
+            None,
+        );
         let net_cash_amount = opening_amount + cash_collected - expenses;
         let display_name = staff_name.clone().unwrap_or_else(|| staff_id.clone());
 

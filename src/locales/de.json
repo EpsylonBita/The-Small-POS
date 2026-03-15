@@ -2630,15 +2630,19 @@
       "exportStaffCSV": "Personal CSV exportieren",
       "print": "Drucken",
       "submitToAdmin": "An Admin senden",
+      "completePendingLocalSubmit": "Vortag lokal abschließen",
       "submitting": "Wird eingereicht…",
       "submitSuccess": "Erfolgreich eingereicht. Tagesabschluss wird durchgeführt und abgemeldet…",
       "submitSuccessQueued": "Tag lokal abgeschlossen. Z-Report wurde für den Admin-Sync in die Warteschlange gestellt. Abmeldung…",
+      "pendingLocalSubmitQueued": "Der vorherige Tag wurde lokal abgeschlossen. Der Z-Report wurde für den Admin-Sync in die Warteschlange gestellt. Abmeldung…",
       "submitSuccessSynced": "Tag lokal abgeschlossen. Z-Report wurde bereits mit dem Admin synchronisiert. Abmeldung…",
       "submitFailed": "Fehlgeschlagen: {{error}}",
       "unknownError": "Unbekannter Fehler",
       "submissionFailed": "Einreichung fehlgeschlagen",
       "close": "Schließen",
-      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
+      "pendingLocalSubmitTitle": "Der vorherige Geschäftstag braucht noch einen lokalen Z-Abschluss",
+      "pendingLocalSubmitHelp": "Nutzen Sie die Hauptaktion unten, um den vorherigen Tag lokal abzuschließen. Das Datum bleibt gesperrt, damit nicht der falsche Geschäftstag übermittelt wird."
     },
     "expense": {
       "title": "Ausgabe erfassen",

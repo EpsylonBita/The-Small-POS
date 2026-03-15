@@ -49,6 +49,30 @@ struct OrderUpdateItemsPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OrderUpdateFinancialsPayload {
+    #[serde(alias = "order_id")]
+    #[serde(alias = "id")]
+    #[serde(alias = "supabaseId")]
+    #[serde(alias = "supabase_id")]
+    order_id: String,
+    #[serde(alias = "total_amount")]
+    total_amount: f64,
+    #[serde(default)]
+    subtotal: Option<f64>,
+    #[serde(default, alias = "discount_amount")]
+    discount_amount: Option<f64>,
+    #[serde(default, alias = "discount_percentage")]
+    discount_percentage: Option<f64>,
+    #[serde(default, alias = "tax_amount")]
+    tax_amount: Option<f64>,
+    #[serde(default, alias = "delivery_fee")]
+    delivery_fee: Option<f64>,
+    #[serde(default, alias = "tip_amount")]
+    tip_amount: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OrderDeletePayload {
     #[serde(alias = "order_id")]
     #[serde(alias = "id")]
@@ -169,6 +193,22 @@ fn parse_order_delete_payload(
         return Err("Missing orderId".into());
     }
     Ok(payload)
+}
+
+fn parse_order_update_financials_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<OrderUpdateFinancialsPayload, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let mut parsed: OrderUpdateFinancialsPayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid order financials payload: {e}"))?;
+    parsed.order_id = parsed.order_id.trim().to_string();
+    if parsed.order_id.is_empty() {
+        return Err("Missing orderId".into());
+    }
+    if !parsed.total_amount.is_finite() || parsed.total_amount < 0.0 {
+        return Err("totalAmount must be a non-negative number".into());
+    }
+    Ok(parsed)
 }
 
 fn resolve_driver_display_name(conn: &rusqlite::Connection, driver_id: &str) -> Option<String> {
@@ -442,6 +482,145 @@ pub async fn order_update_items(
 }
 
 #[tauri::command]
+pub async fn order_update_financials(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_order_update_financials_payload(arg0)?;
+    let now = Utc::now().to_rfc3339();
+
+    let actual_order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?
+    };
+
+    let discount_amount = payload.discount_amount.unwrap_or(0.0).max(0.0);
+    let discount_percentage = payload.discount_percentage.unwrap_or(0.0).max(0.0);
+    let tax_amount = payload.tax_amount.unwrap_or(0.0).max(0.0);
+    let delivery_fee = payload.delivery_fee.unwrap_or(0.0).max(0.0);
+    let tip_amount = payload.tip_amount.unwrap_or(0.0).max(0.0);
+    let subtotal = payload
+        .subtotal
+        .unwrap_or_else(|| {
+            (payload.total_amount + discount_amount - tax_amount - delivery_fee - tip_amount).max(0.0)
+        })
+        .max(0.0);
+
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (current_payment_status, current_payment_method): (String, String) = conn
+            .query_row(
+                "SELECT COALESCE(payment_status, 'pending'), COALESCE(payment_method, '')
+                 FROM orders
+                 WHERE id = ?1",
+                rusqlite::params![actual_order_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("load existing financial state: {e}"))?;
+
+        let total_paid: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0)
+                 FROM order_payments
+                 WHERE order_id = ?1 AND status = 'completed'",
+                rusqlite::params![actual_order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+
+        let completed_payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM order_payments
+                 WHERE order_id = ?1 AND status = 'completed'",
+                rusqlite::params![actual_order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let next_payment_status = if total_paid >= payload.total_amount - 0.01 {
+            "paid".to_string()
+        } else if total_paid > 0.009 {
+            "partially_paid".to_string()
+        } else {
+            current_payment_status
+        };
+
+        let next_payment_method = if completed_payment_count > 1
+            || current_payment_method.eq_ignore_ascii_case("split")
+            || current_payment_method.eq_ignore_ascii_case("mixed")
+        {
+            "split".to_string()
+        } else {
+            current_payment_method
+        };
+
+        conn.execute(
+            "UPDATE orders
+             SET total_amount = ?1,
+                 subtotal = ?2,
+                 discount_amount = ?3,
+                 discount_percentage = ?4,
+                 tax_amount = ?5,
+                 delivery_fee = ?6,
+                 tip_amount = ?7,
+                 payment_status = ?8,
+                 payment_method = ?9,
+                 sync_status = 'pending',
+                 updated_at = ?10
+             WHERE id = ?11",
+            rusqlite::params![
+                payload.total_amount,
+                subtotal,
+                discount_amount,
+                discount_percentage,
+                tax_amount,
+                delivery_fee,
+                tip_amount,
+                next_payment_status,
+                next_payment_method,
+                now,
+                actual_order_id,
+            ],
+        )
+        .map_err(|e| format!("update order financials: {e}"))?;
+
+        let sync_payload = serde_json::json!({
+            "orderId": actual_order_id,
+            "totalAmount": payload.total_amount,
+            "subtotal": subtotal,
+            "discountAmount": discount_amount,
+            "discountPercentage": discount_percentage,
+            "taxAmount": tax_amount,
+            "deliveryFee": delivery_fee,
+            "tipAmount": tip_amount,
+            "paymentStatus": next_payment_status,
+            "paymentMethod": next_payment_method,
+        });
+        let idem = format!(
+            "order:update-financials:{}:{}",
+            actual_order_id,
+            uuid::Uuid::new_v4()
+        );
+        let _ = conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+             VALUES ('order', ?1, 'update', ?2, ?3)",
+            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
+        );
+    }
+
+    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let _ = app.emit("order_realtime_update", order_json);
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": actual_order_id,
+    }))
+}
+
+#[tauri::command]
 pub async fn order_delete(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
@@ -702,7 +881,10 @@ pub async fn order_save_from_remote(
         let _ = app.emit("order_created", order_json);
     }
 
-    if !is_ghost {
+    // Skip auto-print for ghost orders and pending/split payment orders (receipt
+    // will be printed after split payments are individually recorded).
+    let skip_auto_print = is_ghost || payment_method.as_deref() == Some("pending");
+    if !skip_auto_print {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
             if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None) {
                 tracing::warn!(
@@ -1247,6 +1429,14 @@ pub async fn order_update_type(
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     let mut emitted_status: Option<String> = None;
     if order_type == "pickup" {
+        let acting_terminal_id = db::get_setting(&conn, "terminal", "terminal_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                storage::get_credential("terminal_id")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
         let current_status: String = conn
             .query_row(
                 "SELECT COALESCE(status, 'pending')
@@ -1256,7 +1446,48 @@ pub async fn order_update_type(
                 |row| row.get(0),
             )
             .map_err(|e| format!("load pickup conversion context: {e}"))?;
-        order_ownership::assign_order_to_cashier_pickup(&conn, &order_id, &now)?;
+        order_ownership::assign_order_to_cashier_pickup(
+            &conn,
+            &order_id,
+            acting_terminal_id.as_deref(),
+            &now,
+        )?;
+
+        if let Some(removed_earning) =
+            order_ownership::remove_driver_earning_for_order(&conn, &order_id)?
+        {
+            let _ = conn.execute(
+                "DELETE FROM sync_queue
+                 WHERE entity_type IN ('driver_earning', 'driver_earnings')
+                   AND entity_id = ?1
+                   AND status != 'synced'",
+                rusqlite::params![removed_earning.id.as_str()],
+            );
+
+            if removed_earning.supabase_id.is_some() {
+                let driver_sync_payload = serde_json::json!({
+                    "id": removed_earning.id,
+                    "supabase_id": removed_earning.supabase_id,
+                    "order_id": order_id,
+                    "deleted_at": now,
+                });
+                let driver_sync_idem = format!(
+                    "driver_earning:delete:{}:{}",
+                    order_id,
+                    uuid::Uuid::new_v4()
+                );
+                let _ = conn.execute(
+                    "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+                     VALUES ('driver_earning', ?1, 'delete', ?2, ?3)",
+                    rusqlite::params![
+                        removed_earning.id,
+                        driver_sync_payload.to_string(),
+                        driver_sync_idem
+                    ],
+                );
+            }
+        }
+
         emitted_status = Some(if order_ownership::is_final_order_status(&current_status) {
             current_status
         } else if current_status.eq_ignore_ascii_case("out_for_delivery") {

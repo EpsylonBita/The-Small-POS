@@ -2630,15 +2630,19 @@
       "exportStaffCSV": "Esporta personale CSV",
       "print": "Stampa",
       "submitToAdmin": "Invia all'amministratore",
+      "completePendingLocalSubmit": "Completa localmente il giorno precedente",
       "submitting": "Invio…",
       "submitSuccess": "Inviato con successo. Chiusura giornata e disconnessione…",
       "submitSuccessQueued": "Day closed locally. Z-report queued for admin sync. Logging out…",
+      "pendingLocalSubmitQueued": "Il giorno precedente è stato chiuso localmente. Il report Z è in coda per la sincronizzazione admin. Disconnessione…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Non riuscito: {{error}}",
       "unknownError": "Errore sconosciuto",
       "submissionFailed": "Invio non riuscito",
       "close": "Chiudi",
-      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
+      "pendingLocalSubmitTitle": "Il giorno lavorativo precedente richiede ancora la chiusura Z locale",
+      "pendingLocalSubmitHelp": "Usa l'azione principale qui sotto per completare localmente il giorno precedente. La data resta bloccata per evitare l'invio del giorno operativo sbagliato."
     },
     "expense": {
       "title": "Registra spesa",

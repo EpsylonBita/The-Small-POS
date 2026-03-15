@@ -488,6 +488,17 @@ export interface CreateOrderPayload {
   driver_id?: string;
 }
 
+export interface OrderFinancialsUpdateParams {
+  orderId: string;
+  totalAmount: number;
+  subtotal?: number;
+  discountAmount?: number;
+  discountPercentage?: number;
+  taxAmount?: number;
+  deliveryFee?: number;
+  tipAmount?: number;
+}
+
 // -- Sync --------------------------------------------------------------------
 
 export interface SyncStatus {
@@ -560,11 +571,21 @@ export interface RecordPaymentParams {
   orderId: string;
   method: 'cash' | 'card' | 'other';
   amount: number;
+  discountAmount?: number;
   cashReceived?: number;
   changeGiven?: number;
   transactionRef?: string;
+  paymentOrigin?: 'manual' | 'terminal';
+  terminalApproved?: boolean;
+  terminalDeviceId?: string;
   staffId?: string;
   staffShiftId?: string;
+  items?: Array<{
+    itemIndex: number;
+    itemName?: string;
+    itemQuantity?: number;
+    itemAmount: number;
+  }>;
 }
 
 // -- Shifts ------------------------------------------------------------------
@@ -751,6 +772,7 @@ export interface PlatformBridge {
     create(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
     updateStatus(orderId: string, status: string): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
+    updateFinancials(payload: OrderFinancialsUpdateParams): Promise<IpcResult>;
     delete(orderId: string): Promise<IpcResult>;
     saveFromRemote(order: any): Promise<IpcResult>;
     saveForRetry(order: any): Promise<IpcResult>;
@@ -1251,6 +1273,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'order:create': 'orders.create',
   'order:update-status': 'orders.updateStatus',
   'order:update-items': 'orders.updateItems',
+  'order:update-financials': 'orders.updateFinancials',
   'order:delete': 'orders.delete',
   'order:save-from-remote': 'orders.saveFromRemote',
   'order:save-for-retry': 'orders.saveForRetry',
@@ -1700,6 +1723,7 @@ export class TauriBridge implements PlatformBridge {
     create: (p: CreateOrderPayload) => this.inv('order:create', p),
     updateStatus: (id: string, s: string) => this.inv('order:update-status', id, s),
     updateItems: (id: string, items: OrderItem[]) => this.inv('order:update-items', id, items),
+    updateFinancials: (payload: OrderFinancialsUpdateParams) => this.inv('order:update-financials', payload),
     delete: (id: string) => this.inv('order:delete', id),
     saveFromRemote: (o: any) => this.inv('order:save-from-remote', o),
     saveForRetry: (o: any) => this.inv('order:save-for-retry', o),

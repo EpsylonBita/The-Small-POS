@@ -88,6 +88,8 @@ interface MenuCartProps {
   // Manual item props
   onAddManualItem?: (price: number, name?: string) => void;
   onLinePriceChange?: (itemId: string | number, newUnitPrice: number) => void;
+  ghostModeFeatureEnabled?: boolean;
+  ghostModeArmed?: boolean;
 }
 
 export const MenuCart: React.FC<MenuCartProps> = ({
@@ -118,6 +120,8 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   matchedOfferNames = [],
   onAddManualItem,
   onLinePriceChange,
+  ghostModeFeatureEnabled = false,
+  ghostModeArmed = false,
 }) => {
   const { t } = useTranslation();
 
@@ -606,9 +610,27 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             </button>
           )}
         </div>
+        {ghostModeArmed && (
+          <div className="px-4 pb-3">
+            <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-700 dark:text-amber-200">
+              {t(
+                'menu.cart.ghostModeBanner',
+                'Ghost order armed. This cart will print only, stay hidden in POS, and be saved as a ghost reference order.'
+              )}
+            </div>
+          </div>
+        )}
         {/* Manual item inline form */}
         {showManualInput && onAddManualItem && (
           <div className={`px-4 pb-3 space-y-2`}>
+            {ghostModeFeatureEnabled && !ghostModeArmed && (
+              <p className="text-[11px] liquid-glass-modal-text-muted">
+                {t(
+                  'menu.cart.ghostModeHint',
+                  'Enter name X and price 1 to arm ghost mode for the current cart only.'
+                )}
+              </p>
+            )}
             <div className="flex gap-2">
               <input
                 type="text"

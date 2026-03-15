@@ -173,7 +173,8 @@ const isPendingExternalOrder = (order: Order): boolean => {
   );
 };
 
-const isGhostOrder = (order: Order): boolean => {
+const isGhostOrder = (order?: Partial<Order> | null): boolean => {
+  if (!order) return false;
   const value: unknown = order.is_ghost;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value === 1;
@@ -924,7 +925,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
         get()._invalidateCache();
         get()._setLoading(operation, false);
 
-        if (newOrder.id) {
+        if (newOrder.id && !isGhostOrder(orderData)) {
           pollFiscalReceiptStatus(newOrder.id, { timeoutMs: 30000, intervalMs: 2500 })
             .then((fiscalStatus) => {
               if (!fiscalStatus) {

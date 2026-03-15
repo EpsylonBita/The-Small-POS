@@ -1,13 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../contexts/theme-context';
 import { MenuModal } from '../components/modals/MenuModal';
+import { SplitPaymentModal } from '../components/modals/SplitPaymentModal';
+import type { SplitPaymentResult } from '../components/modals/SplitPaymentModal';
 import { AddCustomerModal } from '../components/modals/AddCustomerModal';
 import { CustomerSearchModal } from '../components/modals/CustomerSearchModal';
 import { CustomerInfoModal } from '../components/modals/CustomerInfoModal';
 import { OrderConflictBanner } from '../components/OrderConflictBanner';
 import { useOrderStore } from '../hooks/useOrderStore';
+import { useShift } from '../contexts/shift-context';
+import { useTerminalSettings } from '../hooks/useTerminalSettings';
+import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import toast from 'react-hot-toast';
 import { customerService } from '../services';
 import { NewOrderPageSkeleton } from '../components/skeletons/NewOrderPageSkeleton';
@@ -16,6 +21,11 @@ import { withTimeout, ErrorHandler, POSError } from '../../shared/utils/error-ha
 import { TIMING } from '../../shared/constants';
 import { useAcquiredModules } from '../hooks/useAcquiredModules';
 import { useFeatures } from '../hooks/useFeatures';
+import { ActivityTracker } from '../services/ActivityTracker';
+import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
+import type { SplitPaymentItem } from '../utils/splitPaymentItems';
+import { resolveDeliveryFee } from '../utils/delivery-fee';
+import { AlertTriangle } from 'lucide-react';
 import { getBridge } from '../../lib';
 
 interface Customer {
@@ -55,7 +65,10 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { conflicts } = useOrderStore();
+  const { conflicts, createOrder, silentRefresh } = useOrderStore();
+  const { staff, activeShift, isShiftActive } = useShift();
+  const { getSetting } = useTerminalSettings();
+  const { branchId, organizationId, terminalId } = useResolvedPosIdentity('branch+organization');
   const { isFeatureEnabled, isMobileWaiter } = useFeatures();
   const canCreateOrders = isFeatureEnabled('orderCreation');
 
@@ -75,8 +88,16 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   const [showCustomerInfoModal, setShowCustomerInfoModal] = useState(false);
   const [showAddCustomerModal, setShowAddCustomerModal] = useState(false);
   const [showMenuModal, setShowMenuModal] = useState(false);
+  const [splitPaymentData, setSplitPaymentData] = useState<{
+    orderId: string;
+    orderTotal: number;
+    items: SplitPaymentItem[];
+    isGhostOrder: boolean;
+  } | null>(null);
   const [selectedOrderType, setSelectedOrderType] = useState<"pickup" | "delivery" | null>(null);
   const [addCustomerMode, setAddCustomerMode] = useState<'new' | 'edit' | 'addAddress'>('new');
+  const [isProcessingOrder, setIsProcessingOrder] = useState(false);
+  const [taxRatePercentage, setTaxRatePercentage] = useState<number>(24);
 
   // Customer data states
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -106,6 +127,16 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   useEffect(() => {
     setTimeout(() => setIsInitializing(false), 0);
   }, []);
+
+  useEffect(() => {
+    const rawConfiguredRate = getSetting<number | string>('tax', 'tax_rate_percentage', 24);
+    const configuredRate = Number(rawConfiguredRate);
+    if (Number.isFinite(configuredRate) && configuredRate >= 0 && configuredRate <= 100) {
+      setTaxRatePercentage(configuredRate);
+    } else {
+      setTaxRatePercentage(24);
+    }
+  }, [getSetting]);
 
   // Handler for selecting order type
   const handleOrderTypeSelect = (type: "pickup" | "delivery") => {
@@ -339,6 +370,332 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setShowCustomerInfoModal(false);
     setShowMenuModal(true);
   };
+
+  const extractPaymentId = useCallback((result: any): string | undefined => {
+    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
+    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
+    return directId || dataId;
+  }, []);
+
+  const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
+    let receiptError: unknown = null;
+    try {
+      await bridge.payments.printReceipt(orderId);
+    } catch (error) {
+      receiptError = error;
+    }
+
+    if (isGhostOrder) {
+      if (receiptError) {
+        const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
+        (error as Error & { stage?: string }).stage = 'receipt';
+        throw error;
+      }
+      return;
+    }
+
+    let fiscalError: unknown = null;
+    try {
+      const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
+      if (fiscalResult?.skipped) {
+        fiscalError = null;
+      }
+    } catch (error) {
+      fiscalError = error;
+    }
+
+    if (receiptError) {
+      const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
+      (error as Error & { stage?: string }).stage = 'receipt';
+      throw error;
+    }
+
+    if (fiscalError) {
+      const error = fiscalError instanceof Error ? fiscalError : new Error('Fiscal print failed');
+      (error as Error & { stage?: string }).stage = 'fiscal';
+      throw error;
+    }
+  }, [bridge]);
+
+  const handleOrderComplete = useCallback(async (orderData: any): Promise<boolean> => {
+    setIsProcessingOrder(true);
+    const isSplitPayment = orderData.paymentData?.method === 'pending';
+    const isGhostOrder = orderData.is_ghost === true;
+    const ghostSource = isGhostOrder
+      ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_code_x_1')
+      : null;
+    const ghostMetadata = isGhostOrder ? (orderData.ghost_metadata ?? null) : null;
+
+    try {
+      const currentOrderType = (orderData.orderType || selectedOrderType || 'pickup') as 'pickup' | 'delivery';
+      const currentCustomer = orderData.customer || null;
+      const currentAddress = orderData.address || null;
+      const resolvedBranchId = branchId || staff?.branchId || null;
+
+      if (!resolvedBranchId || !organizationId) {
+        toast.error(t('orderFlow.missingContext', 'Missing branch or organization context'));
+        return false;
+      }
+
+      let deliveryAddress = null;
+      let deliveryFee = 0;
+      let deliveryZoneId = null;
+      let zoneName = null;
+      let estimatedDeliveryTime = null;
+      const effectiveDeliveryZoneInfo = orderData.deliveryZoneInfo ?? null;
+
+      if (currentOrderType === 'delivery' && currentAddress) {
+        const streetAddress = currentAddress.street_address || currentAddress.street || '';
+        const city = currentAddress.city || '';
+        const postalCode = currentAddress.postal_code || '';
+        const floorNumber = currentAddress.floor_number || currentAddress.floor || '';
+
+        deliveryAddress = [streetAddress, city].filter(Boolean).join(', ');
+        if (postalCode) {
+          deliveryAddress += ` ${postalCode}`;
+        }
+        if (floorNumber) {
+          deliveryAddress += `, Floor: ${floorNumber}`;
+        }
+
+        deliveryFee = Number(orderData.deliveryFee ?? resolveDeliveryFee(effectiveDeliveryZoneInfo));
+
+        if (effectiveDeliveryZoneInfo?.zone) {
+          deliveryZoneId = effectiveDeliveryZoneInfo.zone.id;
+          zoneName = effectiveDeliveryZoneInfo.zone.name;
+          estimatedDeliveryTime = effectiveDeliveryZoneInfo.zone.estimatedTime;
+        }
+      }
+
+      const discountPercentage = Number(orderData.discountPercentage || 0);
+      const discountAmount = Number(orderData.discountAmount || 0);
+      const subtotalAfterDiscount = Number(orderData.total || 0);
+      const tax = Math.round(subtotalAfterDiscount * (taxRatePercentage / 100) * 100) / 100;
+      const totalAmount = subtotalAfterDiscount + deliveryFee;
+
+      if (!isShiftActive) {
+        toast(t('orderFlow.noActiveShift', 'No active shift'), {
+          duration: 3000,
+          icon: <AlertTriangle className="w-4 h-4 text-white" />,
+          style: { background: '#f59e0b', color: 'white' },
+        });
+      }
+
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const normalizedItems = (orderData.items || []).map((item: any) => {
+        const rawMenuItemId = item.menuItemId || item.menu_item_id || item.id || null;
+        const normalizedMenuItemId =
+          typeof rawMenuItemId === 'string' && uuidRegex.test(rawMenuItemId.trim())
+            ? rawMenuItemId.trim()
+            : null;
+        const isManualItem =
+          item?.is_manual === true ||
+          String(rawMenuItemId || '').trim().toLowerCase() === 'manual';
+
+        return {
+          menu_item_id: isManualItem ? null : normalizedMenuItemId,
+          name: item.name || item.menu_item_name || null,
+          quantity: item.quantity,
+          price: item.price,
+          customizations: item.customizations || item.selectedIngredients || null,
+          notes: item.notes || item.special_instructions || null,
+          is_manual: isManualItem,
+        };
+      });
+      const invalidItems = normalizedItems.filter((item: any) => {
+        if (item?.is_manual === true) {
+          return false;
+        }
+        const id = typeof item.menu_item_id === 'string' ? item.menu_item_id.trim() : '';
+        return !uuidRegex.test(id);
+      });
+      if (invalidItems.length > 0) {
+        toast.error(
+          t(
+            'orderFlow.invalidCartItems',
+            'Order cannot be created because some cart items are not synced menu items. Sync menu and try again.',
+          ),
+        );
+        return false;
+      }
+
+      const resolvedTerminalId = terminalId || staff?.terminalId || await bridge.terminalConfig.getTerminalId();
+      if (!resolvedTerminalId) {
+        toast.error(t('orderFlow.missingContext', 'Missing branch or organization context'));
+        return false;
+      }
+
+      const activeCashier = await bridge.shifts.getActiveCashierByTerminal(resolvedBranchId, resolvedTerminalId);
+      if (!activeCashier) {
+        toast.error(t('orderFlow.noActiveCashierShift', 'Cannot create orders until a cashier opens the day.'));
+        return false;
+      }
+
+      const clientRequestId =
+        globalThis.crypto?.randomUUID?.() ??
+        `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+      const orderToCreate = {
+        customer_id: currentCustomer?.id !== 'pickup-customer' ? currentCustomer?.id : null,
+        clientRequestId,
+        items: normalizedItems,
+        branch_id: resolvedBranchId,
+        organization_id: organizationId,
+        total_amount: totalAmount,
+        subtotal: subtotalAfterDiscount,
+        tax,
+        delivery_fee: deliveryFee,
+        discount_percentage: discountPercentage,
+        discount_amount: discountAmount,
+        status: 'pending' as const,
+        payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        is_ghost: isGhostOrder,
+        ghost_source: ghostSource,
+        ghost_metadata: ghostMetadata,
+        delivery_address: deliveryAddress,
+        delivery_city: currentAddress?.city || null,
+        delivery_postal_code: currentAddress?.postal_code || null,
+        delivery_floor: currentAddress?.floor_number || currentAddress?.floor || null,
+        delivery_notes: currentAddress?.notes || currentAddress?.delivery_notes || null,
+        name_on_ringer: currentCustomer?.name_on_ringer || currentAddress?.name_on_ringer || null,
+        notes: orderData.notes || null,
+        driver_id: undefined,
+        delivery_zone_id: deliveryZoneId,
+        zone_name: zoneName,
+        estimated_delivery_time: estimatedDeliveryTime,
+        delivery_zone_validation: effectiveDeliveryZoneInfo ? JSON.stringify({
+          deliveryAvailable: effectiveDeliveryZoneInfo.deliveryAvailable,
+          requiresManagerApproval: effectiveDeliveryZoneInfo.uiState?.requiresManagerApproval || false,
+          validatedAt: new Date().toISOString(),
+        }) : null,
+        customerName: currentCustomer?.name || '',
+        customerPhone: currentCustomer?.phone || currentCustomer?.phone_number || '',
+        orderType: currentOrderType,
+        paymentStatus: (
+          isSplitPayment
+            ? 'pending'
+            : (orderData.paymentData ? 'completed' : 'pending')
+        ) as 'pending' | 'completed' | 'processing' | 'failed' | 'refunded',
+        paymentTransactionId: orderData.paymentData?.transactionId || undefined,
+        estimatedTime: 15,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        staff_shift_id: currentOrderType === 'delivery' ? undefined : (activeShift?.id || null),
+        staff_id: currentOrderType === 'delivery' ? undefined : (staff?.staffId || null),
+      };
+
+      const result = await createOrder(orderToCreate);
+      if (!result.success || !result.orderId) {
+        toast.error(t('orderFlow.orderFailed', 'Failed to create order'));
+        return false;
+      }
+
+      const displayOrderNumber = result.orderNumber || result.orderId || '';
+      toast.success(t('orderFlow.orderCreated', { orderNumber: displayOrderNumber }));
+
+      try {
+        ActivityTracker.trackOrderCreated(result.orderId || displayOrderNumber, totalAmount);
+        ActivityTracker.trackDiscount(Boolean(discountAmount), discountAmount, discountPercentage);
+      } catch {}
+
+      if (isSplitPayment) {
+        setSplitPaymentData({
+          orderId: result.orderId,
+          orderTotal: totalAmount,
+          items: buildSplitPaymentItems({
+            items: (orderData.items || []).map((item: any, index: number) => ({
+              name: item.name || 'Item',
+              quantity: item.quantity || 1,
+              price: item.unitPrice || item.price || 0,
+              totalPrice: item.totalPrice || ((item.unitPrice || item.price || 0) * (item.quantity || 1)),
+              itemIndex: item.itemIndex ?? item.item_index ?? index,
+            })),
+            orderTotal: totalAmount,
+            deliveryFee,
+            discountAmount,
+            deliveryFeeLabel: t('payment.fields.deliveryFee', { defaultValue: 'Delivery Fee' }),
+            discountLabel: t('modals.payment.discount', { defaultValue: 'Discount' }),
+            adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
+          }),
+          isGhostOrder,
+        });
+        setShowMenuModal(false);
+        await silentRefresh().catch(() => {});
+        return true;
+      }
+
+      if (!isGhostOrder && orderData.paymentData) {
+        const paymentResult: any = await bridge.payments.recordPayment({
+          orderId: result.orderId,
+          method: orderData.paymentData.method || 'cash',
+          amount: totalAmount,
+          cashReceived: orderData.paymentData.cashReceived,
+          changeGiven: orderData.paymentData.change,
+          transactionRef: orderData.paymentData.transactionId,
+          staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
+          staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
+        });
+
+        if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
+          toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
+          return false;
+        }
+
+        await silentRefresh().catch(() => {});
+      }
+
+      void finalizeCreatedOrderPayment(result.orderId, isGhostOrder).catch((printError: any) => {
+        const stage = printError?.stage;
+        if (isGhostOrder || stage === 'receipt') {
+          console.error('[NewOrderPage] Ghost receipt print error:', printError);
+          toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
+          return;
+        }
+
+        console.warn('[NewOrderPage] Cash register print error (non-blocking):', printError);
+        toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+      });
+
+      return true;
+    } catch (error) {
+      console.error('Error creating order from NewOrderPage:', error);
+      toast.error(t('orderFlow.orderFailed', 'Failed to create order'));
+      return false;
+    } finally {
+      setIsProcessingOrder(false);
+    }
+  }, [
+    activeShift?.id,
+    branchId,
+    bridge,
+    createOrder,
+    extractPaymentId,
+    finalizeCreatedOrderPayment,
+    isShiftActive,
+    organizationId,
+    selectedOrderType,
+    silentRefresh,
+    staff?.branchId,
+    staff?.staffId,
+    staff?.terminalId,
+    t,
+    taxRatePercentage,
+    terminalId,
+  ]);
+
+  const handleSplitClose = useCallback(() => {
+    setSplitPaymentData(null);
+    setShowMenuModal(false);
+    void silentRefresh().catch(() => {});
+    navigate('/');
+  }, [navigate, silentRefresh]);
+
+  const handleSplitComplete = useCallback(async (_result: SplitPaymentResult) => {
+    setSplitPaymentData(null);
+    setShowMenuModal(false);
+    await silentRefresh().catch(() => {});
+    navigate('/');
+  }, [navigate, silentRefresh]);
 
   // Handler for menu modal close
   const handleMenuModalClose = () => {
@@ -687,6 +1044,21 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
           selectedCustomer={getCustomerForMenu()}
           selectedAddress={getSelectedAddress()}
           orderType={selectedOrderType === "pickup" ? "pickup" : "delivery"}
+          isProcessingOrder={isProcessingOrder}
+          onOrderComplete={handleOrderComplete}
+        />
+      )}
+
+      {splitPaymentData && (
+        <SplitPaymentModal
+          isOpen={true}
+          onClose={handleSplitClose}
+          orderId={splitPaymentData.orderId}
+          orderTotal={splitPaymentData.orderTotal}
+          items={splitPaymentData.items}
+          initialMode="by-items"
+          isGhostOrder={splitPaymentData.isGhostOrder}
+          onSplitComplete={handleSplitComplete}
         />
       )}
     </div>

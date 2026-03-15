@@ -117,7 +117,7 @@ export interface DriverEarning {
   delivery_fee: number;
   tip_amount: number;
   total_earning: number;
-  payment_method: 'cash' | 'card' | 'mixed';
+  payment_method: 'cash' | 'card' | 'mixed' | 'split';
   cash_collected: number;
   card_amount: number;
   cash_to_return: number;
@@ -302,7 +302,7 @@ export interface ShiftSummary {
     total_amount: number;
     cash_amount: number;
     card_amount: number;
-    payment_method: 'cash' | 'card' | 'mixed';
+    payment_method: 'cash' | 'card' | 'mixed' | 'split';
     orders: Array<{
       id: string;
       order_id: string;
@@ -362,4 +362,3 @@ export interface GetScheduledShiftsParams {
   endDate: string;
   staffId?: string;
 }
-

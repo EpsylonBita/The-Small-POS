@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -11,6 +11,7 @@ import RefundVoidModal from './RefundVoidModal';
 import { SplitPaymentModal } from './SplitPaymentModal';
 import type { SplitPaymentResult } from './SplitPaymentModal';
 import { getBridge } from '../../../lib';
+import { buildSplitPaymentItems } from '../../utils/splitPaymentItems';
 
 interface OrderDetailsModalProps {
   isOpen: boolean;
@@ -19,6 +20,23 @@ interface OrderDetailsModalProps {
   onClose: () => void;
   onPrintReceipt?: () => void;
   onShowCustomerHistory?: (customerPhone: string) => void;
+}
+
+function isCompletedPaymentRecord(payment: any): boolean {
+  const status = String(payment?.status || '').toLowerCase();
+  return status === 'completed' || status === 'paid';
+}
+
+function unwrapBridgeArray<T>(result: any): T[] {
+  if (Array.isArray(result)) {
+    return result;
+  }
+
+  if (Array.isArray(result?.data)) {
+    return result.data;
+  }
+
+  return [];
 }
 
 const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
@@ -33,6 +51,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [orderData, setOrderData] = useState<any>(null);
+  const [orderPayments, setOrderPayments] = useState<any[]>([]);
+  const [paidItems, setPaidItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
@@ -60,6 +80,36 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     }
   };
 
+  const loadPaymentState = async () => {
+    if (!orderId) {
+      setOrderPayments([]);
+      setPaidItems([]);
+      return;
+    }
+
+    try {
+      const [paymentsResult, paidItemsResult] = await Promise.all([
+        bridge.payments.getOrderPayments(orderId),
+        bridge.payments.getPaidItems(orderId),
+      ]);
+
+      setOrderPayments(unwrapBridgeArray<any>(paymentsResult));
+      setPaidItems(unwrapBridgeArray<any>(paidItemsResult));
+    } catch (error) {
+      console.error('Error loading order payment state:', error);
+      setOrderPayments([]);
+      setPaidItems([]);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen || !orderId) {
+      return;
+    }
+
+    void loadPaymentState();
+  }, [isOpen, orderId]);
+
   if (!isOpen) return null;
 
 
@@ -78,6 +128,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     switch (method?.toLowerCase()) {
       case 'card': return t('modals.orderDetails.card', { defaultValue: 'Card' });
       case 'cash': return t('modals.orderDetails.cash', { defaultValue: 'Cash' });
+      case 'split':
+      case 'mixed': return t('payment.split.title', { defaultValue: 'Split Payment' });
       case 'digital':
       case 'digital_wallet': return t('modals.orderDetails.digital', { defaultValue: 'Digital' });
       default: return method || t('modals.orderDetails.pending', { defaultValue: 'Pending' });
@@ -88,6 +140,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     switch (method?.toLowerCase()) {
       case 'card': return <CreditCard className="h-5 w-5 text-blue-400" />;
       case 'cash': return <Banknote className="h-5 w-5 text-green-400" />;
+      case 'split':
+      case 'mixed': return <Split className="h-5 w-5 text-purple-400" />;
       case 'digital':
       case 'digital_wallet': return <Smartphone className="h-5 w-5 text-purple-400" />;
       default: return <Clock className="h-5 w-5 text-gray-400" />;
@@ -188,8 +242,116 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const originalSubtotal = discountAmount > 0 ? subtotal + discountAmount : subtotal;
   const status = displayOrder.status || 'pending';
   const paymentMethod = displayOrder.payment_method || displayOrder.paymentMethod || '';
-  const paymentStatus = displayOrder.payment_status || displayOrder.paymentStatus || 'pending';
+  const paymentStatus = String(displayOrder.payment_status || displayOrder.paymentStatus || 'pending').toLowerCase();
+  const completedPayments = useMemo(
+    () => orderPayments.filter(isCompletedPaymentRecord),
+    [orderPayments],
+  );
+  const paidAmount = useMemo(
+    () => completedPayments.reduce((sum: number, payment: any) => sum + Number(payment?.amount || 0), 0),
+    [completedPayments],
+  );
+  const remainingAmount = Math.max(0, total - paidAmount);
+  const itemPaymentBreakdownByIndex = useMemo(() => {
+    const breakdown = new Map<number, Array<{
+      paymentId: string;
+      method: string;
+      paymentOrigin: string;
+      itemAmount: number;
+      createdAt?: string;
+      transactionRef?: string;
+    }>>();
+
+    completedPayments.forEach((payment: any) => {
+      const paymentId = String(payment?.id || payment?.paymentId || '');
+      const method = String(payment?.method || payment?.payment_method || '').toLowerCase();
+      const paymentOrigin = String(payment?.paymentOrigin || payment?.payment_origin || 'manual').toLowerCase();
+      const paymentCreatedAt = payment?.created_at || payment?.createdAt;
+      const paymentTransactionRef = payment?.transactionRef || payment?.transaction_ref || '';
+      const paymentItems = Array.isArray(payment?.items) ? payment.items : [];
+
+      paymentItems.forEach((item: any) => {
+        const itemIndex = Number(item?.itemIndex ?? item?.item_index);
+        if (!Number.isInteger(itemIndex)) {
+          return;
+        }
+
+        const entries = breakdown.get(itemIndex) ?? [];
+        entries.push({
+          paymentId,
+          method,
+          paymentOrigin,
+          itemAmount: Number(item?.itemAmount ?? item?.item_amount ?? payment?.amount ?? 0),
+          createdAt: paymentCreatedAt,
+          transactionRef: paymentTransactionRef,
+        });
+        breakdown.set(itemIndex, entries);
+      });
+    });
+
+    paidItems.forEach((item: any) => {
+      const itemIndex = Number(item?.itemIndex ?? item?.item_index);
+      if (!Number.isInteger(itemIndex) || breakdown.has(itemIndex)) {
+        return;
+      }
+
+      breakdown.set(itemIndex, [{
+        paymentId: String(item?.paymentId || item?.payment_id || ''),
+        method: String(item?.paymentMethod || item?.payment_method || '').toLowerCase(),
+        paymentOrigin: 'manual',
+        itemAmount: Number(item?.itemAmount ?? item?.item_amount ?? 0),
+        createdAt: item?.createdAt || item?.created_at,
+        transactionRef: '',
+      }]);
+    });
+
+    return breakdown;
+  }, [completedPayments, paidItems]);
+  const paidItemIndices = useMemo(
+    () => Array.from(itemPaymentBreakdownByIndex.keys()),
+    [itemPaymentBreakdownByIndex],
+  );
+  const paidItemIndexSet = useMemo(() => new Set(paidItemIndices), [paidItemIndices]);
+  const getItemPaymentPresentation = useMemo(
+    () => (itemIndex: number) => {
+      const entries = itemPaymentBreakdownByIndex.get(itemIndex) ?? [];
+      if (!entries.length) {
+        return '';
+      }
+
+      const uniqueMethods = new Set(
+        entries
+          .map((entry) => entry.method)
+          .filter((method) => method === 'cash' || method === 'card'),
+      );
+      const uniquePayments = new Set(entries.map((entry) => entry.paymentId).filter(Boolean));
+
+      if (uniquePayments.size > 1 || uniqueMethods.size > 1) {
+        return 'split';
+      }
+
+      return Array.from(uniqueMethods)[0] || 'split';
+    },
+    [itemPaymentBreakdownByIndex],
+  );
+  const paymentMethodPresentation = (() => {
+    const normalizedMethod = String(paymentMethod || '').toLowerCase();
+    if (normalizedMethod === 'split' || normalizedMethod === 'mixed') {
+      return 'split';
+    }
+    if (paymentStatus === 'partially_paid' && completedPayments.length > 0) {
+      return 'split';
+    }
+    if (completedPayments.length > 1) {
+      return 'split';
+    }
+    return normalizedMethod;
+  })();
   const createdAt = displayOrder.created_at ? new Date(displayOrder.created_at) : new Date();
+  const isGhostOrder =
+    displayOrder.is_ghost === true ||
+    displayOrder.isGhost === true ||
+    displayOrder.ghost === true;
 
   // Driver info for delivered orders
   const driverName = displayOrder.driver_name || displayOrder.driverName || '';
@@ -394,6 +556,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     if (orderId && !order) {
       loadOrderData();
     }
+    void loadPaymentState();
   };
 
   const modalFooter = (
@@ -476,13 +639,133 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                 </div>
                 {/* Payment Method */}
                 <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 border border-white/10">
-                  {getPaymentMethodIcon(paymentMethod)}
+                  {getPaymentMethodIcon(paymentMethodPresentation)}
                   <div>
-                    <p className="font-medium liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethod)}</p>
+                    <p className="font-medium liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</p>
                     <p className="text-xs liquid-glass-modal-text-muted capitalize">{paymentStatus}</p>
                   </div>
                 </div>
               </div>
+              {completedPayments.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <h4 className="text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
+                      {t('payment.split.title', { defaultValue: 'Split Payment' })}
+                    </h4>
+                    <div className="flex items-center gap-4 text-xs liquid-glass-modal-text-muted">
+                      <span>{t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: {formatCurrency(paidAmount)}</span>
+                      <span>{t('splitPayment.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(remainingAmount)}</span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {completedPayments.map((payment: any) => {
+                      const paymentMethodName = String(payment?.method || payment?.payment_method || '').toLowerCase();
+                      const paymentCreatedAt = payment?.created_at || payment?.createdAt;
+                      const paymentOrigin = String(payment?.paymentOrigin || payment?.payment_origin || 'manual').toLowerCase();
+                      const paymentItems = Array.isArray(payment?.items) ? payment.items : [];
+                      const paymentDiscount = Number(payment?.discountAmount || payment?.discount_amount || 0);
+                      const paymentStaffId = payment?.staffId || payment?.staff_id;
+                      const paymentShiftId = payment?.staffShiftId || payment?.staff_shift_id;
+                      const transactionRef = payment?.transactionRef || payment?.transaction_ref;
+
+                      return (
+                        <div
+                          key={payment?.id || payment?.paymentId || `${paymentMethodName}-${paymentCreatedAt}`}
+                          className="rounded-lg border border-white/10 bg-white/5 px-3 py-3 space-y-3"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                              {getPaymentMethodIcon(paymentMethodName)}
+                              <div>
+                                <p className="text-sm font-medium liquid-glass-modal-text">
+                                  {getPaymentMethodLabel(paymentMethodName)}
+                                </p>
+                                <p className="text-xs liquid-glass-modal-text-muted">
+                                  {paymentCreatedAt
+                                    ? `${formatDate(new Date(paymentCreatedAt))} ${formatTime(new Date(paymentCreatedAt), { hour: '2-digit', minute: '2-digit' })}`
+                                    : t('modals.orderDetails.processing', { defaultValue: 'Processing' })}
+                                </p>
+                              </div>
+                            </div>
+                            <span className="font-semibold liquid-glass-modal-text">
+                              {formatCurrency(Number(payment?.amount || 0))}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
+                              paymentMethodName === 'card'
+                                ? 'border border-blue-500/30 bg-blue-500/15 text-blue-300'
+                                : paymentMethodName === 'cash'
+                                  ? 'border border-green-500/30 bg-green-500/15 text-green-300'
+                                  : 'border border-purple-500/30 bg-purple-500/15 text-purple-300'
+                            }`}>
+                              {getPaymentMethodLabel(paymentMethodName)}
+                            </span>
+                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
+                              paymentOrigin === 'terminal'
+                                ? 'border border-cyan-500/30 bg-cyan-500/15 text-cyan-300'
+                                : 'border border-white/15 bg-white/10 text-white/70'
+                            }`}>
+                              {paymentOrigin === 'terminal'
+                                ? t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })
+                                : t('modals.orderDetails.manual', { defaultValue: 'Manual' })}
+                            </span>
+                            {paymentDiscount > 0 && (
+                              <span className="inline-flex items-center rounded-full border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 font-semibold text-yellow-300">
+                                {t('modals.orderDetails.discount', { defaultValue: 'Discount' })}: -{formatCurrency(paymentDiscount)}
+                              </span>
+                            )}
+                          </div>
+                          {(paymentStaffId || paymentShiftId || transactionRef) && (
+                            <div className="space-y-1 text-xs liquid-glass-modal-text-muted">
+                              {paymentStaffId && (
+                                <p>
+                                  {t('modals.orderDetails.staff', { defaultValue: 'Staff' })}: {paymentStaffId}
+                                </p>
+                              )}
+                              {paymentShiftId && (
+                                <p>
+                                  {t('modals.orderDetails.shift', { defaultValue: 'Shift' })}: {paymentShiftId}
+                                </p>
+                              )}
+                              {transactionRef && (
+                                <p className="truncate">
+                                  {t('modals.orderDetails.transaction', { defaultValue: 'Transaction' })}: {transactionRef}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                          {paymentItems.length > 0 && (
+                            <div className="space-y-2 border-t border-white/10 pt-3">
+                              <p className="text-[11px] font-semibold uppercase tracking-wider liquid-glass-modal-text-muted">
+                                {t('modals.orderDetails.coveredItems', { defaultValue: 'Covered Items' })}
+                              </p>
+                              <div className="space-y-1.5">
+                                {paymentItems.map((paymentItem: any, itemIndex: number) => (
+                                  <div
+                                    key={`${payment?.id || payment?.paymentId || paymentCreatedAt}-item-${paymentItem?.itemIndex ?? paymentItem?.item_index ?? itemIndex}`}
+                                    className="flex items-center justify-between gap-2 rounded-md bg-white/5 px-2.5 py-2 text-xs"
+                                  >
+                                    <span className="truncate liquid-glass-modal-text">
+                                      {(paymentItem?.itemQuantity ?? paymentItem?.item_quantity ?? 1) > 1
+                                        ? `${paymentItem?.itemQuantity ?? paymentItem?.item_quantity ?? 1}x `
+                                        : ''}
+                                      {paymentItem?.itemName || paymentItem?.item_name || t('modals.orderDetails.item', { defaultValue: 'Item' })}
+                                    </span>
+                                    <span className="whitespace-nowrap font-medium text-emerald-400">
+                                      {formatCurrency(Number(paymentItem?.itemAmount ?? paymentItem?.item_amount ?? 0))}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -627,13 +910,25 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         const customizations = parseCustomizations(item.customizations);
                         const categoryPath = resolveCategoryPath(item);
                         const itemNotes = resolveItemNotes(item);
+                        const itemIndex = item.itemIndex ?? item.item_index ?? index;
+                        const itemPayments = itemPaymentBreakdownByIndex.get(itemIndex) ?? [];
+                        const isItemPaid = paidItemIndexSet.has(itemIndex);
+                        const itemPaymentPresentation = getItemPaymentPresentation(itemIndex);
+                        const shouldShowItemPaymentState =
+                          paymentMethodPresentation === 'split' ||
+                          paymentStatus === 'partially_paid' ||
+                          paidItemIndices.length > 0;
                         const withoutLabel = t('menu.itemModal.without', { defaultValue: 'Without' });
                         const littleLabel = t('menu.itemModal.little', { defaultValue: 'Little' });
 
                         return (
                           <div
                             key={item.id || index}
-                            className="p-4 bg-white/5 dark:bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-colors"
+                            className={`p-4 rounded-lg border transition-colors ${
+                              shouldShowItemPaymentState && isItemPaid
+                                ? 'bg-green-500/5 border-green-500/20 hover:bg-green-500/10'
+                                : 'bg-white/5 dark:bg-white/5 border-white/10 hover:bg-white/10'
+                            }`}
                           >
                             {/* Item Header */}
                             <div className="flex items-start justify-between mb-2">
@@ -652,6 +947,52 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                   <div className="font-medium liquid-glass-modal-text">
                                     {item.name || item.menu_item?.name || 'Item'}
                                   </div>
+                                  {shouldShowItemPaymentState && (
+                                    <div className="mt-1 space-y-1.5">
+                                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                                        isItemPaid
+                                          ? itemPaymentPresentation === 'card'
+                                            ? 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
+                                            : itemPaymentPresentation === 'split'
+                                              ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                                              : 'bg-green-500/15 text-green-300 border border-green-500/30'
+                                          : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                      }`}>
+                                        {isItemPaid
+                                          ? `${t('modals.orderDetails.paid', { defaultValue: 'Paid' })}${itemPaymentPresentation ? ` • ${getPaymentMethodLabel(itemPaymentPresentation).toUpperCase()}` : ''}`
+                                          : t('splitPayment.remaining', { defaultValue: 'Remaining' })}
+                                      </span>
+                                      {itemPayments.length > 1 && (
+                                        <div className="space-y-1">
+                                          {itemPayments.map((entry, paymentEntryIndex) => (
+                                            <div
+                                              key={`${itemIndex}-${entry.paymentId || paymentEntryIndex}`}
+                                              className="flex flex-wrap items-center gap-2 text-[11px] liquid-glass-modal-text-muted"
+                                            >
+                                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
+                                                entry.method === 'card'
+                                                  ? 'border border-blue-500/30 bg-blue-500/15 text-blue-300'
+                                                  : 'border border-green-500/30 bg-green-500/15 text-green-300'
+                                              }`}>
+                                                {getPaymentMethodLabel(entry.method)}
+                                              </span>
+                                              <span>{formatCurrency(entry.itemAmount)}</span>
+                                              {entry.paymentOrigin === 'terminal' && (
+                                                <span className="text-cyan-300">
+                                                  {t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })}
+                                                </span>
+                                              )}
+                                              {entry.createdAt && (
+                                                <span>
+                                                  {formatTime(new Date(entry.createdAt), { hour: '2-digit', minute: '2-digit' })}
+                                                </span>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                               <div className="text-right">
@@ -775,6 +1116,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
           if (orderId && !order) {
             loadOrderData();
           }
+          void loadPaymentState();
         }}
       />
     )}
@@ -786,12 +1128,28 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
         onClose={() => setShowSplitPaymentModal(false)}
         orderId={orderId}
         orderTotal={total}
-        items={items.map((item: any) => ({
-          name: item.name || item.item_name || '',
-          quantity: item.quantity || 1,
-          totalPrice: (item.price || item.unit_price || 0) * (item.quantity || 1),
-          price: item.price || item.unit_price || 0,
-        }))}
+        items={buildSplitPaymentItems({
+          items: items.map((item: any, index: number) => ({
+            name: item.name || item.item_name || '',
+            quantity: item.quantity || 1,
+            totalPrice:
+              item.total_price ||
+              item.totalPrice ||
+              ((item.price || item.unit_price || 0) * (item.quantity || 1)),
+            price: item.price || item.unit_price || 0,
+            itemIndex: item.itemIndex ?? item.item_index ?? index,
+          })),
+          orderTotal: total,
+          deliveryFee,
+          discountAmount,
+          taxAmount: tax,
+          deliveryFeeLabel: t('payment.fields.deliveryFee', { defaultValue: 'Delivery Fee' }),
+          discountLabel: t('modals.payment.discount', { defaultValue: 'Discount' }),
+          taxLabel: t('modals.orderDetails.tax', { defaultValue: 'Tax' }),
+          adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
+        })}
+        initialMode="by-items"
+        isGhostOrder={isGhostOrder}
         onSplitComplete={handleSplitComplete}
       />
     )}

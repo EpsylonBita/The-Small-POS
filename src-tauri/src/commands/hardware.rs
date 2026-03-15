@@ -574,11 +574,34 @@ pub async fn hardware_reconnect(
     // Build settings from local_settings
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut settings = serde_json::json!({});
-    if let Some(val) = db::get_setting(&conn, "hardware", "scale_port") {
-        settings["scale_port"] = val.into();
-    }
-    if let Some(val) = db::get_setting(&conn, "hardware", "barcode_scanner_port") {
-        settings["barcode_scanner_port"] = val.into();
+    for (category, key, output_key) in [
+        ("scale", "enabled", "scale.enabled"),
+        ("scale", "port", "scale.port"),
+        ("scale", "baud_rate", "scale.baud_rate"),
+        ("scale", "protocol", "scale.protocol"),
+        ("display", "enabled", "display.enabled"),
+        ("display", "connection_type", "display.connection_type"),
+        ("display", "port", "display.port"),
+        ("display", "baud_rate", "display.baud_rate"),
+        ("display", "tcp_port", "display.tcp_port"),
+        ("scanner", "enabled", "scanner.enabled"),
+        ("scanner", "port", "scanner.port"),
+        ("scanner", "baud_rate", "scanner.baud_rate"),
+        ("peripherals", "loyalty_card_reader", "peripherals.loyalty_card_reader"),
+        ("hardware", "scale_port", "hardware.scale_port"),
+        ("hardware", "scale_baud_rate", "hardware.scale_baud_rate"),
+        ("hardware", "scale_protocol", "hardware.scale_protocol"),
+        ("hardware", "barcode_scanner_port", "hardware.barcode_scanner_port"),
+        ("hardware", "scanner_baud_rate", "hardware.scanner_baud_rate"),
+        ("hardware", "display_connection_type", "hardware.display_connection_type"),
+        ("hardware", "display_port", "hardware.display_port"),
+        ("hardware", "display_baud_rate", "hardware.display_baud_rate"),
+        ("hardware", "display_tcp_port", "hardware.display_tcp_port"),
+        ("hardware", "loyalty_card_reader", "hardware.loyalty_card_reader"),
+    ] {
+        if let Some(val) = db::get_setting(&conn, category, key) {
+            settings[output_key] = serde_json::Value::String(val);
+        }
     }
     drop(conn);
     hardware_manager::reconnect(&device_type, &settings, &app)

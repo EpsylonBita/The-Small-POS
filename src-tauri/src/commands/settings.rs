@@ -6,7 +6,12 @@ use zeroize::Zeroizing;
 
 use crate::terminal_helpers::{
     extract_enabled_features_from_terminal_settings_response,
+    extract_owner_terminal_db_id_from_terminal_settings_response,
+    extract_owner_terminal_id_from_terminal_settings_response,
     extract_parent_terminal_id_from_terminal_settings_response,
+    extract_pos_operating_mode_from_terminal_settings_response,
+    extract_source_terminal_db_id_from_terminal_settings_response,
+    extract_source_terminal_id_from_terminal_settings_response,
     extract_terminal_type_from_terminal_settings_response,
 };
 use crate::{api, auth, db, menu, storage};
@@ -68,6 +73,17 @@ fn restart_required_reason_for_setting(full_key: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn is_hardware_settings_update(full_key: &str) -> bool {
+    let normalized = full_key.trim().to_ascii_lowercase();
+    normalized.starts_with("hardware.")
+        || normalized.starts_with("display.")
+        || normalized.starts_with("scanner.")
+        || normalized.starts_with("scale.")
+        || normalized.starts_with("printer.")
+        || normalized.starts_with("payment_terminal.")
+        || normalized.starts_with("peripherals.")
 }
 
 fn parse_settings_set_payload(
@@ -278,6 +294,11 @@ fn build_terminal_runtime_config(db: &db::DbState) -> Value {
         .unwrap_or_else(|| "food".to_string());
     let terminal_type = read_runtime_setting(db, "terminal", "terminal_type");
     let parent_terminal_id = read_runtime_setting(db, "terminal", "parent_terminal_id");
+    let owner_terminal_id = read_runtime_setting(db, "terminal", "owner_terminal_id");
+    let owner_terminal_db_id = read_runtime_setting(db, "terminal", "owner_terminal_db_id");
+    let source_terminal_id = read_runtime_setting(db, "terminal", "source_terminal_id");
+    let source_terminal_db_id = read_runtime_setting(db, "terminal", "source_terminal_db_id");
+    let pos_operating_mode = read_runtime_setting(db, "terminal", "pos_operating_mode");
     let enabled_features = read_runtime_setting(db, "terminal", "enabled_features")
         .map(|raw| parse_json_string(&raw))
         .filter(|value| value.is_object())
@@ -322,6 +343,11 @@ fn build_terminal_runtime_config(db: &db::DbState) -> Value {
         "business_type": business_type,
         "terminal_type": terminal_type,
         "parent_terminal_id": parent_terminal_id,
+        "owner_terminal_id": owner_terminal_id,
+        "owner_terminal_db_id": owner_terminal_db_id,
+        "source_terminal_id": source_terminal_id,
+        "source_terminal_db_id": source_terminal_db_id,
+        "pos_operating_mode": pos_operating_mode,
         "enabled_features": enabled_features,
         "last_config_sync_at": last_config_sync_at,
         "ghost_mode_feature_enabled": ghost_mode_feature_enabled,
@@ -329,6 +355,11 @@ fn build_terminal_runtime_config(db: &db::DbState) -> Value {
         // Compatibility aliases while renderer migrates to the new DTO.
         "terminalType": terminal_type,
         "parentTerminalId": parent_terminal_id,
+        "ownerTerminalId": owner_terminal_id,
+        "ownerTerminalDbId": owner_terminal_db_id,
+        "sourceTerminalId": source_terminal_id,
+        "sourceTerminalDbId": source_terminal_db_id,
+        "posOperatingMode": pos_operating_mode,
         "features": enabled_features,
     })
 }
@@ -422,6 +453,56 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         tracing::info!(
             parent_terminal_id = %crate::mask_terminal_id(&parent_terminal_id),
             "Stored parent_terminal_id from admin settings"
+        );
+    }
+    if let Some(owner_terminal_id) = extract_owner_terminal_id_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "owner_terminal_id", &owner_terminal_id);
+        }
+        tracing::info!(
+            owner_terminal_id = %crate::mask_terminal_id(&owner_terminal_id),
+            "Stored owner_terminal_id from admin settings"
+        );
+    }
+    if let Some(owner_terminal_db_id) =
+        extract_owner_terminal_db_id_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ =
+                db::set_setting(&conn, "terminal", "owner_terminal_db_id", &owner_terminal_db_id);
+        }
+        tracing::info!("Stored owner_terminal_db_id from admin settings");
+    }
+    if let Some(source_terminal_id) =
+        extract_source_terminal_id_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "source_terminal_id", &source_terminal_id);
+        }
+        tracing::info!(
+            source_terminal_id = %crate::mask_terminal_id(&source_terminal_id),
+            "Stored source_terminal_id from admin settings"
+        );
+    }
+    if let Some(source_terminal_db_id) =
+        extract_source_terminal_db_id_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ =
+                db::set_setting(&conn, "terminal", "source_terminal_db_id", &source_terminal_db_id);
+        }
+        tracing::info!("Stored source_terminal_db_id from admin settings");
+    }
+    if let Some(pos_operating_mode) =
+        extract_pos_operating_mode_from_terminal_settings_response(&resp)
+    {
+        if let Ok(conn) = db.conn.lock() {
+            let _ = db::set_setting(&conn, "terminal", "pos_operating_mode", &pos_operating_mode);
+        }
+        tracing::info!(
+            pos_operating_mode = %pos_operating_mode,
+            "Stored pos_operating_mode from admin settings"
         );
     }
     if let Some(enabled_features) = extract_enabled_features_from_terminal_settings_response(&resp)
@@ -982,6 +1063,18 @@ pub async fn settings_update_local(
         "terminal_settings_updated",
         serde_json::json!({ "updated": updated_keys.clone() }),
     );
+    if updated_keys
+        .iter()
+        .any(|full_key| is_hardware_settings_update(full_key))
+    {
+        let _ = app.emit(
+            "hardware_config_update",
+            serde_json::json!({
+                "source": "settings_update_local",
+                "updated": updated_keys.clone(),
+            }),
+        );
+    }
     if let Some(reason) = updated_keys
         .iter()
         .find_map(|full_key| restart_required_reason_for_setting(full_key))

@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{self, DbState};
-use crate::storage;
+use crate::{business_day, order_ownership, storage};
 
 // ---------------------------------------------------------------------------
 // Period filtering (Gap 9)
@@ -28,7 +28,7 @@ use crate::storage;
 /// Returns epoch "1970-01-01T00:00:00Z" if no Z-Report has ever been committed.
 fn get_period_start(conn: &Connection) -> String {
     db::get_setting(conn, "system", "last_z_report_timestamp")
-        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+        .unwrap_or_else(|| business_day::EPOCH_RFC3339.to_string())
 }
 
 const PENDING_Z_REPORT_CONTEXT_KEY: &str = "pending_z_report_context";
@@ -59,6 +59,44 @@ fn local_report_date_from_timestamp(value: &str) -> String {
         .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
 }
 
+fn resolve_period_start_at(
+    conn: &Connection,
+    branch_id: &str,
+    cutoff_at: Option<&str>,
+) -> String {
+    business_day::resolve_period_start(conn, branch_id, cutoff_at)
+}
+
+fn sanitize_terminal_display_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("terminal-")
+        || lower.starts_with("terminal_")
+        || lower.starts_with("pos-terminal-")
+        || lower.starts_with("pos_terminal_")
+        || lower.starts_with("term-")
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn resolve_terminal_display_name(conn: &Connection, explicit: Option<&str>) -> Option<String> {
+    explicit
+        .and_then(sanitize_terminal_display_name)
+        .or_else(|| {
+            ["name", "display_name", "displayName"]
+                .iter()
+                .find_map(|key| db::get_setting(conn, "terminal", key))
+                .and_then(|value| sanitize_terminal_display_name(&value))
+        })
+}
+
 fn load_stored_pending_z_report_context(
     conn: &Connection,
     branch_id: &str,
@@ -76,17 +114,16 @@ fn synthesize_pending_z_report_context(
     conn: &Connection,
     branch_id: &str,
 ) -> Option<PendingZReportContext> {
-    let period_start = get_period_start(conn);
     let latest_closed_at: Option<String> = conn
         .query_row(
             "SELECT COALESCE(check_out_time, check_in_time)
              FROM staff_shifts
              WHERE status = 'closed'
-               AND check_in_time > ?1
-               AND (branch_id = ?2 OR branch_id IS NULL)
+               AND (branch_id = ?1 OR branch_id IS NULL)
+               AND COALESCE(check_out_time, check_in_time) > ?2
              ORDER BY COALESCE(check_out_time, check_in_time) DESC
              LIMIT 1",
-            params![period_start, branch_id],
+            params![branch_id, get_period_start(conn)],
             |row| row.get(0),
         )
         .optional()
@@ -96,17 +133,34 @@ fn synthesize_pending_z_report_context(
     latest_closed_at.map(|cutoff_at| PendingZReportContext {
         branch_id: branch_id.to_string(),
         report_date: local_report_date_from_timestamp(&cutoff_at),
+        period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str())),
         cutoff_at,
-        period_start_at: period_start,
     })
 }
 
-fn load_or_synthesize_pending_z_report_context(
-    conn: &Connection,
-    branch_id: &str,
-) -> Option<PendingZReportContext> {
-    load_stored_pending_z_report_context(conn, branch_id)
-        .or_else(|| synthesize_pending_z_report_context(conn, branch_id))
+fn load_pending_z_report_context(conn: &Connection, branch_id: &str) -> Option<PendingZReportContext> {
+    if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
+        if business_day::stored_period_start(conn)
+            .as_deref()
+            .filter(|value| !business_day::is_epoch_timestamp(value))
+            .map(|value| value >= stored.cutoff_at.as_str())
+            .unwrap_or(false)
+        {
+            let _ = clear_pending_z_report_context(conn);
+            return None;
+        }
+
+        let normalized_period_start =
+            resolve_period_start_at(conn, branch_id, Some(stored.cutoff_at.as_str()));
+        if stored.period_start_at != normalized_period_start {
+            stored.period_start_at = normalized_period_start;
+            let _ = persist_pending_z_report_context(conn, &stored);
+        }
+
+        return Some(stored);
+    }
+
+    synthesize_pending_z_report_context(conn, branch_id)
 }
 
 fn persist_pending_z_report_context(
@@ -146,7 +200,7 @@ pub(crate) fn ensure_pending_z_report_context_for_branch(
         branch_id: branch_id.to_string(),
         report_date: local_report_date_from_timestamp(cutoff_at),
         cutoff_at: cutoff_at.to_string(),
-        period_start_at: get_period_start(conn),
+        period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at)),
     };
 
     persist_pending_z_report_context(conn, &context)?;
@@ -158,7 +212,7 @@ fn resolve_effective_z_report_window(
     branch_id: &str,
     payload: &Value,
 ) -> EffectiveZReportWindow {
-    if let Some(context) = load_or_synthesize_pending_z_report_context(conn, branch_id) {
+    if let Some(context) = load_pending_z_report_context(conn, branch_id) {
         return EffectiveZReportWindow {
             report_date: context.report_date,
             period_start_at: context.period_start_at,
@@ -168,7 +222,7 @@ fn resolve_effective_z_report_window(
 
     EffectiveZReportWindow {
         report_date: str_field(payload, "date").unwrap_or_else(default_report_date),
-        period_start_at: get_period_start(conn),
+        period_start_at: resolve_period_start_at(conn, branch_id, None),
         cutoff_at: None,
     }
 }
@@ -597,28 +651,32 @@ fn load_drawer_rows_for_shift(conn: &Connection, shift_id: &str) -> Result<Vec<V
 
 fn load_sales_by_type_for_period(
     conn: &Connection,
+    branch_id: &str,
     period_start: &str,
     cutoff_at: Option<&str>,
 ) -> Result<Value, String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let sql = format!(
+        "SELECT
+            CASE
+                WHEN COALESCE(o.order_type, 'dine-in') = 'delivery' THEN 'delivery'
+                ELSE 'instore'
+            END AS bucket,
+            op.method,
+            COUNT(DISTINCT o.id),
+            COALESCE(SUM(op.amount), 0)
+         FROM order_payments op
+         JOIN orders o ON o.id = op.order_id
+         WHERE {financial_expr} > ?1
+           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND op.status = 'completed'
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+         GROUP BY bucket, op.method"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT
-                CASE
-                    WHEN COALESCE(o.order_type, 'dine-in') = 'delivery' THEN 'delivery'
-                    ELSE 'instore'
-                END AS bucket,
-                op.method,
-                COUNT(DISTINCT o.id),
-                COALESCE(SUM(op.amount), 0)
-             FROM order_payments op
-             JOIN orders o ON o.id = op.order_id
-             WHERE op.created_at > ?1
-               AND (?2 IS NULL OR op.created_at <= ?2)
-               AND op.status = 'completed'
-               AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-             GROUP BY bucket, op.method",
-        )
+        .prepare(&sql)
         .map_err(|e| format!("prepare sales by type for period: {e}"))?;
 
     let mut instore_cash = (0_i64, 0.0_f64);
@@ -627,7 +685,7 @@ fn load_sales_by_type_for_period(
     let mut delivery_card = (0_i64, 0.0_f64);
 
     let rows = stmt
-        .query_map(params![period_start, cutoff_at], |row| {
+        .query_map(params![period_start, cutoff_at, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -724,6 +782,11 @@ fn load_non_driver_order_totals(
     conn: &Connection,
     shift: &ReportStaffShift,
 ) -> Result<(i64, f64, f64, f64), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let shift_start = shift
+        .check_in_time
+        .as_deref()
+        .unwrap_or(business_day::EPOCH_RFC3339);
     let order_scope_sql = format!(
         "SELECT COUNT(*), COALESCE(SUM(order_total), 0)
          FROM (
@@ -731,6 +794,8 @@ fn load_non_driver_order_totals(
             FROM orders o
             LEFT JOIN order_payments op ON op.order_id = o.id
             WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+              AND {financial_expr} >= ?2
+              AND (?3 IS NULL OR {financial_expr} <= ?3)
               AND COALESCE(o.is_ghost, 0) = 0
               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
               {}
@@ -743,9 +808,13 @@ fn load_non_driver_order_totals(
     );
 
     let (order_count, total_amount): (i64, f64) = conn
-        .query_row(&order_scope_sql, params![shift.id.as_str()], |row| {
+        .query_row(
+            &order_scope_sql,
+            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
+            |row| {
             Ok((row.get(0)?, row.get(1)?))
-        })
+            },
+        )
         .map_err(|e| format!("query non-driver order totals: {e}"))?;
 
     let payment_sql = format!(
@@ -755,6 +824,8 @@ fn load_non_driver_order_totals(
          FROM orders o
          LEFT JOIN order_payments op ON op.order_id = o.id
          WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+           AND {financial_expr} >= ?2
+           AND (?3 IS NULL OR {financial_expr} <= ?3)
            AND COALESCE(o.is_ghost, 0) = 0
            AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
            {}
@@ -765,9 +836,13 @@ fn load_non_driver_order_totals(
     );
 
     let (cash_amount, card_amount): (f64, f64) = conn
-        .query_row(&payment_sql, params![shift.id.as_str()], |row| {
+        .query_row(
+            &payment_sql,
+            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
+            |row| {
             Ok((row.get(0)?, row.get(1)?))
-        })
+            },
+        )
         .map_err(|e| format!("query non-driver payment totals: {e}"))?;
 
     Ok((order_count, cash_amount, card_amount, total_amount))
@@ -832,6 +907,11 @@ fn load_non_driver_order_details(
     conn: &Connection,
     shift: &ReportStaffShift,
 ) -> Result<(Vec<Value>, bool), String> {
+    let financial_expr = business_day::order_financial_timestamp_expr("o2");
+    let shift_start = shift
+        .check_in_time
+        .as_deref()
+        .unwrap_or(business_day::EPOCH_RFC3339);
     let detail_sql = format!(
         "SELECT o.id,
                 COALESCE(NULLIF(TRIM(o.order_number), ''), o.id),
@@ -873,6 +953,8 @@ fn load_non_driver_order_details(
             FROM orders o2
             LEFT JOIN order_payments op ON op.order_id = o2.id
             WHERE COALESCE(op.staff_shift_id, o2.staff_shift_id) = ?1
+              AND {financial_expr} >= ?2
+              AND (?3 IS NULL OR {financial_expr} <= ?3)
               AND COALESCE(o2.is_ghost, 0) = 0
               {}
               AND NOT EXISTS (
@@ -887,7 +969,9 @@ fn load_non_driver_order_details(
     let mut rows = conn
         .prepare(&detail_sql)
         .map_err(|e| format!("prepare non-driver order details: {e}"))?
-        .query_map(params![shift.id.as_str()], |row| {
+        .query_map(
+            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
+            |row| {
             let raw_order_type = row.get::<_, String>(2)?;
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -901,7 +985,8 @@ fn load_non_driver_order_details(
                 "status": row.get::<_, String>(8)?,
                 "createdAt": row.get::<_, String>(9)?,
             }))
-        })
+            },
+        )
         .map_err(|e| format!("query non-driver order details: {e}"))?
         .filter_map(|row| row.ok())
         .collect::<Vec<_>>();
@@ -1310,7 +1395,26 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
 
     if let Some(existing_id) = existing {
         // Return the existing report
-        return get_z_report_by_id(&conn, &existing_id).map(|report| {
+        return get_z_report_by_id(&conn, &existing_id).map(|mut report| {
+            if let Some(obj) = report.as_object_mut() {
+                if let Some(terminal_name) = resolve_terminal_display_name(&conn, None) {
+                    obj.entry("terminalName".to_string())
+                        .or_insert(serde_json::Value::String(terminal_name));
+                }
+                if obj.get("shiftCount").is_none() {
+                    if let Some(report_json) = obj.get("reportJson").and_then(|value| value.as_str()) {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(report_json) {
+                            if let Some(count) = parsed
+                                .pointer("/shifts/total")
+                                .and_then(Value::as_i64)
+                                .filter(|count| *count > 0)
+                            {
+                                obj.insert("shiftCount".to_string(), serde_json::json!(count));
+                            }
+                        }
+                    }
+                }
+            }
             serde_json::json!({
                 "success": true,
                 "existing": true,
@@ -1387,6 +1491,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let terminal_id = shift_terminal_id
         .clone()
         .unwrap_or_else(|| storage::get_credential("terminal_id").unwrap_or_default());
+    let terminal_name = resolve_terminal_display_name(&conn, None);
     let branch_id =
         shift_branch_id.unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
@@ -1901,8 +2006,10 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "report": {
             "id": z_report_id,
             "shiftId": shift_id,
+            "shiftCount": 1,
             "branchId": branch_id,
             "terminalId": terminal_id,
+            "terminalName": terminal_name,
             "reportDate": report_date,
             "generatedAt": now,
             "grossSales": gross_sales,
@@ -2038,6 +2145,12 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
+    let _ = order_ownership::repair_historical_pickup_financial_attribution(
+        &conn,
+        branch_id.as_str(),
+        &Utc::now().to_rfc3339(),
+    )?;
+
     let latest_z_report = conn
         .query_row(
             "SELECT id, sync_state, report_date
@@ -2057,7 +2170,7 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         .optional()
         .map_err(|e| format!("query latest z-report status: {e}"))?;
 
-    if let Some(context) = load_or_synthesize_pending_z_report_context(&conn, &branch_id) {
+    if let Some(context) = load_pending_z_report_context(&conn, &branch_id) {
         return Ok(serde_json::json!({
             "status": "pending_local_submit",
             "pendingReportDate": context.report_date,
@@ -2110,6 +2223,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+    let now = Utc::now().to_rfc3339();
+    let _ = order_ownership::repair_historical_pickup_financial_attribution(
+        &conn,
+        branch_id.as_str(),
+        &now,
+    )?;
     let window = resolve_effective_z_report_window(&conn, &branch_id, payload);
     let date = window.report_date.clone();
     let period_start = window.period_start_at.clone();
@@ -2167,44 +2286,48 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let shifts_kitchen = shifts.iter().filter(|s| s.role_type == "kitchen").count() as i64;
 
     // --- Aggregate orders across all shifts in the period ---
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let order_agg_sql = format!(
+        "SELECT COUNT(*) as cnt,
+                COALESCE(SUM(o.total_amount), 0) as gross,
+                COALESCE(SUM(o.discount_amount), 0) as discounts,
+                COALESCE(SUM(o.tip_amount), 0) as tips
+         FROM orders o
+         WHERE {financial_expr} > ?1
+           AND (?2 IS NULL OR {financial_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled')"
+    );
     let order_agg = conn
-        .query_row(
-            "SELECT COUNT(*) as cnt,
-                    COALESCE(SUM(total_amount), 0) as gross,
-                    COALESCE(SUM(discount_amount), 0) as discounts,
-                    COALESCE(SUM(tip_amount), 0) as tips
-             FROM orders
-             WHERE created_at > ?1
-               AND (?2 IS NULL OR created_at <= ?2)
-               AND COALESCE(is_ghost, 0) = 0
-               AND status NOT IN ('cancelled', 'canceled')",
-            params![period_start, cutoff_param],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, f64>(3)?,
-                ))
-            },
-        )
+        .query_row(&order_agg_sql, params![period_start, cutoff_param, branch_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (total_orders, gross_sales, discounts_total, tips_total) = order_agg;
 
     // --- Payments: breakdown by method across all shifts ---
+    let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let payment_scope_sql = format!(
+        "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
+         FROM order_payments op
+         JOIN orders o ON o.id = op.order_id
+         WHERE {payment_scope_expr} > ?1
+           AND (?2 IS NULL OR {payment_scope_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND op.status = 'completed'
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+         GROUP BY op.method"
+    );
     let mut pay_stmt = conn
-        .prepare(
-            "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
-             FROM order_payments op
-             JOIN orders o ON o.id = op.order_id
-             WHERE op.created_at > ?1
-               AND (?2 IS NULL OR op.created_at <= ?2)
-               AND op.status = 'completed'
-               AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-             GROUP BY op.method",
-        )
+        .prepare(&payment_scope_sql)
         .map_err(|e| format!("prepare payment query: {e}"))?;
 
     let mut cash_sales = 0.0_f64;
@@ -2215,7 +2338,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let mut other_count = 0_i64;
 
     let pay_rows = pay_stmt
-        .query_map(params![period_start, cutoff_param], |row| {
+        .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2243,24 +2366,27 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     }
 
     // --- Adjustments: refunds and voids across all shifts ---
+    let adjustment_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let adjustment_scope_sql = format!(
+        "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
+         FROM payment_adjustments pa
+         JOIN orders o ON o.id = pa.order_id
+         WHERE {adjustment_scope_expr} > ?1
+           AND (?2 IS NULL OR {adjustment_scope_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+         GROUP BY pa.adjustment_type"
+    );
     let mut adj_stmt = conn
-        .prepare(
-            "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
-             FROM payment_adjustments pa
-             JOIN orders o ON o.id = pa.order_id
-             WHERE pa.created_at > ?1
-               AND (?2 IS NULL OR pa.created_at <= ?2)
-               AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-             GROUP BY pa.adjustment_type",
-        )
+        .prepare(&adjustment_scope_sql)
         .map_err(|e| format!("prepare adjustment query: {e}"))?;
 
     let mut refunds_total = 0.0_f64;
     let mut voids_total = 0.0_f64;
 
     let adj_rows = adj_stmt
-        .query_map(params![period_start, cutoff_param], |row| {
+        .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })
         .map_err(|e| format!("query adjustments: {e}"))?;
@@ -2380,16 +2506,19 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .collect();
 
     // --- Order type breakdown across all shifts in the period ---
+    let order_type_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let order_type_scope_sql = format!(
+        "SELECT COALESCE(o.order_type, 'dine-in'), COUNT(*), COALESCE(SUM(o.total_amount), 0)
+         FROM orders o
+         WHERE {order_type_scope_expr} > ?1
+           AND (?2 IS NULL OR {order_type_scope_expr} <= ?2)
+           AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND o.status NOT IN ('cancelled', 'canceled')
+         GROUP BY COALESCE(o.order_type, 'dine-in')"
+    );
     let mut ot_stmt = conn
-        .prepare(
-            "SELECT COALESCE(order_type, 'dine-in'), COUNT(*), COALESCE(SUM(total_amount), 0)
-             FROM orders
-             WHERE created_at > ?1
-               AND (?2 IS NULL OR created_at <= ?2)
-               AND COALESCE(is_ghost, 0) = 0
-               AND status NOT IN ('cancelled', 'canceled')
-             GROUP BY COALESCE(order_type, 'dine-in')",
-        )
+        .prepare(&order_type_scope_sql)
         .map_err(|e| format!("prepare order_type query: {e}"))?;
 
     let mut dine_in_orders = 0_i64;
@@ -2400,7 +2529,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let mut delivery_sales = 0.0_f64;
 
     let ot_rows = ot_stmt
-        .query_map(params![period_start, cutoff_param], |row| {
+        .query_map(params![period_start, cutoff_param, branch_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -2491,13 +2620,15 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     }
 
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
+    let terminal_name = resolve_terminal_display_name(&conn, None);
 
     let payments_breakdown = serde_json::json!({
         "cash": { "count": cash_count, "total": cash_sales },
         "card": { "count": card_count, "total": card_sales },
         "other": { "count": other_count, "total": other_sales },
     });
-    let sales_by_type = load_sales_by_type_for_period(&conn, &period_start, cutoff_param)?;
+    let sales_by_type =
+        load_sales_by_type_for_period(&conn, branch_id.as_str(), &period_start, cutoff_param)?;
     let drawer_rows = load_drawer_rows_for_period(&conn, &period_start, cutoff_param)?;
     let cash_breakdown_lookup = driver_cash_breakdown
         .iter()
@@ -2578,6 +2709,9 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             "success": true,
             "preview": true,
             "report": {
+                "shiftCount": shifts.len() as i64,
+                "terminalId": terminal_id,
+                "terminalName": terminal_name,
                 "reportJson": report_json,
             },
         }));
@@ -2688,8 +2822,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "report": {
             "id": z_report_id,
             "shiftId": shift_id_for_db,
+            "shiftCount": shifts.len() as i64,
             "branchId": branch_id,
             "terminalId": terminal_id,
+            "terminalName": terminal_name,
             "reportDate": date,
             "generatedAt": now,
             "grossSales": gross_sales,
@@ -2725,6 +2861,11 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
     let window = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let _ = order_ownership::repair_historical_pickup_financial_attribution(
+            &conn,
+            branch_id.as_str(),
+            &Utc::now().to_rfc3339(),
+        )?;
         resolve_effective_z_report_window(&conn, &branch_id, payload)
     };
     let cutoff_param = window.cutoff_at.as_deref();
@@ -2760,15 +2901,24 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     // --- Pre-condition: all orders must have settled payments ---
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let unpaid_financial_expr = business_day::order_financial_timestamp_expr("o");
+        let unpaid_sql = format!(
+            "SELECT COUNT(*) FROM orders o
+             WHERE {unpaid_financial_expr} > ?1
+               AND (?2 IS NULL OR {unpaid_financial_expr} <= ?2)
+               AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+               AND COALESCE(o.is_ghost, 0) = 0
+               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+               AND COALESCE((
+                    SELECT SUM(op_settled.amount)
+                    FROM order_payments op_settled
+                    WHERE op_settled.order_id = o.id
+                      AND op_settled.status = 'completed'
+               ), 0) + 0.009 < COALESCE(o.total_amount, 0)"
+        );
         let unpaid_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM orders
-                 WHERE created_at > ?1
-                   AND (?2 IS NULL OR created_at <= ?2)
-                   AND (?3 = '' OR branch_id = ?3 OR branch_id IS NULL)
-                    AND COALESCE(is_ghost, 0) = 0
-                    AND status NOT IN ('cancelled', 'canceled', 'refunded')
-                    AND COALESCE(payment_status, 'pending') NOT IN ('paid', 'completed', 'refunded')",
+                &unpaid_sql,
                 params![window.period_start_at, cutoff_param, branch_id],
                 |row| row.get(0),
             )
@@ -3127,7 +3277,7 @@ pub fn generate_z_report_file(
                     gross_sales, net_sales, total_orders, cash_sales, card_sales,
                     refunds_total, voids_total, discounts_total, tips_total,
                     expenses_total, cash_variance, opening_cash, closing_cash,
-                    expected_cash, payments_breakdown_json
+                    expected_cash, payments_breakdown_json, report_json
              FROM z_reports WHERE id = ?1",
             params![z_report_id],
             |row| {
@@ -3152,6 +3302,7 @@ pub fn generate_z_report_file(
                     row.get::<_, f64>(17)?,    // closing_cash
                     row.get::<_, f64>(18)?,    // expected_cash
                     row.get::<_, String>(19)?, // payments_breakdown_json
+                    row.get::<_, String>(20)?, // report_json
                 ))
             },
         )
@@ -3160,7 +3311,7 @@ pub fn generate_z_report_file(
     let (
         id,
         shift_id,
-        terminal_id,
+        _terminal_id,
         report_date,
         generated_at,
         gross_sales,
@@ -3178,6 +3329,7 @@ pub fn generate_z_report_file(
         closing_cash,
         expected_cash,
         payments_breakdown_str,
+        report_json_str,
     ) = report;
 
     // Store settings for header
@@ -3185,6 +3337,8 @@ pub fn generate_z_report_file(
         db::get_setting(&conn, "terminal", "store_name").unwrap_or_else(|| "The Small".to_string());
     let store_address = db::get_setting(&conn, "terminal", "store_address").unwrap_or_default();
     let store_phone = db::get_setting(&conn, "terminal", "store_phone").unwrap_or_default();
+    let terminal_display_name =
+        resolve_terminal_display_name(&conn, None).unwrap_or_default();
 
     // Staff name from shift
     let staff_name: String = conn
@@ -3195,16 +3349,26 @@ pub fn generate_z_report_file(
         )
         .unwrap_or_else(|_| "N/A".to_string());
 
-    // Shift ID short (first 8 chars)
-    let shift_short = if shift_id.len() > 8 {
-        &shift_id[..8]
-    } else {
-        &shift_id
-    };
-
     // Parse payments breakdown for display
     let _breakdown: Value =
         serde_json::from_str(&payments_breakdown_str).unwrap_or(serde_json::json!({}));
+    let report_json: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
+    let shift_count = report_json
+        .pointer("/shifts/total")
+        .and_then(Value::as_i64)
+        .filter(|count| *count > 1);
+    let shift_line = if let Some(count) = shift_count {
+        format!("Shifts: {count}<br/>")
+    } else if !shift_id.trim().is_empty() {
+        format!("Shift: {}<br/>", shift_id)
+    } else {
+        String::new()
+    };
+    let terminal_line = if terminal_display_name.is_empty() {
+        String::new()
+    } else {
+        format!("Terminal: {}<br/>", terminal_display_name)
+    };
 
     // Build address/phone lines
     let address_line = if store_address.is_empty() {
@@ -3235,8 +3399,7 @@ pub fn generate_z_report_file(
 Z - R E P O R T</div>
 <hr style="border:none;border-top:2px solid #000;"/>
 <div style="margin:4px 0;">
-Shift: {shift_short}<br/>
-Staff: {staff_name}<br/>
+{shift_line}Staff: {staff_name}<br/>
 Date: {report_date}<br/>
 Generated: {generated_at}
 </div>
@@ -3280,7 +3443,7 @@ Generated: {generated_at}
 <hr style="border:none;border-top:2px solid #000;"/>
 <div style="text-align:center;margin-top:8px;font-size:9px;">
 End of Report<br/>
-Terminal: {terminal_id}<br/>
+{terminal_line}
 ID: {id}
 </div>
 </div>"#,
@@ -3787,6 +3950,32 @@ mod tests {
             params![created_at],
         )
         .expect("insert other branch unpaid order");
+    }
+
+    fn seed_paid_order_with_stale_payment_status(db: &DbState, created_at: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, payment_method, staff_shift_id, branch_id, discount_amount, tip_amount,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-stale-paid-status', '#stale-paid', '[]', 22.0, 'completed', 'pickup',
+                'pending', 'cash', 'shift-zr-1', 'branch-1', 0.0, 0.0, 'pending', ?1, ?1
+             )",
+            params![created_at],
+        )
+        .expect("insert stale payment-status order");
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+             ) VALUES (
+                'pay-stale-paid-status', 'ord-stale-paid-status', 'cash', 22.0, 'completed',
+                'shift-zr-1', 'EUR', ?1, ?1
+             )",
+            params![created_at],
+        )
+        .expect("insert settled payment for stale payment-status order");
     }
 
     fn seed_cashier_driver_zreport_day(db: &DbState) {
@@ -4510,6 +4699,48 @@ mod tests {
     }
 
     #[test]
+    fn test_get_end_of_day_status_clears_stale_pending_context_after_local_rollover() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+
+        generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id })).unwrap();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T18:00:00Z",
+            )
+            .unwrap();
+            persist_pending_z_report_context(
+                &conn,
+                &PendingZReportContext {
+                    branch_id: "branch-1".to_string(),
+                    report_date: "2026-02-16".to_string(),
+                    cutoff_at: "2026-02-16T18:00:00Z".to_string(),
+                    period_start_at: "1970-01-01T00:00:00Z".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        let status = get_end_of_day_status(&db, &serde_json::json!({
+            "branchId": "branch-1",
+        }))
+        .expect("status should load");
+
+        assert_eq!(status["status"], "submitted_pending_admin");
+
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none(),
+            "stale pending context should be cleared once last_z_report_timestamp covers cutoff"
+        );
+    }
+
+    #[test]
     fn test_submit_z_report_ignores_unpaid_orders_from_other_branch() {
         let db = test_db();
         seed_closed_shift(&db);
@@ -4520,6 +4751,22 @@ mod tests {
             "date": "2026-02-16",
         }))
         .expect("submit should ignore other-branch unpaid orders");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["localDayClosed"], true);
+    }
+
+    #[test]
+    fn test_submit_z_report_ignores_stale_payment_status_when_settled_payments_exist() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_paid_order_with_stale_payment_status(&db, "2026-02-16T17:00:00Z");
+
+        let result = submit_z_report(&db, &serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        }))
+        .expect("submit should treat settled payment rows as paid even if payment_status is stale");
 
         assert_eq!(result["success"], true);
         assert_eq!(result["localDayClosed"], true);

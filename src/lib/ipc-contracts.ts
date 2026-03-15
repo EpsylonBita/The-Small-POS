@@ -112,6 +112,11 @@ export interface TerminalRuntimeConfig {
   business_type?: string | null;
   terminal_type?: string | null;
   parent_terminal_id?: string | null;
+  owner_terminal_id?: string | null;
+  owner_terminal_db_id?: string | null;
+  source_terminal_id?: string | null;
+  source_terminal_db_id?: string | null;
+  pos_operating_mode?: string | null;
   enabled_features?: Record<string, boolean>;
   last_config_sync_at?: string | null;
   ghost_mode_feature_enabled?: string | boolean | null;
@@ -119,6 +124,11 @@ export interface TerminalRuntimeConfig {
   // Compatibility aliases while the renderer migrates.
   terminalType?: string | null;
   parentTerminalId?: string | null;
+  ownerTerminalId?: string | null;
+  ownerTerminalDbId?: string | null;
+  sourceTerminalId?: string | null;
+  sourceTerminalDbId?: string | null;
+  posOperatingMode?: string | null;
   features?: Record<string, boolean>;
 }
 
@@ -238,6 +248,11 @@ export interface ScreenCaptureSignal {
 
 export interface ScreenCaptureRequestState {
   status?: string;
+  error_message?: string | null;
+  control_status?: string;
+  control_requested_at?: string | null;
+  control_responded_at?: string | null;
+  control_denial_reason?: string | null;
   [key: string]: unknown;
 }
 

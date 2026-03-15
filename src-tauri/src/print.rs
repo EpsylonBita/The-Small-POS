@@ -20,7 +20,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::db::DbState;
+use crate::db::{self, DbState};
 use crate::drawer;
 use crate::printers;
 use crate::receipt_renderer::{
@@ -42,8 +42,55 @@ const AUTO_PRINT_DELIVERY_ONLY: &[&str] = &["delivery_slip"];
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
-        "order_receipt" | "delivery_slip" | "kitchen_ticket"
+        "order_receipt" | "delivery_slip" | "kitchen_ticket" | "shift_checkout" | "z_report"
     )
+}
+
+fn non_empty_text(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn looks_like_raw_terminal_id(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    lower.starts_with("terminal-")
+        || lower.starts_with("terminal_")
+        || lower.starts_with("pos-terminal-")
+        || lower.starts_with("pos_terminal_")
+        || lower.starts_with("term-")
+}
+
+fn sanitize_terminal_display_name(value: &str) -> Option<String> {
+    let trimmed = non_empty_text(value)?;
+    if looks_like_raw_terminal_id(&trimmed) {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn resolve_terminal_display_name_from_settings(conn: &rusqlite::Connection) -> Option<String> {
+    ["name", "display_name", "displayName"]
+        .iter()
+        .find_map(|key| db::get_setting(conn, "terminal", key))
+        .and_then(|value| sanitize_terminal_display_name(&value))
+}
+
+fn resolve_printed_terminal_name_with_conn(
+    conn: &rusqlite::Connection,
+    explicit: Option<&str>,
+) -> Option<String> {
+    explicit
+        .and_then(sanitize_terminal_display_name)
+        .or_else(|| resolve_terminal_display_name_from_settings(conn))
 }
 
 pub fn auto_print_entity_types_for_order_type(order_type: &str) -> &'static [&'static str] {
@@ -2242,17 +2289,27 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Load the payment record
-    let (order_id, method, amount, cash_received, change_given, transaction_ref): (
+    let (
+        order_id,
+        method,
+        amount,
+        cash_received,
+        change_given,
+        transaction_ref,
+        discount_amount,
+    ): (
         String,
         String,
         f64,
         Option<f64>,
         Option<f64>,
         String,
+        f64,
     ) = conn
         .query_row(
             "SELECT order_id, COALESCE(method, ''), COALESCE(amount, 0),
-                    cash_received, change_given, COALESCE(transaction_ref, '')
+                    cash_received, change_given, COALESCE(transaction_ref, ''),
+                    COALESCE(discount_amount, 0)
              FROM order_payments WHERE id = ?1 AND status = 'completed'",
             params![payment_id],
             |row| {
@@ -2263,6 +2320,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -2376,22 +2434,32 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
             .collect()
     };
 
-    // Build totals: show items subtotal and the split payment amount
-    let items_subtotal: f64 = items.iter().map(|i| i.total).sum();
-    let totals = vec![
-        TotalsLine {
-            label: "Subtotal".to_string(),
-            amount: items_subtotal,
+    // Build totals: show gross subtotal, optional discount, and the net paid amount.
+    let inferred_gross_subtotal = if !payment_items.is_empty() {
+        items.iter().map(|i| i.total).sum()
+    } else {
+        amount + discount_amount.max(0.0)
+    };
+    let mut totals = vec![TotalsLine {
+        label: "Subtotal".to_string(),
+        amount: inferred_gross_subtotal,
+        emphasize: false,
+        discount_percent: None,
+    }];
+    if discount_amount > 0.0 {
+        totals.push(TotalsLine {
+            label: "Discount".to_string(),
+            amount: -discount_amount,
             emphasize: false,
             discount_percent: None,
-        },
-        TotalsLine {
-            label: "Split Payment".to_string(),
-            amount,
-            emphasize: true,
-            discount_percent: None,
-        },
-    ];
+        });
+    }
+    totals.push(TotalsLine {
+        label: "Split Payment".to_string(),
+        amount,
+        emphasize: true,
+        discount_percent: None,
+    });
 
     // Build the single payment line
     let label = match method.as_str() {
@@ -2432,6 +2500,9 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         amount, total_amount
     );
     order_notes.push(split_note);
+    if discount_amount > 0.0 {
+        order_notes.push(format!("Includes split discount of {:.2}", discount_amount));
+    }
 
     Ok(OrderReceiptDoc {
         order_id: order_id.to_string(),
@@ -2610,7 +2681,17 @@ fn build_kitchen_ticket_doc(db: &DbState, order_id: &str) -> Result<KitchenTicke
     })
 }
 
-fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckoutDoc, String> {
+fn object_text_field(payload: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| payload.get(*key).and_then(Value::as_str))
+        .and_then(non_empty_text)
+}
+
+fn build_shift_checkout_doc(
+    db: &DbState,
+    shift_id: &str,
+    payload: Option<&Value>,
+) -> Result<ShiftCheckoutDoc, String> {
     let summary = crate::shifts::get_shift_summary(db, shift_id)?;
     let shift = summary
         .get("shift")
@@ -2620,15 +2701,25 @@ fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckou
         .get("cashDrawer")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+    let explicit_terminal_name =
+        payload.and_then(|value| object_text_field(value, &["terminalName", "terminal_name"]));
+    let terminal_name = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
+            .unwrap_or_default()
+    };
 
     let mut doc = Ok(ShiftCheckoutDoc {
         shift_id: shift_id.to_string(),
-        role_type: shift
-            .get("role_type")
-            .or_else(|| shift.get("roleType"))
-            .and_then(Value::as_str)
-            .unwrap_or("staff")
-            .to_string(),
+        role_type: payload
+            .and_then(|value| object_text_field(value, &["roleType", "role_type"]))
+            .or_else(|| {
+                shift.get("role_type")
+                    .or_else(|| shift.get("roleType"))
+                    .and_then(Value::as_str)
+                    .and_then(non_empty_text)
+            })
+            .unwrap_or_else(|| "staff".to_string()),
         staff_name: shift
             .get("staff_name")
             .or_else(|| shift.get("staffName"))
@@ -2636,12 +2727,7 @@ fn build_shift_checkout_doc(db: &DbState, shift_id: &str) -> Result<ShiftCheckou
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("Unknown")
             .to_string(),
-        terminal_name: shift
-            .get("terminal_id")
-            .or_else(|| shift.get("terminalId"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        terminal_name,
         check_in: shift
             .get("check_in_time")
             .or_else(|| shift.get("checkInTime"))
@@ -2781,18 +2867,19 @@ fn number_from_paths(payload: &Value, paths: &[&str]) -> Option<f64> {
 fn text_from_paths(payload: &Value, paths: &[&str]) -> Option<String> {
     for path in paths {
         if let Some(text) = payload.pointer(path).and_then(Value::as_str) {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+            if let Some(trimmed) = non_empty_text(text) {
+                return Some(trimmed);
             }
         }
     }
     None
 }
 
-fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportDoc {
+fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &str) -> ZReportDoc {
     let report_date = text_from_paths(payload, &["/date", "/reportDate", "/report_date"])
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let generated_at = text_from_paths(payload, &["/generatedAt", "/generated_at"])
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
     let total_orders = number_from_paths(
         payload,
         &[
@@ -2912,23 +2999,30 @@ fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportD
         .round() as i64;
     let delivery_sales =
         number_from_paths(payload, &["/sales/deliverySales", "/deliverySales"]).unwrap_or(0.0);
+    let shift_count = number_from_paths(payload, &["/shiftCount", "/shift_count", "/shifts/total"])
+        .map(|value| value.round() as i64)
+        .filter(|count| *count > 0);
+    let mut shift_ref = text_from_paths(payload, &["/shiftId", "/shift_id"]).unwrap_or_default();
+    if shift_count.unwrap_or(0) > 1 {
+        shift_ref.clear();
+    }
+    let explicit_terminal_name = text_from_paths(payload, &["/terminalName", "/terminal_name"]);
+    let terminal_name = db
+        .conn
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
+        })
+        .unwrap_or_default();
 
     ZReportDoc {
         report_id: entity_id.to_string(),
         report_date,
-        generated_at: Utc::now().to_rfc3339(),
-        shift_ref: text_from_paths(payload, &["/shiftId", "/shift_id", "/id"])
-            .unwrap_or_else(|| "snapshot".to_string()),
-        terminal_name: text_from_paths(
-            payload,
-            &[
-                "/terminalName",
-                "/terminal_name",
-                "/terminalId",
-                "/terminal_id",
-            ],
-        )
-        .unwrap_or_default(),
+        generated_at,
+        shift_ref,
+        shift_count,
+        terminal_name,
         total_orders,
         gross_sales,
         net_sales,
@@ -2958,7 +3052,7 @@ fn build_z_report_doc_from_payload(payload: &Value, entity_id: &str) -> ZReportD
 
 fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.query_row(
+    let report = conn.query_row(
         "SELECT id, shift_id, terminal_id, report_date, generated_at,
                 gross_sales, net_sales, total_orders, cash_sales, card_sales,
                 refunds_total, voids_total, discounts_total, expenses_total,
@@ -2967,73 +3061,132 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
          FROM z_reports WHERE id = ?1",
         params![z_report_id],
         |row| {
-            let report_json_str: String = row.get(19)?;
-            let rj: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
-            Ok(ZReportDoc {
-                report_id: row.get(0)?,
-                shift_ref: row.get(1)?,
-                terminal_name: row.get(2)?,
-                report_date: row.get(3)?,
-                generated_at: row.get(4)?,
-                gross_sales: row.get(5)?,
-                net_sales: row.get(6)?,
-                total_orders: row.get(7)?,
-                cash_sales: row.get(8)?,
-                card_sales: row.get(9)?,
-                refunds_total: row.get(10)?,
-                voids_total: row.get(11)?,
-                discounts_total: row.get(12)?,
-                expenses_total: row.get(13)?,
-                cash_variance: row.get(14)?,
-                tips_total: row.get::<_, f64>(15).unwrap_or(0.0),
-                opening_cash: row.get::<_, f64>(16).unwrap_or(0.0),
-                closing_cash: row.get::<_, f64>(17).unwrap_or(0.0),
-                expected_cash: row.get::<_, f64>(18).unwrap_or(0.0),
-                cash_drops: rj
-                    .pointer("/cashDrawer/totalCashDrops")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                driver_cash_given: rj
-                    .pointer("/cashDrawer/driverCashGiven")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                driver_cash_returned: rj
-                    .pointer("/cashDrawer/driverCashReturned")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                staff_payments_total: rj
-                    .pointer("/staffPayments/total")
-                    .or_else(|| rj.pointer("/cashDrawer/staffPaymentsTotal"))
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                dine_in_orders: rj
-                    .pointer("/sales/dineInOrders")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0),
-                dine_in_sales: rj
-                    .pointer("/sales/dineInSales")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                takeaway_orders: rj
-                    .pointer("/sales/takeawayOrders")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0),
-                takeaway_sales: rj
-                    .pointer("/sales/takeawaySales")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                delivery_orders: rj
-                    .pointer("/sales/deliveryOrders")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0),
-                delivery_sales: rj
-                    .pointer("/sales/deliverySales")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, f64>(8)?,
+                row.get::<_, f64>(9)?,
+                row.get::<_, f64>(10)?,
+                row.get::<_, f64>(11)?,
+                row.get::<_, f64>(12)?,
+                row.get::<_, f64>(13)?,
+                row.get::<_, f64>(14)?,
+                row.get::<_, f64>(15).unwrap_or(0.0),
+                row.get::<_, f64>(16).unwrap_or(0.0),
+                row.get::<_, f64>(17).unwrap_or(0.0),
+                row.get::<_, f64>(18).unwrap_or(0.0),
+                row.get::<_, String>(19)?,
+            ))
         },
-    )
-    .map_err(|_| format!("Z-report not found: {z_report_id}"))
+    );
+
+    let (
+        report_id,
+        raw_shift_ref,
+        _terminal_id,
+        report_date,
+        generated_at,
+        gross_sales,
+        net_sales,
+        total_orders,
+        cash_sales,
+        card_sales,
+        refunds_total,
+        voids_total,
+        discounts_total,
+        expenses_total,
+        cash_variance,
+        tips_total,
+        opening_cash,
+        closing_cash,
+        expected_cash,
+        report_json_str,
+    ) = report.map_err(|_| format!("Z-report not found: {z_report_id}"))?;
+
+    let rj: Value = serde_json::from_str(&report_json_str).unwrap_or_default();
+    let shift_count = rj
+        .pointer("/shifts/total")
+        .and_then(Value::as_i64)
+        .filter(|count| *count > 0);
+    let shift_ref = if shift_count.unwrap_or(0) > 1 {
+        String::new()
+    } else {
+        raw_shift_ref.unwrap_or_default()
+    };
+    let explicit_terminal_name = text_from_paths(&rj, &["/terminalName", "/terminal_name"]);
+    let terminal_name =
+        resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
+            .unwrap_or_default();
+
+    Ok(ZReportDoc {
+        report_id,
+        report_date,
+        generated_at,
+        shift_ref,
+        shift_count,
+        terminal_name,
+        total_orders,
+        gross_sales,
+        net_sales,
+        cash_sales,
+        card_sales,
+        refunds_total,
+        voids_total,
+        discounts_total,
+        expenses_total,
+        cash_variance,
+        tips_total,
+        opening_cash,
+        closing_cash,
+        expected_cash,
+        cash_drops: rj
+            .pointer("/cashDrawer/totalCashDrops")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        driver_cash_given: rj
+            .pointer("/cashDrawer/driverCashGiven")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        driver_cash_returned: rj
+            .pointer("/cashDrawer/driverCashReturned")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        staff_payments_total: rj
+            .pointer("/staffPayments/total")
+            .or_else(|| rj.pointer("/cashDrawer/staffPaymentsTotal"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        dine_in_orders: rj
+            .pointer("/sales/dineInOrders")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        dine_in_sales: rj
+            .pointer("/sales/dineInSales")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        takeaway_orders: rj
+            .pointer("/sales/takeawayOrders")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        takeaway_sales: rj
+            .pointer("/sales/takeawaySales")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        delivery_orders: rj
+            .pointer("/sales/deliveryOrders")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        delivery_sales: rj
+            .pointer("/sales/deliverySales")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    })
 }
 
 fn build_document_for_job(
@@ -3042,13 +3195,8 @@ fn build_document_for_job(
     entity_id: &str,
     payload_json: Option<&str>,
 ) -> Result<ReceiptDocument, String> {
-    fn payload_text_field(payload: &Value, keys: &[&str]) -> Option<String> {
-        keys.iter()
-            .find_map(|key| payload.get(*key).and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-    }
+    let payload =
+        payload_json.and_then(|raw_payload| serde_json::from_str::<Value>(raw_payload).ok());
 
     match entity_type {
         "order_receipt" => Ok(ReceiptDocument::OrderReceipt(build_order_receipt_doc(
@@ -3058,37 +3206,34 @@ fn build_document_for_job(
             db, entity_id,
         )?)),
         "shift_checkout" => Ok(ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(
-            db, entity_id,
+            db,
+            entity_id,
+            payload.as_ref(),
         )?)),
         "z_report" => {
-            if let Some(raw_payload) = payload_json {
-                if let Ok(payload) = serde_json::from_str::<Value>(raw_payload) {
-                    return Ok(ReceiptDocument::ZReport(build_z_report_doc_from_payload(
-                        &payload, entity_id,
-                    )));
-                }
+            if let Some(payload) = payload.as_ref() {
+                return Ok(ReceiptDocument::ZReport(build_z_report_doc_from_payload(
+                    db, payload, entity_id,
+                )));
             }
             Ok(ReceiptDocument::ZReport(build_z_report_doc(db, entity_id)?))
         }
         "delivery_slip" => {
             let mut doc = build_order_receipt_doc(db, entity_id)?;
-            if let Some(raw_payload) = payload_json {
-                if let Ok(payload) = serde_json::from_str::<Value>(raw_payload) {
-                    if let Some(mode) = payload_text_field(&payload, &["slip_mode", "slipMode"]) {
-                        doc.delivery_slip_mode = if mode.eq_ignore_ascii_case("assign_driver") {
-                            DeliverySlipMode::AssignDriver
-                        } else {
-                            DeliverySlipMode::DeliveryOrder
-                        };
-                    }
-                    if doc.driver_id.is_none() {
-                        doc.driver_id =
-                            payload_text_field(&payload, &["driverId", "driver_id", "staff_id"]);
-                    }
-                    if doc.driver_name.is_none() {
-                        doc.driver_name =
-                            payload_text_field(&payload, &["driverName", "driver_name"]);
-                    }
+            if let Some(payload) = payload.as_ref() {
+                if let Some(mode) = object_text_field(payload, &["slip_mode", "slipMode"]) {
+                    doc.delivery_slip_mode = if mode.eq_ignore_ascii_case("assign_driver") {
+                        DeliverySlipMode::AssignDriver
+                    } else {
+                        DeliverySlipMode::DeliveryOrder
+                    };
+                }
+                if doc.driver_id.is_none() {
+                    doc.driver_id =
+                        object_text_field(payload, &["driverId", "driver_id", "staff_id"]);
+                }
+                if doc.driver_name.is_none() {
+                    doc.driver_name = object_text_field(payload, &["driverName", "driver_name"]);
                 }
             }
             Ok(ReceiptDocument::DeliverySlip(doc))
@@ -3297,17 +3442,17 @@ fn generate_shift_checkout_file(
         .or_else(|| shift.get("roleType"))
         .and_then(Value::as_str)
         .unwrap_or("staff");
+    let role_display = receipt_renderer::receipt_role_text("en", role_type);
     let staff_name = shift
         .get("staff_name")
         .or_else(|| shift.get("staffName"))
         .and_then(Value::as_str)
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Unknown");
-    let terminal_name = shift
-        .get("terminal_id")
-        .or_else(|| shift.get("terminalId"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let terminal_name = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_printed_terminal_name_with_conn(&conn, None).unwrap_or_default()
+    };
     let check_in = shift
         .get("check_in_time")
         .or_else(|| shift.get("checkInTime"))
@@ -3353,6 +3498,14 @@ fn generate_shift_checkout_file(
         .get("variance_amount")
         .or_else(|| cash_drawer.get("varianceAmount"))
         .and_then(Value::as_f64);
+    let terminal_line = if terminal_name.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"line\"><span>Terminal</span><span>{}</span></div>",
+            escape_html(&terminal_name)
+        )
+    };
 
     // Build driver section HTML if applicable
     let driver_section = if role_type == "driver" {
@@ -3445,10 +3598,9 @@ fn generate_shift_checkout_file(
 </head>
 <body>
 <h1>SHIFT CHECKOUT</h1>
-<div class="line"><span>Shift</span><span>{shift_id_short}</span></div>
 <div class="line"><span>Role</span><span>{role_type}</span></div>
 <div class="line"><span>Staff</span><span>{staff_name}</span></div>
-<div class="line"><span>Terminal</span><span>{terminal_name}</span></div>
+{terminal_line}
 <div class="line"><span>Check-in</span><span>{check_in}</span></div>
 <div class="line"><span>Check-out</span><span>{check_out}</span></div>
 <hr/>
@@ -3467,10 +3619,9 @@ fn generate_shift_checkout_file(
 </body>
 </html>"#,
         shift_id = escape_html(shift_id),
-        shift_id_short = escape_html(shift_id.get(..8).unwrap_or(shift_id)),
-        role_type = escape_html(role_type),
+        role_type = escape_html(&role_display),
         staff_name = escape_html(staff_name),
-        terminal_name = escape_html(terminal_name),
+        terminal_line = terminal_line,
         check_in = escape_html(check_in),
         check_out = escape_html(check_out),
         orders_count = orders_count,
@@ -4017,6 +4168,26 @@ mod tests {
         .expect("insert test payment");
     }
 
+    fn insert_shift_checkout_fixture(conn: &Connection, shift_id: &str, terminal_id: &str) {
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, status,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, total_orders_count, total_sales_amount,
+                total_cash_sales, total_card_sales, branch_id, terminal_id, calculation_version,
+                payment_amount, sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, 'staff-1', 'Alice', 'cashier', 'closed',
+                100.0, 125.0, 125.0, 0.0,
+                '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z', 3, 25.0,
+                15.0, 10.0, 'branch-1', ?2, 2,
+                0.0, 'pending', '2026-03-15T16:00:00Z', '2026-03-15T16:00:00Z'
+             )",
+            params![shift_id, terminal_id],
+        )
+        .expect("insert shift checkout fixture");
+    }
+
     #[test]
     fn test_parse_item_customizations_from_array() {
         let item = serde_json::json!({
@@ -4332,6 +4503,74 @@ mod tests {
             }
             _ => panic!("expected delivery slip document"),
         }
+    }
+
+    #[test]
+    fn test_build_document_for_job_shift_checkout_uses_display_terminal_name() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "shift-checkout-1", "terminal-9bf9dfce");
+            db::set_setting(&conn, "terminal", "name", "Front Counter")
+                .expect("set terminal display name");
+        }
+
+        let doc = build_document_for_job(&db, "shift_checkout", "shift-checkout-1", None).unwrap();
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.terminal_name, "Front Counter");
+                assert_eq!(doc.role_type, "cashier");
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_z_report_payload_prefers_shift_count_and_terminal_name() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(&conn, "terminal", "name", "Fallback Counter")
+                .expect("set fallback terminal display name");
+        }
+
+        let payload = serde_json::json!({
+            "date": "2026-03-15",
+            "generatedAt": "2026-03-15T23:59:00Z",
+            "shiftId": "shift-aggregate-1",
+            "shiftCount": 4,
+            "terminalId": "terminal-9bf9dfce",
+            "terminalName": "Main POS",
+            "sales": {
+                "totalOrders": 11,
+                "totalSales": 245.0,
+                "cashSales": 120.0,
+                "cardSales": 125.0
+            },
+            "cashDrawer": {
+                "totalVariance": 0.0
+            }
+        });
+        let raw_payload = payload.to_string();
+
+        let doc =
+            build_document_for_job(&db, "z_report", "snapshot-20260315", Some(raw_payload.as_str()))
+                .unwrap();
+        match doc {
+            ReceiptDocument::ZReport(doc) => {
+                assert_eq!(doc.shift_ref, "");
+                assert_eq!(doc.shift_count, Some(4));
+                assert_eq!(doc.terminal_name, "Main POS");
+                assert_eq!(doc.generated_at, "2026-03-15T23:59:00Z");
+            }
+            _ => panic!("expected z-report document"),
+        }
+    }
+
+    #[test]
+    fn test_receipt_like_entity_type_includes_shift_checkout_and_z_report() {
+        assert!(is_receipt_like_entity_type("shift_checkout"));
+        assert!(is_receipt_like_entity_type("z_report"));
     }
 
     #[test]

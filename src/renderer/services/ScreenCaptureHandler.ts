@@ -1,11 +1,27 @@
 import { getBridge, offEvent, onEvent } from '../../lib'
-import type { ScreenCaptureSignal, ScreenCaptureSignalBatchPayload } from '../../lib/ipc-contracts'
+import type {
+  ScreenCaptureRequestState,
+  ScreenCaptureSignal,
+  ScreenCaptureSignalBatchPayload,
+} from '../../lib/ipc-contracts'
 
 interface ScreenCaptureConfig {
   requestId: string
-  adminSessionId: string
+  adminSessionId?: string
   terminalId: string
+  remoteViewCapabilities?: Record<string, unknown> | null
 }
+
+interface TerminalSessionPayload {
+  request?: (ScreenCaptureRequestState & { id?: string }) | null
+  terminal?: {
+    terminal_id?: string
+    client_platform?: string | null
+    remote_view_capabilities?: Record<string, unknown> | null
+  } | null
+}
+
+type ControlAction = 'approve_control' | 'deny_control'
 
 class ScreenCaptureHandler {
   private peerConnection: RTCPeerConnection | null = null
@@ -20,18 +36,104 @@ class ScreenCaptureHandler {
   private seenSignalIds = new Set<string>()
   private controlChannel: RTCDataChannel | null = null
   private eventUnsubscribers: Array<() => void> = []
+  private sessionPollTimer: ReturnType<typeof setInterval> | null = null
+  private sessionPollInFlight = false
+  private currentRequestState: (ScreenCaptureRequestState & { id?: string }) | null = null
+  private lastControlPromptKey: string | null = null
+  private lastPointerPosition = { x: 0.5, y: 0.5 }
+  private reportedCapabilities: Record<string, unknown> = {
+    liveView: true,
+    remoteControl: true,
+    requiresControlApproval: true,
+    interactionScope: 'window',
+    captureTarget: 'window',
+    notes: null,
+  }
   private bridge = getBridge()
 
   constructor() {
     this.setupIPCListeners()
+    this.startIdleSessionPolling()
   }
 
-  private async fetchFromAdmin(path: string, options?: { method?: string; body?: unknown }): Promise<any> {
+  private async fetchFromAdmin(
+    path: string,
+    options?: { method?: string; body?: unknown }
+  ): Promise<any> {
     const result = await this.bridge.adminApi.fetchFromAdmin(path, options)
     if (!result?.success) {
       throw new Error(result?.error || `Admin API request failed for ${path}`)
     }
     return result?.data ?? result
+  }
+
+  private startIdleSessionPolling(): void {
+    if (this.sessionPollTimer) {
+      return
+    }
+
+    void this.pollForPendingSession()
+    this.sessionPollTimer = setInterval(() => {
+      void this.pollForPendingSession()
+    }, 1500)
+  }
+
+  private stopIdleSessionPolling(): void {
+    if (!this.sessionPollTimer) {
+      return
+    }
+    clearInterval(this.sessionPollTimer)
+    this.sessionPollTimer = null
+  }
+
+  private async pollForPendingSession(): Promise<void> {
+    if (this.sessionPollInFlight || this.isStreaming || this.isStarting) {
+      return
+    }
+
+    this.sessionPollInFlight = true
+    try {
+      const payload = (await this.fetchFromAdmin(
+        '/api/pos/screen-share/terminal/session'
+      )) as TerminalSessionPayload
+      const request = payload?.request
+
+      if (!request?.id || (request.status !== 'requested' && request.status !== 'active')) {
+        return
+      }
+
+      this.currentRequestState = request
+      if (payload?.terminal?.remote_view_capabilities) {
+        this.reportedCapabilities = payload.terminal.remote_view_capabilities
+      }
+
+      if (this.config?.requestId === request.id) {
+        return
+      }
+
+      await this.startCapture({
+        requestId: request.id,
+        adminSessionId: '',
+        terminalId: payload?.terminal?.terminal_id || '',
+        remoteViewCapabilities: payload?.terminal?.remote_view_capabilities ?? null,
+      })
+    } catch (error) {
+      console.warn('[ScreenCapture] Idle session polling failed', error)
+    } finally {
+      this.sessionPollInFlight = false
+    }
+  }
+
+  private getReportedCapabilities(): Record<string, unknown> {
+    return {
+      liveView: true,
+      remoteControl: true,
+      requiresControlApproval: true,
+      interactionScope: 'window',
+      captureTarget: 'window',
+      notes: null,
+      ...this.reportedCapabilities,
+    }
   }
 
   private async sendSignal(requestId: string, type: 'offer' | 'candidate', data: unknown): Promise<void> {
@@ -42,6 +144,10 @@ class ScreenCaptureHandler {
 
     if (payload?.success === false) {
       throw new Error(payload?.error || payload?.message || `Failed to send ${type} signal`)
+    }
+
+    if (payload?.request) {
+      this.currentRequestState = payload.request
     }
   }
 
@@ -56,11 +162,71 @@ class ScreenCaptureHandler {
         requestId,
         status,
         errorMessage: errorMessage || null,
+        clientPlatform: 'windows',
+        remoteViewCapabilities: this.getReportedCapabilities(),
       },
     })
 
     if (payload?.success === false) {
       throw new Error(payload?.error || payload?.message || `Failed to set status ${status}`)
+    }
+
+    if (payload?.request) {
+      this.currentRequestState = payload.request
+    }
+    if (payload?.terminal?.remote_view_capabilities) {
+      this.reportedCapabilities = payload.terminal.remote_view_capabilities
+    }
+  }
+
+  private async respondToControlRequest(
+    action: ControlAction,
+    denialReason?: string
+  ): Promise<void> {
+    if (!this.config) {
+      return
+    }
+
+    const payload = await this.fetchFromAdmin('/api/pos/screen-share/terminal/session', {
+      method: 'PATCH',
+      body: {
+        requestId: this.config.requestId,
+        action,
+        ...(denialReason ? { denialReason } : {}),
+      },
+    })
+
+    if (payload?.success === false) {
+      throw new Error(payload?.error || 'Failed to update control request')
+    }
+
+    if (payload?.request) {
+      this.currentRequestState = payload.request
+    }
+  }
+
+  private async maybePromptForControlApproval(): Promise<void> {
+    if (!this.config || !this.currentRequestState || this.currentRequestState.control_status !== 'requested') {
+      return
+    }
+
+    const promptKey = `${this.config.requestId}:${this.currentRequestState.control_requested_at || 'requested'}`
+    if (this.lastControlPromptKey === promptKey) {
+      return
+    }
+
+    this.lastControlPromptKey = promptKey
+
+    try {
+      const approved = window.confirm(
+        'Admin requested control of this terminal. Allow remote interaction for this session?'
+      )
+      await this.respondToControlRequest(
+        approved ? 'approve_control' : 'deny_control',
+        approved ? undefined : 'Terminal operator denied control.'
+      )
+    } catch (error) {
+      console.warn('[ScreenCapture] Failed to respond to control request', error)
     }
   }
 
@@ -94,17 +260,17 @@ class ScreenCaptureHandler {
           )
           this.answerSet = true
           if (this.pendingCandidates.length) {
-            for (const cand of this.pendingCandidates) {
+            for (const candidate of this.pendingCandidates) {
               try {
-                await this.peerConnection?.addIceCandidate(new RTCIceCandidate(cand))
+                await this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
               } catch (iceErr) {
                 console.warn('[ScreenCapture] Failed to add queued ICE candidate', iceErr)
               }
             }
             this.pendingCandidates = []
           }
-        } catch (err) {
-          console.error('[ScreenCapture] setRemoteDescription failed', err)
+        } catch (error) {
+          console.error('[ScreenCapture] setRemoteDescription failed', error)
         }
       } else if (signal.type === 'candidate') {
         if (this.peerConnection) {
@@ -132,12 +298,23 @@ class ScreenCaptureHandler {
       }
     }
 
-    const requestStatus = typeof payload?.request?.status === 'string'
-      ? payload.request.status
+    if (payload?.request) {
+      this.currentRequestState = {
+        ...this.currentRequestState,
+        ...payload.request,
+        ...(payload.requestId ? { id: payload.requestId } : {}),
+      }
+    }
+
+    const requestStatus = typeof this.currentRequestState?.status === 'string'
+      ? this.currentRequestState.status
       : null
+
+    await this.maybePromptForControlApproval()
+
     if (requestStatus === 'stopped' || requestStatus === 'failed') {
       if (this.isStreaming || this.isStarting) {
-        void this.stopCapture({ status: requestStatus })
+        void this.stopCapture({ status: requestStatus as 'stopped' | 'failed' })
       }
       return
     }
@@ -175,62 +352,87 @@ class ScreenCaptureHandler {
 
     this.isStarting = true
     this.config = config
+    this.currentRequestState = {
+      id: config.requestId,
+      status: 'requested',
+      control_status: 'view_only',
+    }
+    this.lastControlPromptKey = null
 
     try {
-      // SECURITY: Use IPC-based screen capture that shows user consent dialog
-      // This ensures the user is aware and consents to screen capture enumeration
       let primaryScreenId: string | null = null
       try {
-        const result = await this.bridge.screenCapture.getSources({ types: ['screen'] })
+        const result = await this.bridge.screenCapture.getSources({ types: ['screen', 'window'] })
         const sources = Array.isArray(result?.sources) ? result.sources : []
         if (result?.success && sources.length > 0) {
-          // Prefer the source whose display_id matches primary display (if exposed)
-          const primary = sources.find((s) => s?.display_id === 'primary') || sources[0]
+          const primary = sources.find((source) => source?.display_id === 'primary') || sources[0]
           primaryScreenId = primary.id
         } else if (!result?.success) {
           throw new Error(result?.error || 'User denied screen capture access')
         }
-      } catch (dcErr) {
-        console.warn('[ScreenCapture] Failed to get sources with consent:', dcErr)
-        // SECURITY: Don't fall through to getDisplayMedia without consent - propagate error
-        throw dcErr
+      } catch (sourceError) {
+        console.warn('[ScreenCapture] Failed to get capture sources with consent:', sourceError)
+        primaryScreenId = null
       }
 
       let stream: MediaStream | null = null
-      if (primaryScreenId) {
+      const canUseNativeDesktopSource =
+        typeof primaryScreenId === 'string' &&
+        primaryScreenId.trim().length > 0 &&
+        primaryScreenId !== 'primary'
+
+      if (canUseNativeDesktopSource) {
         try {
-          stream = await (navigator.mediaDevices as any).getUserMedia({
-            audio: false,
-            video: {
-              mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: primaryScreenId,
-                minWidth: 640,
-                maxWidth: 1920,
-                minHeight: 480,
-                maxHeight: 1080,
-                frameRate: 10
-              }
-            }
-          })
-        } catch (e) {
-          console.warn('[ScreenCapture] getUserMedia desktop path failed', e)
+          stream = (await Promise.race([
+            (navigator.mediaDevices as any).getUserMedia({
+              audio: false,
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: primaryScreenId,
+                  minWidth: 640,
+                  maxWidth: 1920,
+                  minHeight: 480,
+                  maxHeight: 1080,
+                  frameRate: 10,
+                },
+              },
+            }),
+            new Promise<never>((_, reject) => {
+              window.setTimeout(() => {
+                reject(new Error('Desktop source capture timed out'))
+              }, 1500)
+            }),
+          ])) as MediaStream
+        } catch (error) {
+          console.warn('[ScreenCapture] getUserMedia desktop path failed', error)
         }
+      } else if (primaryScreenId === 'primary') {
+        console.info('[ScreenCapture] Native source id is placeholder-only, falling back to display picker')
       }
 
       if (!stream) {
-        // SECURITY: getDisplayMedia shows its own browser-native consent dialog
-        // This is acceptable as it requires explicit user interaction to select a screen
-        const mediaDevices: any = (navigator.mediaDevices as any)
+        const mediaDevices: any = navigator.mediaDevices as any
         if (typeof mediaDevices?.getDisplayMedia === 'function') {
-          // Call directly to preserve correct this binding and avoid Illegal invocation
           stream = await mediaDevices.getDisplayMedia({ video: { frameRate: 10 }, audio: false })
         } else {
           throw new Error('Neither desktop capture nor getDisplayMedia is available')
         }
       }
 
-      this.screenStream = stream
+      if (!stream) {
+        throw new Error('Screen capture stream was not created')
+      }
+
+      const activeStream: MediaStream = stream
+      this.screenStream = activeStream
+      const displaySurface = activeStream.getVideoTracks()[0]?.getSettings?.().displaySurface
+      this.reportedCapabilities = {
+        ...this.getReportedCapabilities(),
+        captureTarget: displaySurface === 'window' ? 'window' : 'screen',
+        interactionScope: 'window',
+      }
+
       await this.setupWebRTC()
       this.isStreaming = true
       this.isStarting = false
@@ -244,27 +446,31 @@ class ScreenCaptureHandler {
   }
 
   private async setupWebRTC(): Promise<void> {
-    if (!this.config || !this.screenStream) throw new Error('Missing config or screen stream')
+    if (!this.config || !this.screenStream) {
+      throw new Error('Missing config or screen stream')
+    }
 
     this.peerConnection = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
     })
 
-    this.screenStream.getTracks().forEach(track => {
+    this.screenStream.getTracks().forEach((track) => {
       this.peerConnection!.addTrack(track, this.screenStream!)
     })
 
-    this.peerConnection.ondatachannel = (ev) => {
-      if (ev.channel.label === 'control') {
-        this.controlChannel = ev.channel
-        this.controlChannel.onmessage = (msg) => this.handleControlMessage(msg.data)
-        this.controlChannel.onopen = () => console.log('[ScreenCapture] Control channel open')
-        this.controlChannel.onclose = () => console.log('[ScreenCapture] Control channel closed')
-        this.controlChannel.onerror = (e) => console.warn('[ScreenCapture] Control channel error', e)
+    this.peerConnection.ondatachannel = (event) => {
+      if (event.channel.label !== 'control') {
+        return
       }
+
+      this.controlChannel = event.channel
+      this.controlChannel.onmessage = (message) => this.handleControlMessage(message.data)
+      this.controlChannel.onopen = () => console.log('[ScreenCapture] Control channel open')
+      this.controlChannel.onclose = () => console.log('[ScreenCapture] Control channel closed')
+      this.controlChannel.onerror = (error) => console.warn('[ScreenCapture] Control channel error', error)
     }
 
     this.answerSet = false
@@ -273,12 +479,14 @@ class ScreenCaptureHandler {
     this.seenSignalIds.clear()
 
     this.peerConnection.onicecandidate = async (event) => {
-      if (event.candidate && this.config) {
-        try {
-          await this.sendSignal(this.config.requestId, 'candidate', event.candidate)
-        } catch (signalError) {
-          console.warn('[ScreenCapture] Failed to send ICE candidate', signalError)
-        }
+      if (!event.candidate || !this.config) {
+        return
+      }
+
+      try {
+        await this.sendSignal(this.config.requestId, 'candidate', event.candidate)
+      } catch (signalError) {
+        console.warn('[ScreenCapture] Failed to send ICE candidate', signalError)
       }
     }
 
@@ -305,8 +513,9 @@ class ScreenCaptureHandler {
   }
 
   private listenForWebRTCAnswer(): void {
-    if (!this.config) return
-    if (this.answerChannel) return
+    if (!this.config || this.answerChannel) {
+      return
+    }
 
     const requestId = this.config.requestId
     const signalBatchHandler = (payload: ScreenCaptureSignalBatchPayload) => {
@@ -345,8 +554,8 @@ class ScreenCaptureHandler {
         offEvent('screen-capture:signal-poll-stopped', signalPollStoppedHandler)
         try {
           await this.bridge.screenCapture.stopSignalPolling(requestId)
-        } catch (stopError) {
-          console.warn('[ScreenCapture] Failed to stop native signal polling', stopError)
+        } catch (error) {
+          console.warn('[ScreenCapture] Failed to stop native signal polling', error)
         }
       },
     }
@@ -374,16 +583,102 @@ class ScreenCaptureHandler {
     })()
   }
 
-  private handleControlMessage(_raw: any): void {
-    // SECURITY: Remote input injection is disabled for security reasons.
-    // The input:inject IPC handler was removed from the preload allowlist
-    // and disabled in screen-capture-handlers.ts because it allowed arbitrary
-    // keyboard/mouse input injection which could be exploited by attackers.
-    //
-    // If remote support is required in the future, implement specific
-    // validated actions instead (e.g., remote-support:click-button with
-    // element ID validation, or a restricted command set).
-    console.warn('[ScreenCapture] Remote input is disabled for security reasons')
+  private resolvePoint(x?: number, y?: number): { clientX: number; clientY: number; target: Element | null } {
+    const normalizedX = Math.min(1, Math.max(0, typeof x === 'number' ? x : this.lastPointerPosition.x))
+    const normalizedY = Math.min(1, Math.max(0, typeof y === 'number' ? y : this.lastPointerPosition.y))
+
+    this.lastPointerPosition = { x: normalizedX, y: normalizedY }
+
+    const clientX = Math.round(normalizedX * window.innerWidth)
+    const clientY = Math.round(normalizedY * window.innerHeight)
+    const target = document.elementFromPoint(clientX, clientY) || document.body
+
+    return { clientX, clientY, target }
+  }
+
+  private dispatchMouseEvent(
+    type: 'mousemove' | 'mousedown' | 'mouseup' | 'click',
+    payload: { x?: number; y?: number; b?: number }
+  ): void {
+    const { clientX, clientY, target } = this.resolvePoint(payload.x, payload.y)
+    const button = typeof payload.b === 'number' ? payload.b : 0
+    const mouseEvent = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      button,
+      buttons: type === 'mouseup' || type === 'click' ? 0 : 1 << button,
+      view: window,
+    })
+
+    if (type === 'mousedown' && target instanceof HTMLElement) {
+      target.focus()
+    }
+
+    target?.dispatchEvent(mouseEvent)
+  }
+
+  private dispatchWheelEvent(payload: { dx?: number; dy?: number }): void {
+    const { clientX, clientY, target } = this.resolvePoint()
+    const wheelEvent = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      deltaX: typeof payload.dx === 'number' ? payload.dx : 0,
+      deltaY: typeof payload.dy === 'number' ? payload.dy : 0,
+      view: window,
+    })
+    target?.dispatchEvent(wheelEvent)
+  }
+
+  private dispatchKeyboardEvent(type: 'keydown' | 'keyup', payload: { k?: string; c?: string }): void {
+    const target = (document.activeElement as HTMLElement | null) || document.body
+    const keyboardEvent = new KeyboardEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      key: typeof payload.k === 'string' ? payload.k : '',
+      code: typeof payload.c === 'string' ? payload.c : '',
+    })
+    target.dispatchEvent(keyboardEvent)
+  }
+
+  private handleControlMessage(raw: any): void {
+    if (this.currentRequestState?.control_status !== 'approved') {
+      return
+    }
+
+    let payload: { t?: string; x?: number; y?: number; b?: number; dx?: number; dy?: number; k?: string; c?: string }
+    try {
+      payload = typeof raw === 'string' ? JSON.parse(raw) : raw
+    } catch {
+      return
+    }
+
+    switch (payload?.t) {
+      case 'mm':
+        this.dispatchMouseEvent('mousemove', payload)
+        break
+      case 'md':
+        this.dispatchMouseEvent('mousedown', payload)
+        break
+      case 'mu':
+        this.dispatchMouseEvent('mouseup', payload)
+        this.dispatchMouseEvent('click', payload)
+        break
+      case 'mw':
+        this.dispatchWheelEvent(payload)
+        break
+      case 'kd':
+        this.dispatchKeyboardEvent('keydown', payload)
+        break
+      case 'ku':
+        this.dispatchKeyboardEvent('keyup', payload)
+        break
+      default:
+        break
+    }
   }
 
   private async stopCapture(options?: {
@@ -397,7 +692,7 @@ class ScreenCaptureHandler {
     this.isStarting = false
 
     if (this.screenStream) {
-      this.screenStream.getTracks().forEach(track => track.stop())
+      this.screenStream.getTracks().forEach((track) => track.stop())
       this.screenStream = null
     }
 
@@ -407,15 +702,21 @@ class ScreenCaptureHandler {
     }
 
     if (this.answerChannel) {
-      try { await this.answerChannel.unsubscribe() } catch {}
+      try {
+        await this.answerChannel.unsubscribe()
+      } catch {
+        // Ignore cleanup errors.
+      }
       this.answerChannel = null
     }
 
+    this.controlChannel = null
     this.config = null
     this.answerSet = false
     this.pendingCandidates = []
     this.lastSignalTimestamp = null
     this.seenSignalIds.clear()
+    this.lastControlPromptKey = null
 
     if (requestId && status) {
       try {
@@ -432,11 +733,18 @@ class ScreenCaptureHandler {
         }
       }
     }
+
+    this.currentRequestState = null
   }
 
   cleanup(): void {
-    this.eventUnsubscribers.forEach((unsub) => {
-      try { unsub() } catch {}
+    this.stopIdleSessionPolling()
+    this.eventUnsubscribers.forEach((unsubscribe) => {
+      try {
+        unsubscribe()
+      } catch {
+        // Ignore cleanup errors.
+      }
     })
     this.eventUnsubscribers = []
     void this.stopCapture()

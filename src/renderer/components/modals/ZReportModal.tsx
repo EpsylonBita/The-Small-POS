@@ -57,6 +57,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
   const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
+  const isPendingLocalSubmit = lockDate;
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
   const [selectedDate, setSelectedDate] = useState<string>(date || new Date().toISOString().slice(0, 10));
   const [zReport, setZReport] = useState<ZReportData | null>(null);
@@ -204,6 +205,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   }, [isOpen, branchId, selectedDate]);
 
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
+  const submitButtonLabel = isPendingLocalSubmit
+    ? t('modals.zReport.completePendingLocalSubmit')
+    : t('modals.zReport.submitToAdmin');
 
   return (
     <LiquidGlassModal
@@ -242,6 +246,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             </div>
           )}
         </div>
+
+        {isPendingLocalSubmit && (
+          <div className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+            <div className="text-sm font-bold text-amber-800 dark:text-amber-300">
+              {t('modals.zReport.pendingLocalSubmitTitle')}
+            </div>
+            <div className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-200/90">
+              {t('modals.zReport.pendingLocalSubmitHelp')}
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-2 mb-4">
@@ -874,10 +889,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             if (!zReport) return;
             setPrinting(true);
             try {
-              const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
               const result = await bridge.invoke('report:print-z-report', {
                 snapshot: zReport,
-                terminalName: typeof terminalName === 'string' ? terminalName : undefined,
+                terminalName: typeof zReport.terminalName === 'string' ? zReport.terminalName : undefined,
               });
               if (result?.success === false) {
                 throw new Error(result?.error || t('modals.zReport.printFailed', 'Failed to queue print'));
@@ -930,7 +944,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                   const successMessage =
                     res?.syncState === 'applied'
                       ? t('modals.zReport.submitSuccessSynced')
-                      : t('modals.zReport.submitSuccessQueued');
+                      : isPendingLocalSubmit
+                        ? t('modals.zReport.pendingLocalSubmitQueued')
+                        : t('modals.zReport.submitSuccessQueued');
                   setSubmitResult(successMessage);
 
                   // Clear only business-day state and logout.
@@ -962,7 +978,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
             disabled={submitting || loading}
             aria-busy={submitting}
           >
-            {submitting ? t('modals.zReport.submitting') : t('modals.zReport.submitToAdmin')}
+            {submitting ? t('modals.zReport.submitting') : submitButtonLabel}
           </button>
         ) : showMainTerminalWarning ? (
           <div className="flex items-center gap-2">
@@ -971,7 +987,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               className="px-3 py-2 rounded-md text-sm bg-gray-400 cursor-not-allowed text-white opacity-50"
               title={t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')}
             >
-              {t('modals.zReport.submitToAdmin')}
+              {submitButtonLabel}
             </button>
             <span className="text-xs text-amber-400">
               {t('terminal.messages.zReportMainOnly', 'Z-Report can only be executed from Main POS terminal')}

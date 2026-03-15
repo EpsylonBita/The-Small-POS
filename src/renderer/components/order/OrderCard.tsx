@@ -1,5 +1,6 @@
 import React, { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Split } from 'lucide-react';
 import { useTheme } from '../../contexts/theme-context';
 import { OrderStatusControls } from './OrderStatusControls';
 import type { Order, OrderStatus } from '../../types/orders';
@@ -203,6 +204,19 @@ export const OrderCard = memo<OrderCardProps>(({
       );
     }
 
+    if (method === 'split' || method === 'mixed') {
+      return (
+        <Split
+          width={iconSize}
+          height={iconSize}
+          className="text-purple-400"
+          strokeWidth={2}
+          role="img"
+          aria-label={t('payment.split.title', { defaultValue: 'Split Payment' })}
+        />
+      );
+    }
+
     return null;
   };
 
@@ -216,6 +230,13 @@ export const OrderCard = memo<OrderCardProps>(({
   const customerPhoneNormalized = order.customer_phone || order.customerPhone || '';
   const deliveryAddressNormalized = order.delivery_address || order.address || (order as any).deliveryAddress || '';
   const paymentMethodNormalized = (order.payment_method || order.paymentMethod || '').toString().trim().toLowerCase();
+  const paymentStatusNormalized = (order.payment_status || order.paymentStatus || '').toString().trim().toLowerCase();
+  const paymentMethodPresentation =
+    paymentMethodNormalized === 'split' ||
+    paymentMethodNormalized === 'mixed' ||
+    paymentStatusNormalized === 'partially_paid'
+      ? 'split'
+      : paymentMethodNormalized;
   const [resolvedAddress, setResolvedAddress] = useState<string>('');
   const orderTypeLabel = orderTypeNormalized
     ? t(`orders.type.${orderTypeNormalized}`, { defaultValue: orderTypeNormalized })
@@ -439,8 +460,13 @@ export const OrderCard = memo<OrderCardProps>(({
           </span>
           <div className="flex items-center gap-2">
             <OrderTypeIcon orderType={orderTypeNormalized} />
-            <PaymentMethodIcon method={paymentMethodNormalized} />
+            <PaymentMethodIcon method={paymentMethodPresentation} />
           </div>
+          {paymentMethodPresentation === 'split' && (
+            <span className="text-[10px] sm:text-xs font-semibold tracking-[0.25em] text-purple-400">
+              {t('modals.payment.splitSimple', 'SPLIT')}
+            </span>
+          )}
         </div>
       </div>
 

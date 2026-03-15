@@ -2630,15 +2630,19 @@
       "exportStaffCSV": "Exporter le personnel en CSV",
       "print": "Imprimer",
       "submitToAdmin": "Soumettre à l'administration",
+      "completePendingLocalSubmit": "Clore localement la journée précédente",
       "submitting": "Soumission en cours…",
       "submitSuccess": "Soumis avec succès. Fin de journée et déconnexion en cours…",
       "submitSuccessQueued": "Day closed locally. Z-report queued for admin sync. Logging out…",
+      "pendingLocalSubmitQueued": "La journée précédente a été clôturée localement. Le rapport Z est en file d'attente pour la synchronisation admin. Déconnexion…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Échec : {{error}}",
       "unknownError": "Erreur inconnue",
       "submissionFailed": "Échec de la soumission",
       "close": "Fermer",
-      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission."
+      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
+      "pendingLocalSubmitTitle": "La journée précédente doit encore être clôturée localement",
+      "pendingLocalSubmitHelp": "Utilisez l'action principale ci-dessous pour terminer localement la journée précédente. La date reste verrouillée afin d'éviter l'envoi d'une mauvaise journée d'activité."
     },
     "expense": {
       "title": "Enregistrer une dépense",

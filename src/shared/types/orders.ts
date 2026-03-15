@@ -3,8 +3,15 @@
 
 export type OrderStatus = 'pending' | 'confirmed' | 'preparing' | 'ready' | 'out_for_delivery' | 'delivered' | 'completed' | 'cancelled';
 export type OrderType = 'dine-in' | 'pickup' | 'delivery';
-export type PaymentStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'refunded';
-export type PaymentMethod = 'cash' | 'card' | 'digital';
+export type PaymentStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'paid'
+  | 'partially_paid'
+  | 'failed'
+  | 'refunded';
+export type PaymentMethod = 'cash' | 'card' | 'digital' | 'split';
 export type SyncStatus = 'synced' | 'pending' | 'failed';
 
 /** Order plugin - where the order originated from */
@@ -161,6 +168,8 @@ export interface Order {
   lastSyncedAt?: string; // Last sync timestamp
   terminal_id?: string | null;
   terminalId?: string | null; // For backward compatibility
+  owner_terminal_id?: string | null;
+  ownerTerminalId?: string | null;
   branch_id?: string | null;
   branchId?: string | null; // For backward compatibility
 
@@ -193,6 +202,7 @@ export interface Order {
   // Hybrid Sync Routing information
   routing_path?: string; // 'main', 'via_parent', 'direct_cloud'
   source_terminal_id?: string;
+  sourceTerminalId?: string | null;
   forwarded_at?: string;
 }
 
@@ -237,6 +247,7 @@ export interface OrderRow {
   ghost_metadata?: string | null;
   driver_id?: string;
   terminal_id?: string | null;
+  owner_terminal_id?: string | null;
   branch_id?: string | null;
   // Plugin tracking
   plugin?: OrderPlugin | string;
@@ -250,6 +261,7 @@ export interface OrderRow {
   // Hybrid Sync Routing information
   routing_path?: string;
   source_terminal_id?: string;
+  sourceTerminalId?: string | null;
   forwarded_at?: string;
 }
 

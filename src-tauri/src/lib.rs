@@ -22,6 +22,7 @@ const MENU_WARMUP_THROTTLE_MS: u64 = 15_000;
 
 mod api;
 mod auth;
+mod business_day;
 mod commands;
 mod core_helpers;
 mod customer_display;
@@ -740,6 +741,7 @@ pub fn run() {
             commands::orders::order_create,
             commands::orders::order_update_status,
             commands::orders::order_update_items,
+            commands::orders::order_update_financials,
             commands::orders::order_approve,
             commands::orders::order_decline,
             commands::orders::order_assign_driver,

@@ -16,6 +16,8 @@ import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { CustomerInfoModal } from './modals/CustomerInfoModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
 import { MenuModal } from './modals/MenuModal';
+import { SplitPaymentModal } from './modals/SplitPaymentModal';
+import type { SplitPaymentResult } from './modals/SplitPaymentModal';
 import { OrderApprovalPanel } from './order/OrderApprovalPanel';
 import { OrderConflictBanner } from './OrderConflictBanner';
 import { LiquidGlassModal } from './ui/pos-glass-components';
@@ -46,6 +48,7 @@ import {
 } from '../services/terminal-credentials';
 import { couponRedemptionService } from '../services/CouponRedemptionService';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 
 interface OrderDashboardProps {
   className?: string;
@@ -201,6 +204,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [showMenuModal, setShowMenuModal] = useState(false);
   const [selectedOrderType, setSelectedOrderType] = useState<'pickup' | 'delivery' | null>(null);
 
+  // State for split payment flow (rendered independently of MenuModal)
+  const [splitPaymentData, setSplitPaymentData] = useState<{
+    orderId: string;
+    orderTotal: number;
+    items: Array<{ name: string; quantity: number; price: number; totalPrice: number; itemIndex: number }>;
+    isGhostOrder: boolean;
+  } | null>(null);
+
   // State for delivery flow
   const [showPhoneLookupModal, setShowPhoneLookupModal] = useState(false);
   const [showCustomerInfoModal, setShowCustomerInfoModal] = useState(false);
@@ -239,6 +250,47 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     isMenuModalOpenRef.current = showMenuModal || showEditMenuModal;
   }, [showMenuModal, showEditMenuModal]);
 
+  const getSelectionTypeForOrders = useCallback((
+    orderIds: string[],
+    orderList: Order[]
+  ): 'pickup' | 'delivery' | null => {
+    if (orderIds.length === 0) {
+      return null;
+    }
+
+    const selectedOrderMap = new Map(orderList.map(order => [order.id, order]));
+    const selectedOrderTypes = orderIds
+      .map(id => selectedOrderMap.get(id))
+      .filter((order): order is Order => Boolean(order))
+      .map(order => (order.orderType === 'delivery' ? 'delivery' : 'pickup'));
+
+    if (selectedOrderTypes.length === 0) {
+      return null;
+    }
+
+    return selectedOrderTypes.includes('delivery') ? 'delivery' : 'pickup';
+  }, []);
+
+  const clearBulkSelection = useCallback(() => {
+    setSelectedOrders([]);
+    setSelectionType(null);
+  }, []);
+
+  const selectedOrderObjects = React.useMemo(() => (
+    orders.filter(order => selectedOrders.includes(order.id))
+  ), [orders, selectedOrders]);
+
+  const selectedDeliveryOrders = React.useMemo(() => (
+    selectedOrderObjects.filter(order => order.orderType === 'delivery')
+  ), [selectedOrderObjects]);
+
+  const deliverySelectionCanBeCompleted = React.useMemo(() => (
+    selectedDeliveryOrders.length > 0 && selectedDeliveryOrders.every(order => {
+      const status = String(order.status || '').toLowerCase();
+      return status === 'out_for_delivery';
+    })
+  ), [selectedDeliveryOrders]);
+
   // Click-outside handler to auto-close bulk actions bar
   useEffect(() => {
     // Only add listener when there are selected orders
@@ -270,8 +322,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       }
 
       // Clear selection when clicking outside
-      setSelectedOrders([]);
-      setSelectionType(null);
+      clearBulkSelection();
     };
 
     // Use mousedown for immediate response (before any other click handlers)
@@ -280,7 +331,37 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [selectedOrders.length]);
+  }, [clearBulkSelection, selectedOrders.length]);
+
+  useEffect(() => {
+    if (activeTab === 'tables') {
+      if (selectedOrders.length > 0 || selectionType !== null) {
+        clearBulkSelection();
+      }
+      return;
+    }
+
+    const visibleOrderIds = new Set(filteredOrders.map(order => order.id));
+    const nextSelectedOrders = selectedOrders.filter(orderId => visibleOrderIds.has(orderId));
+
+    if (nextSelectedOrders.length !== selectedOrders.length) {
+      setSelectedOrders(nextSelectedOrders);
+      setSelectionType(getSelectionTypeForOrders(nextSelectedOrders, filteredOrders));
+      return;
+    }
+
+    const nextSelectionType = getSelectionTypeForOrders(nextSelectedOrders, filteredOrders);
+    if (nextSelectionType !== selectionType) {
+      setSelectionType(nextSelectionType);
+    }
+  }, [
+    activeTab,
+    clearBulkSelection,
+    filteredOrders,
+    getSelectionTypeForOrders,
+    selectedOrders,
+    selectionType,
+  ]);
 
   // Shift activation refresh (event-driven steady state)
   // We avoid continuous polling and perform a single silent refresh when a
@@ -487,10 +568,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Handle tab change
   const handleTabChange = useCallback((tab: TabId) => {
     setActiveTab(tab);
-    setSelectedOrders([]); // Clear selection when changing tabs
+    clearBulkSelection();
     // Ensure global status filter doesn't hide tab contents
     try { setFilter({ status: 'all' }); } catch { }
-  }, [setFilter]);
+  }, [clearBulkSelection, setFilter]);
 
   // Update tables count when tables data changes
   useEffect(() => {
@@ -504,35 +585,38 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Handle order selection
   const handleToggleOrderSelection = (orderId: string) => {
-    const order = orders.find(o => o.id === orderId);
+    const order = filteredOrders.find(o => o.id === orderId) || orders.find(o => o.id === orderId);
     if (!order) return;
 
     const type: 'pickup' | 'delivery' = order.orderType === 'delivery' ? 'delivery' : 'pickup';
+    const visibleOrderIds = new Set(filteredOrders.map(visibleOrder => visibleOrder.id));
 
     setSelectedOrders(prev => {
-      const isSelected = prev.includes(orderId);
+      const visibleSelection = prev.filter(id => visibleOrderIds.has(id));
+      const isSelected = visibleSelection.includes(orderId);
+      const currentSelectionType = getSelectionTypeForOrders(visibleSelection, filteredOrders);
 
       if (isSelected) {
-        const next = prev.filter(id => id !== orderId);
-        if (next.length === 0) setSelectionType(null);
+        const next = visibleSelection.filter(id => id !== orderId);
+        setSelectionType(getSelectionTypeForOrders(next, filteredOrders));
         return next;
       }
 
       // Enforce mutually exclusive selection by order type
-      if (!selectionType) {
+      if (!currentSelectionType) {
         setSelectionType(type);
-        return [...prev, orderId];
+        return [...visibleSelection, orderId];
       }
 
-      if (selectionType !== type) {
-        toast.error(selectionType === 'delivery'
+      if (currentSelectionType !== type) {
+        toast.error(currentSelectionType === 'delivery'
           ? t('orderDashboard.bulkPickupDisabled') || 'Pickup orders cannot be selected while Delivery selection is active.'
           : t('orderDashboard.bulkDeliveryDisabled') || 'Delivery orders cannot be selected while Pickup selection is active.'
         );
-        return prev; // ignore selection of other type
+        return visibleSelection; // ignore selection of other type
       }
 
-      return [...prev, orderId];
+      return [...visibleSelection, orderId];
     });
   };
 
@@ -1144,8 +1228,30 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     return null;
   };
 
+  const extractPaymentId = (result: any): string | undefined => {
+    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
+    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
+    return directId || dataId;
+  };
+
+  const finalizeCreatedOrderPayment = async (orderId: string, isGhostOrder: boolean) => {
+    if (isGhostOrder) {
+      const printResult: any = await bridge.payments.printReceipt(orderId);
+      console.log('[OrderDashboard] Ghost receipt print result:', printResult);
+      return;
+    }
+
+    const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
+    if (fiscalResult?.skipped) {
+      return;
+    }
+    console.log('[OrderDashboard] Fiscal print result:', fiscalResult);
+  };
+
   // Handle order completion from menu modal
-  const handleOrderComplete = async (orderData: any) => {
+  const handleOrderComplete = async (orderData: any): Promise<void> => {
+    const isSplitPayment = orderData.paymentData?.method === 'pending';
+    let createdOrderId: string | undefined;
     try {
       console.log('[OrderDashboard.handleOrderComplete] orderData:', orderData);
       console.log('[OrderDashboard.handleOrderComplete] orderData.items with notes:', orderData.items?.map((item: any) => ({
@@ -1353,13 +1459,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         orderData.isGhost === true ||
         orderData.ghost === true;
       const ghostSource = isGhostOrder
-        ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'ghost_mode_toggle')
+        ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_code_x_1')
         : null;
       const ghostMetadata = isGhostOrder
-        ? (orderData.ghost_metadata ?? {
-          trigger: 'ghost_mode_toggle',
-          bypass_reason: 'ghost_mode_enabled',
-        })
+        ? (orderData.ghost_metadata ?? null)
         : null;
 
       const deliveryFee = selectedOrderType === 'delivery'
@@ -1449,7 +1552,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         organization_id: organizationId || null,
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
-        payment_method: orderData.paymentData?.method || 'cash',
+        payment_method: isGhostOrder ? null : (orderData.paymentData?.method || 'cash'),
         // Full delivery address fields for proper sync to Supabase
         delivery_address: deliveryAddress,
         delivery_city: deliveryCity,
@@ -1465,6 +1568,33 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       const result = await createOrder(orderToCreate);
 
       if (result.success) {
+        createdOrderId = result.orderId;
+
+        // Capture split payment data for the SplitPaymentModal (rendered in OrderDashboard).
+        // This must happen before the finally block closes MenuModal.
+        if (isSplitPayment && createdOrderId) {
+          setSplitPaymentData({
+            orderId: createdOrderId,
+            orderTotal: total,
+            items: buildSplitPaymentItems({
+              items: (orderData.items || []).map((item: any, index: number) => ({
+                name: item.name || 'Item',
+                quantity: item.quantity || 1,
+                price: item.unitPrice || item.price || 0,
+                totalPrice: item.totalPrice || ((item.unitPrice || item.price || 0) * (item.quantity || 1)),
+                itemIndex: item.itemIndex ?? index,
+              })),
+              orderTotal: total,
+              deliveryFee,
+              discountAmount: totalDiscountAmount,
+              deliveryFeeLabel: t('payment.fields.deliveryFee', { defaultValue: 'Delivery Fee' }),
+              discountLabel: t('modals.payment.discount', { defaultValue: 'Discount' }),
+              adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
+            }),
+            isGhostOrder,
+          });
+        }
+
         toast.success(t('orderDashboard.orderCreated'));
         // Refresh orders in background - don't block UI
         silentRefresh().catch(err => console.debug('[OrderDashboard] Background refresh error:', err));
@@ -1482,23 +1612,44 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
             });
         }
 
-        if (result.orderId) {
-          if (isGhostOrder) {
-            bridge.payments.printReceipt(result.orderId)
-              .then((printResult: any) => console.log('[OrderDashboard] Ghost receipt print result:', printResult))
-              .catch((printError: any) => {
+        if (result.orderId && !isSplitPayment) {
+          const paymentMethod = orderData.paymentData?.method;
+          if (!isGhostOrder && (paymentMethod === 'cash' || paymentMethod === 'card')) {
+            try {
+              const paymentResult: any = await bridge.payments.recordPayment({
+                orderId: result.orderId,
+                method: paymentMethod,
+                amount: total,
+                cashReceived: paymentMethod === 'cash' ? orderData.paymentData?.cashReceived : undefined,
+                changeGiven: paymentMethod === 'cash' ? orderData.paymentData?.change : undefined,
+                transactionRef: orderData.paymentData?.transactionId,
+              });
+
+              if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
+                throw new Error(paymentResult?.error || 'Missing paymentId after recording payment');
+              }
+
+              await silentRefresh().catch((err) => {
+                console.debug('[OrderDashboard] Silent refresh after payment record failed:', err);
+              });
+            } catch (paymentError) {
+              console.error('[OrderDashboard] Failed to record payment:', paymentError);
+              toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
+              return;
+            }
+          }
+
+          finalizeCreatedOrderPayment(result.orderId, isGhostOrder)
+            .catch((printError: any) => {
+              if (isGhostOrder) {
                 console.error('[OrderDashboard] Ghost receipt print error:', printError);
                 toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
-              });
-          } else {
-            // Cash register / fiscal print (fire-and-forget, non-blocking)
-            bridge.ecr.fiscalPrint(result.orderId)
-              .then((r: any) => { if (r?.skipped) return; console.log('[OrderDashboard] Fiscal print result:', r); })
-              .catch((e: any) => {
-                console.warn('[OrderDashboard] Cash register print error (non-blocking):', e);
-                toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
-              });
-          }
+                return;
+              }
+
+              console.warn('[OrderDashboard] Cash register print error (non-blocking):', printError);
+              toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+            });
 
           // Auto-earn loyalty points (fire-and-forget, non-blocking)
           const loyaltyCustomerId = orderToCreate.customer_id;
@@ -1532,10 +1683,27 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     }
   };
 
+  // Handle split payment completion — dismiss the modal and refresh orders
+  const handleSplitComplete = async (_result: SplitPaymentResult) => {
+    setSplitPaymentData(null);
+    await silentRefresh().catch(() => {});
+  };
+
   // Handle bulk actions
   const handleBulkAction = async (action: string) => {
     setIsBulkActionLoading(true);
     try {
+      const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
+      const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
+      const deliveryOrdersInTransit = deliveryOrders.filter(order => {
+        const status = String(order.status || '').toLowerCase();
+        return status === 'out_for_delivery';
+      });
+      const deliveryOrdersNeedingDispatch = deliveryOrders.filter(order => {
+        const status = String(order.status || '').toLowerCase();
+        return status !== 'out_for_delivery' && status !== 'delivered' && status !== 'completed';
+      });
+
       if (action === 'view') {
         if (selectedOrders.length === 1) {
           const ord = orders.find(o => o.id === selectedOrders[0]);
@@ -1570,8 +1738,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
       if (action === 'assign') {
         // Driver assignment for delivery orders
-        const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
-        const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
         if (deliveryOrders.length === 0) {
           toast.error(t('orderDashboard.noDeliveryOrdersSelected') || 'Select delivery orders to assign driver');
           return;
@@ -1583,8 +1749,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
       if (action === 'pickup') {
         // Convert selected delivery orders to pickup
-        const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
-        const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
         if (deliveryOrders.length === 0) {
           toast.error(t('orderDashboard.noDeliveryOrdersSelected') || 'Select delivery orders to convert to pickup');
           return;
@@ -1607,21 +1771,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       }
 
       if (action === 'delivered') {
-        // Get the selected order objects
-        const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
-
-        // Separate delivery orders from pickup orders
-        const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
-        const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
-        const deliveryOrdersInTransit = deliveryOrders.filter(order => {
-          const status = String(order.status || '').toLowerCase();
-          return status === 'out_for_delivery';
-        });
-        const deliveryOrdersNeedingDispatch = deliveryOrders.filter(order => {
-          const status = String(order.status || '').toLowerCase();
-          return status !== 'out_for_delivery' && status !== 'delivered' && status !== 'completed';
-        });
-
         // Handle pickup orders immediately (mark as completed)
         if (pickupOrders.length > 0) {
           for (const order of pickupOrders) {
@@ -1659,11 +1808,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           );
         } else if (pickupOrders.length > 0) {
           // If only pickup orders, clear selection
-          setSelectedOrders([]);
+          clearBulkSelection();
         }
       } else if (action === 'return') {
         // Reactivate cancelled orders back to active (pending)
-        const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
         const cancelledOrders = selectedOrderObjects.filter(order => order.status === 'cancelled');
 
         if (cancelledOrders.length === 0) {
@@ -1677,12 +1825,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
             }
           }
           toast.success(t('orderDashboard.returnedToOrders', { count: cancelledOrders.length }));
-          setSelectedOrders([]);
+          clearBulkSelection();
           await loadOrders();
         }
       } else if (action === 'map') {
         // Open selected delivery addresses in Google Maps (browser)
-        const selectedOrderObjects = orders.filter(order => selectedOrders.includes(order.id));
         const addresses = selectedOrderObjects
           .filter(order => order.orderType === 'delivery')
           .map(order => order.delivery_address || order.address)
@@ -1730,8 +1877,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Handle clearing selection
   const handleClearSelection = () => {
-    setSelectedOrders([]);
-    setSelectionType(null);
+    clearBulkSelection();
   };
 
   // Handle driver modal close
@@ -1758,7 +1904,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       // Close modal and clear selections
       setShowCancelModal(false);
       setPendingCancelOrders([]);
-      setSelectedOrders([]);
+      clearBulkSelection();
     } catch (error) {
       console.error('Failed to cancel orders:', error);
       toast.error(t('orderDashboard.cancelFailed'));
@@ -1919,7 +2065,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       setEditPaymentTarget(null);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
-      setSelectedOrders([]);
+      clearBulkSelection();
     } catch (error) {
       console.error('Failed to update payment method:', error);
       toast.error(t('orderDashboard.paymentMethodUpdateFailed'));
@@ -1943,7 +2089,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       setShowEditCustomerModal(false);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
-      setSelectedOrders([]);
+      clearBulkSelection();
     } catch (error) {
       console.error('Failed to update customer info:', error);
       toast.error(t('orderDashboard.customerInfoFailed'));
@@ -1981,7 +2127,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       setShowEditOrderModal(false);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
-      setSelectedOrders([]);
+      clearBulkSelection();
     } catch (error) {
       console.error('Failed to update order items:', error);
       toast.error(t('orderDashboard.orderItemsFailed'));
@@ -2021,7 +2167,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       setShowEditMenuModal(false);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
-      setSelectedOrders([]);
+      clearBulkSelection();
       // Clear the persisted edit order details
       setCurrentEditOrderId(undefined);
       setCurrentEditOrderNumber(undefined);
@@ -2135,6 +2281,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         <BulkActionsBar
           selectedCount={selectedOrders.length}
           selectionType={selectionType}
+          deliverySelectionCanBeCompleted={deliverySelectionCanBeCompleted}
           activeTab={activeTab}
           onBulkAction={handleBulkAction}
           onClearSelection={handleClearSelection}
@@ -2409,6 +2556,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         deliveryZoneInfo={deliveryZoneInfo}
         onOrderComplete={handleOrderComplete}
       />
+
+      {/* Split Payment Modal — rendered at OrderDashboard level so it
+          survives MenuModal closing after order creation */}
+      {splitPaymentData && (
+        <SplitPaymentModal
+          isOpen={true}
+          onClose={() => setSplitPaymentData(null)}
+          orderId={splitPaymentData.orderId}
+          orderTotal={splitPaymentData.orderTotal}
+          items={splitPaymentData.items}
+          initialMode="by-items"
+          isGhostOrder={splitPaymentData.isGhostOrder}
+          onSplitComplete={handleSplitComplete}
+        />
+      )}
 
       {/* Order Approval Panel */}
       {showApprovalPanel && selectedOrderForApproval && (

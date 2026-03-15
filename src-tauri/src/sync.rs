@@ -924,14 +924,26 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     drop(conn);
 
-    for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
-        if let Err(error) = print::enqueue_print_job(db, entity_type, &order_id, None) {
-            warn!(
-                order_id = %order_id,
-                entity_type = %entity_type,
-                error = %error,
-                "Failed to enqueue automatic print job after local create"
-            );
+    // Skip auto-print for ghost orders and pending/split payment orders.
+    // Split payment receipts are printed after individual payments are recorded.
+    let skip_auto_print = is_ghost || payment_method.as_deref() == Some("pending");
+    info!(
+        order_id = %order_id,
+        payment_method = ?payment_method,
+        is_ghost = %is_ghost,
+        skip_auto_print = %skip_auto_print,
+        "Auto-print decision for new order"
+    );
+    if !skip_auto_print {
+        for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
+            if let Err(error) = print::enqueue_print_job(db, entity_type, &order_id, None) {
+                warn!(
+                    order_id = %order_id,
+                    entity_type = %entity_type,
+                    error = %error,
+                    "Failed to enqueue automatic print job after local create"
+                );
+            }
         }
     }
 

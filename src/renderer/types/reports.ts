@@ -65,6 +65,10 @@ export interface OrderTypeBreakdown {
 
 export interface ZReportData {
   date: string; // ISO date (yyyy-mm-dd)
+  shiftId?: string;
+  terminalId?: string;
+  terminalName?: string;
+  shiftCount?: number;
   shifts: {
     total: number;
     cashier: number;

@@ -264,6 +264,49 @@ fn snapshot_or_payload(payload: &serde_json::Value) -> Option<serde_json::Value>
     })
 }
 
+fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json::Value {
+    let mut report_data = match generated.get("report").and_then(|report| report.get("reportJson"))
+    {
+        Some(serde_json::Value::String(raw)) => {
+            serde_json::from_str::<serde_json::Value>(raw).unwrap_or_else(|_| generated.clone())
+        }
+        Some(value) => value.clone(),
+        None => generated.clone(),
+    };
+    let Some(report) = generated.get("report") else {
+        return report_data;
+    };
+    let Some(obj) = report_data.as_object_mut() else {
+        return report_data;
+    };
+
+    for (key, value) in [
+        ("shiftId", value_str(report, &["shiftId", "shift_id"])),
+        ("terminalId", value_str(report, &["terminalId", "terminal_id"])),
+        (
+            "terminalName",
+            value_str(report, &["terminalName", "terminal_name"]),
+        ),
+    ] {
+        if !obj.contains_key(key) {
+            if let Some(value) = value {
+                obj.insert(key.to_string(), serde_json::Value::String(value));
+            }
+        }
+    }
+
+    if !obj.contains_key("shiftCount") {
+        if let Some(count) = number_from_pointers(
+            report,
+            &["/shiftCount", "/shift_count", "/reportJson/shifts/total", "/shifts/total"],
+        ) {
+            obj.insert("shiftCount".to_string(), serde_json::json!(count.round() as i64));
+        }
+    }
+
+    report_data
+}
+
 fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_json::Value {
     match arg0 {
         Some(serde_json::Value::String(shift_id)) => serde_json::json!({
@@ -1013,11 +1056,7 @@ pub async fn report_generate_z_report(
 
     // Frontend expects report_json fields (sales, cashDrawer, etc.) directly
     // under "data". Extract reportJson from the nested response.
-    let report_data = generated
-        .get("report")
-        .and_then(|r| r.get("reportJson"))
-        .cloned()
-        .unwrap_or(generated.clone());
+    let report_data = flatten_generated_z_report_data(&generated);
 
     Ok(serde_json::json!({ "success": true, "data": report_data }))
 }
@@ -1199,5 +1238,28 @@ mod dto_tests {
         assert!(snapshot_or_payload(&nested).is_some());
         assert!(snapshot_or_payload(&flat).is_some());
         assert!(snapshot_or_payload(&missing).is_none());
+    }
+
+    #[test]
+    fn flatten_generated_z_report_data_keeps_print_metadata() {
+        let generated = serde_json::json!({
+            "report": {
+                "shiftId": "shift-aggregate-1",
+                "terminalId": "terminal-9bf9dfce",
+                "terminalName": "Front Counter",
+                "reportJson": {
+                    "date": "2026-03-15",
+                    "sales": { "totalSales": 245.0, "totalOrders": 11 },
+                    "shifts": { "total": 3 }
+                }
+            }
+        });
+
+        let flattened = flatten_generated_z_report_data(&generated);
+        assert_eq!(flattened["shiftId"], "shift-aggregate-1");
+        assert_eq!(flattened["terminalId"], "terminal-9bf9dfce");
+        assert_eq!(flattened["terminalName"], "Front Counter");
+        assert_eq!(flattened["shiftCount"], 3);
+        assert_eq!(flattened["sales"]["totalSales"], 245.0);
     }
 }

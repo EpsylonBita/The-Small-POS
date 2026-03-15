@@ -34,6 +34,7 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from "./services/terminal-credentials";
+import { subscribeToAdminOrderDeletedEvents } from "./services/OrderDeleteRealtimeService";
 
 const INVALID_SESSION_IDENTITY_VALUES = new Set([
   '',
@@ -313,6 +314,69 @@ function ConfigGuard({ children }: { children: React.ReactNode }) {
       offEvent('terminal-config-updated', handleConfigUpdated);
     };
   }, []);
+
+  useEffect(() => {
+    if (isConfigured !== true || isBrowser()) {
+      return;
+    }
+
+    let disposed = false;
+    let unsubscribeRealtimeDeletes: (() => void) | null = null;
+    let subscriptionGeneration = 0;
+
+    const resubscribeToDeletedOrders = async () => {
+      const generation = ++subscriptionGeneration;
+
+      unsubscribeRealtimeDeletes?.();
+      unsubscribeRealtimeDeletes = null;
+
+      try {
+        const credentials = await refreshTerminalCredentialCache();
+        const terminalId = normalizeSessionIdentityValue(credentials.terminalId);
+        const organizationId = normalizeSessionIdentityValue(credentials.organizationId);
+        const branchId = normalizeSessionIdentityValue(credentials.branchId);
+
+        if (disposed || generation !== subscriptionGeneration) {
+          return;
+        }
+
+        if (!terminalId || !organizationId) {
+          console.warn('[ConfigGuard] Skipping delete realtime subscription due to incomplete terminal identity', {
+            terminalId: terminalId || null,
+            organizationId: organizationId || null,
+            branchId: branchId || null,
+          });
+          return;
+        }
+
+        unsubscribeRealtimeDeletes = subscribeToAdminOrderDeletedEvents({
+          terminalId,
+          organizationId,
+          branchId: branchId || undefined,
+        });
+      } catch (error) {
+        if (!disposed && generation === subscriptionGeneration) {
+          console.warn('[ConfigGuard] Failed to start delete realtime subscription:', error);
+        }
+      }
+    };
+
+    const handleTerminalIdentityChanged = () => {
+      void resubscribeToDeletedOrders();
+    };
+
+    void resubscribeToDeletedOrders();
+    onEvent('terminal-credentials-updated', handleTerminalIdentityChanged);
+    onEvent('terminal-config-updated', handleTerminalIdentityChanged);
+
+    return () => {
+      disposed = true;
+      subscriptionGeneration += 1;
+      offEvent('terminal-credentials-updated', handleTerminalIdentityChanged);
+      offEvent('terminal-config-updated', handleTerminalIdentityChanged);
+      unsubscribeRealtimeDeletes?.();
+    };
+  }, [isConfigured]);
 
   if (isConfigured === null) {
     return (

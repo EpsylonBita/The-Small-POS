@@ -32,6 +32,11 @@ export type TerminalType = 'main' | 'mobile_waiter';
 export interface TerminalConfig {
   terminalType: TerminalType | null;
   parentTerminalId: string | null;
+  ownerTerminalId: string | null;
+  ownerTerminalDbId: string | null;
+  sourceTerminalId: string | null;
+  sourceTerminalDbId: string | null;
+  posOperatingMode: string | null;
   features: FeatureFlags;
 }
 
@@ -150,6 +155,11 @@ function extractRuntimeConfig(config: unknown): {
   rawConfig: Record<string, unknown>;
   terminalType: TerminalType | null;
   parentTerminalId: string | null;
+  ownerTerminalId: string | null;
+  ownerTerminalDbId: string | null;
+  sourceTerminalId: string | null;
+  sourceTerminalDbId: string | null;
+  posOperatingMode: string | null;
   loadedFeatures: Record<string, unknown>;
 } | null {
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
@@ -167,6 +177,36 @@ function extractRuntimeConfig(config: unknown): {
       : typeof rawConfig.parentTerminalId === 'string'
         ? rawConfig.parentTerminalId
         : null;
+  const ownerTerminalId =
+    typeof rawConfig.owner_terminal_id === 'string'
+      ? rawConfig.owner_terminal_id
+      : typeof rawConfig.ownerTerminalId === 'string'
+        ? rawConfig.ownerTerminalId
+        : null;
+  const ownerTerminalDbId =
+    typeof rawConfig.owner_terminal_db_id === 'string'
+      ? rawConfig.owner_terminal_db_id
+      : typeof rawConfig.ownerTerminalDbId === 'string'
+        ? rawConfig.ownerTerminalDbId
+        : null;
+  const sourceTerminalId =
+    typeof rawConfig.source_terminal_id === 'string'
+      ? rawConfig.source_terminal_id
+      : typeof rawConfig.sourceTerminalId === 'string'
+        ? rawConfig.sourceTerminalId
+        : null;
+  const sourceTerminalDbId =
+    typeof rawConfig.source_terminal_db_id === 'string'
+      ? rawConfig.source_terminal_db_id
+      : typeof rawConfig.sourceTerminalDbId === 'string'
+        ? rawConfig.sourceTerminalDbId
+        : null;
+  const posOperatingMode =
+    typeof rawConfig.pos_operating_mode === 'string'
+      ? rawConfig.pos_operating_mode
+      : typeof rawConfig.posOperatingMode === 'string'
+        ? rawConfig.posOperatingMode
+        : null;
   const enabledFeaturesCandidate = rawConfig.enabled_features ?? rawConfig.features;
   const loadedFeatures =
     enabledFeaturesCandidate &&
@@ -179,6 +219,11 @@ function extractRuntimeConfig(config: unknown): {
     rawConfig,
     terminalType,
     parentTerminalId,
+    ownerTerminalId,
+    ownerTerminalDbId,
+    sourceTerminalId,
+    sourceTerminalDbId,
+    posOperatingMode,
     loadedFeatures,
   };
 }
@@ -288,6 +333,11 @@ export function useFeatures() {
   const [features, setFeatures] = useState<FeatureFlags>(DEFAULT_FEATURES);
   const [terminalType, setTerminalType] = useState<TerminalType | null>(null);
   const [parentTerminalId, setParentTerminalId] = useState<string | null>(null);
+  const [ownerTerminalId, setOwnerTerminalId] = useState<string | null>(null);
+  const [ownerTerminalDbId, setOwnerTerminalDbId] = useState<string | null>(null);
+  const [sourceTerminalId, setSourceTerminalId] = useState<string | null>(null);
+  const [sourceTerminalDbId, setSourceTerminalDbId] = useState<string | null>(null);
+  const [posOperatingMode, setPosOperatingMode] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -311,6 +361,11 @@ export function useFeatures() {
           rawConfig,
           terminalType: resolvedTerminalType,
           parentTerminalId: resolvedParentTerminalId,
+          ownerTerminalId: resolvedOwnerTerminalId,
+          ownerTerminalDbId: resolvedOwnerTerminalDbId,
+          sourceTerminalId: resolvedSourceTerminalId,
+          sourceTerminalDbId: resolvedSourceTerminalDbId,
+          posOperatingMode: resolvedPosOperatingMode,
           loadedFeatures,
         } = extractedConfig;
         let mergedFeatures = resolveFeatureFlags(loadedFeatures, resolvedTerminalType);
@@ -323,6 +378,11 @@ export function useFeatures() {
             rawConfig = recoveredRuntimeConfig.rawConfig;
             resolvedTerminalType = recoveredRuntimeConfig.terminalType;
             resolvedParentTerminalId = recoveredRuntimeConfig.parentTerminalId;
+            resolvedOwnerTerminalId = recoveredRuntimeConfig.ownerTerminalId;
+            resolvedOwnerTerminalDbId = recoveredRuntimeConfig.ownerTerminalDbId;
+            resolvedSourceTerminalId = recoveredRuntimeConfig.sourceTerminalId;
+            resolvedSourceTerminalDbId = recoveredRuntimeConfig.sourceTerminalDbId;
+            resolvedPosOperatingMode = recoveredRuntimeConfig.posOperatingMode;
             loadedFeatures = recoveredRuntimeConfig.loadedFeatures;
             mergedFeatures = resolveFeatureFlags(loadedFeatures, resolvedTerminalType);
           }
@@ -330,6 +390,11 @@ export function useFeatures() {
 
         setTerminalType(resolvedTerminalType);
         setParentTerminalId(resolvedParentTerminalId);
+        setOwnerTerminalId(resolvedOwnerTerminalId);
+        setOwnerTerminalDbId(resolvedOwnerTerminalDbId);
+        setSourceTerminalId(resolvedSourceTerminalId);
+        setSourceTerminalDbId(resolvedSourceTerminalDbId);
+        setPosOperatingMode(resolvedPosOperatingMode);
         console.log('[useFeatures] Merged features:', mergedFeatures);
         setFeatures(mergedFeatures);
       } else {
@@ -392,6 +457,26 @@ export function useFeatures() {
       if (nextParentTerminalId !== undefined) {
         setParentTerminalId(nextParentTerminalId);
       }
+      const nextOwnerTerminalId = data?.owner_terminal_id ?? data?.ownerTerminalId;
+      if (nextOwnerTerminalId !== undefined) {
+        setOwnerTerminalId(nextOwnerTerminalId);
+      }
+      const nextOwnerTerminalDbId = data?.owner_terminal_db_id ?? data?.ownerTerminalDbId;
+      if (nextOwnerTerminalDbId !== undefined) {
+        setOwnerTerminalDbId(nextOwnerTerminalDbId);
+      }
+      const nextSourceTerminalId = data?.source_terminal_id ?? data?.sourceTerminalId;
+      if (nextSourceTerminalId !== undefined) {
+        setSourceTerminalId(nextSourceTerminalId);
+      }
+      const nextSourceTerminalDbId = data?.source_terminal_db_id ?? data?.sourceTerminalDbId;
+      if (nextSourceTerminalDbId !== undefined) {
+        setSourceTerminalDbId(nextSourceTerminalDbId);
+      }
+      const nextPosOperatingMode = data?.pos_operating_mode ?? data?.posOperatingMode;
+      if (nextPosOperatingMode !== undefined) {
+        setPosOperatingMode(nextPosOperatingMode);
+      }
       const nextFeatures = data?.enabled_features ?? data?.features;
       if (nextFeatures) {
         setFeatures(() => resolveFeatureFlags(nextFeatures, resolvedTerminalType));
@@ -416,6 +501,11 @@ export function useFeatures() {
     // Terminal type and parent
     terminalType,
     parentTerminalId,
+    ownerTerminalId,
+    ownerTerminalDbId,
+    sourceTerminalId,
+    sourceTerminalDbId,
+    posOperatingMode,
 
     // Convenience checks
     isFeatureEnabled,

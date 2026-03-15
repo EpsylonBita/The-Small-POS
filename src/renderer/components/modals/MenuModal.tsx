@@ -8,8 +8,7 @@ import { MenuItemModal } from '../menu/MenuItemModal';
 import { ComboChoiceModal } from '../menu/ComboChoiceModal';
 import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
-import { SplitPaymentModal } from './SplitPaymentModal';
-import type { SplitPaymentResult } from './SplitPaymentModal';
+// SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
@@ -86,7 +85,7 @@ interface MenuModalProps {
     ghost_metadata?: Record<string, unknown> | null;
     deliveryFee?: number;
     deliveryZoneInfo?: DeliveryBoundaryValidationResponse | null;
-  }) => void;
+  }) => Promise<void | boolean> | void | boolean;
   // Edit mode props
   editMode?: boolean;
   editOrderId?: string;
@@ -136,12 +135,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
   const [offerEvaluation, setOfferEvaluation] = useState<CatalogOfferEvaluationResult | null>(null);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
-  const [splitOrderId, setSplitOrderId] = useState<string | null>(null);
+  // Split payment state managed by OrderDashboard (SplitPaymentModal renders there)
   const [manualDiscountMode, setManualDiscountMode] = useState<'percentage' | 'fixed'>('percentage');
   const [manualDiscountValue, setManualDiscountValue] = useState<number>(0);
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false);
-  const [ghostModeEnabled, setGhostModeEnabled] = useState(false);
+  const [ghostModeArmed, setGhostModeArmed] = useState(false);
+  const [ghostModeArmedAt, setGhostModeArmedAt] = useState<string | null>(null);
   const [categories, setCategories] = useState<Array<{id: string, name: string, icon?: string}>>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [isLoadingItems, setIsLoadingItems] = useState(false);
@@ -214,9 +213,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   // Track if we've loaded items for this edit session to prevent infinite loops
   const hasLoadedItemsRef = React.useRef(false);
   const lastEditOrderIdRef = React.useRef<string | undefined>(undefined);
-  const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeEnabled;
-  const hasOnlyManualItems = cartItems.length > 0 && cartItems.every((item) => item?.is_manual === true);
-  const shouldBypassPaymentWithGhostMode = shouldApplyGhostMode && hasOnlyManualItems;
+  const shouldApplyGhostMode = ghostModeFeatureEnabled && ghostModeArmed;
+  const shouldBypassPaymentWithGhostMode = shouldApplyGhostMode;
 
   const parseBooleanSetting = (value: unknown): boolean => {
     if (value === true || value === 1) return true;
@@ -384,7 +382,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setSelectedCombo(null);
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
-      setGhostModeEnabled(false);
+      setGhostModeArmed(false);
+      setGhostModeArmedAt(null);
       setGhostModeFeatureEnabled(false);
     }
   }, [isOpen, cartItems.length]);
@@ -395,20 +394,30 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
     const loadGhostSettings = async () => {
       try {
-        const [featureFlag, enabled] = await Promise.all([
-          bridge.settings.get('terminal', 'ghost_mode_feature_enabled'),
-          bridge.settings.get('system', 'ghost_mode_enabled'),
-        ]);
+        const featureFlag = await bridge.settings.get('terminal', 'ghost_mode_feature_enabled');
         setGhostModeFeatureEnabled(parseBooleanSetting(featureFlag));
-        setGhostModeEnabled(parseBooleanSetting(enabled));
       } catch (error) {
         console.warn('[MenuModal] Failed to load ghost mode settings:', error);
         setGhostModeFeatureEnabled(false);
-        setGhostModeEnabled(false);
+        setGhostModeArmed(false);
+        setGhostModeArmedAt(null);
       }
     };
     void loadGhostSettings();
   }, [bridge.settings, isOpen]);
+
+  const buildGhostMetadata = useCallback(() => {
+    if (!shouldApplyGhostMode) {
+      return null;
+    }
+
+    return {
+      trigger_code: 'X/1',
+      scope: 'cart_session',
+      armed_at: ghostModeArmedAt,
+      checkout_item_count: cartItems.length,
+    };
+  }, [cartItems.length, ghostModeArmedAt, shouldApplyGhostMode]);
 
   // Fetch delivery zone info when modal opens for delivery orders (if not provided via props)
   useEffect(() => {
@@ -982,14 +991,9 @@ export const MenuModal: React.FC<MenuModalProps> = ({
   const handleAddManualItem = (price: number, name?: string) => {
     // Secret code: name "x" + price 1 toggles ghost mode
     if (ghostModeFeatureEnabled && name?.trim().toLowerCase() === 'x' && price === 1) {
-      const newState = !ghostModeEnabled;
-      setGhostModeEnabled(newState);
-      // Persist the toggle
-      bridge.settings.updateLocal({
-        settingType: 'system',
-        settings: { ghost_mode_enabled: newState },
-      })
-        .catch((err: unknown) => console.warn('[MenuModal] Failed to save ghost mode setting:', err));
+      const newState = !ghostModeArmed;
+      setGhostModeArmed(newState);
+      setGhostModeArmedAt(newState ? new Date().toISOString() : null);
       toast.success(
         newState
           ? (t('menu.cart.ghostModeActivated', 'Ghost mode activated'))
@@ -1276,26 +1280,21 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       return;
     }
 
-    if (shouldBypassPaymentWithGhostMode) {
-      await handlePaymentComplete({
-        method: 'other',
-        status: 'paid',
-        amount: finalOrderTotal,
-        isGhostBypass: true,
-      });
-      return;
+    if (orderType === 'delivery') {
+      const validationResult = await ensureDeliveryValidationForCheckout();
+      if (!selectedAddressCoordinates) {
+        toast.error(t('menu.cart.deliveryFeeNeedsExactAddress'));
+        return;
+      }
+      if (getDeliveryFeeStatus(orderType, validationResult, false) !== 'resolved') {
+        toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
+        return;
+      }
     }
 
-      if (orderType === 'delivery') {
-        const validationResult = await ensureDeliveryValidationForCheckout();
-        if (!selectedAddressCoordinates) {
-          toast.error(t('menu.cart.deliveryFeeNeedsExactAddress'));
-          return;
-        }
-        if (getDeliveryFeeStatus(orderType, validationResult, false) !== 'resolved') {
-          toast.error(validationResult?.message || t('orderFlow.zoneValidationRequired'));
-          return;
-      }
+    if (shouldBypassPaymentWithGhostMode) {
+      await handlePaymentComplete(undefined);
+      return;
     }
 
     // Show payment modal instead of immediately completing order
@@ -1347,16 +1346,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     );
   };
 
-  const handlePaymentComplete = async (paymentData: any): Promise<boolean> => {
+  const handlePaymentComplete = async (paymentData?: any): Promise<boolean> => {
     setIsLocalProcessing(true);
     const isGhostOrder = shouldBypassPaymentWithGhostMode;
-    const ghostMetadata = isGhostOrder
-      ? {
-        trigger: 'ghost_mode_toggle',
-        item_count: cartItems.length,
-        bypass_reason: 'ghost_mode_enabled',
-      }
-      : null;
+    const ghostMetadata = buildGhostMetadata();
 
     // Debug: Log cart items with notes, categoryName, and customizations before passing to onOrderComplete
     console.log('[MenuModal.handlePaymentComplete] cartItems details:', cartItems.map(item => ({
@@ -1381,7 +1374,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
     try {
       if (onOrderComplete) {
-        await onOrderComplete({
+        const completionResult = await onOrderComplete({
           items: cartItems,
           total: discountedSubtotal,
           customer: selectedCustomer,
@@ -1395,7 +1388,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           manualDiscountValue,
           total_discount_amount: totalDiscountAmount,
           is_ghost: isGhostOrder,
-          ghost_source: isGhostOrder ? 'ghost_mode_toggle' : null,
+          ghost_source: isGhostOrder ? 'manual_code_x_1' : null,
           ghost_metadata: ghostMetadata,
           deliveryFee: resolvedDeliveryFee,
           deliveryZoneInfo: effectiveDeliveryZoneInfo, // Pass delivery zone info to OrderDashboard for correct fee calculation
@@ -1405,6 +1398,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
             coupon_discount_amount: currentCouponDiscountAmount,
           } : {}),
         });
+
+        if (completionResult === false) {
+          setIsLocalProcessing(false);
+          return false;
+        }
       }
 
       // Reset state
@@ -1413,6 +1411,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       setSelectedSubcategory("");
       setManualDiscountMode('percentage');
       setManualDiscountValue(0);
+      setGhostModeArmed(false);
+      setGhostModeArmedAt(null);
       setShowPaymentModal(false);
       setIsLocalProcessing(false);
       onClose();
@@ -1432,38 +1432,42 @@ export const MenuModal: React.FC<MenuModalProps> = ({
    * SplitPaymentModal so the user can allocate amounts to each person.
    */
   const handleSplitPayment = async () => {
+    if (!onOrderComplete) {
+      return;
+    }
+
     setIsLocalProcessing(true);
     try {
-      if (onOrderComplete) {
-        // Create the order with a pending payment status
-        await onOrderComplete({
-          items: cartItems,
-          total: discountedSubtotal,
-          customer: selectedCustomer,
-          address: selectedAddress || null,
-          orderType,
-          notes: '',
-          paymentData: { method: 'pending', status: 'pending', amount: 0 },
-          discountPercentage: currentDiscountPercentage,
-          discountAmount: currentManualDiscountAmount,
-          manualDiscountMode,
-          manualDiscountValue,
-          total_discount_amount: totalDiscountAmount,
-          is_ghost: false,
-          ghost_source: null,
-          ghost_metadata: null,
-          deliveryFee: resolvedDeliveryFee,
-          deliveryZoneInfo: effectiveDeliveryZoneInfo,
-          ...(appliedCoupon ? {
-            coupon_id: appliedCoupon.id,
-            coupon_code: appliedCoupon.code,
-            coupon_discount_amount: currentCouponDiscountAmount,
-          } : {}),
-        });
+      // Create the order with pending payment method.
+      // Parent flows detect split checkout and open SplitPaymentModal after creation.
+      const completionResult = await onOrderComplete({
+        items: cartItems,
+        total: discountedSubtotal,
+        customer: selectedCustomer,
+        address: selectedAddress || null,
+        orderType,
+        notes: '',
+        paymentData: { method: 'pending', status: 'pending', amount: 0 },
+        discountPercentage: currentDiscountPercentage,
+        discountAmount: currentManualDiscountAmount,
+        manualDiscountMode,
+        manualDiscountValue,
+        total_discount_amount: totalDiscountAmount,
+        is_ghost: false,
+        ghost_source: null,
+        ghost_metadata: null,
+        deliveryFee: resolvedDeliveryFee,
+        deliveryZoneInfo: effectiveDeliveryZoneInfo,
+        ...(appliedCoupon ? {
+          coupon_id: appliedCoupon.id,
+          coupon_code: appliedCoupon.code,
+          coupon_discount_amount: currentCouponDiscountAmount,
+        } : {}),
+      });
+
+      if (completionResult === false) {
+        return;
       }
-      // Close PaymentModal, open SplitPaymentModal
-      setShowPaymentModal(false);
-      setShowSplitPaymentModal(true);
     } catch (error) {
       console.error('[MenuModal.handleSplitPayment] Error creating order for split:', error);
       toast.error(t('modals.menu.orderFailed'));
@@ -1472,20 +1476,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     }
   };
 
-  /**
-   * Called when the split payment modal completes successfully.
-   * Resets all cart state and closes the menu modal.
-   */
-  const handleSplitComplete = (_result: SplitPaymentResult) => {
-    setCartItems([]);
-    setSelectedCategory("all");
-    setSelectedSubcategory("");
-    setManualDiscountMode('percentage');
-    setManualDiscountValue(0);
-    setShowSplitPaymentModal(false);
-    setSplitOrderId(null);
-    onClose();
-  };
+  // handleSplitComplete moved to OrderDashboard (where SplitPaymentModal now renders)
 
   // Generate modal title based on mode
   const getModalTitle = () => {
@@ -1664,6 +1655,8 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               matchedOfferNames={matchedOfferNames}
               onAddManualItem={editMode ? undefined : handleAddManualItem}
               onLinePriceChange={handleLinePriceChange}
+              ghostModeFeatureEnabled={ghostModeFeatureEnabled}
+              ghostModeArmed={ghostModeArmed}
             />
           </div>
         </div>
@@ -1710,30 +1703,12 @@ export const MenuModal: React.FC<MenuModalProps> = ({
           orderType={orderType}
           minimumOrderAmount={effectiveDeliveryZoneInfo?.zone?.minimumOrderAmount ?? 0}
           onPaymentComplete={handlePaymentComplete}
-          onSplitPayment={handleSplitPayment}
+          onSplitPayment={onOrderComplete ? handleSplitPayment : undefined}
           isProcessing={effectiveProcessing}
         />
       )}
 
-      {/* Split Payment Modal */}
-      {isOpen && (
-        <SplitPaymentModal
-          isOpen={showSplitPaymentModal}
-          onClose={() => {
-            setShowSplitPaymentModal(false);
-            setSplitOrderId(null);
-          }}
-          orderId={splitOrderId || ''}
-          orderTotal={finalOrderTotal}
-          items={cartItems.map((item) => ({
-            name: item.name,
-            quantity: item.quantity,
-            totalPrice: (item.price || 0) * item.quantity,
-            price: item.price || 0,
-          }))}
-          onSplitComplete={handleSplitComplete}
-        />
-      )}
+      {/* SplitPaymentModal now rendered in OrderDashboard */}
 
       {/* Customer Info Modal — compact centered overlay */}
       {showCustomerPopover && (

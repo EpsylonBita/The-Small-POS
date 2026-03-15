@@ -324,6 +324,8 @@ pub struct ZReportDoc {
     pub report_date: String,
     pub generated_at: String,
     pub shift_ref: String,
+    #[serde(default)]
+    pub shift_count: Option<i64>,
     pub terminal_name: String,
     pub total_orders: i64,
     pub gross_sales: f64,
@@ -503,6 +505,11 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SHIFT CHECKOUT" => "ΚΛΕΙΣΙΜΟ ΒΑΡΔΙΑΣ",
             "Z REPORT" => "ΑΝΑΦΟΡΑ Z",
             "Role" => "Ρόλος",
+            "Cashier" => "Ταμίας",
+            "Manager" => "Διευθυντής",
+            "Kitchen" => "Κουζίνα",
+            "Server" => "Σερβιτόρος",
+            "Shifts" => "Βάρδιες",
             "Terminal" => "Τερματικό",
             "Check-in" => "Έναρξη",
             "Check-out" => "Λήξη",
@@ -599,6 +606,11 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SHIFT CHECKOUT" => "SCHICHT-ABSCHLUSS",
             "Z REPORT" => "Z-BERICHT",
             "Role" => "Rolle",
+            "Cashier" => "Kassierer",
+            "Manager" => "Manager",
+            "Kitchen" => "Kueche",
+            "Server" => "Service",
+            "Shifts" => "Schichten",
             "Terminal" => "Terminal",
             "Check-in" => "Check-in",
             "Check-out" => "Check-out",
@@ -695,6 +707,11 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SHIFT CHECKOUT" => "CLOTURE DE SHIFT",
             "Z REPORT" => "RAPPORT Z",
             "Role" => "Role",
+            "Cashier" => "Caissier",
+            "Manager" => "Manager",
+            "Kitchen" => "Cuisine",
+            "Server" => "Serveur",
+            "Shifts" => "Shifts",
             "Terminal" => "Terminal",
             "Check-in" => "Debut",
             "Check-out" => "Fin",
@@ -791,6 +808,11 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "SHIFT CHECKOUT" => "CHIUSURA TURNO",
             "Z REPORT" => "RAPPORTO Z",
             "Role" => "Ruolo",
+            "Cashier" => "Cassiere",
+            "Manager" => "Manager",
+            "Kitchen" => "Cucina",
+            "Server" => "Cameriere",
+            "Shifts" => "Turni",
             "Terminal" => "Terminale",
             "Check-in" => "Ingresso",
             "Check-out" => "Uscita",
@@ -845,6 +867,63 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
         },
         _ => key,
     }
+}
+
+fn non_empty_receipt_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn title_case_words(value: &str) -> String {
+    let words = value
+        .split(|ch: char| ch == '_' || ch == '-' || ch.is_whitespace())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut word = String::new();
+                    word.extend(first.to_uppercase());
+                    word.push_str(&chars.as_str().to_ascii_lowercase());
+                    word
+                }
+                None => String::new(),
+            }
+        })
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        "Staff".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+pub fn receipt_role_text(lang: &str, role_type: &str) -> String {
+    let key = match role_type.trim().to_ascii_lowercase().as_str() {
+        "cashier" => Some("Cashier"),
+        "manager" => Some("Manager"),
+        "driver" => Some("Driver"),
+        "kitchen" => Some("Kitchen"),
+        "server" => Some("Server"),
+        "staff" => Some("Staff"),
+        _ => None,
+    };
+    key.map(|value| receipt_label(lang, value).to_string())
+        .unwrap_or_else(|| title_case_words(role_type))
+}
+
+fn z_report_shift_line(doc: &ZReportDoc, lang: &str) -> Option<(String, String)> {
+    if let Some(shift_ref) = non_empty_receipt_value(&doc.shift_ref) {
+        return Some((receipt_label(lang, "Shift").to_string(), shift_ref.to_string()));
+    }
+    doc.shift_count
+        .filter(|count| *count > 0)
+        .map(|count| (receipt_label(lang, "Shifts").to_string(), count.to_string()))
 }
 
 /// Translate an order type string (e.g. "pickup", "delivery", "dine_in", "takeaway")
@@ -2778,6 +2857,16 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             html_shell(receipt_label(lang, "DELIVERY SLIP"), &body, cfg)
         }
         ReceiptDocument::ShiftCheckout(doc) => {
+            let role_display = receipt_role_text(lang, &doc.role_type);
+            let terminal_line = non_empty_receipt_value(&doc.terminal_name)
+                .map(|terminal_name| {
+                    format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Terminal")),
+                        esc(terminal_name)
+                    )
+                })
+                .unwrap_or_default();
             let expected = doc
                 .expected_amount
                 .map(money)
@@ -2801,18 +2890,12 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div></div>",
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>{}</div>",
                 esc(receipt_label(lang, "SHIFT CHECKOUT")),
-                esc(receipt_label(lang, "Shift")),
-                esc(&doc.shift_id),
                 esc(receipt_label(lang, "Role")),
-                esc(&doc.role_type),
+                esc(&role_display),
                 esc(receipt_label(lang, "Staff")),
                 esc(&doc.staff_name),
-                esc(receipt_label(lang, "Terminal")),
-                esc(&doc.terminal_name),
                 esc(receipt_label(lang, "Orders")),
                 doc.orders_count,
                 esc(receipt_label(lang, "Sales")),
@@ -2828,28 +2911,44 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(receipt_label(lang, "Closing")),
                 closing,
                 esc(receipt_label(lang, "Variance")),
-                variance
+                variance,
+                terminal_line
             );
             html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg)
         }
         ReceiptDocument::ZReport(doc) => {
+            let shift_line = z_report_shift_line(doc, lang)
+                .map(|(label, value)| {
+                    format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(&label),
+                        esc(&value)
+                    )
+                })
+                .unwrap_or_default();
+            let terminal_line = non_empty_receipt_value(&doc.terminal_name)
+                .map(|terminal_name| {
+                    format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Terminal")),
+                        esc(terminal_name)
+                    )
+                })
+                .unwrap_or_default();
             let mut body = format!(
                 "<div class=\"center\"><strong>{}</strong></div>\
                  <div class=\"section\">\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 {}{}\
                  </div>",
                 esc(receipt_label(lang, "Z REPORT")),
                 esc(receipt_label(lang, "Date")),
                 esc(&doc.report_date),
                 esc(receipt_label(lang, "Generated")),
                 esc(&doc.generated_at),
-                esc(receipt_label(lang, "Shift")),
-                esc(&doc.shift_ref),
-                esc(receipt_label(lang, "Terminal")),
-                esc(&doc.terminal_name),
+                shift_line,
+                terminal_line,
             );
 
             // Sales
@@ -5478,20 +5577,22 @@ fn render_classic_non_customer_raster_exact_ttf(
         ReceiptDocument::ShiftCheckout(doc) => {
             canvas.draw_reverse_banner(receipt_label(lang, "SHIFT CHECKOUT"));
             canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Shift")),
-                &doc.shift_id,
-                preset.meta_style,
-            );
-            canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Staff")),
                 &doc.staff_name,
                 preset.meta_style,
             );
             canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Terminal")),
-                &doc.terminal_name,
+                &format!("{}:", receipt_label(lang, "Role")),
+                &receipt_role_text(lang, &doc.role_type),
                 preset.meta_style,
             );
+            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Terminal")),
+                    terminal_name,
+                    preset.meta_style,
+                );
+            }
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Check-in")),
                 &format_datetime_human(&doc.check_in),
@@ -5579,16 +5680,16 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &format_datetime_human(&doc.generated_at),
                 preset.meta_style,
             );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Shift")),
-                &doc.shift_ref,
-                preset.meta_style,
-            );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Terminal")),
-                &doc.terminal_name,
-                preset.meta_style,
-            );
+            if let Some((label, value)) = z_report_shift_line(doc, lang) {
+                canvas.draw_pair(&format!("{label}:"), &value, preset.meta_style);
+            }
+            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Terminal")),
+                    terminal_name,
+                    preset.meta_style,
+                );
+            }
             canvas.draw_rule();
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Orders")),
@@ -5663,13 +5764,11 @@ fn render_classic_raster_exact(
         ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
             render_classic_customer_raster_exact(document, cfg)
         }
-        ReceiptDocument::KitchenTicket(_) => {
+        ReceiptDocument::KitchenTicket(_)
+        | ReceiptDocument::ShiftCheckout(_)
+        | ReceiptDocument::ZReport(_) => {
             let image = render_classic_non_customer_raster_exact_ttf(document, cfg)?;
             Ok(finalize_raster_exact_bytes(image, cfg, true))
-        }
-        _ => {
-            let image = render_classic_non_customer_raster_exact_ttf(document, cfg)?;
-            Ok(finalize_raster_exact_bytes(image, cfg, false))
         }
     }
 }
@@ -5688,17 +5787,11 @@ pub fn render_classic_raster_exact_preview_data_url(
                 }
             }
         }
-        ReceiptDocument::KitchenTicket(_) => {
-            render_classic_non_customer_raster_exact_ttf(document, cfg)?
-        }
-        _ => render_classic_non_customer_raster_exact_ttf(document, cfg)?,
+        ReceiptDocument::KitchenTicket(_)
+        | ReceiptDocument::ShiftCheckout(_)
+        | ReceiptDocument::ZReport(_) => render_classic_non_customer_raster_exact_ttf(document, cfg)?,
     };
-    let composed = match document {
-        ReceiptDocument::OrderReceipt(_)
-        | ReceiptDocument::DeliverySlip(_)
-        | ReceiptDocument::KitchenTicket(_) => compose_receipt_like_logo_image(body, cfg),
-        _ => body,
-    };
+    let composed = compose_receipt_like_logo_image(body, cfg);
     let mut encoded = Vec::new();
     image::DynamicImage::ImageLuma8(composed)
         .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
@@ -6641,14 +6734,8 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 .left();
             emit_pair(
                 &mut builder,
-                receipt_label(lang, "Shift"),
-                &doc.shift_id,
-                width,
-            );
-            emit_pair(
-                &mut builder,
                 receipt_label(lang, "Role"),
-                &doc.role_type,
+                &receipt_role_text(lang, &doc.role_type),
                 width,
             );
             emit_pair(
@@ -6657,12 +6744,14 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &doc.staff_name,
                 width,
             );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Terminal"),
-                &doc.terminal_name,
-                width,
-            );
+            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Terminal"),
+                    terminal_name,
+                    width,
+                );
+            }
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Orders"),
@@ -6823,18 +6912,17 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &doc.generated_at,
                 width,
             );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Shift"),
-                &doc.shift_ref,
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Terminal"),
-                &doc.terminal_name,
-                width,
-            );
+            if let Some((label, value)) = z_report_shift_line(doc, lang) {
+                emit_pair(&mut builder, &label, &value, width);
+            }
+            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Terminal"),
+                    terminal_name,
+                    width,
+                );
+            }
             emit_rule(&mut builder, width, '-');
 
             // --- Sales summary ---
@@ -8286,12 +8374,16 @@ mod tests {
         let shift_text = String::from_utf8_lossy(&render_escpos(&shift, &cfg).bytes).to_string();
         assert!(shift_text.contains(receipt_label("it", "SHIFT CHECKOUT")));
         assert!(shift_text.contains(receipt_label("it", "Orders")));
+        assert!(shift_text.contains(receipt_label("it", "Role")));
+        assert!(shift_text.contains(&receipt_role_text("it", "cashier")));
+        assert!(!shift_text.contains("SHIFT-001"));
 
         let z_report = ReceiptDocument::ZReport(ZReportDoc {
             report_id: "ZR-1".to_string(),
             report_date: "2026-03-05".to_string(),
             generated_at: "2026-03-05T23:59:00Z".to_string(),
-            shift_ref: "SHIFT-001".to_string(),
+            shift_ref: String::new(),
+            shift_count: Some(3),
             terminal_name: "Front".to_string(),
             total_orders: 120,
             gross_sales: 980.0,
@@ -8308,6 +8400,70 @@ mod tests {
         let z_text = String::from_utf8_lossy(&render_escpos(&z_report, &cfg).bytes).to_string();
         assert!(z_text.contains(receipt_label("it", "Z REPORT")));
         assert!(z_text.contains(receipt_label("it", "Generated")));
+        assert!(z_text.contains(receipt_label("it", "Shifts")));
+        assert!(z_text.contains("3"));
+        assert!(z_text.contains("Front"));
+        assert!(!z_text.contains("snapshot"));
+    }
+
+    #[test]
+    fn html_non_customer_receipts_hide_internal_shift_ids_and_show_display_metadata() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            ..LayoutConfig::default()
+        };
+
+        let shift_html = render_html(
+            &ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                shift_id: "shift-serial-999".to_string(),
+                role_type: "cashier".to_string(),
+                staff_name: "Staff".to_string(),
+                terminal_name: "Front Counter".to_string(),
+                check_in: "2026-03-05T08:00:00Z".to_string(),
+                check_out: "2026-03-05T16:00:00Z".to_string(),
+                orders_count: 12,
+                sales_amount: 120.5,
+                total_expenses: 8.0,
+                cash_refunds: 1.5,
+                opening_amount: 50.0,
+                expected_amount: Some(161.0),
+                closing_amount: Some(160.0),
+                variance_amount: Some(-1.0),
+                ..ShiftCheckoutDoc::default()
+            }),
+            &cfg,
+        );
+        assert!(shift_html.contains("Role"));
+        assert!(shift_html.contains("Cashier"));
+        assert!(shift_html.contains("Front Counter"));
+        assert!(!shift_html.contains("shift-serial-999"));
+
+        let z_report_html = render_html(
+            &ReceiptDocument::ZReport(ZReportDoc {
+                report_id: "ZR-1".to_string(),
+                report_date: "2026-03-05".to_string(),
+                generated_at: "2026-03-05T23:59:00Z".to_string(),
+                shift_ref: String::new(),
+                shift_count: Some(4),
+                terminal_name: "Main POS".to_string(),
+                total_orders: 120,
+                gross_sales: 980.0,
+                net_sales: 880.0,
+                cash_sales: 500.0,
+                card_sales: 380.0,
+                refunds_total: 10.0,
+                voids_total: 4.0,
+                discounts_total: 6.0,
+                expenses_total: 15.0,
+                cash_variance: -1.0,
+                ..ZReportDoc::default()
+            }),
+            &cfg,
+        );
+        assert!(z_report_html.contains("Shifts"));
+        assert!(z_report_html.contains("Main POS"));
+        assert!(!z_report_html.contains("snapshot"));
     }
 
     #[test]

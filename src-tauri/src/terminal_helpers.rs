@@ -128,6 +128,51 @@ pub(crate) fn extract_ghost_mode_feature_from_terminal_settings_response(
     )
 }
 
+fn is_local_only_setting_category(category: &str) -> bool {
+    matches!(
+        category.trim().to_ascii_lowercase().as_str(),
+        "ui"
+            | "hardware"
+            | "peripherals"
+            | "display"
+            | "scanner"
+            | "scale"
+            | "printer"
+            | "payment_terminal"
+            | "system"
+    )
+}
+
+fn is_local_only_terminal_setting(setting_key: &str) -> bool {
+    matches!(
+        setting_key.trim().to_ascii_lowercase().as_str(),
+        "display_brightness"
+            | "screen_timeout"
+            | "touch_sensitivity"
+            | "audio_enabled"
+            | "receipt_auto_print"
+            | "auto_print_receipts"
+            | "cash_drawer_enabled"
+            | "barcode_scanner_enabled"
+            | "customer_display_enabled"
+            | "cash_drawer_port"
+            | "barcode_scanner_port"
+            | "card_reader_enabled"
+            | "scale_enabled"
+            | "scale_port"
+            | "scale_baud_rate"
+            | "scale_protocol"
+            | "loyalty_card_reader"
+            | "wifi_ssid"
+            | "ethernet_enabled"
+            | "display_connection_type"
+            | "display_port"
+            | "display_baud_rate"
+            | "display_tcp_port"
+            | "scanner_baud_rate"
+    )
+}
+
 pub(crate) fn extract_terminal_type_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -153,6 +198,81 @@ pub(crate) fn extract_parent_terminal_id_from_terminal_settings_response(
                 "/settings/terminal/parent_terminal_id",
                 "/terminal/parent_terminal_id",
                 "/terminal/parent/id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_owner_terminal_id_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["owner_terminal_id"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/owner_terminal_id",
+                "/terminal/owner_terminal_id",
+                "/terminal/owner/id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_owner_terminal_db_id_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["owner_terminal_db_id"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/owner_terminal_db_id",
+                "/terminal/owner_terminal_db_id",
+                "/terminal/owner/db_id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_source_terminal_id_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["source_terminal_id"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/source_terminal_id",
+                "/terminal/source_terminal_id",
+                "/terminal/source/id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_source_terminal_db_id_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["source_terminal_db_id"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/source_terminal_db_id",
+                "/terminal/source_terminal_db_id",
+                "/terminal/source/db_id",
+            ],
+        )
+    })
+}
+
+pub(crate) fn extract_pos_operating_mode_from_terminal_settings_response(
+    resp: &serde_json::Value,
+) -> Option<String> {
+    crate::value_str(resp, &["pos_operating_mode"]).or_else(|| {
+        nested_value_str(
+            resp,
+            &[
+                "/settings/terminal/pos_operating_mode",
+                "/terminal/pos_operating_mode",
+                "/branch/pos_operating_mode",
             ],
         )
     })
@@ -213,11 +333,16 @@ pub(crate) fn cache_terminal_settings_snapshot(
 
     if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
         for (category, category_values) in settings_obj {
+            if is_local_only_setting_category(category) {
+                continue;
+            }
             let Some(values_obj) = category_values.as_object() else {
                 continue;
             };
             for (key, raw_value) in values_obj {
-                if category == "terminal" && is_sensitive_terminal_setting(key) {
+                if category == "terminal"
+                    && (is_sensitive_terminal_setting(key) || is_local_only_terminal_setting(key))
+                {
                     continue;
                 }
                 let Some(serialized) = setting_value_to_string(raw_value) else {

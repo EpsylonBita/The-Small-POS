@@ -4,7 +4,7 @@ import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -13,6 +13,8 @@ import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
+import { useFeatures } from '../../hooks/useFeatures';
+import { useModules } from '../../contexts/module-context';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -46,12 +48,41 @@ const parseBooleanSetting = (value: unknown): boolean => {
   return false
 }
 
+const parseNumberSetting = (value: unknown, fallback: number): number => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
+}
+
+const parseStringSetting = (value: unknown, fallback: string): string => {
+  if (typeof value === 'string' && value.trim()) return value
+  return fallback
+}
+
+const getNestedSetting = (
+  source: Record<string, any>,
+  category: string,
+  key: string
+): unknown => {
+  const categoryValue = source?.[category]
+  if (categoryValue && typeof categoryValue === 'object' && !Array.isArray(categoryValue)) {
+    return categoryValue[key]
+  }
+
+  return source?.[`${category}.${key}`]
+}
+
 const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
   const bridge = getBridge()
   const allowManualCredentials = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV)
+  const { features, terminalType, ownerTerminalId, posOperatingMode } = useFeatures()
+  const { enabledModules } = useModules()
   const [connectionCode, setConnectionCode] = useState('')
   const [terminalId, setTerminalId] = useState('')
   const [apiKey, setApiKey] = useState('')
@@ -69,6 +100,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
   const [isClearingOperational, setIsClearingOperational] = useState(false)
+  const [showTerminalPreferences, setShowTerminalPreferences] = useState(false)
 
   // Factory reset confirmation dialogs
   const [showFactoryResetWarning, setShowFactoryResetWarning] = useState(false)
@@ -80,7 +112,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [sessionTimeoutEnabled, setSessionTimeoutEnabled] = useState(false)
   const [sessionTimeoutMinutes, setSessionTimeoutMinutes] = useState('15')
   const [ghostModeFeatureEnabled, setGhostModeFeatureEnabled] = useState(false)
-  const [ghostModeEnabled, setGhostModeEnabled] = useState(false)
+  const [screenTimeoutMinutes, setScreenTimeoutMinutes] = useState('5')
+  const [touchSensitivity, setTouchSensitivity] = useState('medium')
+  const [audioEnabled, setAudioEnabled] = useState(true)
+  const [receiptAutoPrint, setReceiptAutoPrint] = useState(true)
+  const [displayBrightness, setDisplayBrightness] = useState('80')
+  const [pinResetRequired, setPinResetRequired] = useState(false)
+  const [runtimeTerminalId, setRuntimeTerminalId] = useState('')
+  const [runtimeAdminUrl, setRuntimeAdminUrl] = useState('')
+  const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('offline')
 
   const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
   // Peripheral settings state
@@ -174,20 +214,118 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         const ghostFeature = remoteGhostFeatureEnabled !== null
           ? remoteGhostFeatureEnabled
           : await bridge.settings.get('terminal', 'ghost_mode_feature_enabled')
-        const ghostEnabled = await bridge.settings.get('system', 'ghost_mode_enabled')
         const enabled = await bridge.settings.get('system', 'session_timeout_enabled')
         const minutes = await bridge.settings.get('system', 'session_timeout_minutes')
         const enabledNormalized = parseBooleanSetting(enabled)
         const minutesParsed = Number(minutes)
         setGhostModeFeatureEnabled(parseBooleanSetting(ghostFeature))
-        setGhostModeEnabled(parseBooleanSetting(ghostEnabled))
         setSessionTimeoutEnabled(enabledNormalized)
         setSessionTimeoutMinutes(String(Number.isFinite(minutesParsed) && minutesParsed > 0 ? minutesParsed : 15))
       } catch (e) {
         console.warn('Failed to load security settings:', e)
       }
     }
-    loadSecuritySettings()
+    const loadLocalTerminalSettings = async () => {
+      try {
+        const [localSettings, runtimeConfig] = await Promise.all([
+          bridge.settings.getLocal(),
+          bridge.terminalConfig.getFullConfig().catch(() => null),
+        ])
+
+        const settingsMap = (localSettings && typeof localSettings === 'object')
+          ? localSettings as Record<string, any>
+          : {}
+        const runtime = (runtimeConfig && typeof runtimeConfig === 'object')
+          ? runtimeConfig as Record<string, any>
+          : {}
+
+        setRuntimeTerminalId(parseStringSetting(runtime.terminal_id, parseStringSetting(settingsMap?.terminal?.terminal_id, '')))
+        setRuntimeAdminUrl(parseStringSetting(runtime.admin_dashboard_url, parseStringSetting(settingsMap?.terminal?.admin_dashboard_url, '')))
+        setRuntimeSyncHealth(parseStringSetting(runtime.sync_health, 'offline'))
+
+        setDisplayBrightness(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'ui', 'display_brightness') ?? getNestedSetting(settingsMap, 'terminal', 'display_brightness'),
+          80
+        )))
+        setScreenTimeoutMinutes(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'ui', 'screen_timeout') ?? getNestedSetting(settingsMap, 'terminal', 'screen_timeout'),
+          5
+        )))
+        setTouchSensitivity(parseStringSetting(
+          getNestedSetting(settingsMap, 'ui', 'touch_sensitivity') ?? getNestedSetting(settingsMap, 'terminal', 'touch_sensitivity'),
+          'medium'
+        ))
+        setAudioEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'ui', 'audio_enabled') ?? getNestedSetting(settingsMap, 'terminal', 'audio_enabled')
+        ))
+        setReceiptAutoPrint(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'ui', 'receipt_auto_print') ?? getNestedSetting(settingsMap, 'terminal', 'receipt_auto_print')
+        ))
+        setPinResetRequired(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'terminal', 'pin_reset_required')
+        ))
+
+        setScaleEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'scale', 'enabled') ?? getNestedSetting(settingsMap, 'hardware', 'scale_enabled')
+        ))
+        setScalePort(parseStringSetting(
+          getNestedSetting(settingsMap, 'scale', 'port') ?? getNestedSetting(settingsMap, 'hardware', 'scale_port'),
+          'COM3'
+        ))
+        setScaleBaudRate(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'scale', 'baud_rate') ?? getNestedSetting(settingsMap, 'hardware', 'scale_baud_rate'),
+          9600
+        )))
+        setScaleProtocol(parseStringSetting(
+          getNestedSetting(settingsMap, 'scale', 'protocol') ?? getNestedSetting(settingsMap, 'hardware', 'scale_protocol'),
+          'generic'
+        ))
+
+        setDisplayEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'display', 'enabled') ?? getNestedSetting(settingsMap, 'hardware', 'customer_display_enabled')
+        ))
+        setDisplayConnectionType(parseStringSetting(
+          getNestedSetting(settingsMap, 'display', 'connection_type') ?? getNestedSetting(settingsMap, 'hardware', 'display_connection_type'),
+          'serial'
+        ))
+        setDisplayPort(parseStringSetting(
+          getNestedSetting(settingsMap, 'display', 'port') ?? getNestedSetting(settingsMap, 'hardware', 'display_port'),
+          'COM4'
+        ))
+        setDisplayBaudRate(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'display', 'baud_rate') ?? getNestedSetting(settingsMap, 'hardware', 'display_baud_rate'),
+          9600
+        )))
+        setDisplayTcpPort(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'display', 'tcp_port') ?? getNestedSetting(settingsMap, 'hardware', 'display_tcp_port'),
+          9100
+        )))
+
+        setScannerEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'scanner', 'enabled') ?? getNestedSetting(settingsMap, 'hardware', 'barcode_scanner_enabled')
+        ))
+        setScannerPort(parseStringSetting(
+          getNestedSetting(settingsMap, 'scanner', 'port') ?? getNestedSetting(settingsMap, 'hardware', 'barcode_scanner_port'),
+          'COM2'
+        ))
+        setScannerBaudRate(String(parseNumberSetting(
+          getNestedSetting(settingsMap, 'scanner', 'baud_rate') ?? getNestedSetting(settingsMap, 'hardware', 'scanner_baud_rate'),
+          9600
+        )))
+
+        setCardReaderEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'peripherals', 'card_reader_enabled') ?? getNestedSetting(settingsMap, 'hardware', 'card_reader_enabled')
+        ))
+        setLoyaltyEnabled(parseBooleanSetting(
+          getNestedSetting(settingsMap, 'peripherals', 'loyalty_card_reader') ?? getNestedSetting(settingsMap, 'hardware', 'loyalty_card_reader')
+        ))
+      } catch (error) {
+        console.warn('[ConnectionSettings] Failed to load local terminal settings:', error)
+      }
+    }
+
+    void loadSecuritySettings()
+    void loadLocalTerminalSettings()
   }, [isOpen])
 
   useEffect(() => {
@@ -311,6 +449,27 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }
 
+  const handleManualPolicySync = async () => {
+    try {
+      const syncResult: any = await bridge.terminalConfig.syncFromAdmin()
+      const runtimeConfig = syncResult?.data?.config || syncResult?.config || {}
+      setRuntimeTerminalId(parseStringSetting(runtimeConfig?.terminal_id, runtimeTerminalId))
+      setRuntimeAdminUrl(parseStringSetting(runtimeConfig?.admin_dashboard_url, runtimeAdminUrl))
+      setRuntimeSyncHealth(parseStringSetting(runtimeConfig?.sync_health, runtimeSyncHealth))
+
+      const localSettings = await bridge.settings.getLocal()
+      const settingsMap = (localSettings && typeof localSettings === 'object')
+        ? localSettings as Record<string, any>
+        : {}
+      setPinResetRequired(parseBooleanSetting(getNestedSetting(settingsMap, 'terminal', 'pin_reset_required')))
+
+      toast.success(t('settings.connection.policySynced', 'Admin policy synced'))
+    } catch (error: any) {
+      console.error('[ConnectionSettings] Failed to sync admin policy:', error)
+      toast.error(error?.message || t('settings.connection.policySyncFailed', 'Failed to sync admin policy'))
+    }
+  }
+
   const handleSavePin = async () => {
     if (!pin || pin.length < 4) {
       toast.error(t('modals.connectionSettings.pinMinLength'))
@@ -331,7 +490,40 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
 
     toast.success(t('modals.connectionSettings.pinSaved'))
+    setPinResetRequired(false)
     setEditingPin(false)
+  }
+
+  const handleSaveTerminalPreferences = async () => {
+    const timeoutMinutes = parseInt(screenTimeoutMinutes, 10)
+    const brightnessValue = parseInt(displayBrightness, 10)
+
+    if (Number.isNaN(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 120) {
+      toast.error(t('settings.terminal.invalidTimeout', 'Screen timeout must be between 1 and 120 minutes'))
+      return
+    }
+
+    if (Number.isNaN(brightnessValue) || brightnessValue < 10 || brightnessValue > 100) {
+      toast.error(t('settings.terminal.invalidBrightness', 'Brightness must be between 10 and 100'))
+      return
+    }
+
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'ui',
+        settings: {
+          display_brightness: brightnessValue,
+          screen_timeout: timeoutMinutes,
+          touch_sensitivity: touchSensitivity,
+          audio_enabled: audioEnabled,
+          receipt_auto_print: receiptAutoPrint,
+        }
+      })
+      toast.success(t('settings.terminal.saved', 'Terminal preferences saved'))
+    } catch (error) {
+      console.error('[ConnectionSettings] Failed to save terminal preferences:', error)
+      toast.error(t('settings.terminal.saveFailed', 'Failed to save terminal preferences'))
+    }
   }
 
   const handleSaveTheme = (newTheme: 'light' | 'dark' | 'auto') => {
@@ -352,24 +544,6 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     } catch (e) {
       console.error('Failed to toggle session timeout:', e)
       toast.error(t('modals.connectionSettings.sessionTimeoutError', 'Failed to update session timeout'))
-    }
-  }
-
-  const handleToggleGhostMode = async (enabled: boolean) => {
-    try {
-      await bridge.settings.updateLocal({
-        settingType: 'system',
-        settings: { ghost_mode_enabled: enabled }
-      })
-      setGhostModeEnabled(enabled)
-      toast.success(
-        enabled
-          ? t('modals.connectionSettings.ghostModeEnabled', 'Ghost mode enabled')
-          : t('modals.connectionSettings.ghostModeDisabled', 'Ghost mode disabled')
-      )
-    } catch (e) {
-      console.error('Failed to toggle ghost mode:', e)
-      toast.error(t('modals.connectionSettings.ghostModeError', 'Failed to update ghost mode'))
     }
   }
 
@@ -573,6 +747,22 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     }
   }
 
+  const enabledFeatureLabels = Object.entries({
+    'Order creation': features.orderCreation,
+    'Order editing': features.orderModification,
+    'Cash payments': features.cashPayments,
+    'Card payments': features.cardPayments,
+    Discounts: features.discounts,
+    Refunds: features.refunds,
+    Reports: features.reports,
+    Settings: features.settings,
+    'Ghost mode': ghostModeFeatureEnabled,
+  })
+    .filter(([, enabled]) => enabled)
+    .map(([label]) => label)
+
+  const enabledModuleNames = enabledModules.map((module) => module.module.name)
+
   return (
     <>
     <LiquidGlassModal
@@ -580,7 +770,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onClose={onClose}
       title={t('modals.connectionSettings.title')}
       size="md"
-      className="!max-w-lg"
+      className="!max-w-2xl"
       closeOnBackdrop={true}
       closeOnEscape={true}
     >
@@ -588,6 +778,69 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         <PaymentTerminalsSection onBack={() => setShowPaymentTerminalsSection(false)} />
       ) : (
       <div className="space-y-4">
+        <div className="rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-emerald-500/10 dark:bg-emerald-500/10 px-4 py-4 transition-all">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <Settings className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+                <div>
+                  <span className="font-medium block liquid-glass-modal-text">
+                    {t('settings.managedByAdmin.title', 'Managed by Admin')}
+                  </span>
+                  <span className="text-xs liquid-glass-modal-text-muted">
+                    {t('settings.managedByAdmin.helpText', 'Admin controls access policy. This terminal controls hardware and local behavior.')}
+                  </span>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Terminal unit</div>
+                  <div className="mt-1 liquid-glass-modal-text">
+                    {terminalType === 'mobile_waiter' ? 'Mobile Terminal' : 'Main Terminal'}
+                    {ownerTerminalId ? ` • Owner ${ownerTerminalId}` : ''}
+                  </div>
+                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
+                    {posOperatingMode || 'legacy_branch_shared'}
+                  </div>
+                </div>
+                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2">
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Connection</div>
+                  <div className="mt-1 liquid-glass-modal-text break-all">{runtimeTerminalId || terminalId || 'Unassigned terminal'}</div>
+                  <div className="text-xs liquid-glass-modal-text-muted mt-1 break-all">
+                    {runtimeAdminUrl || adminDashboardUrl || 'No admin URL'}
+                  </div>
+                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
+                    Sync: {runtimeSyncHealth}
+                  </div>
+                </div>
+                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Enabled features</div>
+                  <div className="mt-1 liquid-glass-modal-text">
+                    {enabledFeatureLabels.length ? enabledFeatureLabels.join(', ') : 'No remote features enabled'}
+                  </div>
+                </div>
+                <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-2 md:col-span-2">
+                  <div className="text-xs uppercase tracking-wide liquid-glass-modal-text-muted">Enabled modules</div>
+                  <div className="mt-1 liquid-glass-modal-text">
+                    {enabledModuleNames.length ? enabledModuleNames.join(', ') : 'Core modules only'}
+                  </div>
+                  <div className="text-xs liquid-glass-modal-text-muted mt-1">
+                    {pinResetRequired
+                      ? 'Admin requires a new local PIN on next login.'
+                      : 'No remote PIN reset request pending.'}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={handleManualPolicySync}
+              className={liquidGlassModalButton('secondary', 'md')}
+            >
+              {t('settings.managedByAdmin.syncNow', 'Sync Policy')}
+            </button>
+          </div>
+        </div>
+
         {/* Connection Settings */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showConnectionSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''
           }`}>
@@ -682,6 +935,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     {t('modals.connectionSettings.test')}
                   </button>
                 )}
+                <button onClick={handleManualPolicySync} className={liquidGlassModalButton('secondary', 'md')}>
+                  {t('settings.connection.syncPolicy', 'Sync Policy')}
+                </button>
                 <button onClick={handleSaveConnection} className={liquidGlassModalButton('primary', 'md')}>
                   {t('modals.connectionSettings.save')}
                 </button>
@@ -700,8 +956,14 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <div className="flex items-center gap-3">
               <Lock className="w-5 h-5 text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.6)]" />
               <div className="text-left">
-                <span className="font-medium block">{t('modals.connectionSettings.pinSetup')}</span>
-                {pin && !editingPin && <span className={`text-xs liquid-glass-modal-text-muted`}>••••</span>}
+                <span className="font-medium block">{t('modals.connectionSettings.pinSetup', 'Local PIN')}</span>
+                <span className={`text-xs liquid-glass-modal-text-muted`}>
+                  {pinResetRequired
+                    ? t('settings.security.pinResetRequired', 'Admin requires a new PIN before next login')
+                    : pin && !editingPin
+                      ? '••••'
+                      : t('settings.security.pinHelp', 'Local staff authentication')}
+                </span>
               </div>
             </div>
             <ChevronDown className={`w-5 h-5 transition-transform ${showPinSettings ? 'rotate-180' : ''}`} />
@@ -878,6 +1140,107 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </div>
 
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showTerminalPreferences ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+          <button
+            onClick={() => setShowTerminalPreferences(!showTerminalPreferences)}
+            className={`w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text`}
+          >
+            <div className="flex items-center gap-3">
+              <Monitor className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
+              <div className="text-left">
+                <span className="font-medium block">{t('settings.terminal.title', 'Terminal')}</span>
+                <span className="text-xs liquid-glass-modal-text-muted">
+                  {t('settings.terminal.helpText', 'Local UX and operator preferences for this device')}
+                </span>
+              </div>
+            </div>
+            <ChevronDown className={`w-5 h-5 transition-transform ${showTerminalPreferences ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showTerminalPreferences && (
+            <div className={`px-4 pb-4 space-y-4 border-t liquid-glass-modal-border pt-4`}>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
+                    {t('settings.terminal.screenTimeout', 'Screen timeout (minutes)')}
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={screenTimeoutMinutes}
+                    onChange={e => setScreenTimeoutMinutes(e.target.value)}
+                    className="liquid-glass-modal-input"
+                  />
+                </div>
+                <div>
+                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
+                    {t('settings.terminal.touchSensitivity', 'Touch sensitivity')}
+                  </label>
+                  <select
+                    value={touchSensitivity}
+                    onChange={e => setTouchSensitivity(e.target.value)}
+                    className="liquid-glass-modal-input"
+                  >
+                    <option value="low">{t('settings.terminal.touchLow', 'Low')}</option>
+                    <option value="medium">{t('settings.terminal.touchMedium', 'Medium')}</option>
+                    <option value="high">{t('settings.terminal.touchHigh', 'High')}</option>
+                  </select>
+                </div>
+                <div className="md:col-span-2">
+                  <label className={`block text-xs font-medium mb-2 liquid-glass-modal-text-muted`}>
+                    {t('settings.terminal.displayBrightness', 'Display brightness')}
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={10}
+                      max={100}
+                      step={5}
+                      value={displayBrightness}
+                      onChange={e => setDisplayBrightness(e.target.value)}
+                      className="flex-1"
+                    />
+                    <div className="w-16 text-right text-sm liquid-glass-modal-text">{displayBrightness}%</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="flex items-center justify-between rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-3">
+                  <div>
+                    <div className="font-medium liquid-glass-modal-text">{t('settings.terminal.audioEnabled', 'Audio enabled')}</div>
+                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.audioHelp', 'Play UI sounds on this device')}</div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={audioEnabled} onChange={(e) => setAudioEnabled(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+                <div className="flex items-center justify-between rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-3">
+                  <div>
+                    <div className="font-medium liquid-glass-modal-text">{t('settings.terminal.receiptAutoPrint', 'Auto-print receipts')}</div>
+                    <div className="text-xs liquid-glass-modal-text-muted">{t('settings.terminal.receiptAutoPrintHelp', 'Automatically print after successful checkout')}</div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={receiptAutoPrint} onChange={(e) => setReceiptAutoPrint(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
+                  </label>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t liquid-glass-modal-border">
+                <button
+                  onClick={handleSaveTerminalPreferences}
+                  className={liquidGlassModalButton('primary', 'md')}
+                >
+                  {t('settings.terminal.saveButton', 'Save Terminal Preferences')}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Security Settings - Session Timeout */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showSecuritySettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
           <button
@@ -930,7 +1293,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                       {ghostModeFeatureEnabled
                         ? t(
                             'modals.connectionSettings.ghostModeHelp',
-                            'Manual-item orders are hidden from POS and bypass payment terminals.'
+                            'Use manual item code X with price 1 to arm ghost mode for the current cart only.'
                           )
                         : t(
                             'modals.connectionSettings.ghostModeDisabledByAdmin',
@@ -939,23 +1302,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     </span>
                   </div>
                 </div>
-                <label
-                  className={`relative inline-flex items-center ${
-                    ghostModeFeatureEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+                <span
+                  className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                    ghostModeFeatureEnabled
+                      ? 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-200'
+                      : 'bg-black/10 text-black/50 dark:bg-white/10 dark:text-white/50'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={ghostModeEnabled}
-                    onChange={(e) => {
-                      if (!ghostModeFeatureEnabled) return
-                      void handleToggleGhostMode(e.target.checked)
-                    }}
-                    disabled={!ghostModeFeatureEnabled}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-600 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-cyan-500/50 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-500"></div>
-                </label>
+                  {ghostModeFeatureEnabled
+                    ? t('modals.connectionSettings.available', 'Available')
+                    : t('modals.connectionSettings.unavailable', 'Unavailable')}
+                </span>
               </div>
 
               {/* Timeout Duration */}
@@ -1178,7 +1535,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           )}
         </div>
 
-        {/* Peripherals Settings */}
+        {/* Hardware Settings */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showPeripheralsSettings ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
           <button
             onClick={() => setShowPeripheralsSettings(!showPeripheralsSettings)}
@@ -1187,8 +1544,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
             <div className="flex items-center gap-3">
               <Cable className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
               <div className="text-left">
-                <span className="font-medium block">{t('settings.peripherals.title', 'Peripherals')}</span>
-                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.peripherals.helpText', 'Configure external hardware devices')}</span>
+                <span className="font-medium block">{t('settings.hardware.title', 'Hardware')}</span>
+                <span className={`text-xs liquid-glass-modal-text-muted`}>{t('settings.hardware.helpText', 'Configure local hardware devices for this POS')}</span>
               </div>
             </div>
             <ChevronDown className={`w-5 h-5 transition-transform ${showPeripheralsSettings ? 'rotate-180' : ''}`} />
@@ -1446,34 +1803,51 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                 <button
                   onClick={async () => {
                     try {
-                      await bridge.settings.updateLocal({
-                        settingType: 'hardware',
-                        settings: {
-                          scale_enabled: scaleEnabled,
-                          scale_port: scalePort,
-                          scale_baud_rate: Number(scaleBaudRate),
-                          scale_protocol: scaleProtocol,
-                          customer_display_enabled: displayEnabled,
-                          display_connection_type: displayConnectionType,
-                          display_port: displayPort,
-                          display_baud_rate: Number(displayBaudRate),
-                          display_tcp_port: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
-                          barcode_scanner_enabled: scannerEnabled,
-                          barcode_scanner_port: scannerPort,
-                          scanner_baud_rate: Number(scannerBaudRate),
-                          card_reader_enabled: cardReaderEnabled,
-                          loyalty_card_reader: loyaltyEnabled,
-                        }
-                      })
-                      toast.success(t('settings.peripherals.saved', 'Peripheral settings saved'))
+                      await Promise.all([
+                        bridge.settings.updateLocal({
+                          settingType: 'scale',
+                          settings: {
+                            enabled: scaleEnabled,
+                            port: scalePort,
+                            baud_rate: Number(scaleBaudRate),
+                            protocol: scaleProtocol,
+                          }
+                        }),
+                        bridge.settings.updateLocal({
+                          settingType: 'display',
+                          settings: {
+                            enabled: displayEnabled,
+                            connection_type: displayConnectionType,
+                            port: displayPort,
+                            baud_rate: Number(displayBaudRate),
+                            tcp_port: displayConnectionType === 'network' ? Number(displayTcpPort) : null,
+                          }
+                        }),
+                        bridge.settings.updateLocal({
+                          settingType: 'scanner',
+                          settings: {
+                            enabled: scannerEnabled,
+                            port: scannerPort,
+                            baud_rate: Number(scannerBaudRate),
+                          }
+                        }),
+                        bridge.settings.updateLocal({
+                          settingType: 'peripherals',
+                          settings: {
+                            card_reader_enabled: cardReaderEnabled,
+                            loyalty_card_reader: loyaltyEnabled,
+                          }
+                        }),
+                      ])
+                      toast.success(t('settings.hardware.saved', 'Hardware settings saved'))
                     } catch (e) {
-                      console.error('Failed to save peripheral settings:', e)
-                      toast.error(t('settings.peripherals.saveFailed', 'Failed to save peripheral settings'))
+                      console.error('Failed to save hardware settings:', e)
+                      toast.error(t('settings.hardware.saveFailed', 'Failed to save hardware settings'))
                     }
                   }}
                   className={liquidGlassModalButton('primary', 'md')}
                 >
-                  {t('common.actions.save', 'Save')}
+                  {t('settings.hardware.saveButton', 'Save Hardware')}
                 </button>
               </div>
 

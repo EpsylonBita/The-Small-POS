@@ -4,6 +4,8 @@ import { MenuModal } from './modals/MenuModal';
 import { ProductCatalogModal } from './modals/ProductCatalogModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
+import { SplitPaymentModal } from './modals/SplitPaymentModal';
+import type { SplitPaymentResult } from './modals/SplitPaymentModal';
 import { ZoneValidationAlert } from './delivery/ZoneValidationAlert';
 import { FloatingActionButton } from './ui/FloatingActionButton';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
@@ -30,6 +32,8 @@ import {
   refreshTerminalCredentialCache,
 } from '../services/terminal-credentials';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
+import type { SplitPaymentItem } from '../utils/splitPaymentItems';
 
 
 interface OrderFlowProps {
@@ -93,6 +97,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [isCustomerSearchModalOpen, setIsCustomerSearchModalOpen] = useState(false);
   const [isAddCustomerModalOpen, setIsAddCustomerModalOpen] = useState(false);
   const [isMenuModalOpen, setIsMenuModalOpen] = useState(false);
+  const [splitPaymentData, setSplitPaymentData] = useState<{
+    orderId: string;
+    orderTotal: number;
+    items: SplitPaymentItem[];
+    isGhostOrder: boolean;
+  } | null>(null);
 
   // Customer modal mode: 'new' | 'edit' | 'addAddress' | 'editAddress'
   const [customerModalMode, setCustomerModalMode] = useState<'new' | 'edit' | 'addAddress' | 'editAddress'>('new');
@@ -113,7 +123,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   const [overrideApproved, setOverrideApproved] = useState(false);
 
   // Order store for managing orders
-  const { createOrder } = useOrderStore();
+  const { createOrder, silentRefresh } = useOrderStore();
 
   // Shift context for linking orders to shifts
   const { staff, activeShift, isShiftActive } = useShift();
@@ -195,8 +205,9 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Fetch tax rate from terminal settings; auto-updates on settings change
   const { getSetting } = useTerminalSettings();
   useEffect(() => {
-    const rate = getSetting<number>('tax', 'tax_rate_percentage', 24);
-    if (typeof rate === 'number' && rate >= 0 && rate <= 100) {
+    const rawRate = getSetting<number | string>('tax', 'tax_rate_percentage', 24);
+    const rate = Number(rawRate);
+    if (Number.isFinite(rate) && rate >= 0 && rate <= 100) {
       setTaxRatePercentage(rate);
     } else {
       setTaxRatePercentage(24);
@@ -209,6 +220,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     setIsCustomerSearchModalOpen(false);
     setIsAddCustomerModalOpen(false);
     setIsMenuModalOpen(false);
+    setSplitPaymentData(null);
     setSelectedOrderType(null);
     setSelectedCustomer(null);
     setSelectedAddress(null);
@@ -429,6 +441,64 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     resetFlow();
   }, [resetFlow]);
 
+  const extractPaymentId = useCallback((result: any): string | undefined => {
+    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
+    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
+    return directId || dataId;
+  }, []);
+
+  const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
+    let receiptError: unknown = null;
+    try {
+      await bridge.payments.printReceipt(orderId);
+    } catch (error) {
+      receiptError = error;
+    }
+
+    if (isGhostOrder) {
+      if (receiptError) {
+        const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
+        (error as Error & { stage?: string }).stage = 'receipt';
+        throw error;
+      }
+      return;
+    }
+
+    let fiscalError: unknown = null;
+    try {
+      const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
+      if (fiscalResult?.skipped) {
+        fiscalError = null;
+      }
+    } catch (error) {
+      fiscalError = error;
+    }
+
+    if (receiptError) {
+      const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
+      (error as Error & { stage?: string }).stage = 'receipt';
+      throw error;
+    }
+
+    if (fiscalError) {
+      const error = fiscalError instanceof Error ? fiscalError : new Error('Fiscal print failed');
+      (error as Error & { stage?: string }).stage = 'fiscal';
+      throw error;
+    }
+  }, [bridge]);
+
+  const handleSplitClose = useCallback(() => {
+    setSplitPaymentData(null);
+    resetFlow();
+    void silentRefresh().catch(() => {});
+  }, [resetFlow, silentRefresh]);
+
+  const handleSplitComplete = useCallback(async (_result: SplitPaymentResult) => {
+    setSplitPaymentData(null);
+    resetFlow();
+    await silentRefresh().catch(() => {});
+  }, [resetFlow, silentRefresh]);
+
   // Zone validation alert handlers
   const handleOverrideApproved = useCallback(() => {
     setOverrideApproved(true);
@@ -541,6 +611,12 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
   // Handle order completion from menu
   const handleOrderComplete = useCallback(async (orderData: any) => {
     setIsProcessingOrder(true);
+    const isSplitPayment = orderData.paymentData?.method === 'pending';
+    const isGhostOrder = orderData.is_ghost === true;
+    const ghostSource = isGhostOrder
+      ? (typeof orderData.ghost_source === 'string' ? orderData.ghost_source : 'manual_code_x_1')
+      : null;
+    const ghostMetadata = isGhostOrder ? (orderData.ghost_metadata ?? null) : null;
 
     try {
       // Calculate delivery details
@@ -649,7 +725,10 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         discount_amount: discountAmount,
 
         status: 'pending' as const,
-        payment_method: orderData.paymentData?.method || null,
+        payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        is_ghost: isGhostOrder,
+        ghost_source: ghostSource,
+        ghost_metadata: ghostMetadata,
         delivery_address: deliveryAddress,
         delivery_city: selectedAddress?.city || null,
         delivery_postal_code: selectedAddress?.postal_code || null,
@@ -676,7 +755,11 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
         customerName: selectedCustomer?.name || '',
         customerPhone: selectedCustomer?.phone || '',
         orderType: selectedOrderType as 'pickup' | 'delivery',
-        paymentStatus: (orderData.paymentData ? 'completed' : 'pending') as 'pending' | 'completed' | 'processing' | 'failed' | 'refunded',
+        paymentStatus: (
+          isSplitPayment
+            ? 'pending'
+            : (orderData.paymentData ? 'completed' : 'pending')
+        ) as 'pending' | 'completed' | 'processing' | 'failed' | 'refunded',
         paymentTransactionId: orderData.paymentData?.transactionId || undefined,
         estimatedTime: 15,
         createdAt: new Date().toISOString(),
@@ -719,10 +802,36 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           ActivityTracker.trackDiscount(Boolean(discountAmount), discountAmount, discountPercentage)
         } catch {}
 
-        // Record payment in local DB (fire-and-forget — don't block order flow)
-        if (orderData.paymentData && result.orderId) {
+        if (result.orderId && isSplitPayment) {
+          setSplitPaymentData({
+            orderId: result.orderId,
+            orderTotal: total_amount,
+            items: buildSplitPaymentItems({
+              items: (orderData.items || []).map((item: any, index: number) => ({
+                name: item.name || 'Item',
+                quantity: item.quantity || 1,
+                price: item.unitPrice || item.price || 0,
+                totalPrice: item.totalPrice || ((item.unitPrice || item.price || 0) * (item.quantity || 1)),
+                itemIndex: item.itemIndex ?? index,
+              })),
+              orderTotal: total_amount,
+              deliveryFee,
+              discountAmount,
+              deliveryFeeLabel: t('payment.fields.deliveryFee', { defaultValue: 'Delivery Fee' }),
+              discountLabel: t('modals.payment.discount', { defaultValue: 'Discount' }),
+              adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
+            }),
+            isGhostOrder,
+          });
+          setIsMenuModalOpen(false);
+          await silentRefresh().catch(() => {});
+          return;
+        }
+
+        // Record payment before printing so checkout-created orders do not remain pending.
+        if (!isGhostOrder && orderData.paymentData && result.orderId) {
           try {
-            await bridge.payments.recordPayment({
+            const paymentResult: any = await bridge.payments.recordPayment({
               orderId: result.orderId,
               method: orderData.paymentData.method || 'cash',
               amount: total_amount,
@@ -732,17 +841,33 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
               staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
               staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
             });
+
+            if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
+              throw new Error(paymentResult?.error || 'Missing paymentId after recording payment');
+            }
+
+            await silentRefresh().catch(() => {});
           } catch (payErr) {
             console.error('Failed to record payment:', payErr);
+            toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
+            return;
           }
         }
 
         // Cash register / fiscal print (fire-and-forget, non-blocking)
         if (result.orderId) {
-          try {
-            bridge.ecr.fiscalPrint(result.orderId)
-              .catch((e: any) => console.warn('[OrderFlow] Cash register print error (non-blocking):', e));
-          } catch {}
+          finalizeCreatedOrderPayment(result.orderId, isGhostOrder)
+            .catch((printError: any) => {
+              const stage = printError?.stage;
+              if (isGhostOrder || stage === 'receipt') {
+                console.error('[OrderFlow] Ghost receipt print error:', printError);
+                toast.error(t('orderDashboard.printFailed', { defaultValue: 'Receipt print failed' }));
+                return;
+              }
+
+              console.warn('[OrderFlow] Cash register print error (non-blocking):', printError);
+              toast.error(t('orderDashboard.fiscalPrintFailed', { defaultValue: 'Cash register print failed' }));
+            });
         }
 
         // Additional success feedback for delivery orders
@@ -765,7 +890,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, t, silentRefresh, extractPaymentId, finalizeCreatedOrderPayment]);
 
   return (
     <div className={`order-flow ${className}`}>
@@ -990,6 +1115,19 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
             isProcessingOrder={isProcessingOrder}
           />
         )
+      )}
+
+      {splitPaymentData && (
+        <SplitPaymentModal
+          isOpen={true}
+          onClose={handleSplitClose}
+          orderId={splitPaymentData.orderId}
+          orderTotal={splitPaymentData.orderTotal}
+          items={splitPaymentData.items}
+          initialMode="by-items"
+          isGhostOrder={splitPaymentData.isGhostOrder}
+          onSplitComplete={handleSplitComplete}
+        />
       )}
     </div>
   );

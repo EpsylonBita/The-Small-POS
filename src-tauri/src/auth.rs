@@ -773,6 +773,8 @@ pub fn setup_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String>
         info!("staff PIN set");
     }
 
+    db::set_setting(&conn, "terminal", "pin_reset_required", "false")?;
+
     Ok(serde_json::json!({ "success": true }))
 }
 

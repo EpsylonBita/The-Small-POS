@@ -13,6 +13,42 @@ use uuid::Uuid;
 use crate::db::DbState;
 use crate::{order_ownership, print, printers, receipt_renderer};
 
+fn load_payment_items_for_payment(
+    conn: &rusqlite::Connection,
+    payment_id: &str,
+) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT item_index, item_name, item_quantity, item_amount, created_at
+             FROM payment_items
+             WHERE payment_id = ?1
+             ORDER BY item_index ASC, created_at ASC",
+        )
+        .map_err(|e| format!("prepare payment_items lookup: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![payment_id], |row| {
+            Ok(serde_json::json!({
+                "itemIndex": row.get::<_, i32>(0)?,
+                "itemName": row.get::<_, String>(1)?,
+                "itemQuantity": row.get::<_, i32>(2)?,
+                "itemAmount": row.get::<_, f64>(3)?,
+                "createdAt": row.get::<_, String>(4)?,
+            }))
+        })
+        .map_err(|e| format!("query payment_items lookup: {e}"))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        match row {
+            Ok(item) => items.push(item),
+            Err(e) => warn!("skipping malformed payment_items lookup row: {e}"),
+        }
+    }
+
+    Ok(items)
+}
+
 // ---------------------------------------------------------------------------
 // Record payment
 // ---------------------------------------------------------------------------
@@ -47,6 +83,39 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| str_field(payload, "transaction_ref"))
         .or_else(|| str_field(payload, "transactionId"))
         .or_else(|| str_field(payload, "transaction_id"));
+    let discount_amount = num_field(payload, "discountAmount")
+        .or_else(|| num_field(payload, "discount_amount"))
+        .unwrap_or(0.0)
+        .max(0.0);
+    let terminal_approved = payload
+        .get("terminalApproved")
+        .or_else(|| payload.get("terminal_approved"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let requested_payment_origin = str_field(payload, "paymentOrigin")
+        .or_else(|| str_field(payload, "payment_origin"))
+        .unwrap_or_else(|| {
+            if terminal_approved {
+                "terminal".to_string()
+            } else {
+                "manual".to_string()
+            }
+        });
+    let payment_origin = if method == "card"
+        && requested_payment_origin.eq_ignore_ascii_case("terminal")
+    {
+        "terminal".to_string()
+    } else {
+        "manual".to_string()
+    };
+    let terminal_device_id = if payment_origin == "terminal" {
+        str_field(payload, "terminalDeviceId")
+            .or_else(|| str_field(payload, "terminal_device_id"))
+            .or_else(|| str_field(payload, "deviceId"))
+            .or_else(|| str_field(payload, "device_id"))
+    } else {
+        None
+    };
     let requested_staff_id =
         str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
     let requested_staff_shift_id =
@@ -61,6 +130,8 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         driver_id,
         order_staff_shift_id,
         order_staff_id,
+        order_payment_method,
+        is_ghost,
     ): (
         Option<String>,
         String,
@@ -69,6 +140,8 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
+        bool,
     ) = conn
         .query_row(
             "SELECT
@@ -78,7 +151,9 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 COALESCE(terminal_id, ''),
                 driver_id,
                 staff_shift_id,
-                staff_id
+                staff_id,
+                payment_method,
+                COALESCE(is_ghost, 0)
              FROM orders
              WHERE id = ?1",
             params![order_id],
@@ -91,10 +166,16 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
+                    row.get::<_, i64>(8)? != 0,
                 ))
             },
         )
         .map_err(|_| format!("Order not found: {order_id}"))?;
+
+    if is_ghost {
+        return Err(format!("Cannot record payment for ghost order: {order_id}"));
+    }
 
     // If the order hasn't synced yet (no supabase_id), the payment starts
     // in waiting_parent; the reconciliation loop will promote it to pending
@@ -153,10 +234,11 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             "INSERT INTO order_payments (
                 id, order_id, method, amount, currency, status,
                 cash_received, change_given, transaction_ref,
+                discount_amount, payment_origin, terminal_device_id,
                 staff_id, staff_shift_id, sync_status,
                 sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, 'EUR', 'completed', ?5, ?6, ?7, ?8, ?9, 'pending',
-                      ?10, ?11, ?11)",
+            ) VALUES (?1, ?2, ?3, ?4, 'EUR', 'completed', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending',
+                      ?13, ?14, ?14)",
             params![
                 payment_id,
                 order_id,
@@ -165,6 +247,9 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 cash_received,
                 change_given,
                 transaction_ref,
+                discount_amount,
+                payment_origin,
+                terminal_device_id,
                 resolved_staff_id,
                 resolved_shift_id,
                 initial_sync_state,
@@ -235,6 +320,11 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        let has_item_assignments = payload
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false);
 
         let new_payment_status = if total_paid >= order_total - 0.01 {
             "paid"
@@ -242,7 +332,18 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             "partially_paid"
         };
 
-        let effective_method = if completed_payment_count > 1 {
+        let current_order_payment_method = order_payment_method
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let effective_method = if new_payment_status == "partially_paid"
+            || has_item_assignments
+            || completed_payment_count > 1
+            || current_order_payment_method == "pending"
+            || current_order_payment_method == "split"
+            || current_order_payment_method == "mixed"
+        {
             "split"
         } else {
             &method
@@ -294,6 +395,9 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             "cashReceived": cash_received,
             "changeGiven": change_given,
             "transactionRef": transaction_ref,
+            "discountAmount": discount_amount,
+            "paymentOrigin": payment_origin,
+            "terminalDeviceId": terminal_device_id,
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
             "items": payload.get("items"),
@@ -333,6 +437,7 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({
         "success": true,
         "paymentId": payment_id,
+        "paymentOrigin": payment_origin,
         "message": format!("Payment of {:.2} recorded", amount),
     }))
 }
@@ -363,10 +468,36 @@ pub fn void_payment(
 pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
+    type PaymentRow = (
+        String,
+        String,
+        String,
+        f64,
+        String,
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+        f64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        String,
+    );
+
     let mut stmt = conn
         .prepare(
             "SELECT id, order_id, method, amount, currency, status,
                     cash_received, change_given, transaction_ref,
+                    COALESCE(discount_amount, 0),
+                    COALESCE(payment_origin, 'manual'),
+                    terminal_device_id,
                     staff_id, staff_shift_id, voided_at, voided_by,
                     void_reason, sync_status, created_at, updated_at
              FROM order_payments
@@ -375,36 +506,69 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
         )
         .map_err(|e| e.to_string())?;
 
-    let rows = stmt
+    let rows: Vec<PaymentRow> = stmt
         .query_map(params![order_id], |row| {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "orderId": row.get::<_, String>(1)?,
-                "method": row.get::<_, String>(2)?,
-                "amount": row.get::<_, f64>(3)?,
-                "currency": row.get::<_, String>(4)?,
-                "status": row.get::<_, String>(5)?,
-                "cashReceived": row.get::<_, Option<f64>>(6)?,
-                "changeGiven": row.get::<_, Option<f64>>(7)?,
-                "transactionRef": row.get::<_, Option<String>>(8)?,
-                "staffId": row.get::<_, Option<String>>(9)?,
-                "staffShiftId": row.get::<_, Option<String>>(10)?,
-                "voidedAt": row.get::<_, Option<String>>(11)?,
-                "voidedBy": row.get::<_, Option<String>>(12)?,
-                "voidReason": row.get::<_, Option<String>>(13)?,
-                "syncStatus": row.get::<_, String>(14)?,
-                "createdAt": row.get::<_, String>(15)?,
-                "updatedAt": row.get::<_, String>(16)?,
-            }))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<f64>>(6)?,
+                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, f64>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, Option<String>>(13)?,
+                row.get::<_, Option<String>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, String>(17)?,
+                row.get::<_, String>(18)?,
+                row.get::<_, String>(19)?,
+            ))
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .filter_map(|row| match row {
+            Ok(payment) => Some(payment),
+            Err(e) => {
+                warn!("skipping malformed payment row: {e}");
+                None
+            }
+        })
+        .collect();
+    drop(stmt);
 
     let mut payments = Vec::new();
     for row in rows {
-        match row {
-            Ok(p) => payments.push(p),
-            Err(e) => warn!("skipping malformed payment row: {e}"),
-        }
+        let items = load_payment_items_for_payment(&conn, &row.0)?;
+        payments.push(serde_json::json!({
+            "id": row.0,
+            "orderId": row.1,
+            "method": row.2,
+            "amount": row.3,
+            "currency": row.4,
+            "status": row.5,
+            "cashReceived": row.6,
+            "changeGiven": row.7,
+            "transactionRef": row.8,
+            "discountAmount": row.9,
+            "paymentOrigin": row.10,
+            "terminalApproved": row.10 == "terminal",
+            "terminalDeviceId": row.11,
+            "staffId": row.12,
+            "staffShiftId": row.13,
+            "voidedAt": row.14,
+            "voidedBy": row.15,
+            "voidReason": row.16,
+            "syncStatus": row.17,
+            "createdAt": row.18,
+            "updatedAt": row.19,
+            "items": items,
+        }));
     }
 
     Ok(serde_json::json!(payments))
@@ -592,6 +756,146 @@ mod tests {
         assert_eq!(arr[0]["cashReceived"], 30.0);
         assert_eq!(arr[0]["changeGiven"], 5.0);
         assert_eq!(arr[0]["id"], payment_id);
+    }
+
+    #[test]
+    fn test_record_split_payment_items_and_status_transitions() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES (
+                'ord-split',
+                '[{\"name\":\"Burger\",\"quantity\":1,\"totalPrice\":6.0},{\"name\":\"Fries\",\"quantity\":1,\"totalPrice\":4.0},{\"name\":\"Drink\",\"quantity\":1,\"totalPrice\":6.0}]',
+                16.0,
+                'pending',
+                'pending',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert split order");
+        drop(conn);
+
+        let first_payment = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-split",
+                "method": "cash",
+                "amount": 10.0,
+                "cashReceived": 10.0,
+                "changeGiven": 0.0,
+                "transactionRef": "SPLIT-CASH-1",
+                "items": [
+                    {
+                        "itemIndex": 0,
+                        "itemName": "Burger",
+                        "itemQuantity": 1,
+                        "itemAmount": 6.0
+                    },
+                    {
+                        "itemIndex": 1,
+                        "itemName": "Fries",
+                        "itemQuantity": 1,
+                        "itemAmount": 4.0
+                    }
+                ]
+            }),
+        )
+        .expect("record first split payment");
+        let first_payment_id = first_payment["paymentId"]
+            .as_str()
+            .expect("first payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let (first_status, first_method): (String, String) = conn
+            .query_row(
+                "SELECT payment_status, payment_method FROM orders WHERE id = 'ord-split'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query partial payment state");
+        assert_eq!(first_status, "partially_paid");
+        assert_eq!(first_method, "split");
+        drop(conn);
+
+        let paid_items_after_first = get_paid_items(&db, "ord-split").expect("get first paid items");
+        let first_items = paid_items_after_first
+            .as_array()
+            .expect("first paid items array");
+        assert_eq!(first_items.len(), 2);
+        assert_eq!(first_items[0]["paymentId"], first_payment_id);
+        assert_eq!(first_items[0]["itemIndex"], 0);
+        assert_eq!(first_items[1]["itemIndex"], 1);
+
+        let second_payment = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-split",
+                "method": "card",
+                "amount": 6.0,
+                "transactionRef": "SPLIT-CARD-2",
+                "discountAmount": 1.5,
+                "paymentOrigin": "terminal",
+                "terminalDeviceId": "device-1",
+                "items": [
+                    {
+                        "itemIndex": 2,
+                        "itemName": "Drink",
+                        "itemQuantity": 1,
+                        "itemAmount": 6.0
+                    }
+                ]
+            }),
+        )
+        .expect("record second split payment");
+        let second_payment_id = second_payment["paymentId"]
+            .as_str()
+            .expect("second payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let (final_status, final_method): (String, String) = conn
+            .query_row(
+                "SELECT payment_status, payment_method FROM orders WHERE id = 'ord-split'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query final payment state");
+        assert_eq!(final_status, "paid");
+        assert_eq!(final_method, "split");
+        drop(conn);
+
+        let paid_items_after_second =
+            get_paid_items(&db, "ord-split").expect("get second paid items");
+        let second_items = paid_items_after_second
+            .as_array()
+            .expect("second paid items array");
+        assert_eq!(second_items.len(), 3);
+        assert_eq!(second_items[2]["paymentId"], second_payment_id);
+        assert_eq!(second_items[2]["itemIndex"], 2);
+
+        let payments = get_order_payments(&db, "ord-split").expect("get split order payments");
+        let payment_rows = payments.as_array().expect("split payments array");
+        assert_eq!(payment_rows.len(), 2);
+        let card_payment = payment_rows
+            .iter()
+            .find(|payment| payment["id"] == second_payment_id)
+            .expect("card payment row");
+        assert_eq!(card_payment["discountAmount"], 1.5);
+        assert_eq!(card_payment["paymentOrigin"], "terminal");
+        assert_eq!(card_payment["terminalApproved"], true);
+        assert_eq!(card_payment["terminalDeviceId"], "device-1");
+        assert_eq!(
+            card_payment["items"]
+                .as_array()
+                .expect("nested payment items")
+                .len(),
+            1
+        );
     }
 
     #[test]

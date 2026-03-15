@@ -549,10 +549,35 @@ pub async fn shift_print_checkout(
         value_str(&shift, &["role_type", "roleType"]).unwrap_or_else(|| "staff".to_string())
     });
     let terminal_name = payload.terminal_name.or_else(|| {
-        value_str(&shift, &["terminal_id", "terminalId"]).filter(|value| !value.is_empty())
+        db.conn.lock().ok().and_then(|conn| {
+            ["name", "display_name", "displayName"]
+                .iter()
+                .find_map(|key| db::get_setting(&conn, "terminal", key))
+                .map(|value| value.trim().to_string())
+                .filter(|value| {
+                    !value.is_empty()
+                        && !value.to_ascii_lowercase().starts_with("terminal-")
+                        && !value.to_ascii_lowercase().starts_with("term-")
+                })
+        })
+    });
+    let shift_id = payload.shift_id.clone();
+    let role_type_for_job = role_type.clone();
+    let terminal_name_for_job = terminal_name.clone();
+
+    let print_payload = serde_json::json!({
+        "shiftId": shift_id,
+        "roleType": role_type_for_job,
+        "terminalName": terminal_name_for_job,
     });
 
-    match print::enqueue_print_job(&db, "shift_checkout", &payload.shift_id, None) {
+    match print::enqueue_print_job_with_payload(
+        &db,
+        "shift_checkout",
+        &payload.shift_id,
+        None,
+        Some(&print_payload),
+    ) {
         Ok(job) => Ok(serde_json::json!({
             "success": true,
             "queued": true,

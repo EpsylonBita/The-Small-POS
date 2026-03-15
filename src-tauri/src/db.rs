@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 31;
+const CURRENT_SCHEMA_VERSION: i32 = 33;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -230,6 +230,12 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 31 {
         migrate_v31(conn)?;
+    }
+    if current < 32 {
+        migrate_v32(conn)?;
+    }
+    if current < 33 {
+        migrate_v33(conn)?;
     }
 
     Ok(())
@@ -2014,6 +2020,236 @@ fn migrate_v31(conn: &Connection) -> Result<(), String> {
     })?;
 
     info!("Applied migration v31 (payment_items table for split payments)");
+    Ok(())
+}
+
+/// Migration v32:
+/// - add split-payment discount persistence on order_payments
+/// - persist whether card approval came from a live terminal or manual fallback
+fn migrate_v32(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "order_payments", "discount_amount")? {
+        conn.execute_batch(
+            "ALTER TABLE order_payments
+             ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0;",
+        )
+        .map_err(|e| format!("migration v32 add order_payments.discount_amount: {e}"))?;
+    }
+
+    if !column_exists(conn, "order_payments", "payment_origin")? {
+        conn.execute_batch(
+            "ALTER TABLE order_payments
+             ADD COLUMN payment_origin TEXT NOT NULL DEFAULT 'manual'
+             CHECK (payment_origin IN ('manual', 'terminal'));",
+        )
+        .map_err(|e| format!("migration v32 add order_payments.payment_origin: {e}"))?;
+    }
+
+    if !column_exists(conn, "order_payments", "terminal_device_id")? {
+        conn.execute_batch(
+            "ALTER TABLE order_payments
+             ADD COLUMN terminal_device_id TEXT;",
+        )
+        .map_err(|e| format!("migration v32 add order_payments.terminal_device_id: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (32)", [])
+        .map_err(|e| format!("migration v32 mark schema version: {e}"))?;
+
+    info!("Applied migration v32 (split payment discounts + payment origin)");
+    Ok(())
+}
+
+fn migrate_v33(conn: &Connection) -> Result<(), String> {
+    fn seed_setting_if_missing(
+        conn: &Connection,
+        target_category: &str,
+        target_key: &str,
+        source_candidates: &[(&str, &str)],
+    ) -> Result<bool, String> {
+        if get_setting(conn, target_category, target_key).is_some() {
+            return Ok(false);
+        }
+
+        for (source_category, source_key) in source_candidates {
+            let Some(value) = get_setting(conn, source_category, source_key) else {
+                continue;
+            };
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            set_setting(conn, target_category, target_key, trimmed)?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    let mut migrated = 0usize;
+    let seed_mappings: &[(&str, &str, &[(&str, &str)])] = &[
+        (
+            "ui",
+            "display_brightness",
+            &[("ui", "display_brightness"), ("terminal", "display_brightness")],
+        ),
+        (
+            "ui",
+            "screen_timeout",
+            &[("ui", "screen_timeout"), ("terminal", "screen_timeout")],
+        ),
+        (
+            "ui",
+            "touch_sensitivity",
+            &[("ui", "touch_sensitivity"), ("terminal", "touch_sensitivity")],
+        ),
+        (
+            "ui",
+            "audio_enabled",
+            &[("ui", "audio_enabled"), ("terminal", "audio_enabled")],
+        ),
+        (
+            "ui",
+            "receipt_auto_print",
+            &[
+                ("ui", "receipt_auto_print"),
+                ("terminal", "receipt_auto_print"),
+                ("terminal", "auto_print_receipts"),
+            ],
+        ),
+        (
+            "scale",
+            "enabled",
+            &[("scale", "enabled"), ("terminal", "scale_enabled"), ("hardware", "scale_enabled")],
+        ),
+        (
+            "scale",
+            "port",
+            &[("scale", "port"), ("terminal", "scale_port"), ("hardware", "scale_port")],
+        ),
+        (
+            "scale",
+            "baud_rate",
+            &[
+                ("scale", "baud_rate"),
+                ("terminal", "scale_baud_rate"),
+                ("hardware", "scale_baud_rate"),
+            ],
+        ),
+        (
+            "scale",
+            "protocol",
+            &[
+                ("scale", "protocol"),
+                ("terminal", "scale_protocol"),
+                ("hardware", "scale_protocol"),
+            ],
+        ),
+        (
+            "display",
+            "enabled",
+            &[
+                ("display", "enabled"),
+                ("terminal", "customer_display_enabled"),
+                ("hardware", "customer_display_enabled"),
+            ],
+        ),
+        (
+            "display",
+            "connection_type",
+            &[
+                ("display", "connection_type"),
+                ("terminal", "display_connection_type"),
+                ("hardware", "display_connection_type"),
+            ],
+        ),
+        (
+            "display",
+            "port",
+            &[
+                ("display", "port"),
+                ("terminal", "display_port"),
+                ("hardware", "display_port"),
+            ],
+        ),
+        (
+            "display",
+            "baud_rate",
+            &[
+                ("display", "baud_rate"),
+                ("terminal", "display_baud_rate"),
+                ("hardware", "display_baud_rate"),
+            ],
+        ),
+        (
+            "display",
+            "tcp_port",
+            &[
+                ("display", "tcp_port"),
+                ("terminal", "display_tcp_port"),
+                ("hardware", "display_tcp_port"),
+            ],
+        ),
+        (
+            "scanner",
+            "enabled",
+            &[
+                ("scanner", "enabled"),
+                ("terminal", "barcode_scanner_enabled"),
+                ("hardware", "barcode_scanner_enabled"),
+            ],
+        ),
+        (
+            "scanner",
+            "port",
+            &[
+                ("scanner", "port"),
+                ("terminal", "barcode_scanner_port"),
+                ("hardware", "barcode_scanner_port"),
+            ],
+        ),
+        (
+            "scanner",
+            "baud_rate",
+            &[
+                ("scanner", "baud_rate"),
+                ("terminal", "scanner_baud_rate"),
+                ("hardware", "scanner_baud_rate"),
+            ],
+        ),
+        (
+            "peripherals",
+            "card_reader_enabled",
+            &[
+                ("peripherals", "card_reader_enabled"),
+                ("terminal", "card_reader_enabled"),
+                ("hardware", "card_reader_enabled"),
+            ],
+        ),
+        (
+            "peripherals",
+            "loyalty_card_reader",
+            &[
+                ("peripherals", "loyalty_card_reader"),
+                ("terminal", "loyalty_card_reader"),
+                ("hardware", "loyalty_card_reader"),
+            ],
+        ),
+    ];
+
+    for (target_category, target_key, source_candidates) in seed_mappings {
+        if seed_setting_if_missing(conn, target_category, target_key, source_candidates)? {
+            migrated += 1;
+        }
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (33)", [])
+        .map_err(|e| format!("migration v33 mark schema version: {e}"))?;
+
+    info!(
+        seeded_settings = migrated,
+        "Applied migration v33 (seeded local-only terminal/device setting namespaces)"
+    );
     Ok(())
 }
 
