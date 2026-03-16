@@ -201,6 +201,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
   const [isTesting, setIsTesting] = useState<string | null>(null)
   const [showDevices, setShowDevices] = useState(true)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const [fiscalPrintEnabled, setFiscalPrintEnabled] = useState(true)
 
   // Load devices
   const loadDevices = useCallback(async () => {
@@ -218,7 +219,36 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
 
   useEffect(() => {
     loadDevices()
+    // Load fiscal print setting
+    const bridge = getBridge()
+    bridge.settings.get('terminal', 'fiscal_print_enabled')
+      .then((val: any) => {
+        // Default to true if not set
+        if (val === false || val === 'false' || val === '0') {
+          setFiscalPrintEnabled(false)
+        } else {
+          setFiscalPrintEnabled(true)
+        }
+      })
+      .catch(() => setFiscalPrintEnabled(true))
   }, [loadDevices])
+
+  const handleFiscalPrintToggle = useCallback(async (enabled: boolean) => {
+    setFiscalPrintEnabled(enabled)
+    try {
+      const bridge = getBridge()
+      await bridge.settings.set({ category: 'terminal', key: 'fiscal_print_enabled', value: enabled })
+      toast.success(
+        enabled
+          ? t('settings.peripherals.cashRegister.fiscalPrintEnabled', 'Fiscal printing enabled')
+          : t('settings.peripherals.cashRegister.fiscalPrintDisabled', 'Fiscal printing disabled')
+      )
+    } catch (e: any) {
+      console.error('Failed to save fiscal print setting:', e)
+      setFiscalPrintEnabled(!enabled) // revert on error
+      toast.error(t('settings.peripherals.cashRegister.fiscalPrintSaveFailed', 'Failed to save setting'))
+    }
+  }, [t])
 
   // Form helpers
   const updateForm = (patch: Partial<FormData>) => {
@@ -428,6 +458,33 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
                 className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20"
               >
                 <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+
+            {/* Fiscal Print Toggle */}
+            <div className="flex items-center justify-between rounded-lg bg-white/5 dark:bg-gray-800/10 border liquid-glass-modal-border px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <Printer className="w-4 h-4 text-amber-400" />
+                <div>
+                  <span className="text-sm font-medium liquid-glass-modal-text">
+                    {t('settings.peripherals.cashRegister.fiscalPrintLabel', 'Auto Fiscal Print')}
+                  </span>
+                  <span className="block text-xs liquid-glass-modal-text-muted">
+                    {t('settings.peripherals.cashRegister.fiscalPrintHelp', 'Send fiscal receipt to cash register on each order')}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => handleFiscalPrintToggle(!fiscalPrintEnabled)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  fiscalPrintEnabled ? 'bg-amber-500' : 'bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                    fiscalPrintEnabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
               </button>
             </div>
 

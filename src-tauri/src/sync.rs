@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -773,6 +773,11 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         requested_staff_id.as_deref(),
     )?;
 
+    // Wrap order + sync_queue inserts in a transaction to prevent
+    // orphaned orders (order exists locally but never syncs).
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin order transaction: {e}"))?;
+
     conn.execute(
         "INSERT INTO orders (
             id, order_number, customer_name, customer_phone, customer_email,
@@ -836,7 +841,10 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &ghost_metadata,
         ],
     )
-    .map_err(|e| format!("insert order: {e}"))?;
+    .map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        format!("insert order: {e}")
+    })?;
 
     // Enqueue for sync
     let idempotency_key = format!("{terminal_id}:{order_id}:{}", Uuid::new_v4());
@@ -922,7 +930,13 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
          VALUES ('order', ?1, 'insert', ?2, ?3)",
         params![&order_id, sync_payload, idempotency_key],
     )
-    .map_err(|e| format!("enqueue sync: {e}"))?;
+    .map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        format!("enqueue sync: {e}")
+    })?;
+
+    conn.execute_batch("COMMIT")
+        .map_err(|e| format!("commit order transaction: {e}"))?;
 
     drop(conn);
 
@@ -1824,6 +1838,9 @@ fn is_permanent_order_sync_error(error: &str) -> bool {
         || lower.contains("invalid customer")
         || lower.contains("invalid driver")
         || lower.contains("missing required parameter")
+        || lower.contains("payload too large")
+        || lower.contains("invalid json")
+        || lower.contains("invalid status transition")
 }
 
 fn is_legacy_unclaimed_receipt_timeout_message(error: &str) -> bool {
@@ -3504,7 +3521,7 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                         OR julianday(next_retry_at) <= julianday('now')
                    )
                  ORDER BY COALESCE(next_retry_at, created_at) ASC, created_at ASC
-                 LIMIT 10",
+                 LIMIT 25",
             )
             .map_err(|e| e.to_string())?;
 
@@ -3596,8 +3613,10 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                     }
                 }
 
-                // Route non-insert items (not handled by direct API) through
-                // the queue endpoint as secondary path.
+                // Any items not handled by direct API (inserts + updates)
+                // stay pending for retry next cycle. Do NOT route to the
+                // queue endpoint — its background worker is unreliable and
+                // causes "receipt not claimed within 30s" failures.
                 let handled = direct_outcome.all_handled_ids();
                 let remaining: Vec<&SyncItem> = order_items
                     .iter()
@@ -3606,99 +3625,22 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                     .collect();
 
                 if !remaining.is_empty() {
-                    match sync_order_batch(
-                        db,
-                        &admin_url,
-                        &api_key,
-                        &terminal_id,
-                        &branch_id,
-                        &remaining,
-                    )
-                    .await
-                    {
-                        Ok(resp) => {
-                            let receipt_id = resp
-                                .get("receipt_id")
-                                .and_then(Value::as_str)
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty());
-
-                            if let Some(receipt_id) = receipt_id {
-                                let queued =
-                                    mark_order_queue_as_queued_remote(db, &remaining, &receipt_id)?;
-                                info!(
-                                    receipt_id = %receipt_id,
-                                    queued_rows = queued,
-                                    "Non-insert order ops queued remotely"
-                                );
-                                total_progress += queued;
-                            } else {
-                                let outcome = mark_batch_failed(
-                                    db,
-                                    &remaining,
-                                    "Missing receipt_id in /api/pos/orders/sync response",
-                                )?;
-                                if !outcome.backpressure_deferred {
-                                    had_non_backpressure_failure = true;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let empty = DirectOrderFallbackOutcome::default();
-                            if mark_order_batch_failures(db, &remaining, &e, &empty)? {
-                                had_non_backpressure_failure = true;
-                            }
-                        }
-                    }
+                    info!(
+                        remaining_count = remaining.len(),
+                        "Unhandled order sync items will retry next cycle"
+                    );
                 }
             }
             Err(e) => {
-                // Direct API completely failed — fall back to queue for all items
-                warn!(error = %e, "Direct order API failed, falling back to queue endpoint");
-                match sync_order_batch(
-                    db,
-                    &admin_url,
-                    &api_key,
-                    &terminal_id,
-                    &branch_id,
-                    &order_items,
-                )
-                .await
-                {
-                    Ok(resp) => {
-                        let receipt_id = resp
-                            .get("receipt_id")
-                            .and_then(Value::as_str)
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
-
-                        if let Some(receipt_id) = receipt_id {
-                            let queued =
-                                mark_order_queue_as_queued_remote(db, &order_items, &receipt_id)?;
-                            info!(
-                                receipt_id = %receipt_id,
-                                queued_rows = queued,
-                                "Order batch accepted by admin and queued remotely (fallback)"
-                            );
-                            total_progress += queued;
-                        } else {
-                            let outcome = mark_batch_failed(
-                                db,
-                                &order_items,
-                                "Missing receipt_id in /api/pos/orders/sync response",
-                            )?;
-                            if !outcome.backpressure_deferred {
-                                had_non_backpressure_failure = true;
-                            }
-                            warn!("Order sync response missing receipt_id");
-                        }
-                    }
-                    Err(queue_err) => {
-                        let empty = DirectOrderFallbackOutcome::default();
-                        if mark_order_batch_failures(db, &order_items, &queue_err, &empty)? {
-                            had_non_backpressure_failure = true;
-                        }
-                    }
+                // Direct API completely failed — do NOT fall back to the queue
+                // endpoint for insert operations. The queue's background worker
+                // may not process receipts within the 30s stale timeout, causing
+                // orders to be dead-lettered. Instead, let the normal retry
+                // mechanism schedule retries on the direct API path.
+                warn!(error = %e, "Direct order API failed, scheduling retry (no queue fallback)");
+                let empty = DirectOrderFallbackOutcome::default();
+                if mark_order_batch_failures(db, &order_items, &e, &empty)? {
+                    had_non_backpressure_failure = true;
                 }
             }
         }
@@ -4441,7 +4383,7 @@ async fn sync_order_batch_via_direct_api(
             let menu_item_id = if raw_menu_item_id.is_empty() {
                 None
             } else if Uuid::parse_str(&raw_menu_item_id).is_ok() {
-                Some(raw_menu_item_id)
+                Some(raw_menu_item_id.clone())
             } else {
                 warn!(
                     menu_item_id = %raw_menu_item_id,
@@ -4455,6 +4397,12 @@ async fn sync_order_batch_via_direct_api(
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false);
             if menu_item_id.is_none() && !has_name {
+                warn!(
+                    queue_id = *queue_id,
+                    entity_id = %entity_id,
+                    raw_menu_item_id = %raw_menu_item_id,
+                    "Dropping order item: no valid menu_item_id and no name"
+                );
                 continue;
             }
             let quantity = raw_item
@@ -4517,12 +4465,35 @@ async fn sync_order_batch_via_direct_api(
             continue;
         }
 
+        // Normalize payment_method to match the Zod enum on the server:
+        // cash, card, digital_wallet, other. "pending" is not a valid payment
+        // method — map it to "cash" so the order can sync.
+        let raw_payment_method = str_any(&data, &["payment_method"])
+            .unwrap_or_else(|| "cash".to_string());
+        let payment_method_normalized = match raw_payment_method.to_lowercase().as_str() {
+            "cash" | "card" | "digital_wallet" | "other" => raw_payment_method,
+            "pending" => "cash".to_string(),
+            _ => "other".to_string(),
+        };
+
+        // Normalize order_type to match the Zod enum: dine-in, pickup, delivery,
+        // drive-through, takeaway. Underscore variants are remapped.
+        let raw_order_type = str_any(&data, &["order_type"])
+            .unwrap_or_else(|| "pickup".to_string());
+        let order_type_normalized = match raw_order_type.to_lowercase().as_str() {
+            "dine-in" | "pickup" | "delivery" | "drive-through" | "takeaway" => raw_order_type,
+            "dine_in" | "dinein" => "dine-in".to_string(),
+            "take_away" | "take-away" => "takeaway".to_string(),
+            "drive_through" | "drivethrough" => "drive-through".to_string(),
+            _ => "pickup".to_string(),
+        };
+
         let body = serde_json::json!({
             "client_order_id": entity_id,
             "branch_id": branch_id,
             "items": direct_items,
-            "order_type": str_any(&data, &["order_type"]).unwrap_or_else(|| "pickup".to_string()),
-            "payment_method": str_any(&data, &["payment_method"]).unwrap_or_else(|| "cash".to_string()),
+            "order_type": order_type_normalized,
+            "payment_method": payment_method_normalized,
             "payment_status": str_any(&data, &["payment_status"]).unwrap_or_else(|| "pending".to_string()),
             "total_amount": num_any(&data, &["total_amount"]).unwrap_or(0.0),
             "subtotal": num_any(&data, &["subtotal"]),
@@ -4584,12 +4555,15 @@ async fn sync_order_batch_via_direct_api(
                         *queue_id,
                         format!("Permanent direct fallback failure: {error}"),
                     );
-                    warn!(
+                    error!(
                         queue_id = *queue_id,
                         entity_id = %entity_id,
                         error = %error,
                         order_preview = ?order_preview,
-                        "Direct order fallback failed (permanent)"
+                        items_sent = direct_items.len(),
+                        order_type = %order_type_normalized,
+                        payment_method = %payment_method_normalized,
+                        "Direct order sync PERMANENT failure — order will not retry"
                     );
                 } else if is_transient_order_sync_error(&error) {
                     outcome.record_transient_failure(
@@ -4601,12 +4575,145 @@ async fn sync_order_batch_via_direct_api(
                         entity_id = %entity_id,
                         error = %error,
                         order_preview = ?order_preview,
-                        "Direct order fallback failed (transient)"
+                        items_sent = direct_items.len(),
+                        order_type = %order_type_normalized,
+                        payment_method = %payment_method_normalized,
+                        "Direct order sync transient failure — will retry"
                     );
                 } else {
                     outcome.record_transient_failure(
                         *queue_id,
                         format!("Transient direct fallback failure: {error}"),
+                    );
+                }
+            }
+        }
+    }
+
+    // Handle update operations via PATCH /api/pos/orders (status changes,
+    // driver assignments, etc.). These were previously routed exclusively
+    // through the queue endpoint, which has a broken/slow background worker.
+    for item in items {
+        let (queue_id, _etype, entity_id, operation, payload, _idem, _ret, _max, _, _, _) = item;
+        if operation.trim().to_lowercase() != "update" {
+            continue;
+        }
+
+        // Check if this order has a supabase_id (remote ID) — needed for PATCH
+        let remote_id: Option<String> = {
+            let local_order = get_order_by_id(db, entity_id).unwrap_or(Value::Null);
+            local_order
+                .get("supabaseId")
+                .or_else(|| local_order.get("supabase_id"))
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+
+        // If no remote ID yet, the parent order hasn't synced — skip for now,
+        // it will be picked up after the order sync completes.
+        let Some(remote_id) = remote_id else {
+            // Don't mark as handled — leave for next cycle when order has synced
+            continue;
+        };
+
+        let payload_value: Value =
+            serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}));
+
+        let status = payload_value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if status.is_empty() {
+            outcome.record_permanent_failure(
+                *queue_id,
+                "Permanent failure: update payload missing status field".to_string(),
+            );
+            continue;
+        }
+
+        let mut body = serde_json::json!({
+            "id": remote_id,
+            "status": status,
+        });
+
+        // Include optional fields if present
+        if let Some(estimated_time) = payload_value.get("estimatedTime") {
+            if !estimated_time.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert("estimated_time".to_string(), estimated_time.clone());
+            }
+        }
+        if let Some(driver_id) = payload_value.get("driverId").or(payload_value.get("driver_id")) {
+            if !driver_id.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert("driver_id".to_string(), driver_id.clone());
+            }
+        }
+        if let Some(notes) = payload_value.get("notes") {
+            if !notes.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert("notes".to_string(), notes.clone());
+            }
+        }
+
+        match api::fetch_from_admin(admin_url, api_key, "/api/pos/orders", "PATCH", Some(body))
+            .await
+        {
+            Ok(_resp) => {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                let now = Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "UPDATE sync_queue
+                     SET status = 'synced',
+                         synced_at = ?1,
+                         last_error = NULL,
+                         updated_at = ?1
+                     WHERE id = ?2",
+                    params![now, queue_id],
+                );
+                // Also update the local order's sync_status
+                let _ = conn.execute(
+                    "UPDATE orders SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
+                    params![now, entity_id],
+                );
+                outcome.record_synced(*queue_id);
+                info!(
+                    queue_id = *queue_id,
+                    entity_id = %entity_id,
+                    remote_id = %remote_id,
+                    new_status = %status,
+                    "Order status update synced via direct PATCH API"
+                );
+            }
+            Err(err) => {
+                if is_permanent_order_sync_error(&err) {
+                    outcome.record_permanent_failure(
+                        *queue_id,
+                        format!("Permanent status update failure: {err}"),
+                    );
+                    warn!(
+                        queue_id = *queue_id,
+                        entity_id = %entity_id,
+                        error = %err,
+                        "Order status update PATCH failed (permanent)"
+                    );
+                } else {
+                    outcome.record_transient_failure(
+                        *queue_id,
+                        format!("Transient status update failure: {err}"),
+                    );
+                    warn!(
+                        queue_id = *queue_id,
+                        entity_id = %entity_id,
+                        error = %err,
+                        "Order status update PATCH failed (transient, will retry)"
                     );
                 }
             }
@@ -5562,8 +5669,9 @@ fn mark_batch_failed(
             continue;
         }
 
+        let is_permanent = is_permanent_order_sync_error(error);
         let new_count = retry_count + 1;
-        let exhausted = new_count >= *max_retries;
+        let exhausted = is_permanent || new_count >= *max_retries;
         let new_status = if exhausted { "failed" } else { "pending" };
         let next_delay =
             ((*retry_delay_ms).max(DEFAULT_RETRY_DELAY_MS) * 2).min(MAX_RETRY_DELAY_MS);
@@ -5583,6 +5691,32 @@ fn mark_batch_failed(
              WHERE id = ?6",
             params![new_status, new_count, next_retry_at, next_delay, error, id],
         );
+
+        // When an order is permanently failed, cascade to dependent payments
+        // and adjustments so they don't sit in deferred/waiting_parent forever.
+        if exhausted {
+            let entity_id_str: &str = &item.2;
+            let cascade_error = format!("Parent order sync failed: {error}");
+            let cascaded = conn
+                .execute(
+                    "UPDATE sync_queue
+                     SET status = 'failed',
+                         last_error = ?1,
+                         updated_at = datetime('now')
+                     WHERE entity_type IN ('order_payment', 'payment_adjustment')
+                       AND status IN ('deferred', 'waiting_parent')
+                       AND payload LIKE '%' || ?2 || '%'",
+                    params![cascade_error, entity_id_str],
+                )
+                .unwrap_or(0);
+            if cascaded > 0 {
+                warn!(
+                    order_entity_id = %entity_id_str,
+                    cascaded_items = cascaded,
+                    "Cascaded order failure to dependent payments/adjustments"
+                );
+            }
+        }
     }
     Ok(BatchFailureResult {
         backpressure_deferred: is_backpressure,

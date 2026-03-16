@@ -378,42 +378,24 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
   }, []);
 
   const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
-    let receiptError: unknown = null;
-    try {
-      await bridge.payments.printReceipt(orderId);
-    } catch (error) {
-      receiptError = error;
-    }
-
+    // Ghost orders: print receipt directly (Rust auto-print skips ghosts)
     if (isGhostOrder) {
-      if (receiptError) {
-        const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
-        (error as Error & { stage?: string }).stage = 'receipt';
-        throw error;
-      }
+      await bridge.payments.printReceipt(orderId);
       return;
     }
 
-    let fiscalError: unknown = null;
-    try {
-      const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
-      if (fiscalResult?.skipped) {
-        fiscalError = null;
-      }
-    } catch (error) {
-      fiscalError = error;
+    // Non-ghost orders: Rust auto-print already enqueued the correct receipt
+    // (order_receipt for dine-in/takeout, delivery_slip for delivery).
+    // Only fire fiscal print if enabled in settings.
+    const fiscalEnabled = await bridge.settings.get('terminal', 'fiscal_print_enabled')
+      .catch(() => true);
+    if (fiscalEnabled === false || fiscalEnabled === 'false' || fiscalEnabled === '0') {
+      return;
     }
 
-    if (receiptError) {
-      const error = receiptError instanceof Error ? receiptError : new Error('Receipt print failed');
-      (error as Error & { stage?: string }).stage = 'receipt';
-      throw error;
-    }
-
-    if (fiscalError) {
-      const error = fiscalError instanceof Error ? fiscalError : new Error('Fiscal print failed');
-      (error as Error & { stage?: string }).stage = 'fiscal';
-      throw error;
+    const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
+    if (fiscalResult?.skipped) {
+      return;
     }
   }, [bridge]);
 

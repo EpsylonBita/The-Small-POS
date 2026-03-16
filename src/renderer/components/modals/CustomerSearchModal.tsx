@@ -87,13 +87,18 @@ const normalizeCustomerAddress = (address: any): CustomerAddress => {
     city: typeof address?.city === 'string' ? address.city : '',
     street: normalizedStreet,
     street_address: normalizedStreet,
-    notes: address?.notes ?? address?.delivery_notes,
+    postal_code: typeof address?.postal_code === 'string' ? address.postal_code : '',
+    floor_number: typeof address?.floor_number === 'string' ? address.floor_number : '',
+    name_on_ringer: typeof address?.name_on_ringer === 'string' ? address.name_on_ringer : '',
+    notes: address?.notes ?? address?.delivery_notes ?? '',
+    delivery_notes: address?.notes ?? address?.delivery_notes ?? '',
     coordinates,
     latitude: address?.latitude ?? null,
     longitude: address?.longitude ?? null,
     address_type: typeof address?.address_type === 'string' ? address.address_type : 'delivery',
     is_default: Boolean(address?.is_default),
     created_at: typeof address?.created_at === 'string' ? address.created_at : '',
+    version: address?.version ?? 1,
   };
 };
 

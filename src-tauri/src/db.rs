@@ -2125,6 +2125,13 @@ fn migrate_v33(conn: &Connection) -> Result<(), String> {
             ],
         ),
         (
+            "terminal",
+            "fiscal_print_enabled",
+            &[
+                ("terminal", "fiscal_print_enabled"),
+            ],
+        ),
+        (
             "scale",
             "enabled",
             &[

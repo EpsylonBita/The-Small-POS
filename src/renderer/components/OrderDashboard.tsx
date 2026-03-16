@@ -1241,6 +1241,14 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       return;
     }
 
+    // Non-ghost orders: Rust auto-print already enqueued the correct receipt.
+    // Only fire fiscal print if enabled in settings.
+    const fiscalEnabled = await bridge.settings.get('terminal', 'fiscal_print_enabled')
+      .catch(() => true);
+    if (fiscalEnabled === false || fiscalEnabled === 'false' || fiscalEnabled === '0') {
+      return;
+    }
+
     const fiscalResult: any = await bridge.ecr.fiscalPrint(orderId);
     if (fiscalResult?.skipped) {
       return;
