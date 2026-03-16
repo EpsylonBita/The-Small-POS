@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{business_day, order_ownership, storage, zreport};
+use crate::{business_day, order_ownership, storage};
 
 // ---------------------------------------------------------------------------
 // Open shift
@@ -590,27 +590,6 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             params![shift_id, sync_payload, idempotency_key],
         )
         .map_err(|e| format!("enqueue shift close sync: {e}"))?;
-
-        if !shift_branch_id.trim().is_empty() {
-            let active_shift_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*)
-                     FROM staff_shifts
-                     WHERE status = 'active'
-                       AND (branch_id = ?1 OR branch_id IS NULL)",
-                    params![shift_branch_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-
-            if active_shift_count == 0 {
-                let _ = zreport::ensure_pending_z_report_context_for_branch(
-                    &conn,
-                    &shift_branch_id,
-                    &now,
-                )?;
-            }
-        }
 
         Ok((expected, variance))
     })();

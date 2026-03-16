@@ -236,6 +236,10 @@ static FAILED_ORDER_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 static STUCK_RECEIPT_CLEANUP_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
 /// Ensure old sync failure pruning runs once per process start.
 static SYNC_FAILURE_PRUNE_DONE: AtomicBool = AtomicBool::new(false);
+/// Ensure failed financial items (shift-not-found) are requeued once per session.
+static FAILED_FINANCIAL_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
+/// Re-enqueue shifts that were wrongly marked synced due to ignored per-event errors.
+static SHIFT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_RETRY_DELAY_MS: i64 = 5_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
@@ -1573,6 +1577,12 @@ pub fn start_sync_loop(
             // whose parent payment has synced (sync_state = 'applied').
             if let Err(e) = reconcile_deferred_adjustments(&db) {
                 warn!("Adjustment reconciliation failed: {e}");
+            }
+
+            // Run financial reconciliation: promote deferred financial items
+            // whose parent shift has synced (sync_status = 'synced').
+            if let Err(e) = reconcile_deferred_financials(&db) {
+                warn!("Financial reconciliation failed: {e}");
             }
 
             match run_sync_cycle(&db, &app).await {
@@ -3496,6 +3506,38 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         }
     }
 
+    // One-time requeue: recover financial items that failed with "shift not found"
+    // before the parent-shift deferral logic was added.
+    if FAILED_FINANCIAL_REQUEUE_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        if let Ok(requeued) = requeue_failed_financial_shift_rows(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Requeued failed financial sync rows (shift not found)"
+                );
+            }
+        }
+    }
+
+    // One-time recovery: re-enqueue shifts that were wrongly marked as synced
+    // due to the old sync_shift_batch ignoring per-event server errors.
+    if SHIFT_REQUEUE_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        if let Ok(requeued) = requeue_falsely_synced_shifts(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Re-enqueued falsely-synced shifts for server verification"
+                );
+            }
+        }
+    }
+
     // Poll queued remote receipts first and reconcile remote-assigned IDs
     // before sending new batches.
     let mut total_progress: usize = 0;
@@ -3649,21 +3691,51 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     // Sync shifts
     if !shift_items.is_empty() {
         match sync_shift_batch(&admin_url, &api_key, &terminal_id, &branch_id, &shift_items).await {
-            Ok(()) => {
+            Ok(shift_outcome) => {
                 let conn = db.conn.lock().map_err(|e| e.to_string())?;
                 let now = Utc::now().to_rfc3339();
+
+                // Mark successfully synced shifts
+                let synced_set: std::collections::HashSet<&str> = shift_outcome
+                    .synced_shift_ids
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
                 for item in &shift_items {
                     let (id, _, entity_id, _, _, _, _, _, _, _, _) = item;
-                    let _ = conn.execute(
-                        "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
-                        params![now, id],
-                    );
-                    let _ = conn.execute(
-                        "UPDATE staff_shifts SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
-                        params![now, entity_id],
-                    );
+                    if synced_set.contains(entity_id.as_str()) {
+                        let _ = conn.execute(
+                            "UPDATE sync_queue SET status = 'synced', synced_at = ?1, updated_at = ?1 WHERE id = ?2",
+                            params![now, id],
+                        );
+                        let _ = conn.execute(
+                            "UPDATE staff_shifts SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
+                            params![now, entity_id],
+                        );
+                        // Inline-promote any deferred financial items for this shift
+                        promote_financials_for_shift(&conn, entity_id);
+                    }
                 }
-                total_progress += shift_items.len();
+                total_progress += shift_outcome.synced_shift_ids.len();
+
+                // Mark per-event failures
+                if !shift_outcome.failed_shift_ids.is_empty() {
+                    let failed_set: std::collections::HashMap<&str, &str> = shift_outcome
+                        .failed_shift_ids
+                        .iter()
+                        .map(|(sid, msg)| (sid.as_str(), msg.as_str()))
+                        .collect();
+                    for item in &shift_items {
+                        let (_, _, entity_id, _, _, _, _, _, _, _, _) = item;
+                        if let Some(err_msg) = failed_set.get(entity_id.as_str()) {
+                            let single = [*item];
+                            let failure = mark_batch_failed(db, &single, err_msg)?;
+                            if !failure.backpressure_deferred {
+                                had_non_backpressure_failure = true;
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 warn!("Shift sync failed: {e}");
@@ -4468,8 +4540,8 @@ async fn sync_order_batch_via_direct_api(
         // Normalize payment_method to match the Zod enum on the server:
         // cash, card, digital_wallet, other. "pending" is not a valid payment
         // method — map it to "cash" so the order can sync.
-        let raw_payment_method = str_any(&data, &["payment_method"])
-            .unwrap_or_else(|| "cash".to_string());
+        let raw_payment_method =
+            str_any(&data, &["payment_method"]).unwrap_or_else(|| "cash".to_string());
         let payment_method_normalized = match raw_payment_method.to_lowercase().as_str() {
             "cash" | "card" | "digital_wallet" | "other" => raw_payment_method,
             "pending" => "cash".to_string(),
@@ -4478,8 +4550,8 @@ async fn sync_order_batch_via_direct_api(
 
         // Normalize order_type to match the Zod enum: dine-in, pickup, delivery,
         // drive-through, takeaway. Underscore variants are remapped.
-        let raw_order_type = str_any(&data, &["order_type"])
-            .unwrap_or_else(|| "pickup".to_string());
+        let raw_order_type =
+            str_any(&data, &["order_type"]).unwrap_or_else(|| "pickup".to_string());
         let order_type_normalized = match raw_order_type.to_lowercase().as_str() {
             "dine-in" | "pickup" | "delivery" | "drive-through" | "takeaway" => raw_order_type,
             "dine_in" | "dinein" => "dine-in".to_string(),
@@ -4757,15 +4829,29 @@ async fn sync_order_batch(
     .await
 }
 
+/// Result of a shift sync batch — tracks per-event outcomes.
+#[derive(Debug, Default)]
+struct ShiftBatchOutcome {
+    /// Shift IDs (entity_id) that the server accepted (ok or skipped).
+    synced_shift_ids: Vec<String>,
+    /// Shift IDs that the server rejected with an error.
+    failed_shift_ids: Vec<(String, String)>, // (entity_id, error_message)
+}
+
 /// POST a batch of shift sync items to `/api/pos/shifts/sync`.
+///
+/// Returns per-event results so the caller can mark individual items as synced
+/// or failed. Previously this discarded the response body, causing server-side
+/// rejections to be silently marked as synced locally.
 async fn sync_shift_batch(
     admin_url: &str,
     api_key: &str,
     terminal_id: &str,
     branch_id: &str,
     items: &[&SyncItem],
-) -> Result<(), String> {
+) -> Result<ShiftBatchOutcome, String> {
     let mut events = Vec::new();
+    let mut event_shift_ids: Vec<String> = Vec::new();
     for item in items {
         let (_id, etype, entity_id, operation, payload, idem_key, _ret, _max, _, _, _) = item;
         let data: Value = serde_json::from_str(payload).unwrap_or(serde_json::json!({}));
@@ -4789,6 +4875,7 @@ async fn sync_shift_batch(
             "idempotency_key": idem_key,
             "data": data,
         }));
+        event_shift_ids.push(entity_id.clone());
     }
 
     let body = serde_json::json!({
@@ -4797,15 +4884,62 @@ async fn sync_shift_batch(
         "events": events,
     });
 
-    api::fetch_from_admin(
+    let response = api::fetch_from_admin(
         admin_url,
         api_key,
         "/api/pos/shifts/sync",
         "POST",
         Some(body),
     )
-    .await
-    .map(|_| ())
+    .await?;
+
+    // Parse per-event results from the server response.
+    // The endpoint returns { success, results: [{ shift_id, status, message? }] }.
+    let mut outcome = ShiftBatchOutcome::default();
+    let results = response
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        // Old server or unexpected response — treat all as synced (legacy behavior)
+        outcome.synced_shift_ids = event_shift_ids;
+        return Ok(outcome);
+    }
+
+    for result in &results {
+        let shift_id = result
+            .get("shift_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+
+        match status {
+            "ok" | "skipped" => {
+                outcome.synced_shift_ids.push(shift_id);
+            }
+            _ => {
+                let message = result
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Unknown shift sync error")
+                    .to_string();
+                warn!(
+                    shift_id = %shift_id,
+                    error = %message,
+                    "Shift sync event rejected by server"
+                );
+                outcome.failed_shift_ids.push((shift_id, message));
+            }
+        }
+    }
+
+    Ok(outcome)
 }
 
 fn extract_financial_result_message(result: &Value) -> Option<String> {
@@ -4902,6 +5036,56 @@ fn mark_financial_item_failed(db: &DbState, item: &SyncItem, error: &str) -> Res
     Ok(())
 }
 
+/// Extract the parent shift ID from a financial sync payload.
+///
+/// Financial items reference their parent shift via various key names depending
+/// on the entity type (staff_payment, shift_expense, driver_earning).
+fn extract_shift_id_from_financial_payload(payload: &str) -> Option<String> {
+    let data: Value = serde_json::from_str(payload).ok()?;
+    for key in &[
+        "cashierShiftId",
+        "cashier_shift_id",
+        "paidByCashierShiftId",
+        "paid_by_cashier_shift_id",
+        "shiftId",
+        "shift_id",
+        "staffShiftId",
+        "staff_shift_id",
+    ] {
+        if let Some(val) = data.get(*key).and_then(Value::as_str) {
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Check whether a parent shift has been synced locally.
+/// Returns: Some("synced") | Some("pending") | Some("failed") | None (not found).
+fn get_shift_sync_status(conn: &rusqlite::Connection, shift_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT sync_status FROM staff_shifts WHERE id = ?1",
+        params![shift_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// Check if a shift's sync_queue entry is permanently failed.
+fn is_shift_sync_failed(conn: &rusqlite::Connection, shift_id: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sync_queue
+         WHERE entity_type = 'shift'
+           AND entity_id = ?1
+           AND status = 'failed'",
+        params![shift_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
 async fn sync_financial_batch(
     admin_url: &str,
     api_key: &str,
@@ -4910,6 +5094,73 @@ async fn sync_financial_batch(
     db: &DbState,
     items: &[&SyncItem],
 ) -> Result<FinancialBatchOutcome, String> {
+    // Pre-check: defer financial items whose parent shift hasn't synced yet.
+    let ready_items: Vec<&SyncItem> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now().to_rfc3339();
+        let mut ready = Vec::with_capacity(items.len());
+
+        for item in items {
+            let (queue_id, entity_type, entity_id, _, payload, _, _, _, _, _, _) = item;
+            let shift_id = extract_shift_id_from_financial_payload(payload);
+
+            if let Some(ref sid) = shift_id {
+                let sync_status = get_shift_sync_status(&conn, sid);
+
+                match sync_status.as_deref() {
+                    Some("synced") => {
+                        // Parent shift synced — proceed normally
+                        ready.push(*item);
+                    }
+                    _ if is_shift_sync_failed(&conn, sid) => {
+                        // Parent shift permanently failed — cascade failure
+                        let _ = conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'failed',
+                                 last_error = 'Parent shift sync failed',
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, queue_id],
+                        );
+                        warn!(
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            shift_id = %sid,
+                            "Financial item cascaded to failed — parent shift sync failed"
+                        );
+                    }
+                    _ => {
+                        // Parent shift not yet synced — defer
+                        let _ = conn.execute(
+                            "UPDATE sync_queue
+                             SET status = 'deferred',
+                                 last_error = 'Parent shift not yet synced',
+                                 updated_at = ?1
+                             WHERE id = ?2",
+                            params![now, queue_id],
+                        );
+                        info!(
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            shift_id = %sid,
+                            "Financial item deferred — parent shift not yet synced"
+                        );
+                    }
+                }
+            } else {
+                // No shift reference found — send as-is (server will validate)
+                ready.push(*item);
+            }
+        }
+
+        ready
+    };
+
+    if ready_items.is_empty() {
+        return Ok(FinancialBatchOutcome::default());
+    }
+
+    let items = &ready_items[..];
     let mut payload_items = Vec::with_capacity(items.len());
     for item in items {
         let (_, entity_type, entity_id, operation, payload, idem_key, _, _, _, _, _) = item;
@@ -5897,6 +6148,248 @@ fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
     }
 
     Ok(promoted)
+}
+
+/// Reconcile deferred financial items whose parent shift has now been synced.
+///
+/// Called once per sync loop iteration, before `run_sync_cycle`, mirroring the
+/// pattern used by `reconcile_deferred_payments` for order→payment dependencies.
+fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, entity_id, payload
+             FROM sync_queue
+             WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
+               AND status = 'deferred'",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows: Vec<(i64, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut promoted = 0;
+
+    for (queue_id, entity_type, entity_id, payload) in &rows {
+        let shift_id = match extract_shift_id_from_financial_payload(payload) {
+            Some(sid) => sid,
+            None => {
+                // No shift reference — promote to let server validate
+                let _ = conn.execute(
+                    "UPDATE sync_queue SET status = 'pending', updated_at = ?1
+                     WHERE id = ?2 AND status = 'deferred'",
+                    params![now, queue_id],
+                );
+                promoted += 1;
+                continue;
+            }
+        };
+
+        // Check if parent shift sync failed permanently
+        if is_shift_sync_failed(&conn, &shift_id) {
+            let _ = conn.execute(
+                "UPDATE sync_queue
+                 SET status = 'failed',
+                     last_error = 'Parent shift sync failed',
+                     updated_at = ?1
+                 WHERE id = ?2 AND status = 'deferred'",
+                params![now, queue_id],
+            );
+            warn!(
+                entity_type = %entity_type,
+                entity_id = %entity_id,
+                shift_id = %shift_id,
+                "Deferred financial item cascaded to failed — parent shift permanently failed"
+            );
+            continue;
+        }
+
+        // Check if parent shift has synced
+        if get_shift_sync_status(&conn, &shift_id).as_deref() == Some("synced") {
+            let _ = conn.execute(
+                "UPDATE sync_queue SET status = 'pending', updated_at = ?1
+                 WHERE id = ?2 AND status = 'deferred'",
+                params![now, queue_id],
+            );
+            info!(
+                entity_type = %entity_type,
+                entity_id = %entity_id,
+                shift_id = %shift_id,
+                "Reconciled deferred financial -> pending (parent shift synced)"
+            );
+            promoted += 1;
+        }
+    }
+
+    if promoted > 0 {
+        info!("Financial reconciliation: promoted {promoted} deferred financial items");
+    }
+
+    Ok(promoted)
+}
+
+/// Inline promotion: after a shift syncs successfully, immediately promote any
+/// deferred financial items that reference that shift. This provides low-latency
+/// sync for the common case (shift + financial item in the same sync cycle).
+fn promote_financials_for_shift(conn: &rusqlite::Connection, shift_id: &str) {
+    let now = Utc::now().to_rfc3339();
+    let updated = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending', updated_at = ?1
+             WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
+               AND status = 'deferred'
+               AND payload LIKE '%' || ?2 || '%'",
+            params![now, shift_id],
+        )
+        .unwrap_or(0);
+
+    if updated > 0 {
+        info!(
+            shift_id = %shift_id,
+            count = updated,
+            "Inline-promoted deferred financial items after shift sync"
+        );
+    }
+}
+
+/// One-time requeue: recover financial items that failed with "was not found on
+/// the backend" due to the missing parent-shift deferral logic. These items will
+/// now benefit from the new deferral pre-check.
+fn requeue_failed_financial_shift_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let requeued = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
+               AND status = 'failed'
+               AND last_error LIKE '%was not found on the backend%'",
+            params![now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(requeued)
+}
+
+/// One-time recovery: re-enqueue shifts that were wrongly marked as synced
+/// locally due to a bug where `sync_shift_batch` discarded per-event server
+/// errors. These shifts have `sync_status = 'synced'` in `staff_shifts` but
+/// no longer appear in `sync_queue` (their queue rows were also marked synced).
+///
+/// We reset their `sync_status` to 'pending' and re-insert a sync_queue row
+/// so the (now fixed) sync_shift_batch can properly process them.
+fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    // Find shifts marked synced locally that have no pending/synced queue entry.
+    // These are shifts that were falsely marked synced because the server response
+    // was not checked for per-event errors.
+    let mut stmt = conn
+        .prepare(
+            "SELECT ss.id
+             FROM staff_shifts ss
+             WHERE ss.sync_status = 'synced'
+               AND NOT EXISTS (
+                   SELECT 1 FROM sync_queue sq
+                   WHERE sq.entity_type = 'shift'
+                     AND sq.entity_id = ss.id
+                     AND sq.status IN ('pending', 'in_progress', 'deferred')
+               )",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let shift_ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if shift_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut requeued = 0;
+    for shift_id in &shift_ids {
+        // Reset the shift sync_status so the sync loop picks it up
+        let _ = conn.execute(
+            "UPDATE staff_shifts SET sync_status = 'pending', updated_at = ?1 WHERE id = ?2",
+            params![now, shift_id],
+        );
+
+        // Re-insert a sync_queue row (skip if one already exists for this shift)
+        let existing: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'shift' AND entity_id = ?1",
+                params![shift_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if existing == 0 {
+            // Read the shift payload from the local table to rebuild the sync payload
+            let payload: Option<String> = conn
+                .query_row(
+                    "SELECT json_object(
+                        'staffId', staff_id,
+                        'staffName', staff_name,
+                        'roleType', role_type,
+                        'openingCash', COALESCE(opening_cash, 0),
+                        'checkInTime', check_in_time,
+                        'status', status
+                     ) FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let idem_key = format!("shift:requeue:{}:{}", shift_id, uuid::Uuid::new_v4());
+            let status_str = conn
+                .query_row(
+                    "SELECT status FROM staff_shifts WHERE id = ?1",
+                    params![shift_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_else(|_| "active".to_string());
+
+            let operation = if status_str == "closed" {
+                "update"
+            } else {
+                "insert"
+            };
+
+            let _ = conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+                 VALUES ('shift', ?1, ?2, ?3, ?4, 'pending')",
+                params![
+                    shift_id,
+                    operation,
+                    payload.unwrap_or_else(|| "{}".to_string()),
+                    idem_key
+                ],
+            );
+            requeued += 1;
+        }
+    }
+
+    Ok(requeued)
 }
 
 /// Inline reconciliation: after successfully syncing an order that received

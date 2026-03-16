@@ -153,19 +153,41 @@ function normalizeLegacyProbeError(error: string): string {
 }
 
 function mapScheduledStaffToMember(member: any): StaffMember {
-  const roleRecord = member?.role || member?.roles?.[0] || null;
-  const primaryRole: StaffRole = {
-    role_id: String(roleRecord?.id ?? member?.role_id ?? ''),
-    role_name: String(roleRecord?.name ?? member?.role_name ?? 'staff'),
-    role_display_name: String(
-      roleRecord?.displayName ??
-        roleRecord?.display_name ??
-        member?.role_display_name ??
-        'Staff',
-    ),
-    role_color: String(roleRecord?.color ?? member?.role_color ?? '#6B7280'),
-    is_primary: true,
-  };
+  // Map all roles from the API's roles array (new multi-role response)
+  const apiRoles: StaffRole[] = Array.isArray(member?.roles)
+    ? member.roles
+        .map((r: any) => ({
+          role_id: String(r?.id ?? r?.role_id ?? ''),
+          role_name: String(r?.name ?? r?.role_name ?? 'staff'),
+          role_display_name: String(
+            r?.displayName ?? r?.display_name ?? r?.role_display_name ?? 'Staff',
+          ),
+          role_color: String(r?.color ?? r?.role_color ?? '#6B7280'),
+          is_primary: Boolean(r?.isPrimary ?? r?.is_primary ?? false),
+        }))
+        .filter((r: StaffRole) => r.role_id)
+    : [];
+
+  // Fallback: if no roles array, use legacy single role field
+  if (apiRoles.length === 0) {
+    const roleRecord = member?.role || null;
+    if (roleRecord) {
+      apiRoles.push({
+        role_id: String(roleRecord.id ?? roleRecord.role_id ?? member?.role_id ?? ''),
+        role_name: String(roleRecord.name ?? roleRecord.role_name ?? member?.role_name ?? 'staff'),
+        role_display_name: String(
+          roleRecord.displayName ??
+            roleRecord.display_name ??
+            member?.role_display_name ??
+            'Staff',
+        ),
+        role_color: String(roleRecord.color ?? roleRecord.role_color ?? member?.role_color ?? '#6B7280'),
+        is_primary: true,
+      });
+    }
+  }
+
+  const primaryRole = apiRoles.find((r) => r.is_primary) || apiRoles[0];
 
   return {
     id: String(member?.id ?? '').trim(),
@@ -176,10 +198,10 @@ function mapScheduledStaffToMember(member: any): StaffMember {
     first_name: String(member?.firstName ?? member?.first_name ?? ''),
     last_name: String(member?.lastName ?? member?.last_name ?? ''),
     email: String(member?.email ?? ''),
-    role_id: primaryRole.role_id,
-    role_name: primaryRole.role_name,
-    role_display_name: primaryRole.role_display_name,
-    roles: primaryRole.role_id ? [primaryRole] : [],
+    role_id: primaryRole?.role_id ?? '',
+    role_name: primaryRole?.role_name ?? 'staff',
+    role_display_name: primaryRole?.role_display_name ?? 'Staff',
+    roles: apiRoles,
     can_login_pos: parseBoolean(member?.can_login_pos, true),
     is_active: parseBoolean(member?.is_active, true),
     has_pin: typeof member?.has_pin === 'boolean' ? member.has_pin : undefined,
@@ -1562,7 +1584,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         title: t('modals.staffShift.confirmZeroTitle', 'Confirm Zero Closing Cash'),
         message: t('modals.staffShift.confirmZeroMessage', 'Are you sure you want to close the shift with $0.00 closing cash?'),
         variant: 'warning',
-        onConfirm: () => handleCheckOut(true)
+        onConfirm: () => { closeConfirm(); handleCheckOut(true); }
       });
       return;
     }

@@ -126,11 +126,23 @@ fn synthesize_pending_z_report_context(
         .ok()
         .flatten();
 
-    latest_closed_at.map(|cutoff_at| PendingZReportContext {
-        branch_id: branch_id.to_string(),
-        report_date: local_report_date_from_timestamp(&cutoff_at),
-        period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str())),
-        cutoff_at,
+    latest_closed_at.and_then(|cutoff_at| {
+        let report_date = local_report_date_from_timestamp(&cutoff_at);
+        let today = Local::now().format("%Y-%m-%d").to_string();
+
+        // Only synthesize a pending context for shifts from a previous day.
+        // Same-day shifts should not lock the business day — staff can check
+        // back in at any time.
+        if report_date >= today {
+            return None;
+        }
+
+        Some(PendingZReportContext {
+            branch_id: branch_id.to_string(),
+            report_date,
+            period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str())),
+            cutoff_at,
+        })
     })
 }
 
@@ -138,6 +150,8 @@ fn load_pending_z_report_context(
     conn: &Connection,
     branch_id: &str,
 ) -> Option<PendingZReportContext> {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
     if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
         if business_day::stored_period_start(conn)
             .as_deref()
@@ -145,6 +159,14 @@ fn load_pending_z_report_context(
             .map(|value| value >= stored.cutoff_at.as_str())
             .unwrap_or(false)
         {
+            let _ = clear_pending_z_report_context(conn);
+            return None;
+        }
+
+        // A stored context for today (or later) is not actionable yet — the
+        // business day is still in progress.  Clear it so it does not block
+        // staff from checking back in.
+        if stored.report_date >= today {
             let _ = clear_pending_z_report_context(conn);
             return None;
         }
@@ -182,6 +204,7 @@ fn clear_pending_z_report_context(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn ensure_pending_z_report_context_for_branch(
     conn: &Connection,
     branch_id: &str,
@@ -4635,6 +4658,59 @@ mod tests {
         assert_eq!(status["pendingReportDate"], "2026-02-16");
         assert_eq!(status["cutoffAt"], "2026-02-16T18:00:00Z");
         assert_eq!(status["canOpenPendingZReport"], true);
+    }
+
+    #[test]
+    fn test_get_end_of_day_status_idle_for_same_day_closed_shifts() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        // Insert a shift that closed *today* — this should NOT trigger pending status
+        let today = Local::now();
+        let check_in = (today - chrono::Duration::hours(8))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let check_out = today.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-today', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
+                200.0, 235.0, 235.0, 0.0,
+                ?1, ?2, 'closed', 2,
+                'pending', ?2, ?2
+             )",
+            params![check_in, check_out],
+        )
+        .expect("insert today shift");
+
+        // Seed minimal order data so the repair query does not error
+        conn.execute(
+            "INSERT INTO orders (id, branch_id, order_number, order_type, status, total_amount, created_at, updated_at)
+             VALUES ('ord-today', 'branch-1', 1001, 'dine_in', 'completed', 10.0, ?1, ?1)",
+            params![check_out],
+        )
+        .expect("insert order");
+
+        drop(conn);
+
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
+        .expect("status should load");
+
+        // Same-day closed shifts must NOT produce a pending Z-report
+        assert_eq!(
+            status["status"], "idle",
+            "same-day closed shifts should not trigger pending Z-report"
+        );
     }
 
     #[test]

@@ -3045,6 +3045,58 @@ fn build_z_report_doc_from_payload(db: &DbState, payload: &Value, entity_id: &st
         takeaway_sales,
         delivery_orders,
         delivery_sales,
+        staff_reports: payload
+            .get("staffReports")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| receipt_renderer::ZReportStaffEntry {
+                        name: s
+                            .get("staffName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("—")
+                            .to_string(),
+                        role: s
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("cashier")
+                            .to_string(),
+                        check_in: s
+                            .get("checkIn")
+                            .and_then(Value::as_str)
+                            .map(|v| v.to_string()),
+                        check_out: s
+                            .get("checkOut")
+                            .and_then(Value::as_str)
+                            .map(|v| v.to_string()),
+                        order_count: s
+                            .pointer("/orders/count")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                        cash_amount: s
+                            .pointer("/orders/cashAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        card_amount: s
+                            .pointer("/orders/cardAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        total_amount: s
+                            .pointer("/orders/totalAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        opening_cash: s
+                            .pointer("/drawer/opening")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        staff_payment: s
+                            .pointer("/payments/staffPayments")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -3184,6 +3236,58 @@ fn build_z_report_doc(db: &DbState, z_report_id: &str) -> Result<ZReportDoc, Str
             .pointer("/sales/deliverySales")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
+        staff_reports: rj
+            .get("staffReports")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|s| receipt_renderer::ZReportStaffEntry {
+                        name: s
+                            .get("staffName")
+                            .and_then(Value::as_str)
+                            .unwrap_or("—")
+                            .to_string(),
+                        role: s
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("cashier")
+                            .to_string(),
+                        check_in: s
+                            .get("checkIn")
+                            .and_then(Value::as_str)
+                            .map(|v| v.to_string()),
+                        check_out: s
+                            .get("checkOut")
+                            .and_then(Value::as_str)
+                            .map(|v| v.to_string()),
+                        order_count: s
+                            .pointer("/orders/count")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0),
+                        cash_amount: s
+                            .pointer("/orders/cashAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        card_amount: s
+                            .pointer("/orders/cardAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        total_amount: s
+                            .pointer("/orders/totalAmount")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        opening_cash: s
+                            .pointer("/drawer/opening")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                        staff_payment: s
+                            .pointer("/payments/staffPayments")
+                            .and_then(Value::as_f64)
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
