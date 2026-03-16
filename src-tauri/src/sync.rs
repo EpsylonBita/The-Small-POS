@@ -4648,13 +4648,10 @@ async fn sync_order_batch_via_direct_api(
                     .insert("estimated_time".to_string(), estimated_time.clone());
             }
         }
-        if let Some(driver_id) = payload_value.get("driverId").or(payload_value.get("driver_id")) {
-            if !driver_id.is_null() {
-                body.as_object_mut()
-                    .unwrap()
-                    .insert("driver_id".to_string(), driver_id.clone());
-            }
-        }
+        // NOTE: driver_id is NOT sent in status update PATCHes.
+        // The driver was assigned during order creation. Sending it here
+        // triggers server-side validateDriver() which fails if the driver's
+        // shift has ended or role_type != 'driver'.
         if let Some(notes) = payload_value.get("notes") {
             if !notes.is_null() {
                 body.as_object_mut()
