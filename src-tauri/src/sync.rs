@@ -3359,9 +3359,25 @@ async fn reconcile_remote_orders(
 
         for local_id in newly_materialized_order_ids {
             let mut auto_print_types = print::auto_print_entity_types_for_order_type("pickup");
+            let mut skip_auto_print = false;
             if let Ok(order_json) = get_order_by_id(db, &local_id) {
                 if let Some(order_type) = order_json.get("orderType").and_then(|v| v.as_str()) {
                     auto_print_types = print::auto_print_entity_types_for_order_type(order_type);
+                }
+                // Skip auto-print for ghost and split/pending payment orders (receipt
+                // will be printed after split payments are individually recorded).
+                let is_ghost = order_json
+                    .get("isGhost")
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| order_json.get("is_ghost").and_then(|v| v.as_bool()))
+                    .unwrap_or(false);
+                let payment_method = order_json
+                    .get("paymentMethod")
+                    .or_else(|| order_json.get("payment_method"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if is_ghost || payment_method == "pending" {
+                    skip_auto_print = true;
                 }
                 let _ = app.emit("order_created", order_json.clone());
                 let _ = app.emit("order_realtime_update", order_json);
@@ -3372,14 +3388,18 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            for entity_type in auto_print_types {
-                if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
-                    warn!(
-                        order_id = %local_id,
-                        entity_type = %entity_type,
-                        error = %error,
-                        "Failed to enqueue print job for newly materialized remote order"
-                    );
+            if !skip_auto_print {
+                for entity_type in auto_print_types {
+                    if let Err(error) =
+                        print::enqueue_print_job(db, entity_type, &local_id, None)
+                    {
+                        warn!(
+                            order_id = %local_id,
+                            entity_type = %entity_type,
+                            error = %error,
+                            "Failed to enqueue print job for newly materialized remote order"
+                        );
+                    }
                 }
             }
         }

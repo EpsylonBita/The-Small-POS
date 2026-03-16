@@ -48,7 +48,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   const [showNotesOverlay, setShowNotesOverlay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [ingredientsByColor, setIngredientsByColor] = useState<{ [color: string]: Ingredient[] }>({});
-  const [activeFlavorType, setActiveFlavorType] = useState<'all' | 'savory' | 'sweet'>('all');
+  const [activeFlavorType, setActiveFlavorType] = useState<'savory' | 'sweet'>('savory');
   const [isLittleMode, setIsLittleMode] = useState(false);
   const [isWithoutMode, setIsWithoutMode] = useState(false); // New: "without" mode for removing ingredients
   const [ingredientSearch, setIngredientSearch] = useState('');
@@ -86,7 +86,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         setQuantity(initialQuantity || 1);
         setNotes(initialNotes || '');
       }
-      setActiveFlavorType('all');
+      setActiveFlavorType((menuItem.flavor_type as 'savory' | 'sweet') || 'savory');
       setIsLittleMode(false);
       setIsWithoutMode(false);
       loadAvailableIngredients();
@@ -256,9 +256,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
   // Filter ingredients by flavor type and search query
   const filteredIngredients = useMemo(() => {
     let result = availableIngredients;
-    if (activeFlavorType !== 'all') {
-      result = result.filter(ing => ing.flavor_type === activeFlavorType);
-    }
+    result = result.filter(ing => ing.flavor_type === activeFlavorType);
     if (ingredientSearch.trim()) {
       const q = ingredientSearch.trim().toLowerCase();
       result = result.filter(ing => ing.name?.toLowerCase().includes(q));
@@ -389,15 +387,6 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
           {/* Flavor Type Tabs */}
           <div className="flex gap-2 pb-3 border-b liquid-glass-modal-border">
-                  <button
-                    onClick={() => setActiveFlavorType('all')}
-                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'all'
-                        ? 'bg-blue-500 text-white shadow-lg'
-                        : 'liquid-glass-modal-button'
-                      }`}
-                  >
-                    {t('menu.itemModal.all')}
-                  </button>
                   <button
                     onClick={() => setActiveFlavorType('savory')}
                     className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'savory'

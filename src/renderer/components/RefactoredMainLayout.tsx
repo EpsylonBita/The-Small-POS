@@ -28,7 +28,6 @@ import KitchenDisplayPage from '../pages/KitchenDisplayPage';
 import CustomerDisplayPage from '../pages/CustomerDisplayPage';
 import KioskManagementPage from '../pages/KioskManagementPage';
 import IntegrationsPage from '../pages/IntegrationsPage';
-import AboutPage from '../pages/AboutPage';
 import { getBridge } from '../../lib';
 
 import { ExpenseModal } from './modals/ExpenseModal';
@@ -329,8 +328,6 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
     plugin_integrations: () => <IntegrationsPage />,
     integrations: () => <IntegrationsPage />, // alias
 
-    // System / Diagnostics
-    about: () => <AboutPage />,
   };
 
   // Render current view based on navigation selection

@@ -722,10 +722,20 @@ async fn sync_customer_update_remote(
     db: &db::DbState,
     customer_id: &str,
     updates: &serde_json::Value,
+    expected_version: i64,
 ) -> Result<serde_json::Value, String> {
-    let body = build_remote_customer_update_body(updates);
+    let mut body = build_remote_customer_update_body(updates);
     if body.as_object().map(|obj| obj.is_empty()).unwrap_or(true) {
         return Err("Missing customer updates".into());
+    }
+
+    if expected_version > 0 {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "expected_version".to_string(),
+                serde_json::json!(expected_version),
+            );
+        }
     }
 
     let path = format!("/api/pos/customers/{customer_id}");
@@ -736,6 +746,60 @@ async fn sync_customer_update_remote(
         .or_else(|| response.get("data").cloned())
         .ok_or("Customer API response missing customer")?;
     Ok(remote_customer)
+}
+
+/// Fetch all customers for the organization via Supabase RPC and replace the local cache.
+/// Calls `get_customers_for_pos_terminal` which validates terminal credentials server-side.
+async fn sync_customer_fetch_all(
+    db: &db::DbState,
+) -> Result<Vec<serde_json::Value>, String> {
+    let supabase_url =
+        crate::storage::get_credential("supabase_url").ok_or("Missing supabase_url")?;
+    let anon_key =
+        crate::storage::get_credential("supabase_anon_key").ok_or("Missing supabase_anon_key")?;
+    let org_id =
+        crate::storage::get_credential("organization_id").ok_or("Missing organization_id")?;
+    let terminal_id =
+        crate::storage::get_credential("terminal_id").ok_or("Missing terminal_id")?;
+    let api_key =
+        crate::storage::get_credential("pos_api_key").ok_or("Missing pos_api_key")?;
+
+    let base = supabase_url.trim_end_matches('/');
+    let url = format!("{base}/rest/v1/rpc/get_customers_for_pos_terminal");
+
+    let body = serde_json::json!({
+        "p_organization_id": org_id,
+        "p_terminal_id": terminal_id,
+        "p_api_key": api_key,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let resp = client
+        .post(&url)
+        .header("apikey", &anon_key)
+        .header("Authorization", format!("Bearer {anon_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Supabase RPC request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Supabase customers RPC error ({status}): {body}"));
+    }
+
+    let rows: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {e}"))?;
+    let customers = rows.as_array().cloned().unwrap_or_default();
+    write_local_json(db, "customer_cache_v1", &serde_json::json!(customers))?;
+    Ok(customers)
 }
 
 async fn sync_customer_fetch_remote_by_id(
@@ -969,7 +1033,15 @@ pub async fn customer_search(
 ) -> Result<serde_json::Value, String> {
     let query = parse_search_payload(arg0).query.to_lowercase();
     if query.is_empty() {
-        return Ok(serde_json::json!([]));
+        // Fetch all customers from admin API and refresh local cache
+        match sync_customer_fetch_all(&db).await {
+            Ok(customers) => return Ok(serde_json::json!(customers)),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to fetch all customers, falling back to cache");
+                let cache = read_local_json_array(&db, "customer_cache_v1")?;
+                return Ok(serde_json::json!(cache));
+            }
+        }
     }
     let cache = read_local_json_array(&db, "customer_cache_v1")?;
     let matches: Vec<serde_json::Value> = cache
@@ -1025,7 +1097,8 @@ pub async fn customer_update(
         .map(|obj| !obj.is_empty())
         .unwrap_or(false)
     {
-        let remote_customer = sync_customer_update_remote(&db, &customer_id, &updates).await?;
+        let remote_customer =
+            sync_customer_update_remote(&db, &customer_id, &updates, expected_version).await?;
         let mut cache = read_local_json_array(&db, "customer_cache_v1")?;
         let customer = upsert_customer_cache_entry(&mut cache, remote_customer);
         write_local_json(&db, "customer_cache_v1", &serde_json::Value::Array(cache))?;

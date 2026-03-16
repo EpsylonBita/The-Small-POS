@@ -106,64 +106,8 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const searchRequestRef = useRef(0);
-  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [terminalBranchId, setTerminalBranchId] = useState<string | null>(null);
   const bridge = getBridge();
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const setIfNotCancelled = (lat: number, lng: number) => {
-      if (cancelled) return;
-      setUserLocation({ latitude: lat, longitude: lng });
-      console.log('[AddressAutocomplete] Location resolved:', lat, lng);
-    };
-
-    const resolveViaMainProcess = async (): Promise<boolean> => {
-      try {
-        const res = await bridge.geo.ip();
-        if (res && (res as any).ok && typeof (res as any).latitude === 'number' && typeof (res as any).longitude === 'number') {
-          setIfNotCancelled((res as any).latitude, (res as any).longitude);
-          return true;
-        }
-      } catch (e) {
-        console.warn('[AddressAutocomplete] main-process IP geolocation failed:', e);
-      }
-      return false;
-    };
-
-    const fetchIpFallback = async () => {
-      // Prefer main-process fetch (bypasses renderer CSP)
-      if (await resolveViaMainProcess()) return;
-
-      // As a last resort, try direct fetches (may be blocked by CSP in some builds)
-      try {
-        const res = await fetch('https://ipapi.co/json/');
-        if (res.ok) {
-          const data = await res.json();
-          if (data && typeof data.latitude === 'number' && typeof data.longitude === 'number') {
-            setIfNotCancelled(data.latitude, data.longitude);
-            return;
-          }
-        }
-      } catch { }
-      try {
-        const res2 = await fetch('https://ipwho.is/');
-        if (res2.ok) {
-          const data2 = await res2.json();
-          if (data2 && data2.success && data2.latitude && data2.longitude) {
-            setIfNotCancelled(Number(data2.latitude), Number(data2.longitude));
-            return;
-          }
-        }
-      } catch { }
-      console.warn('[AddressAutocomplete] IP geolocation fallback failed; proceeding without location bias');
-    };
-
-    fetchIpFallback();
-
-    return () => { cancelled = true };
-  }, []);
 
   // Resolve branch id from main (Admin-provisioned) - needed for delivery zone validation
   useEffect(() => {
@@ -193,8 +137,6 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     try {
       const results = await searchAddressSuggestions(input, {
         branchId: terminalBranchId || undefined,
-        location: userLocation,
-        radius: userLocation ? 20000 : undefined,
         limit: 5,
       });
       if (requestId !== searchRequestRef.current) {
@@ -1051,7 +993,39 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const createdCustomer = (createdRaw?.data ?? createdRaw?.customer ?? createdRaw) as any;
 
       if (createdCustomer?.id) {
-        onCustomerAdded(createdCustomer);
+        // Enrich with form data to ensure city/floor are immediately available
+        // (matches the enrichment pattern used by EDIT mode at lines 928-940)
+        const enrichedAddressFields = {
+          street_address: formData.address.trim(),
+          city: formData.city ? formData.city.trim() : '',
+          postal_code: formData.postalCode ? formData.postalCode.trim() : null,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
+          notes: formData.notes ? formData.notes.trim() : null,
+          name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
+          is_default: true,
+        };
+
+        // Ensure addresses array has at least the address from form data
+        const existingAddresses = createdCustomer.addresses || [];
+        const enrichedAddresses = existingAddresses.length > 0
+          ? existingAddresses.map((addr: any, i: number) =>
+              i === 0 ? { ...addr, ...enrichedAddressFields } : addr
+            )
+          : formData.address.trim()
+            ? [{ id: 'local-new', customer_id: createdCustomer.id, ...enrichedAddressFields }]
+            : [];
+
+        const enrichedCustomer = {
+          ...createdCustomer,
+          address: formData.address.trim(),
+          city: formData.city ? formData.city.trim() : createdCustomer.city,
+          postal_code: formData.postalCode ? formData.postalCode.trim() : createdCustomer.postal_code,
+          floor_number: formData.floorNumber ? formData.floorNumber.trim() : createdCustomer.floor_number,
+          notes: formData.notes ? formData.notes.trim() : createdCustomer.notes,
+          name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : createdCustomer.name_on_ringer,
+          addresses: enrichedAddresses,
+        };
+        onCustomerAdded(enrichedCustomer);
 
         // Reset form
         setFormData({

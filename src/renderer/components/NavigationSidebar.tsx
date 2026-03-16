@@ -46,7 +46,9 @@ import {
   Warehouse,
   ScanBarcode,
   Ticket,
-  Info,
+  MonitorPlay,
+  Award,
+  Plug2,
 } from 'lucide-react';
 import UpgradePromptModal from './modals/UpgradePromptModal';
 
@@ -180,6 +182,12 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
         return <ScanBarcode className={iconClass} strokeWidth={2} />;
       case 'Ticket':
         return <Ticket className={iconClass} strokeWidth={2} />;
+      case 'MonitorPlay':
+        return <MonitorPlay className={iconClass} strokeWidth={2} />;
+      case 'Award':
+        return <Award className={iconClass} strokeWidth={2} />;
+      case 'Plug2':
+        return <Plug2 className={iconClass} strokeWidth={2} />;
       default:
         // Log unknown icons for debugging
         console.warn(`[NavigationSidebar] Unknown icon: ${iconName}, using default`);
@@ -226,6 +234,11 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
       // Customer-facing - friendly colors
       customer_web: 'green',
       customer_app: 'blue',
+
+      // Addon modules
+      loyalty: 'purple',
+      plugin_integrations: 'green',
+      kitchen_display: 'orange',
     };
 
     // Return mapped color or default based on category
@@ -387,15 +400,6 @@ const NavigationSidebar: React.FC<NavigationSidebarProps> = ({
             {hasPendingLocalSubmit && (
               <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.8)]" />
             )}
-          </button>
-
-          {/* About Button */}
-          <button
-            onClick={() => handleNavClick('about', false)}
-            className={`w-12 h-12 flex items-center justify-center transition-colors ${getNeonClass('blue', currentView === 'about', resolvedTheme)}`}
-            title="About"
-          >
-            <Info className="w-5 h-5" strokeWidth={2} />
           </button>
 
           {/* Settings Button */}

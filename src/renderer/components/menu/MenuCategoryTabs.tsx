@@ -7,7 +7,6 @@ interface MenuCategoryTabsProps {
   onCategoryChange: (categoryId: string) => void;
   selectedSubcategory?: string;
   onSubcategoryChange?: (subcategoryId: string) => void;
-  hideAllItemsButton?: boolean;
   categories: Array<{ id: string; name: string; icon?: string }>;
 }
 
@@ -16,7 +15,6 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
   onCategoryChange,
   selectedSubcategory = '',
   onSubcategoryChange,
-  hideAllItemsButton = false,
   categories
 }) => {
   const { t } = useTranslation();
@@ -95,11 +93,12 @@ export const MenuCategoryTabs: React.FC<MenuCategoryTabsProps> = React.memo(({
 
   const handleCategoryChange = useCallback((categoryId: string) => {
     onCategoryChange(categoryId);
-    // Reset subcategory when category changes
+    // Auto-select first subcategory (savory) when category has subcategories
     if (onSubcategoryChange) {
-      onSubcategoryChange('');
+      const subs = getSubcategories(categoryId);
+      onSubcategoryChange(subs.length > 0 ? subs[0].id : '');
     }
-  }, [onCategoryChange, onSubcategoryChange]);
+  }, [onCategoryChange, onSubcategoryChange, getSubcategories]);
 
   const handleSubcategoryChange = useCallback((subcategoryId: string) => {
     if (onSubcategoryChange) {

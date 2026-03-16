@@ -712,7 +712,23 @@
     "phone": "Telefono",
     "email": "Email",
     "addresses": "Indirizzi",
-    "notes": "Note"
+    "notes": "Note",
+    "filterCustomers": "Clienti",
+    "filterAppUsers": "Utenti dell'app",
+    "unnamed": "Utente senza nome",
+    "confirmDeleteAddress": "Sei sicuro di voler eliminare questo indirizzo?",
+    "deleteAddressSuccess": "Indirizzo eliminato con successo",
+    "deleteAddressError": "Impossibile eliminare l'indirizzo",
+    "updateAddressSuccess": "Indirizzo aggiornato con successo",
+    "updateAddressError": "Impossibile aggiornare l'indirizzo",
+    "address": {
+      "street": "Indirizzo",
+      "city": "Città",
+      "postalCode": "Codice postale",
+      "floor": "Piano",
+      "deliveryNotes": "Note di consegna",
+      "default": "Predefinito"
+    }
   },
   "customer": {
     "title": "Clienti",

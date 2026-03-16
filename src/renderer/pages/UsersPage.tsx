@@ -151,18 +151,28 @@ const UsersPage: React.FC = () => {
       const payload = result.success ? result.data : null;
       console.log('Customer details from API:', payload);
 
-      if (result.success && payload?.success && payload.customer && payload.customer.addresses) {
-        setUserAddresses(payload.customer.addresses.map((addr: any) => ({
-          id: addr.id,
-          customer_id: user.id,
-          street_address: addr.street || addr.street_address,
-          city: addr.city || '',
-          postal_code: addr.postal_code || '',
-          floor_number: addr.floor_number,
-          address_type: addr.address_type || 'delivery',
-          is_default: addr.is_default,
-          delivery_notes: addr.delivery_notes || addr.notes,
-        })));
+      if (result.success && payload?.success) {
+        // Handle single result (customer) or multiple results (customers array)
+        let matchedCustomer = payload.customer;
+        if (!matchedCustomer && Array.isArray(payload.customers)) {
+          matchedCustomer = payload.customers.find((c: any) => c.id === user.id) || payload.customers[0];
+        }
+
+        if (matchedCustomer?.addresses && matchedCustomer.addresses.length > 0) {
+          setUserAddresses(matchedCustomer.addresses.map((addr: any) => ({
+            id: addr.id,
+            customer_id: user.id,
+            street_address: addr.street || addr.street_address,
+            city: addr.city || '',
+            postal_code: addr.postal_code || '',
+            floor_number: addr.floor_number,
+            address_type: addr.address_type || 'delivery',
+            is_default: addr.is_default,
+            delivery_notes: addr.delivery_notes || addr.notes,
+          })));
+        } else {
+          setUserAddresses([]);
+        }
       } else {
         setUserAddresses([]);
       }
@@ -319,7 +329,7 @@ const UsersPage: React.FC = () => {
       }
 
       if (result.data?.success !== false) {
-        toast.success('Address updated successfully');
+        toast.success(t('users.updateAddressSuccess', 'Address updated successfully'));
 
         // Update local state with the returned address data
         setUserAddresses(prev => prev.map(addr =>
@@ -344,14 +354,14 @@ const UsersPage: React.FC = () => {
       }
     } catch (error) {
       console.error('Error updating address:', error);
-      toast.error('Failed to update address');
+      toast.error(t('users.updateAddressError', 'Failed to update address'));
     }
   };
 
   const handleDeleteAddress = async (addressId: string) => {
     if (!selectedUser) return;
 
-    if (!confirm('Are you sure you want to delete this address?')) {
+    if (!confirm(t('users.confirmDeleteAddress', 'Are you sure you want to delete this address?'))) {
       return;
     }
 
@@ -366,7 +376,7 @@ const UsersPage: React.FC = () => {
       }
 
       if (result.data?.success !== false) {
-        toast.success('Address deleted successfully');
+        toast.success(t('users.deleteAddressSuccess', 'Address deleted successfully'));
 
         // Update local state
         setUserAddresses(prev => prev.filter(addr => addr.id !== addressId));
@@ -375,7 +385,7 @@ const UsersPage: React.FC = () => {
       }
     } catch (error) {
       console.error('Error deleting address:', error);
-      toast.error('Failed to delete address');
+      toast.error(t('users.deleteAddressError', 'Failed to delete address'));
     }
   };
 
@@ -498,8 +508,8 @@ const UsersPage: React.FC = () => {
               }`}
             >
               <option value="all">{t('filters.all', 'All')}</option>
-              <option value="customer">Customers</option>
-              <option value="app_user">App Users</option>
+              <option value="customer">{t('users.filterCustomers', 'Customers')}</option>
+              <option value="app_user">{t('users.filterAppUsers', 'App Users')}</option>
             </select>
           </div>
         </div>
@@ -586,12 +596,12 @@ const UsersPage: React.FC = () => {
                           <div className={`text-sm font-medium ${
                             resolvedTheme === 'dark' ? 'text-white' : 'text-gray-900'
                           }`}>
-                            {user.name || 'Unnamed User'}
+                            {user.name || t('users.unnamed', 'Unnamed User')}
                           </div>
                           <div className={`text-sm ${
                             resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
                           }`}>
-                            {user.type === 'app_user' ? 'App User' : 'Customer'}
+                            {user.type === 'app_user' ? t('users.filterAppUsers', 'App User') : t('users.customer', 'Customer')}
                           </div>
                         </div>
                       </div>
@@ -778,7 +788,7 @@ const UsersPage: React.FC = () => {
                                 <label className={`text-xs font-medium ${
                                   resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
                                 }`}>
-                                  Street Address
+                                  {t('users.address.street', 'Street Address')}
                                 </label>
                                 <input
                                   type="text"
@@ -840,7 +850,7 @@ const UsersPage: React.FC = () => {
                                 <label className={`text-xs font-medium ${
                                   resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
                                 }`}>
-                                  City
+                                  {t('users.address.city', 'City')}
                                 </label>
                                 <input
                                   type="text"
@@ -857,7 +867,7 @@ const UsersPage: React.FC = () => {
                                 <label className={`text-xs font-medium ${
                                   resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
                                 }`}>
-                                  Postal Code
+                                  {t('users.address.postalCode', 'Postal Code')}
                                 </label>
                                 <input
                                   type="text"
@@ -874,7 +884,7 @@ const UsersPage: React.FC = () => {
                                 <label className={`text-xs font-medium ${
                                   resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
                                 }`}>
-                                  Floor Number
+                                  {t('users.address.floor', 'Floor Number')}
                                 </label>
                                 <input
                                   type="text"
@@ -892,7 +902,7 @@ const UsersPage: React.FC = () => {
                               <label className={`text-xs font-medium ${
                                 resolvedTheme === 'dark' ? 'text-gray-300' : 'text-gray-700'
                               }`}>
-                                Delivery Notes
+                                {t('users.address.deliveryNotes', 'Delivery Notes')}
                               </label>
                               <textarea
                                 value={editedAddress.delivery_notes || ''}
@@ -911,7 +921,7 @@ const UsersPage: React.FC = () => {
                                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
                               >
                                 <Save className="w-4 h-4" />
-                                Save
+                                {t('common.actions.save', 'Save')}
                               </button>
                               <button
                                 onClick={handleCancelEdit}
@@ -922,7 +932,7 @@ const UsersPage: React.FC = () => {
                                 }`}
                               >
                                 <X className="w-4 h-4" />
-                                Cancel
+                                {t('common.actions.cancel', 'Cancel')}
                               </button>
                             </div>
                           </div>
@@ -940,8 +950,8 @@ const UsersPage: React.FC = () => {
                                 resolvedTheme === 'dark' ? 'text-gray-400' : 'text-gray-500'
                               }`}>
                                 {address.postal_code}
-                                {address.floor_number && ` • Floor ${address.floor_number}`}
-                                {address.is_default && ' • Default'}
+                                {address.floor_number && ` • ${t('users.address.floor', 'Floor')} ${address.floor_number}`}
+                                {address.is_default && ` • ${t('users.address.default', 'Default')}`}
                               </p>
                               {address.delivery_notes && (
                                 <p className={`text-xs mt-1 ${

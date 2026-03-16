@@ -712,7 +712,23 @@
     "phone": "Τηλέφωνο",
     "email": "Email",
     "addresses": "Διευθύνσεις",
-    "notes": "Σημειώσεις"
+    "notes": "Σημειώσεις",
+    "filterCustomers": "Πελάτες",
+    "filterAppUsers": "Χρήστες Εφαρμογής",
+    "unnamed": "Ανώνυμος Χρήστης",
+    "confirmDeleteAddress": "Είστε σίγουροι ότι θέλετε να διαγράψετε αυτή τη διεύθυνση;",
+    "deleteAddressSuccess": "Η διεύθυνση διαγράφηκε επιτυχώς",
+    "deleteAddressError": "Αποτυχία διαγραφής διεύθυνσης",
+    "updateAddressSuccess": "Η διεύθυνση ενημερώθηκε επιτυχώς",
+    "updateAddressError": "Αποτυχία ενημέρωσης διεύθυνσης",
+    "address": {
+      "street": "Οδός",
+      "city": "Πόλη",
+      "postalCode": "Τ.Κ.",
+      "floor": "Όροφος",
+      "deliveryNotes": "Σημειώσεις Παράδοσης",
+      "default": "Προεπιλογή"
+    }
   },
   "customer": {
     "title": "Πελάτες",

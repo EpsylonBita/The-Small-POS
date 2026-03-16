@@ -10,6 +10,7 @@ import type { ChosenComboItem } from '../menu/ComboChoiceModal';
 import { PaymentModal } from './PaymentModal';
 // SplitPaymentModal is rendered in OrderDashboard (survives MenuModal close)
 import { useDiscountSettings } from '../../hooks/useDiscountSettings';
+import { useFeaturedItems } from '../../hooks/useFeaturedItems';
 import { useDeliveryValidation } from '../../hooks/useDeliveryValidation';
 import { useAcquiredModules, MODULE_IDS } from '../../hooks/useAcquiredModules';
 import { useKdsLiveDraftSync } from '../../hooks/useKdsLiveDraftSync';
@@ -126,10 +127,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
+  const { topSellerIds } = useFeaturedItems(staff?.branchId || null);
   const { hasModule } = useAcquiredModules();
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
   const bridge = getBridge();
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [selectedCategory, setSelectedCategory] = useState<string>("featured");
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("");
   const [selectedMenuItem, setSelectedMenuItem] = useState<any>(null);
   const [cartItems, setCartItems] = useState<MenuModalCartItem[]>([]);
@@ -676,9 +678,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
 
         // Default categories
         const defaultCategories = [
-          { id: "all", name: t('modals.menu.allItems'), icon: "🍽️" },
           { id: "featured", name: t('modals.menu.featured'), icon: "⭐" },
-          { id: "combos", name: t('modals.menu.combos', 'Combos & Offers'), icon: "🎁" },
         ];
 
         // Combine default categories with database categories
@@ -704,7 +704,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
         console.error('Error loading categories in MenuModal:', error);
         // Fallback to default categories
         setCategories([
-          { id: "all", name: t('modals.menu.allItems'), icon: "🍽️" },
           { id: "featured", name: t('modals.menu.featured'), icon: "⭐" }
         ]);
       }
@@ -1603,7 +1602,6 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onCategoryChange={(cat) => { setSelectedCategory(cat); setMenuSearchQuery(''); }}
               selectedSubcategory={selectedSubcategory}
               onSubcategoryChange={setSelectedSubcategory}
-              hideAllItemsButton={true}
               categories={categories}
             />
             <MenuItemGrid
@@ -1612,6 +1610,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               orderType={orderType}
               onItemSelect={(item) => { setSelectedMenuItem(item); setMenuSearchQuery(''); setTimeout(() => menuSearchRef.current?.focus(), 50); }}
               onQuickAdd={handleQuickAdd}
+              topSellerIds={topSellerIds}
               comboMode={selectedCategory === 'combos'}
               combos={combos}
               onComboSelect={handleComboSelect}

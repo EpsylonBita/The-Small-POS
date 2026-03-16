@@ -712,7 +712,23 @@
     "phone": "Telefon",
     "email": "E-Mail",
     "addresses": "Adressen",
-    "notes": "Anmerkungen"
+    "notes": "Anmerkungen",
+    "filterCustomers": "Kunden",
+    "filterAppUsers": "App-Benutzer",
+    "unnamed": "Unbenannter Benutzer",
+    "confirmDeleteAddress": "Sind Sie sicher, dass Sie diese Adresse löschen möchten?",
+    "deleteAddressSuccess": "Adresse erfolgreich gelöscht",
+    "deleteAddressError": "Adresse konnte nicht gelöscht werden",
+    "updateAddressSuccess": "Adresse erfolgreich aktualisiert",
+    "updateAddressError": "Adresse konnte nicht aktualisiert werden",
+    "address": {
+      "street": "Straße",
+      "city": "Stadt",
+      "postalCode": "Postleitzahl",
+      "floor": "Stockwerk",
+      "deliveryNotes": "Lieferhinweise",
+      "default": "Standard"
+    }
   },
   "customer": {
     "title": "Kunden",

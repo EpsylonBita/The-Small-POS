@@ -4,7 +4,7 @@ import { toast } from 'react-hot-toast'
 import { posApiGet } from '../../utils/api-helpers'
 import { useTheme } from '../../contexts/theme-context'
 import { useI18n } from '../../contexts/i18n-context'
-import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings } from 'lucide-react'
+import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, Printer, Eye, EyeOff, Clipboard, Timer, CreditCard, Cable, Settings, Info, Copy, Check } from 'lucide-react'
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
@@ -20,7 +20,7 @@ import {
   refreshTerminalCredentialCache,
   updateTerminalCredentialCache,
 } from '../../services/terminal-credentials';
-import { getBridge } from '../../../lib';
+import { getBridge, type DiagnosticsAboutInfo } from '../../../lib';
 import {
   decodeConnectionString,
   looksLikeRawApiKey,
@@ -123,6 +123,9 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [runtimeSyncHealth, setRuntimeSyncHealth] = useState('offline')
 
   const [showPeripheralsSettings, setShowPeripheralsSettings] = useState(false)
+  const [showAboutInfo, setShowAboutInfo] = useState(false)
+  const [aboutData, setAboutData] = useState<DiagnosticsAboutInfo | null>(null)
+  const [aboutCopied, setAboutCopied] = useState(false)
   // Peripheral settings state
   const [scaleEnabled, setScaleEnabled] = useState(false)
   const [scalePort, setScalePort] = useState('COM3')
@@ -358,6 +361,31 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       cancelled = true
     }
   }, [bridge.printer, isOpen])
+
+  // Lazy-load about info when the About section is expanded
+  useEffect(() => {
+    if (!showAboutInfo || aboutData) return
+    bridge.diagnostics
+      .getAbout()
+      .then((data) => setAboutData(data))
+      .catch((err: unknown) => console.error('Failed to load about info:', err))
+  }, [showAboutInfo, aboutData, bridge.diagnostics])
+
+  const handleCopyAboutInfo = async () => {
+    if (!aboutData) return
+    const text = [
+      `The Small POS v${aboutData.version}`,
+      `Build: ${aboutData.buildTimestamp}`,
+      `Git SHA: ${aboutData.gitSha}`,
+      `Platform: ${aboutData.platform} (${aboutData.arch})`,
+      `Rust: ${aboutData.rustVersion}`,
+    ].join('\n')
+    try {
+      await navigator.clipboard.writeText(text)
+      setAboutCopied(true)
+      setTimeout(() => setAboutCopied(false), 2000)
+    } catch { /* fallback */ }
+  }
 
   const handleSaveConnection = async () => {
     let nextTerminalId = terminalId.trim()
@@ -1899,6 +1927,62 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
       </div>
       )}
+
+        {/* About Section */}
+        <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 hover:bg-white/10 dark:hover:bg-gray-800/20 transition-all ${showAboutInfo ? 'bg-white/10 dark:bg-gray-800/20' : ''}`}>
+          <button
+            onClick={() => setShowAboutInfo(!showAboutInfo)}
+            className="w-full px-4 py-3 flex items-center justify-between transition-colors liquid-glass-modal-text"
+          >
+            <div className="flex items-center gap-3">
+              <Info className="w-5 h-5 text-blue-400 drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]" />
+              <div className="text-left">
+                <span className="font-medium block">{t('modals.connectionSettings.about', 'About')}</span>
+                <span className="text-xs liquid-glass-modal-text-muted">
+                  {aboutData ? `v${aboutData.version}` : t('modals.connectionSettings.aboutSubtitle', 'Version info')}
+                </span>
+              </div>
+            </div>
+            <ChevronDown className={`w-5 h-5 transition-transform ${showAboutInfo ? 'rotate-180' : ''}`} />
+          </button>
+
+          {showAboutInfo && (
+            <div className="px-4 pb-4 space-y-1 border-t liquid-glass-modal-border pt-4">
+              {aboutData ? (
+                <>
+                  {[
+                    { label: t('settings.about.version', 'Version'), value: `v${aboutData.version}` },
+                    { label: t('settings.about.buildDate', 'Build Date'), value: aboutData.buildTimestamp },
+                    { label: t('settings.about.gitSha', 'Git SHA'), value: aboutData.gitSha },
+                    { label: t('settings.about.platform', 'Platform'), value: `${aboutData.platform} (${aboutData.arch})` },
+                    { label: t('settings.about.rust', 'Rust'), value: aboutData.rustVersion },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="flex justify-between items-center py-2 border-b border-white/5 last:border-b-0">
+                      <span className="text-sm liquid-glass-modal-text-muted">{label}</span>
+                      <span className="text-sm font-mono liquid-glass-modal-text">{value}</span>
+                    </div>
+                  ))}
+                  <div className="pt-3 flex justify-center">
+                    <button
+                      onClick={handleCopyAboutInfo}
+                      className={liquidGlassModalButton('secondary', 'md')}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        {aboutCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                        {aboutCopied ? t('settings.about.copied', 'Copied!') : t('settings.about.copyInfo', 'Copy Info')}
+                      </span>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="py-4 text-center">
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500 mx-auto" />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
     </LiquidGlassModal>
 
     {/* Sub-modals rendered outside LiquidGlassModal for independent viewport positioning */}
