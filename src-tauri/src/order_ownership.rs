@@ -272,7 +272,7 @@ pub fn assign_order_to_driver_shift(
     let target_status = if is_final_order_status(&current.status) {
         None
     } else {
-        Some("out_for_delivery")
+        Some("delivered")
     };
     let applied = apply_order_attribution(
         conn,

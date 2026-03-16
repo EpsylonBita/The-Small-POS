@@ -1310,7 +1310,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
                   ? order.status
                   : (serverStatus
                     ? (mapStatusForPOS(serverStatus) as Order['status'])
-                    : (isFinal ? order.status : 'out_for_delivery' as const));
+                    : (isFinal ? order.status : 'delivered' as const));
                 return {
                   ...order,
                   status: nextStatus,
