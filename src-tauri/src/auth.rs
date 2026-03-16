@@ -269,8 +269,11 @@ fn load_staff_auth_cache(
     branch_id: &str,
 ) -> Result<StaffAuthDirectoryCache, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let Some(raw) = db::get_setting(&conn, STAFF_AUTH_CACHE_CATEGORY, &staff_auth_cache_key(branch_id))
-    else {
+    let Some(raw) = db::get_setting(
+        &conn,
+        STAFF_AUTH_CACHE_CATEGORY,
+        &staff_auth_cache_key(branch_id),
+    ) else {
         return Err("missing staff auth cache".to_string());
     };
 
@@ -571,8 +574,8 @@ pub fn login(arg0: Option<Value>, db: &db::DbState, auth: &AuthState) -> Result<
 /// global app-login auth session.
 pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Result<Value, String> {
     let payload = arg0.ok_or("Missing staff check-in payload")?;
-    let request: StaffCheckInVerifyRequest =
-        serde_json::from_value(payload).map_err(|_| "Invalid staff check-in payload".to_string())?;
+    let request: StaffCheckInVerifyRequest = serde_json::from_value(payload)
+        .map_err(|_| "Invalid staff check-in payload".to_string())?;
 
     let staff_id = request.staff_id.trim();
     let branch_id = request.branch_id.trim();
@@ -602,9 +605,10 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         ));
     }
 
-    let maybe_staff = cache.staff.iter().find(|entry| {
-        entry.id.trim().eq_ignore_ascii_case(staff_id)
-    });
+    let maybe_staff = cache
+        .staff
+        .iter()
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(staff_id));
 
     let Some(staff) = maybe_staff else {
         return Ok(check_in_verify_failure(
@@ -627,7 +631,12 @@ pub fn verify_staff_check_in_pin(arg0: Option<Value>, db: &db::DbState) -> Resul
         ));
     }
 
-    let Some(hash) = staff.pin_hash.as_deref().map(str::trim).filter(|hash| !hash.is_empty()) else {
+    let Some(hash) = staff
+        .pin_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|hash| !hash.is_empty())
+    else {
         return Ok(check_in_verify_failure(
             "pin_not_configured",
             "No POS PIN is configured for this staff member.",
@@ -1144,7 +1153,10 @@ mod tests {
         .expect("verification should succeed");
 
         assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
-        assert_eq!(result.get("staffId").and_then(Value::as_str), Some("staff-1"));
+        assert_eq!(
+            result.get("staffId").and_then(Value::as_str),
+            Some("staff-1")
+        );
     }
 
     #[test]

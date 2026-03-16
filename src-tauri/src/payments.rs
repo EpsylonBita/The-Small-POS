@@ -101,13 +101,12 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "manual".to_string()
             }
         });
-    let payment_origin = if method == "card"
-        && requested_payment_origin.eq_ignore_ascii_case("terminal")
-    {
-        "terminal".to_string()
-    } else {
-        "manual".to_string()
-    };
+    let payment_origin =
+        if method == "card" && requested_payment_origin.eq_ignore_ascii_case("terminal") {
+            "terminal".to_string()
+        } else {
+            "manual".to_string()
+        };
     let terminal_device_id = if payment_origin == "terminal" {
         str_field(payload, "terminalDeviceId")
             .or_else(|| str_field(payload, "terminal_device_id"))
@@ -356,7 +355,13 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 payment_transaction_id = ?3,
                 updated_at = ?4
              WHERE id = ?5",
-            params![new_payment_status, effective_method, payment_id, now, order_id],
+            params![
+                new_payment_status,
+                effective_method,
+                payment_id,
+                now,
+                order_id
+            ],
         )
         .map_err(|e| format!("update order payment: {e}"))?;
 
@@ -822,7 +827,8 @@ mod tests {
         assert_eq!(first_method, "split");
         drop(conn);
 
-        let paid_items_after_first = get_paid_items(&db, "ord-split").expect("get first paid items");
+        let paid_items_after_first =
+            get_paid_items(&db, "ord-split").expect("get first paid items");
         let first_items = paid_items_after_first
             .as_array()
             .expect("first paid items array");

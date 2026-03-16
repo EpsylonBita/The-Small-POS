@@ -714,6 +714,7 @@ pub fn run() {
             commands::settings::settings_set,
             commands::settings::settings_update_local,
             commands::settings::settings_factory_reset,
+            commands::settings::settings_emergency_reset,
             commands::settings::settings_update_terminal_credentials,
             commands::settings::settings_get_admin_url,
             commands::settings::settings_clear_connection,

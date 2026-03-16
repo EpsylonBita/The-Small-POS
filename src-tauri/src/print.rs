@@ -2495,10 +2495,7 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
 
     // Add a note indicating this is a split payment receipt
     let mut order_notes = Vec::new();
-    let split_note = format!(
-        "Split Payment ({:.2} of {:.2} total)",
-        amount, total_amount
-    );
+    let split_note = format!("Split Payment ({:.2} of {:.2} total)", amount, total_amount);
     order_notes.push(split_note);
     if discount_amount > 0.0 {
         order_notes.push(format!("Includes split discount of {:.2}", discount_amount));
@@ -2714,7 +2711,8 @@ fn build_shift_checkout_doc(
         role_type: payload
             .and_then(|value| object_text_field(value, &["roleType", "role_type"]))
             .or_else(|| {
-                shift.get("role_type")
+                shift
+                    .get("role_type")
                     .or_else(|| shift.get("roleType"))
                     .and_then(Value::as_str)
                     .and_then(non_empty_text)
@@ -4553,9 +4551,13 @@ mod tests {
         });
         let raw_payload = payload.to_string();
 
-        let doc =
-            build_document_for_job(&db, "z_report", "snapshot-20260315", Some(raw_payload.as_str()))
-                .unwrap();
+        let doc = build_document_for_job(
+            &db,
+            "z_report",
+            "snapshot-20260315",
+            Some(raw_payload.as_str()),
+        )
+        .unwrap();
         match doc {
             ReceiptDocument::ZReport(doc) => {
                 assert_eq!(doc.shift_ref, "");

@@ -2087,11 +2087,15 @@ fn migrate_v33(conn: &Connection) -> Result<(), String> {
     }
 
     let mut migrated = 0usize;
+    #[allow(clippy::type_complexity)]
     let seed_mappings: &[(&str, &str, &[(&str, &str)])] = &[
         (
             "ui",
             "display_brightness",
-            &[("ui", "display_brightness"), ("terminal", "display_brightness")],
+            &[
+                ("ui", "display_brightness"),
+                ("terminal", "display_brightness"),
+            ],
         ),
         (
             "ui",
@@ -2101,7 +2105,10 @@ fn migrate_v33(conn: &Connection) -> Result<(), String> {
         (
             "ui",
             "touch_sensitivity",
-            &[("ui", "touch_sensitivity"), ("terminal", "touch_sensitivity")],
+            &[
+                ("ui", "touch_sensitivity"),
+                ("terminal", "touch_sensitivity"),
+            ],
         ),
         (
             "ui",
@@ -2120,12 +2127,20 @@ fn migrate_v33(conn: &Connection) -> Result<(), String> {
         (
             "scale",
             "enabled",
-            &[("scale", "enabled"), ("terminal", "scale_enabled"), ("hardware", "scale_enabled")],
+            &[
+                ("scale", "enabled"),
+                ("terminal", "scale_enabled"),
+                ("hardware", "scale_enabled"),
+            ],
         ),
         (
             "scale",
             "port",
-            &[("scale", "port"), ("terminal", "scale_port"), ("hardware", "scale_port")],
+            &[
+                ("scale", "port"),
+                ("terminal", "scale_port"),
+                ("hardware", "scale_port"),
+            ],
         ),
         (
             "scale",

@@ -48,7 +48,11 @@ fn resolve_historical_financial_owner(
     if let Some(current_shift_id) = current.shift_id.as_deref() {
         if let Some((role_type, staff_id, _, _)) = resolve_shift_context(conn, current_shift_id)? {
             if matches!(role_type.as_str(), "cashier" | "manager")
-                && business_day::shift_contains_timestamp(conn, current_shift_id, financial_effective_at)?
+                && business_day::shift_contains_timestamp(
+                    conn,
+                    current_shift_id,
+                    financial_effective_at,
+                )?
             {
                 return Ok(Some((current_shift_id.to_string(), staff_id)));
             }
@@ -698,8 +702,8 @@ pub fn assign_order_to_cashier_pickup(
     let current = load_order_attribution_snapshot(conn, order_id)?;
     let financial_effective_at =
         business_day::resolve_order_financial_effective_at(conn, order_id)?;
-    let preferred_terminal_id =
-        normalize_opt_text(acting_terminal_id).or_else(|| normalize_opt_text(Some(current.terminal_id.as_str())));
+    let preferred_terminal_id = normalize_opt_text(acting_terminal_id)
+        .or_else(|| normalize_opt_text(Some(current.terminal_id.as_str())));
     let original_terminal_id = normalize_opt_text(Some(current.terminal_id.as_str()));
 
     let mut cashier_assignment = None;
@@ -727,23 +731,23 @@ pub fn assign_order_to_cashier_pickup(
         }
     }
 
-    let (cashier_shift_id, cashier_staff_id) = if let Some((shift_id, staff_id)) = cashier_assignment
-    {
-        (Some(shift_id), Some(staff_id))
-    } else {
-        resolve_order_owner(
-            conn,
-            "pickup",
-            current.branch_id.as_str(),
-            preferred_terminal_id
-                .as_deref()
-                .or_else(|| original_terminal_id.as_deref())
-                .unwrap_or_default(),
-            current.driver_id.as_deref(),
-            current.shift_id.as_deref(),
-            current.staff_id.as_deref(),
-        )?
-    };
+    let (cashier_shift_id, cashier_staff_id) =
+        if let Some((shift_id, staff_id)) = cashier_assignment {
+            (Some(shift_id), Some(staff_id))
+        } else {
+            resolve_order_owner(
+                conn,
+                "pickup",
+                current.branch_id.as_str(),
+                preferred_terminal_id
+                    .as_deref()
+                    .or(original_terminal_id.as_deref())
+                    .unwrap_or_default(),
+                current.driver_id.as_deref(),
+                current.shift_id.as_deref(),
+                current.staff_id.as_deref(),
+            )?
+        };
 
     let target_status = if current.status.eq_ignore_ascii_case("out_for_delivery") {
         Some("ready")
@@ -753,7 +757,9 @@ pub fn assign_order_to_cashier_pickup(
 
     let reassign_to_cashier = cashier_shift_id
         .as_deref()
-        .map(|shift_id| business_day::shift_contains_timestamp(conn, shift_id, &financial_effective_at))
+        .map(|shift_id| {
+            business_day::shift_contains_timestamp(conn, shift_id, &financial_effective_at)
+        })
         .transpose()?
         .unwrap_or(false);
 
@@ -764,11 +770,7 @@ pub fn assign_order_to_cashier_pickup(
         } else if let Some((historical_shift_id, historical_staff_id)) =
             resolve_historical_financial_owner(conn, &current, &financial_effective_at)?
         {
-            (
-                Some(historical_shift_id),
-                Some(historical_staff_id),
-                true,
-            )
+            (Some(historical_shift_id), Some(historical_staff_id), true)
         } else {
             (None, None, true)
         }
@@ -832,12 +834,12 @@ pub fn repair_historical_pickup_financial_attribution(
         let current = load_order_attribution_snapshot(conn, order_id.as_str())?;
         let historical_owner =
             resolve_historical_financial_owner(conn, &current, financial_effective_at.as_str())?;
-        let (target_shift_id, target_staff_id) = if let Some((shift_id, staff_id)) = historical_owner
-        {
-            (Some(shift_id), Some(staff_id))
-        } else {
-            (None, None)
-        };
+        let (target_shift_id, target_staff_id) =
+            if let Some((shift_id, staff_id)) = historical_owner {
+                (Some(shift_id), Some(staff_id))
+            } else {
+                (None, None)
+            };
 
         if current.shift_id == target_shift_id && current.staff_id == target_staff_id {
             continue;

@@ -265,7 +265,9 @@ fn snapshot_or_payload(payload: &serde_json::Value) -> Option<serde_json::Value>
 }
 
 fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json::Value {
-    let mut report_data = match generated.get("report").and_then(|report| report.get("reportJson"))
+    let mut report_data = match generated
+        .get("report")
+        .and_then(|report| report.get("reportJson"))
     {
         Some(serde_json::Value::String(raw)) => {
             serde_json::from_str::<serde_json::Value>(raw).unwrap_or_else(|_| generated.clone())
@@ -282,7 +284,10 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
 
     for (key, value) in [
         ("shiftId", value_str(report, &["shiftId", "shift_id"])),
-        ("terminalId", value_str(report, &["terminalId", "terminal_id"])),
+        (
+            "terminalId",
+            value_str(report, &["terminalId", "terminal_id"]),
+        ),
         (
             "terminalName",
             value_str(report, &["terminalName", "terminal_name"]),
@@ -298,9 +303,17 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
     if !obj.contains_key("shiftCount") {
         if let Some(count) = number_from_pointers(
             report,
-            &["/shiftCount", "/shift_count", "/reportJson/shifts/total", "/shifts/total"],
+            &[
+                "/shiftCount",
+                "/shift_count",
+                "/reportJson/shifts/total",
+                "/shifts/total",
+            ],
         ) {
-            obj.insert("shiftCount".to_string(), serde_json::json!(count.round() as i64));
+            obj.insert(
+                "shiftCount".to_string(),
+                serde_json::json!(count.round() as i64),
+            );
         }
     }
 

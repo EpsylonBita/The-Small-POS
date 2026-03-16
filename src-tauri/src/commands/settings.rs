@@ -455,7 +455,8 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
             "Stored parent_terminal_id from admin settings"
         );
     }
-    if let Some(owner_terminal_id) = extract_owner_terminal_id_from_terminal_settings_response(&resp)
+    if let Some(owner_terminal_id) =
+        extract_owner_terminal_id_from_terminal_settings_response(&resp)
     {
         if let Ok(conn) = db.conn.lock() {
             let _ = db::set_setting(&conn, "terminal", "owner_terminal_id", &owner_terminal_id);
@@ -469,8 +470,12 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         extract_owner_terminal_db_id_from_terminal_settings_response(&resp)
     {
         if let Ok(conn) = db.conn.lock() {
-            let _ =
-                db::set_setting(&conn, "terminal", "owner_terminal_db_id", &owner_terminal_db_id);
+            let _ = db::set_setting(
+                &conn,
+                "terminal",
+                "owner_terminal_db_id",
+                &owner_terminal_db_id,
+            );
         }
         tracing::info!("Stored owner_terminal_db_id from admin settings");
     }
@@ -489,8 +494,12 @@ async fn refresh_terminal_context_from_admin(db: &db::DbState) -> Result<(), Str
         extract_source_terminal_db_id_from_terminal_settings_response(&resp)
     {
         if let Ok(conn) = db.conn.lock() {
-            let _ =
-                db::set_setting(&conn, "terminal", "source_terminal_db_id", &source_terminal_db_id);
+            let _ = db::set_setting(
+                &conn,
+                "terminal",
+                "source_terminal_db_id",
+                &source_terminal_db_id,
+            );
         }
         tracing::info!("Stored source_terminal_db_id from admin settings");
     }
@@ -716,6 +725,36 @@ pub async fn settings_factory_reset(
         serde_json::json!({ "reason": "factory_reset" }),
     );
     Ok(result)
+}
+
+/// Emergency reset — same as factory reset but without admin PIN authorization.
+/// Used when the user is locked out (e.g. broken PIN) and needs to wipe the
+/// terminal back to onboarding. Guarded by a UI confirmation (type "RESET")
+/// instead of a privileged action PIN check.
+#[tauri::command]
+pub async fn settings_emergency_reset(
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    tracing::warn!("emergency reset initiated — clearing all terminal data");
+    let _ = crate::clear_operational_data_inner(&db);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM local_settings", [])
+            .map_err(|e| format!("clear local settings: {e}"))?;
+        conn.execute("DELETE FROM menu_cache", [])
+            .map_err(|e| format!("clear menu cache: {e}"))?;
+    }
+    storage::factory_reset()?;
+    let _ = app.emit(
+        "app_reset",
+        serde_json::json!({ "source": "emergency_reset" }),
+    );
+    let _ = app.emit(
+        "terminal_disabled",
+        serde_json::json!({ "reason": "emergency_reset" }),
+    );
+    Ok(serde_json::json!({ "success": true }))
 }
 
 #[tauri::command]

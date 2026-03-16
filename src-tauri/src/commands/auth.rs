@@ -134,12 +134,19 @@ pub async fn auth_setup_pin(
     auth_state: tauri::State<'_, auth::AuthState>,
 ) -> Result<Value, String> {
     // Security hardening: once an admin PIN is set, require an active admin
-    // session before allowing PIN reset/overwrite.
-    let has_admin_pin = {
+    // session before allowing PIN reset/overwrite — UNLESS the admin has
+    // remotely triggered a PIN reset (pin_reset_required flag). In that case
+    // the user is on the login screen with no session and must be allowed to
+    // set a new PIN to break the deadlock.
+    let (has_admin_pin, pin_reset_required) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        db::get_setting(&conn, "staff", "admin_pin_hash").is_some()
+        let has_pin = db::get_setting(&conn, "staff", "admin_pin_hash").is_some();
+        let reset_flag = db::get_setting(&conn, "terminal", "pin_reset_required")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        (has_pin, reset_flag)
     };
-    if has_admin_pin {
+    if has_admin_pin && !pin_reset_required {
         let session = auth::get_session_json(&auth_state);
         let role_name = session
             .get("role")

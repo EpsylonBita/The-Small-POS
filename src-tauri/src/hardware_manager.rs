@@ -70,7 +70,9 @@ fn read_u64(settings: &Value, paths: &[&str]) -> Option<u64> {
                     return Some(number as u64);
                 }
             }
-            if let Some(number) = value.as_str().and_then(|value| value.trim().parse::<u64>().ok())
+            if let Some(number) = value
+                .as_str()
+                .and_then(|value| value.trim().parse::<u64>().ok())
             {
                 return Some(number);
             }
@@ -109,16 +111,27 @@ pub fn reconnect(
     match device_type {
         "scale" => {
             let _ = scale::disconnect();
-            let port = read_str(settings, &["scale.port", "scale_port", "hardware.scale_port"])
-                .unwrap_or("COM3");
+            let port = read_str(
+                settings,
+                &["scale.port", "scale_port", "hardware.scale_port"],
+            )
+            .unwrap_or("COM3");
             let baud = read_u64(
                 settings,
-                &["scale.baud_rate", "scale_baud_rate", "hardware.scale_baud_rate"],
+                &[
+                    "scale.baud_rate",
+                    "scale_baud_rate",
+                    "hardware.scale_baud_rate",
+                ],
             )
             .unwrap_or(9600) as u32;
             let protocol = read_str(
                 settings,
-                &["scale.protocol", "scale_protocol", "hardware.scale_protocol"],
+                &[
+                    "scale.protocol",
+                    "scale_protocol",
+                    "hardware.scale_protocol",
+                ],
             )
             .unwrap_or("generic");
             scale::connect(port, baud, protocol, app.clone())
@@ -134,16 +147,27 @@ pub fn reconnect(
                 ],
             )
             .unwrap_or("serial");
-            let target = read_str(settings, &["display.port", "display_port", "hardware.display_port"])
-                .unwrap_or("COM4");
+            let target = read_str(
+                settings,
+                &["display.port", "display_port", "hardware.display_port"],
+            )
+            .unwrap_or("COM4");
             let port = read_u64(
                 settings,
-                &["display.tcp_port", "display_tcp_port", "hardware.display_tcp_port"],
+                &[
+                    "display.tcp_port",
+                    "display_tcp_port",
+                    "hardware.display_tcp_port",
+                ],
             )
             .map(|value| value as u16);
             let baud = read_u64(
                 settings,
-                &["display.baud_rate", "display_baud_rate", "hardware.display_baud_rate"],
+                &[
+                    "display.baud_rate",
+                    "display_baud_rate",
+                    "hardware.display_baud_rate",
+                ],
             )
             .map(|value| value as u32);
             customer_display::connect(conn_type, target, port, baud)
@@ -152,12 +176,20 @@ pub fn reconnect(
             let _ = scanner::stop();
             let port = read_str(
                 settings,
-                &["scanner.port", "barcode_scanner_port", "hardware.barcode_scanner_port"],
+                &[
+                    "scanner.port",
+                    "barcode_scanner_port",
+                    "hardware.barcode_scanner_port",
+                ],
             )
             .unwrap_or("COM2");
             let baud = read_u64(
                 settings,
-                &["scanner.baud_rate", "scanner_baud_rate", "hardware.scanner_baud_rate"],
+                &[
+                    "scanner.baud_rate",
+                    "scanner_baud_rate",
+                    "hardware.scanner_baud_rate",
+                ],
             )
             .unwrap_or(9600) as u32;
             scanner::start(port, baud, app.clone())
@@ -180,19 +212,30 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
         settings,
         &["scale.enabled", "scale_enabled", "hardware.scale_enabled"],
     )
-        .unwrap_or(false);
+    .unwrap_or(false);
 
     if scale_enabled {
-        let port = read_str(settings, &["scale.port", "scale_port", "hardware.scale_port"])
-            .unwrap_or("COM3");
+        let port = read_str(
+            settings,
+            &["scale.port", "scale_port", "hardware.scale_port"],
+        )
+        .unwrap_or("COM3");
         let baud = read_u64(
             settings,
-            &["scale.baud_rate", "scale_baud_rate", "hardware.scale_baud_rate"],
+            &[
+                "scale.baud_rate",
+                "scale_baud_rate",
+                "hardware.scale_baud_rate",
+            ],
         )
         .unwrap_or(9600) as u32;
         let protocol = read_str(
             settings,
-            &["scale.protocol", "scale_protocol", "hardware.scale_protocol"],
+            &[
+                "scale.protocol",
+                "scale_protocol",
+                "hardware.scale_protocol",
+            ],
         )
         .unwrap_or("generic");
 
@@ -213,7 +256,7 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
             "hardware.customer_display_enabled",
         ],
     )
-        .unwrap_or(false);
+    .unwrap_or(false);
 
     if display_enabled {
         let conn_type = read_str(
@@ -225,16 +268,27 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
             ],
         )
         .unwrap_or("serial");
-        let target = read_str(settings, &["display.port", "display_port", "hardware.display_port"])
-            .unwrap_or("COM4");
+        let target = read_str(
+            settings,
+            &["display.port", "display_port", "hardware.display_port"],
+        )
+        .unwrap_or("COM4");
         let tcp_port = read_u64(
             settings,
-            &["display.tcp_port", "display_tcp_port", "hardware.display_tcp_port"],
+            &[
+                "display.tcp_port",
+                "display_tcp_port",
+                "hardware.display_tcp_port",
+            ],
         )
         .map(|value| value as u16);
         let baud_rate = read_u64(
             settings,
-            &["display.baud_rate", "display_baud_rate", "hardware.display_baud_rate"],
+            &[
+                "display.baud_rate",
+                "display_baud_rate",
+                "hardware.display_baud_rate",
+            ],
         )
         .map(|value| value as u32);
 
@@ -255,7 +309,7 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
             "hardware.barcode_scanner_enabled",
         ],
     )
-        .unwrap_or(false);
+    .unwrap_or(false);
     let scanner_port = read_str(
         settings,
         &[
@@ -270,7 +324,11 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
     if let Some(port) = scanner_port.filter(|_| scanner_enabled) {
         let baud = read_u64(
             settings,
-            &["scanner.baud_rate", "scanner_baud_rate", "hardware.scanner_baud_rate"],
+            &[
+                "scanner.baud_rate",
+                "scanner_baud_rate",
+                "hardware.scanner_baud_rate",
+            ],
         )
         .unwrap_or(9600) as u32;
 
@@ -291,7 +349,7 @@ pub fn apply_settings(settings: &Value, app: &tauri::AppHandle) {
             "hardware.loyalty_card_reader",
         ],
     )
-        .unwrap_or(false);
+    .unwrap_or(false);
 
     if loyalty_enabled {
         match loyalty::start(app.clone()) {

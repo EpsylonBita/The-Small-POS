@@ -292,7 +292,9 @@ impl QueueFailureSnapshot {
     }
 
     fn has_future_retry(&self, now: DateTime<Utc>) -> bool {
-        self.next_retry_timestamp().map(|ts| ts > now).unwrap_or(false)
+        self.next_retry_timestamp()
+            .map(|ts| ts > now)
+            .unwrap_or(false)
     }
 
     fn blocker_rank(&self, now: DateTime<Utc>) -> i32 {
@@ -2397,7 +2399,10 @@ fn receipt_status_recovery_hint(
     ReceiptStatusRecoveryHint::RetryLocalQueue
 }
 
-fn load_queued_remote_receipt_items(db: &DbState, receipt_id: &str) -> Result<Vec<SyncItem>, String> {
+fn load_queued_remote_receipt_items(
+    db: &DbState,
+    receipt_id: &str,
+) -> Result<Vec<SyncItem>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
@@ -2414,20 +2419,20 @@ fn load_queued_remote_receipt_items(db: &DbState, receipt_id: &str) -> Result<Ve
 
     let rows = stmt
         .query_map(params![receipt_id], |row| {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-            row.get(7)?,
-            row.get(8)?,
-            row.get(9)?,
-            row.get(10)?,
-        ))
-    })
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+            ))
+        })
         .map_err(|e| format!("queued remote receipt items query: {e}"))?;
 
     Ok(rows.filter_map(|row| row.ok()).collect())
@@ -2468,9 +2473,8 @@ fn release_queued_remote_item(
         }
         QueuedRemoteDisposition::Retryable => {
             if is_backpressure_error(error) {
-                let delay_ms =
-                    (extract_retry_after_seconds(error).unwrap_or(5).max(1) * 1000)
-                        .clamp(1_000, MAX_RETRY_DELAY_MS);
+                let delay_ms = (extract_retry_after_seconds(error).unwrap_or(5).max(1) * 1000)
+                    .clamp(1_000, MAX_RETRY_DELAY_MS);
                 let next_retry_at = schedule_next_retry(delay_ms, *id);
                 conn.execute(
                     "UPDATE sync_queue
@@ -2572,7 +2576,15 @@ async fn recover_legacy_unclaimed_receipt_via_direct_fallback(
     }
 
     if !eligible_items.is_empty() {
-        match sync_order_batch_via_direct_api(db, admin_url, api_key, fallback_branch_id, &eligible_items).await {
+        match sync_order_batch_via_direct_api(
+            db,
+            admin_url,
+            api_key,
+            fallback_branch_id,
+            &eligible_items,
+        )
+        .await
+        {
             Ok(direct_outcome) => {
                 for item in &eligible_items {
                     if direct_outcome.synced_queue_ids.contains(&item.0) {
@@ -2627,12 +2639,7 @@ async fn recover_legacy_unclaimed_receipt_via_direct_fallback(
     }
 
     for item in non_insert_items {
-        release_queued_remote_item(
-            db,
-            item,
-            original_error,
-            QueuedRemoteDisposition::Retryable,
-        )?;
+        release_queued_remote_item(db, item, original_error, QueuedRemoteDisposition::Retryable)?;
         outcome.requeued_rows += 1;
     }
 
@@ -3390,9 +3397,7 @@ async fn reconcile_remote_orders(
 
             if !skip_auto_print {
                 for entity_type in auto_print_types {
-                    if let Err(error) =
-                        print::enqueue_print_job(db, entity_type, &local_id, None)
-                    {
+                    if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
                         warn!(
                             order_id = %local_id,
                             entity_type = %entity_type,
@@ -3477,8 +3482,7 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     // Poll queued remote receipts first and reconcile remote-assigned IDs
     // before sending new batches.
     let mut total_progress: usize = 0;
-    let receipt_updates =
-        poll_order_receipt_statuses(db, &admin_url, &api_key, &branch_id).await?;
+    let receipt_updates = poll_order_receipt_statuses(db, &admin_url, &api_key, &branch_id).await?;
     total_progress += receipt_updates;
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
@@ -6796,13 +6800,8 @@ mod tests {
             "Transient direct fallback failure: timed out",
             Some(future_retry_at.as_str()),
         );
-        let failed_queue_id = insert_queue_failure_row(
-            &db,
-            "ord-hard-fail",
-            "failed",
-            "validation failed",
-            None,
-        );
+        let failed_queue_id =
+            insert_queue_failure_row(&db, "ord-hard-fail", "failed", "validation failed", None);
 
         let conn = db.conn.lock().unwrap();
         let snapshot = extract_last_queue_failure_snapshot(&conn).expect("queue failure snapshot");

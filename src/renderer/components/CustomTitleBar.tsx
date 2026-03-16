@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { useTheme } from '../contexts/theme-context';
 import { useWindowState } from '../hooks/useWindowState';
 import { getBridge } from '../../lib';
@@ -20,6 +21,7 @@ import {
   Book,
   MessageSquare,
   AlertCircle,
+  AlertTriangle,
   RefreshCw,
   Code,
   ZoomIn,
@@ -55,6 +57,9 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [isWindows, setIsWindows] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [isResetting, setIsResetting] = useState(false);
 
   // Detect platform
   useEffect(() => {
@@ -219,6 +224,14 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
       {
         label: isMaximized ? 'Restore' : 'Maximize',
         action: handleMaximize,
+      },
+      { type: 'separator' },
+      {
+        label: 'Reset Terminal',
+        action: async () => {
+          setShowResetDialog(true);
+          setResetConfirmText('');
+        },
       },
       { type: 'separator' },
       {
@@ -422,6 +435,97 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
             <X size={14} strokeWidth={2} />
           </button>
         </div>
+      )}
+
+      {/* Emergency Reset Confirmation Dialog */}
+      {showResetDialog && createPortal(
+        <div className="fixed inset-0 z-[99999] flex items-center justify-center">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => { if (!isResetting) { setShowResetDialog(false); } }}
+          />
+          {/* Dialog */}
+          <div className={`relative w-full max-w-md mx-4 p-6 rounded-xl shadow-2xl border ${
+            isDark
+              ? 'bg-gray-900 border-gray-700 text-white'
+              : 'bg-white border-gray-200 text-gray-900'
+          }`}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 rounded-full bg-red-500/20">
+                <AlertTriangle size={20} className="text-red-500" />
+              </div>
+              <h3 className="text-lg font-bold">Reset Terminal</h3>
+            </div>
+
+            <p className={`text-sm mb-3 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>
+              This will completely erase all local data and disconnect this terminal. The app will restart and require a new connection code to set up again.
+            </p>
+
+            <ul className={`text-xs mb-4 space-y-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+              <li>&#8226; All local orders and transaction history will be deleted</li>
+              <li>&#8226; All settings and PIN will be cleared</li>
+              <li>&#8226; Terminal configuration and credentials will be removed</li>
+              <li>&#8226; You will need a new connection code from the admin dashboard</li>
+            </ul>
+
+            <div className="mb-4">
+              <label className={`text-xs font-medium block mb-1 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                Type <span className="font-bold text-red-500">RESET</span> to confirm
+              </label>
+              <input
+                type="text"
+                value={resetConfirmText}
+                onChange={(e) => setResetConfirmText(e.target.value)}
+                disabled={isResetting}
+                placeholder="RESET"
+                autoFocus
+                className={`w-full px-3 py-2 rounded-lg border text-sm font-mono ${
+                  isDark
+                    ? 'bg-gray-800 border-gray-600 text-white placeholder-gray-500'
+                    : 'bg-gray-50 border-gray-300 text-gray-900 placeholder-gray-400'
+                } focus:outline-none focus:ring-2 focus:ring-red-500/50`}
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setShowResetDialog(false); setResetConfirmText(''); }}
+                disabled={isResetting}
+                className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  isDark
+                    ? 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                    : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  if (resetConfirmText !== 'RESET') return;
+                  setIsResetting(true);
+                  try {
+                    await bridge.settings.emergencyReset();
+                    localStorage.clear();
+                    await bridge.app.restart();
+                  } catch (err) {
+                    console.error('[CustomTitleBar] Emergency reset failed:', err);
+                    setIsResetting(false);
+                  }
+                }}
+                disabled={resetConfirmText !== 'RESET' || isResetting}
+                className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  resetConfirmText === 'RESET' && !isResetting
+                    ? 'bg-red-600 hover:bg-red-700 text-white'
+                    : 'bg-red-600/30 text-red-300 cursor-not-allowed'
+                }`}
+              >
+                {isResetting ? 'Resetting...' : 'Reset Terminal'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

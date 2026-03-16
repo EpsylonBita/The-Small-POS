@@ -80,12 +80,7 @@ pub(crate) fn timestamp_within_bounds(
     ) {
         (Some(ts), Some(start), Some(end)) => ts >= start && ts <= end,
         (Some(ts), Some(start), None) => ts >= start,
-        _ => {
-            timestamp >= start_at
-                && end_at
-                    .map(|end| timestamp <= end)
-                    .unwrap_or(true)
-        }
+        _ => timestamp >= start_at && end_at.map(|end| timestamp <= end).unwrap_or(true),
     }
 }
 
@@ -174,7 +169,8 @@ pub(crate) fn resolve_period_start(
         return stored;
     }
 
-    infer_branch_period_start(conn, branch_id, cutoff_at).unwrap_or_else(|| EPOCH_RFC3339.to_string())
+    infer_branch_period_start(conn, branch_id, cutoff_at)
+        .unwrap_or_else(|| EPOCH_RFC3339.to_string())
 }
 
 pub(crate) fn find_cashier_owner_for_timestamp(

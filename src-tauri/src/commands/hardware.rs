@@ -587,17 +587,41 @@ pub async fn hardware_reconnect(
         ("scanner", "enabled", "scanner.enabled"),
         ("scanner", "port", "scanner.port"),
         ("scanner", "baud_rate", "scanner.baud_rate"),
-        ("peripherals", "loyalty_card_reader", "peripherals.loyalty_card_reader"),
+        (
+            "peripherals",
+            "loyalty_card_reader",
+            "peripherals.loyalty_card_reader",
+        ),
         ("hardware", "scale_port", "hardware.scale_port"),
         ("hardware", "scale_baud_rate", "hardware.scale_baud_rate"),
         ("hardware", "scale_protocol", "hardware.scale_protocol"),
-        ("hardware", "barcode_scanner_port", "hardware.barcode_scanner_port"),
-        ("hardware", "scanner_baud_rate", "hardware.scanner_baud_rate"),
-        ("hardware", "display_connection_type", "hardware.display_connection_type"),
+        (
+            "hardware",
+            "barcode_scanner_port",
+            "hardware.barcode_scanner_port",
+        ),
+        (
+            "hardware",
+            "scanner_baud_rate",
+            "hardware.scanner_baud_rate",
+        ),
+        (
+            "hardware",
+            "display_connection_type",
+            "hardware.display_connection_type",
+        ),
         ("hardware", "display_port", "hardware.display_port"),
-        ("hardware", "display_baud_rate", "hardware.display_baud_rate"),
+        (
+            "hardware",
+            "display_baud_rate",
+            "hardware.display_baud_rate",
+        ),
         ("hardware", "display_tcp_port", "hardware.display_tcp_port"),
-        ("hardware", "loyalty_card_reader", "hardware.loyalty_card_reader"),
+        (
+            "hardware",
+            "loyalty_card_reader",
+            "hardware.loyalty_card_reader",
+        ),
     ] {
         if let Some(val) = db::get_setting(&conn, category, key) {
             settings[output_key] = serde_json::Value::String(val);

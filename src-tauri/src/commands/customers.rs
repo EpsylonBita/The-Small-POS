@@ -750,19 +750,15 @@ async fn sync_customer_update_remote(
 
 /// Fetch all customers for the organization via Supabase RPC and replace the local cache.
 /// Calls `get_customers_for_pos_terminal` which validates terminal credentials server-side.
-async fn sync_customer_fetch_all(
-    db: &db::DbState,
-) -> Result<Vec<serde_json::Value>, String> {
+async fn sync_customer_fetch_all(db: &db::DbState) -> Result<Vec<serde_json::Value>, String> {
     let supabase_url =
         crate::storage::get_credential("supabase_url").ok_or("Missing supabase_url")?;
     let anon_key =
         crate::storage::get_credential("supabase_anon_key").ok_or("Missing supabase_anon_key")?;
     let org_id =
         crate::storage::get_credential("organization_id").ok_or("Missing organization_id")?;
-    let terminal_id =
-        crate::storage::get_credential("terminal_id").ok_or("Missing terminal_id")?;
-    let api_key =
-        crate::storage::get_credential("pos_api_key").ok_or("Missing pos_api_key")?;
+    let terminal_id = crate::storage::get_credential("terminal_id").ok_or("Missing terminal_id")?;
+    let api_key = crate::storage::get_credential("pos_api_key").ok_or("Missing pos_api_key")?;
 
     let base = supabase_url.trim_end_matches('/');
     let url = format!("{base}/rest/v1/rpc/get_customers_for_pos_terminal");

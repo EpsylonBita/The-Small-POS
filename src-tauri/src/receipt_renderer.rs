@@ -919,7 +919,10 @@ pub fn receipt_role_text(lang: &str, role_type: &str) -> String {
 
 fn z_report_shift_line(doc: &ZReportDoc, lang: &str) -> Option<(String, String)> {
     if let Some(shift_ref) = non_empty_receipt_value(&doc.shift_ref) {
-        return Some((receipt_label(lang, "Shift").to_string(), shift_ref.to_string()));
+        return Some((
+            receipt_label(lang, "Shift").to_string(),
+            shift_ref.to_string(),
+        ));
     }
     doc.shift_count
         .filter(|count| *count > 0)
@@ -5789,7 +5792,9 @@ pub fn render_classic_raster_exact_preview_data_url(
         }
         ReceiptDocument::KitchenTicket(_)
         | ReceiptDocument::ShiftCheckout(_)
-        | ReceiptDocument::ZReport(_) => render_classic_non_customer_raster_exact_ttf(document, cfg)?,
+        | ReceiptDocument::ZReport(_) => {
+            render_classic_non_customer_raster_exact_ttf(document, cfg)?
+        }
     };
     let composed = compose_receipt_like_logo_image(body, cfg);
     let mut encoded = Vec::new();

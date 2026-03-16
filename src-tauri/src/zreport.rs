@@ -59,11 +59,7 @@ fn local_report_date_from_timestamp(value: &str) -> String {
         .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
 }
 
-fn resolve_period_start_at(
-    conn: &Connection,
-    branch_id: &str,
-    cutoff_at: Option<&str>,
-) -> String {
+fn resolve_period_start_at(conn: &Connection, branch_id: &str, cutoff_at: Option<&str>) -> String {
     business_day::resolve_period_start(conn, branch_id, cutoff_at)
 }
 
@@ -138,7 +134,10 @@ fn synthesize_pending_z_report_context(
     })
 }
 
-fn load_pending_z_report_context(conn: &Connection, branch_id: &str) -> Option<PendingZReportContext> {
+fn load_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
     if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
         if business_day::stored_period_start(conn)
             .as_deref()
@@ -810,10 +809,12 @@ fn load_non_driver_order_totals(
     let (order_count, total_amount): (i64, f64) = conn
         .query_row(
             &order_scope_sql,
-            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
-            |row| {
-            Ok((row.get(0)?, row.get(1)?))
-            },
+            params![
+                shift.id.as_str(),
+                shift_start,
+                shift.check_out_time.as_deref()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("query non-driver order totals: {e}"))?;
 
@@ -838,10 +839,12 @@ fn load_non_driver_order_totals(
     let (cash_amount, card_amount): (f64, f64) = conn
         .query_row(
             &payment_sql,
-            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
-            |row| {
-            Ok((row.get(0)?, row.get(1)?))
-            },
+            params![
+                shift.id.as_str(),
+                shift_start,
+                shift.check_out_time.as_deref()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| format!("query non-driver payment totals: {e}"))?;
 
@@ -970,21 +973,25 @@ fn load_non_driver_order_details(
         .prepare(&detail_sql)
         .map_err(|e| format!("prepare non-driver order details: {e}"))?
         .query_map(
-            params![shift.id.as_str(), shift_start, shift.check_out_time.as_deref()],
+            params![
+                shift.id.as_str(),
+                shift_start,
+                shift.check_out_time.as_deref()
+            ],
             |row| {
-            let raw_order_type = row.get::<_, String>(2)?;
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "orderNumber": row.get::<_, String>(1)?,
-                "orderType": normalize_order_type(&raw_order_type),
-                "tableNumber": row.get::<_, Option<String>>(3)?,
-                "deliveryAddress": row.get::<_, Option<String>>(4)?,
-                "amount": row.get::<_, f64>(5)?,
-                "paymentMethod": row.get::<_, Option<String>>(6)?,
-                "paymentStatus": row.get::<_, Option<String>>(7)?,
-                "status": row.get::<_, String>(8)?,
-                "createdAt": row.get::<_, String>(9)?,
-            }))
+                let raw_order_type = row.get::<_, String>(2)?;
+                Ok(serde_json::json!({
+                    "id": row.get::<_, String>(0)?,
+                    "orderNumber": row.get::<_, String>(1)?,
+                    "orderType": normalize_order_type(&raw_order_type),
+                    "tableNumber": row.get::<_, Option<String>>(3)?,
+                    "deliveryAddress": row.get::<_, Option<String>>(4)?,
+                    "amount": row.get::<_, f64>(5)?,
+                    "paymentMethod": row.get::<_, Option<String>>(6)?,
+                    "paymentStatus": row.get::<_, Option<String>>(7)?,
+                    "status": row.get::<_, String>(8)?,
+                    "createdAt": row.get::<_, String>(9)?,
+                }))
             },
         )
         .map_err(|e| format!("query non-driver order details: {e}"))?
@@ -1402,7 +1409,9 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                         .or_insert(serde_json::Value::String(terminal_name));
                 }
                 if obj.get("shiftCount").is_none() {
-                    if let Some(report_json) = obj.get("reportJson").and_then(|value| value.as_str()) {
+                    if let Some(report_json) =
+                        obj.get("reportJson").and_then(|value| value.as_str())
+                    {
                         if let Ok(parsed) = serde_json::from_str::<Value>(report_json) {
                             if let Some(count) = parsed
                                 .pointer("/shifts/total")
@@ -2300,14 +2309,18 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
            AND o.status NOT IN ('cancelled', 'canceled')"
     );
     let order_agg = conn
-        .query_row(&order_agg_sql, params![period_start, cutoff_param, branch_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, f64>(3)?,
-            ))
-        })
+        .query_row(
+            &order_agg_sql,
+            params![period_start, cutoff_param, branch_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            },
+        )
         .unwrap_or((0, 0.0, 0.0, 0.0));
 
     let (total_orders, gross_sales, discounts_total, tips_total) = order_agg;
@@ -2884,7 +2897,9 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
             .map_err(|e| format!("prepare active-shift check: {e}"))?;
 
         let active_names: Vec<String> = stmt
-            .query_map(params![branch_id, cutoff_param], |row| row.get::<_, String>(1))
+            .query_map(params![branch_id, cutoff_param], |row| {
+                row.get::<_, String>(1)
+            })
             .map_err(|e| format!("query active shifts: {e}"))?
             .filter_map(|r| r.ok())
             .collect();
@@ -3337,8 +3352,7 @@ pub fn generate_z_report_file(
         db::get_setting(&conn, "terminal", "store_name").unwrap_or_else(|| "The Small".to_string());
     let store_address = db::get_setting(&conn, "terminal", "store_address").unwrap_or_default();
     let store_phone = db::get_setting(&conn, "terminal", "store_phone").unwrap_or_default();
-    let terminal_display_name =
-        resolve_terminal_display_name(&conn, None).unwrap_or_default();
+    let terminal_display_name = resolve_terminal_display_name(&conn, None).unwrap_or_default();
 
     // Staff name from shift
     let staff_name: String = conn
@@ -4609,9 +4623,12 @@ mod tests {
         let db = test_db();
         seed_closed_shift(&db);
 
-        let status = get_end_of_day_status(&db, &serde_json::json!({
-            "branchId": "branch-1",
-        }))
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
         .expect("status should load");
 
         assert_eq!(status["status"], "pending_local_submit");
@@ -4640,10 +4657,13 @@ mod tests {
             .expect("persist frozen context");
         }
 
-        let result = generate_z_report_for_date(&db, &serde_json::json!({
-            "branchId": "branch-1",
-            "date": "2026-02-17",
-        }))
+        let result = generate_z_report_for_date(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+                "date": "2026-02-17",
+            }),
+        )
         .expect("generate should succeed");
 
         let report = &result["report"];
@@ -4672,9 +4692,12 @@ mod tests {
             .expect("persist frozen context");
         }
 
-        let result = submit_z_report(&db, &serde_json::json!({
-            "branchId": "branch-1",
-        }))
+        let result = submit_z_report(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
         .expect("submit should succeed with next-day active shift");
 
         assert_eq!(result["localDayClosed"], true);
@@ -4690,9 +4713,12 @@ mod tests {
             .unwrap();
         assert_eq!(remaining_active_shifts, 1, "next-day shift must remain");
 
-        let status = get_end_of_day_status(&db, &serde_json::json!({
-            "branchId": "branch-1",
-        }))
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
         .expect("status should load");
         assert_eq!(status["status"], "submitted_pending_admin");
         assert_eq!(status["canOpenPendingZReport"], false);
@@ -4726,9 +4752,12 @@ mod tests {
             .unwrap();
         }
 
-        let status = get_end_of_day_status(&db, &serde_json::json!({
-            "branchId": "branch-1",
-        }))
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
         .expect("status should load");
 
         assert_eq!(status["status"], "submitted_pending_admin");
@@ -4746,10 +4775,13 @@ mod tests {
         seed_closed_shift(&db);
         seed_other_branch_unpaid_order(&db, "2026-02-16T17:00:00Z");
 
-        let result = submit_z_report(&db, &serde_json::json!({
-            "branchId": "branch-1",
-            "date": "2026-02-16",
-        }))
+        let result = submit_z_report(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+                "date": "2026-02-16",
+            }),
+        )
         .expect("submit should ignore other-branch unpaid orders");
 
         assert_eq!(result["success"], true);
@@ -4762,10 +4794,13 @@ mod tests {
         seed_closed_shift(&db);
         seed_paid_order_with_stale_payment_status(&db, "2026-02-16T17:00:00Z");
 
-        let result = submit_z_report(&db, &serde_json::json!({
-            "branchId": "branch-1",
-            "date": "2026-02-16",
-        }))
+        let result = submit_z_report(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+                "date": "2026-02-16",
+            }),
+        )
         .expect("submit should treat settled payment rows as paid even if payment_status is stale");
 
         assert_eq!(result["success"], true);

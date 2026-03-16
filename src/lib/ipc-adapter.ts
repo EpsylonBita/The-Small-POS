@@ -874,6 +874,7 @@ export interface PlatformBridge {
     updateTerminalCredentials(payload: UpdateTerminalCredentialsPayload): Promise<IpcResult>;
     isConfigured(): Promise<SettingsConfiguredResponse>;
     factoryReset(): Promise<IpcResult>;
+    emergencyReset(): Promise<IpcResult>;
   };
 
   // -- Terminal config -------------------------------------------------------
@@ -1367,6 +1368,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'settings:update-terminal-credentials': 'settings.updateTerminalCredentials',
   'settings:is-configured': 'settings.isConfigured',
   'settings:factory-reset': 'settings.factoryReset',
+  'settings:emergency-reset': 'settings.emergencyReset',
 
   // Terminal config
   'terminal-config:get-settings': 'terminalConfig.getSettings',
@@ -1832,6 +1834,7 @@ export class TauriBridge implements PlatformBridge {
     updateTerminalCredentials: (p: UpdateTerminalCredentialsPayload) => this.inv('settings:update-terminal-credentials', p),
     isConfigured: () => this.inv('settings:is-configured'),
     factoryReset: () => this.inv('settings:factory-reset'),
+    emergencyReset: () => this.inv('settings:emergency-reset'),
   };
 
   terminalConfig = {

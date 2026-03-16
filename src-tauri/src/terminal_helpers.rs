@@ -131,8 +131,7 @@ pub(crate) fn extract_ghost_mode_feature_from_terminal_settings_response(
 fn is_local_only_setting_category(category: &str) -> bool {
     matches!(
         category.trim().to_ascii_lowercase().as_str(),
-        "ui"
-            | "hardware"
+        "ui" | "hardware"
             | "peripherals"
             | "display"
             | "scanner"

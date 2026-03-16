@@ -503,7 +503,8 @@ pub async fn order_update_financials(
     let subtotal = payload
         .subtotal
         .unwrap_or_else(|| {
-            (payload.total_amount + discount_amount - tax_amount - delivery_fee - tip_amount).max(0.0)
+            (payload.total_amount + discount_amount - tax_amount - delivery_fee - tip_amount)
+                .max(0.0)
         })
         .max(0.0);
 
