@@ -710,7 +710,7 @@ pub async fn settings_factory_reset(
     let _ = crate::clear_operational_data_inner(&db);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM local_settings", [])
+        conn.execute("DELETE FROM local_settings WHERE setting_category != 'staff'", [])
             .map_err(|e| format!("clear local settings: {e}"))?;
         conn.execute("DELETE FROM menu_cache", [])
             .map_err(|e| format!("clear menu cache: {e}"))?;
@@ -740,7 +740,7 @@ pub async fn settings_emergency_reset(
     let _ = crate::clear_operational_data_inner(&db);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM local_settings", [])
+        conn.execute("DELETE FROM local_settings WHERE setting_category != 'staff'", [])
             .map_err(|e| format!("clear local settings: {e}"))?;
         conn.execute("DELETE FROM menu_cache", [])
             .map_err(|e| format!("clear menu cache: {e}"))?;

@@ -202,7 +202,7 @@ fn factory_reset_from_sync(db: &DbState, app: &AppHandle) {
              DELETE FROM z_reports;
              DELETE FROM sync_queue;
              DELETE FROM orders;
-             DELETE FROM local_settings;
+             DELETE FROM local_settings WHERE setting_category != 'staff';
              DELETE FROM menu_cache;
              COMMIT;",
         );
