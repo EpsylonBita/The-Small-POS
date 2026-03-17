@@ -1,7 +1,7 @@
 use serde_json::Value;
 use tauri::Emitter;
 
-use crate::{auth, db};
+use crate::{api, auth, db, storage};
 
 fn parse_permission_payload(arg0: Option<Value>) -> Option<String> {
     let payload = arg0?;
@@ -157,7 +157,32 @@ pub async fn auth_setup_pin(
             return Err("Unauthorized: active admin session required to change PIN".into());
         }
     }
-    auth::setup_pin(arg0, &db)
+    let result = auth::setup_pin(arg0, &db)?;
+
+    // Fire-and-forget: acknowledge PIN reset to admin server so the remote
+    // pos_configurations flag doesn't re-sync as true on next settings fetch.
+    tokio::spawn(async move {
+        let Some(api_key) = storage::get_credential("pos_api_key") else {
+            return;
+        };
+        let Some(admin_url) = storage::get_credential("admin_dashboard_url") else {
+            return;
+        };
+        let Some(terminal_id) = storage::get_credential("terminal_id") else {
+            return;
+        };
+
+        let path = format!("/api/pos/settings/{terminal_id}");
+        let body = serde_json::json!({
+            "settings": { "terminal": { "pin_reset_required": false } }
+        });
+        match api::fetch_from_admin(&admin_url, &api_key, &path, "POST", Some(body)).await {
+            Ok(_) => tracing::info!("PIN reset acknowledged to admin server"),
+            Err(e) => tracing::warn!("Failed to ack PIN reset to admin (non-fatal): {e}"),
+        }
+    });
+
+    Ok(result)
 }
 
 #[tauri::command]

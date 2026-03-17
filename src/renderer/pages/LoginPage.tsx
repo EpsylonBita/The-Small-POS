@@ -88,9 +88,20 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                     snapshot?.['terminal.pinResetRequired'] ??
                     snapshot?.terminal?.pinResetRequired;
                 const resetRequired = rawResetFlag === true || rawResetFlag === 'true';
-                setPinResetRequired(resetRequired);
-                if (resetRequired) {
-                    setShowPinSetup(true);
+
+                if (resetRequired && hasPinHashes) {
+                    // Stale flag — user already has a PIN set. Auto-clear.
+                    console.log('[LoginPage] pin_reset_required is true but PIN hashes exist. Auto-clearing stale flag.');
+                    setPinResetRequired(false);
+                    bridge.settings.updateLocal({
+                        settingType: 'terminal',
+                        settings: { pin_reset_required: false },
+                    }).catch((e: unknown) => console.warn('[LoginPage] Failed to clear stale pin_reset_required:', e));
+                } else {
+                    setPinResetRequired(resetRequired);
+                    if (resetRequired) {
+                        setShowPinSetup(true);
+                    }
                 }
             } catch (err) {
                 console.error('[LoginPage] Failed to check PIN:', err);
@@ -394,6 +405,11 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
 
                                                 if (result?.success) {
                                                     console.log('[LoginPage] PIN setup successful');
+                                                    // Explicitly clear the flag locally to prevent re-sync from re-asserting it
+                                                    bridge.settings.updateLocal({
+                                                        settingType: 'terminal',
+                                                        settings: { pin_reset_required: false },
+                                                    }).catch(() => {});
                                                     setShowPinSetup(false);
                                                     setNewPin("");
                                                     setConfirmPin("");
