@@ -82,12 +82,12 @@ export default function LoginPage({ onLogin }: LoginPageProps) {
                 console.log('[LoginPage] PIN check result - noPinConfigured:', noPinConfigured, 'hasAdminHash:', !!adminPinHash, 'hasStaffHash:', !!staffPinHash);
                 setNoPinSet(noPinConfigured);
 
-                const resetRequired = Boolean(
+                const rawResetFlag =
                     snapshot?.['terminal.pin_reset_required'] ??
                     snapshot?.terminal?.pin_reset_required ??
                     snapshot?.['terminal.pinResetRequired'] ??
-                    snapshot?.terminal?.pinResetRequired
-                );
+                    snapshot?.terminal?.pinResetRequired;
+                const resetRequired = rawResetFlag === true || rawResetFlag === 'true';
                 setPinResetRequired(resetRequired);
                 if (resetRequired) {
                     setShowPinSetup(true);
