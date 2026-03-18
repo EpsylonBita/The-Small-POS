@@ -194,6 +194,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [pendingEditOrders, setPendingEditOrders] = useState<string[]>([]);
   const [editingSingleOrder, setEditingSingleOrder] = useState<string | null>(null);
   const [editingOrderType, setEditingOrderType] = useState<'pickup' | 'delivery'>('pickup'); // Track order type for editing
+  // Snapshot of customer info captured when "Edit Customer Info" is clicked
+  // (avoids depending on pendingEditOrders surviving the modal transition)
+  const [editCustomerSnapshot, setEditCustomerSnapshot] = useState<{
+    name: string; phone: string; address: string; postal_code?: string; notes?: string;
+  } | null>(null);
+
   // Store edit order details separately to persist while modal is open
   const [currentEditOrderId, setCurrentEditOrderId] = useState<string | undefined>(undefined);
   const [currentEditOrderNumber, setCurrentEditOrderNumber] = useState<string | undefined>(undefined);
@@ -1927,6 +1933,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Handle edit options
   const handleEditInfo = () => {
+    // Capture the customer info NOW while pendingEditOrders is still populated
+    setEditCustomerSnapshot(getSelectedOrderCustomerInfo());
     setShowEditOptionsModal(false);
     setShowEditCustomerModal(true);
   };
@@ -2095,6 +2103,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
       // Close modal and clear state
       setShowEditCustomerModal(false);
+      setEditCustomerSnapshot(null);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
       clearBulkSelection();
@@ -2106,6 +2115,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   const handleEditCustomerClose = () => {
     setShowEditCustomerModal(false);
+    setEditCustomerSnapshot(null);
     setPendingEditOrders([]);
     setEditingSingleOrder(null);
   };
@@ -2198,14 +2208,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Get customer info for the first selected order (for editing)
   const getSelectedOrderCustomerInfo = () => {
-    if (pendingEditOrders.length === 0) return { name: '', phone: '', address: '', notes: '' };
+    if (pendingEditOrders.length === 0 && !editingSingleOrder) return { name: '', phone: '', address: '', notes: '' };
 
-    const firstOrder = orders.find(order => order.id === pendingEditOrders[0]);
+    const targetId = pendingEditOrders[0] || editingSingleOrder;
+    const firstOrder = orders.find(order => order.id === targetId) as any;
     return {
-      name: firstOrder?.customerName || '',
-      phone: firstOrder?.customerPhone || '',
-      address: '', // Add address field to order type if needed
-      notes: firstOrder?.notes || ''
+      name: firstOrder?.customerName || firstOrder?.customer_name || '',
+      phone: firstOrder?.customerPhone || firstOrder?.customer_phone || '',
+      address: firstOrder?.deliveryAddress || firstOrder?.delivery_address || firstOrder?.address || '',
+      postal_code: firstOrder?.deliveryPostalCode || firstOrder?.delivery_postal_code || firstOrder?.postalCode || firstOrder?.postal_code || '',
+      notes: firstOrder?.deliveryNotes || firstOrder?.delivery_notes || firstOrder?.specialInstructions || firstOrder?.special_instructions || firstOrder?.notes || '',
     };
   };
 
@@ -2632,8 +2644,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
       <EditCustomerInfoModal
         isOpen={showEditCustomerModal}
-        orderCount={pendingEditOrders.length}
-        initialCustomerInfo={getSelectedOrderCustomerInfo()}
+        orderCount={pendingEditOrders.length || (editCustomerSnapshot ? 1 : 0)}
+        initialCustomerInfo={editCustomerSnapshot || getSelectedOrderCustomerInfo()}
         onSave={handleCustomerInfoSave}
         onClose={handleEditCustomerClose}
       />

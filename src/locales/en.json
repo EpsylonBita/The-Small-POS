@@ -1796,7 +1796,22 @@
       "sectionCalibration": "Calibration",
       "sectionRoleDefaults": "Role & Defaults",
       "livePreview": "Live Preview",
-      "previewLoading": "Generating preview..."
+      "previewLoading": "Generating preview...",
+      "receiptActions": {
+        "sectionTitle": "Automatic Receipt Actions",
+        "afterOrder": "After order placed",
+        "paymentReceipt": "After payment / checkout",
+        "splitReceipt": "After split payment",
+        "shiftClose": "After shift close",
+        "driverAssigned": "When driver assigned",
+        "zReport": "When Z-Report generated",
+        "kitchenTicket": "Kitchen ticket",
+        "onComplete": "When order completed / delivered",
+        "onCancel": "When order canceled",
+        "newTriggersLabel": "New triggers"
+      },
+      "bodyBoldness": "Body Boldness",
+      "bodyBoldnessHint": "Controls the weight of body text on printed receipts."
     },
     "display": {
       "title": "Display Settings",

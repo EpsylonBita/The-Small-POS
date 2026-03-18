@@ -447,18 +447,20 @@ pub async fn shift_close(
             .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
     });
     if let Some(shift_id) = shift_id {
-        match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None) {
-            Ok(job) => {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("autoPrintJob".to_string(), job);
+        if crate::print::is_print_action_enabled(&db, "shift_close") {
+            match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None) {
+                Ok(job) => {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert("autoPrintJob".to_string(), job);
+                    }
                 }
-            }
-            Err(error) => {
-                warn!(
-                    shift_id = %shift_id,
-                    error = %error,
-                    "Failed to enqueue automatic shift checkout print job"
-                );
+                Err(error) => {
+                    warn!(
+                        shift_id = %shift_id,
+                        error = %error,
+                        "Failed to enqueue automatic shift checkout print job"
+                    );
+                }
             }
         }
     }
@@ -571,6 +573,9 @@ pub async fn shift_print_checkout(
         "terminalName": terminal_name_for_job,
     });
 
+    if !crate::print::is_print_action_enabled(&db, "shift_close") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
     match print::enqueue_print_job_with_payload(
         &db,
         "shift_checkout",

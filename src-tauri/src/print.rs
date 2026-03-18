@@ -42,7 +42,13 @@ const AUTO_PRINT_DELIVERY_ONLY: &[&str] = &["delivery_slip"];
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type,
-        "order_receipt" | "delivery_slip" | "kitchen_ticket" | "shift_checkout" | "z_report"
+        "order_receipt"
+            | "delivery_slip"
+            | "kitchen_ticket"
+            | "shift_checkout"
+            | "z_report"
+            | "order_completed_receipt"
+            | "order_canceled_receipt"
     )
 }
 
@@ -101,6 +107,32 @@ pub fn auto_print_entity_types_for_order_type(order_type: &str) -> &'static [&'s
     }
 }
 
+/// Returns whether the given receipt action is enabled.
+/// Reads from local_settings("receipt_actions", key).
+/// Acquires and releases the DB lock internally — safe to call without holding the lock.
+/// Existing triggers default to true when absent; new triggers default to false.
+pub fn is_print_action_enabled(db: &DbState, key: &str) -> bool {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return true, // fail open — don't suppress print if lock poisoned
+    };
+    let raw = crate::db::get_setting(&conn, "receipt_actions", key);
+    drop(conn);
+    match raw.as_deref() {
+        None => matches!(
+            key,
+            "after_order"
+                | "payment_receipt"
+                | "split_receipt"
+                | "shift_close"
+                | "driver_assigned"
+                | "z_report"
+                | "kitchen_ticket"
+        ),
+        Some(v) => matches!(v.trim(), "true" | "1" | "yes" | "on"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Enqueue
 // ---------------------------------------------------------------------------
@@ -133,9 +165,11 @@ pub fn enqueue_print_job_with_payload(
         && entity_type != "delivery_slip"
         && entity_type != "test_print"
         && entity_type != "split_receipt"
+        && entity_type != "order_completed_receipt"
+        && entity_type != "order_canceled_receipt"
     {
         return Err(format!(
-            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, test_print, or split_receipt"
+            "Invalid entity_type: {entity_type}. Must be order_receipt, kitchen_ticket, shift_checkout, z_report, delivery_slip, test_print, split_receipt, order_completed_receipt, or order_canceled_receipt"
         ));
     }
 
@@ -387,7 +421,7 @@ fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Optio
         .filter(|value| !value.is_empty())
 }
 
-fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool {
+pub(crate) fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool {
     let raw = setting_text(conn, category, key).unwrap_or_default();
     matches!(
         raw.to_ascii_lowercase().as_str(),
@@ -1233,6 +1267,13 @@ pub fn resolve_layout_config(
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(1.0)
         .clamp(0.5, 2.0);
+    let body_font_weight: u32 = match setting_text(&conn, "receipt", "body_boldness").as_deref() {
+        Some("2") => 500,
+        Some("3") => 600,
+        Some("4") => 700,
+        Some("5") => 800,
+        _ => 400,
+    };
 
     Ok(LayoutConfig {
         paper_width: crate::escpos::PaperWidth::from_mm(paper_mm),
@@ -1270,6 +1311,7 @@ pub fn resolve_layout_config(
         raster_threshold,
         text_scale,
         logo_scale,
+        body_font_weight,
     })
 }
 
@@ -2276,6 +2318,8 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         adjustments,
         masked_card,
         order_notes,
+        status_label: None,
+        cancellation_reason: None,
     })
 }
 
@@ -2528,6 +2572,8 @@ fn build_split_receipt_doc(db: &DbState, payment_id: &str) -> Result<OrderReceip
         adjustments: Vec::new(),
         masked_card,
         order_notes,
+        status_label: None,
+        cancellation_reason: None,
     })
 }
 
@@ -3343,6 +3389,22 @@ fn build_document_for_job(
         "split_receipt" => {
             // entity_id is the payment_id for split receipts
             let doc = build_split_receipt_doc(db, entity_id)?;
+            Ok(ReceiptDocument::OrderReceipt(doc))
+        }
+        "order_completed_receipt" => {
+            let mut doc = build_order_receipt_doc(db, entity_id)?;
+            doc.status_label = Some("\u{2713} COMPLETED".to_string());
+            Ok(ReceiptDocument::OrderReceipt(doc))
+        }
+        "order_canceled_receipt" => {
+            let mut doc = build_order_receipt_doc(db, entity_id)?;
+            doc.status_label = Some("\u{2717} CANCELED".to_string());
+            if let Some(payload) = payload.as_ref() {
+                doc.cancellation_reason = payload
+                    .get("cancellationReason")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+            }
             Ok(ReceiptDocument::OrderReceipt(doc))
         }
         _ => Err(format!("Unknown entity_type: {entity_type}")),
@@ -4239,6 +4301,7 @@ mod tests {
         .expect("insert test order");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_order_payment(
         conn: &Connection,
         payment_id: &str,
@@ -5237,6 +5300,56 @@ mod tests {
     }
 
     #[test]
+    fn test_body_boldness_default() {
+        let db = test_db();
+        let profile = serde_json::json!({});
+        let layout = resolve_layout_config(&db, &profile, "order_receipt").unwrap();
+        assert_eq!(layout.body_font_weight, 400);
+    }
+
+    #[test]
+    fn test_body_boldness_level_3() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["receipt", "body_boldness", "3"],
+            ).unwrap();
+        }
+        let profile = serde_json::json!({});
+        let layout = resolve_layout_config(&db, &profile, "order_receipt").unwrap();
+        assert_eq!(layout.body_font_weight, 600);
+    }
+
+    #[test]
+    fn test_body_boldness_in_html() {
+        use crate::receipt_renderer::{
+            render_html, LayoutConfig, OrderReceiptDoc, ReceiptDocument,
+        };
+        let cfg = LayoutConfig {
+            body_font_weight: 700,
+            ..Default::default()
+        };
+        let html = render_html(
+            &ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+                order_id: "t".into(),
+                order_number: "1".into(),
+                order_type: "pickup".into(),
+                status: "completed".into(),
+                created_at: "2026-01-01".into(),
+                ..Default::default()
+            }),
+            &cfg,
+        );
+        assert!(
+            html.contains("font-weight: 700"),
+            "HTML should contain body font-weight 700, got snippet: {}",
+            &html[..500.min(html.len())]
+        );
+    }
+
+    #[test]
     fn test_enqueue_and_list() {
         let db = test_db();
 
@@ -5612,5 +5725,146 @@ mod tests {
         // But the job is now 'pending' and will actually be processed
         let pending = list_print_jobs(&db, Some("pending")).unwrap();
         assert_eq!(pending.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_is_print_action_enabled_defaults() {
+        let db = test_db();
+        for key in &[
+            "after_order",
+            "payment_receipt",
+            "split_receipt",
+            "shift_close",
+            "driver_assigned",
+            "z_report",
+            "kitchen_ticket",
+        ] {
+            assert!(
+                is_print_action_enabled(&db, key),
+                "key {key} should default true"
+            );
+        }
+        assert!(!is_print_action_enabled(&db, "on_complete"));
+        assert!(!is_print_action_enabled(&db, "on_cancel"));
+    }
+
+    #[test]
+    fn test_is_print_action_enabled_explicit_false() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["receipt_actions", "after_order", "false"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["receipt_actions", "on_complete", "true"],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(!is_print_action_enabled(&db, "after_order"));
+        assert!(is_print_action_enabled(&db, "on_complete"));
+    }
+
+    #[test]
+    fn test_new_entity_types_accepted() {
+        let db = test_db();
+        let r1 = enqueue_print_job(&db, "order_completed_receipt", "ord-c1", None);
+        assert!(r1.is_ok(), "order_completed_receipt should be accepted");
+        let r2 = enqueue_print_job(&db, "order_canceled_receipt", "ord-x1", None);
+        assert!(r2.is_ok(), "order_canceled_receipt should be accepted");
+    }
+
+    #[test]
+    fn test_new_entity_types_use_receipt_layout() {
+        assert!(
+            is_receipt_like_entity_type("order_completed_receipt"),
+            "order_completed_receipt must be receipt-like for proper LayoutConfig"
+        );
+        assert!(
+            is_receipt_like_entity_type("order_canceled_receipt"),
+            "order_canceled_receipt must be receipt-like for proper LayoutConfig"
+        );
+    }
+
+    #[test]
+    fn test_completed_receipt_sets_status_label() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-done', 'ORD-DONE', '[]', 10.0, 10.0, 'completed', 'dine-in', 'pending', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        let doc = match build_document_for_job(&db, "order_completed_receipt", "ord-done", None)
+            .unwrap()
+        {
+            ReceiptDocument::OrderReceipt(d) => d,
+            _ => panic!("expected OrderReceipt"),
+        };
+        assert!(
+            doc.status_label
+                .as_deref()
+                .unwrap_or("")
+                .contains("COMPLETED"),
+            "status_label should contain COMPLETED"
+        );
+    }
+
+    #[test]
+    fn test_canceled_receipt_includes_reason() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-x', 'ORD-X', '[]', 5.0, 5.0, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        let payload = serde_json::json!({ "cancellationReason": "Out of stock" }).to_string();
+        let doc =
+            match build_document_for_job(&db, "order_canceled_receipt", "ord-x", Some(&payload))
+                .unwrap()
+            {
+                ReceiptDocument::OrderReceipt(d) => d,
+                _ => panic!("expected OrderReceipt"),
+            };
+        assert_eq!(
+            doc.cancellation_reason.as_deref(),
+            Some("Out of stock"),
+            "cancellation_reason should be 'Out of stock'"
+        );
+    }
+
+    #[test]
+    fn test_canceled_receipt_null_reason() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, order_number, items, total_amount, subtotal, status, order_type, sync_status, created_at, updated_at)
+                 VALUES ('ord-x2', 'ORD-X2', '[]', 5.0, 5.0, 'canceled', 'takeaway', 'pending', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        let payload = serde_json::json!({ "cancellationReason": null }).to_string();
+        let doc =
+            match build_document_for_job(&db, "order_canceled_receipt", "ord-x2", Some(&payload))
+                .unwrap()
+            {
+                ReceiptDocument::OrderReceipt(d) => d,
+                _ => panic!("expected OrderReceipt"),
+            };
+        assert!(
+            doc.cancellation_reason.is_none(),
+            "cancellation_reason should be None when payload has null"
+        );
     }
 }

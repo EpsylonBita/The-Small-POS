@@ -572,19 +572,21 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   const deliveryFeeDisplay =
     deliveryFeeStatus === 'resolved'
       ? formatCurrency(appliedDeliveryFee)
-      : deliveryFeeStatus === 'requires_selection'
-        ? t('menu.cart.deliveryFeeNeedsExactAddress')
-        : deliveryFeeStatus === 'out_of_zone'
-          ? t('menu.cart.deliveryFeeOutOfZone')
-          : deliveryFeeStatus === 'unavailable'
-            ? t('menu.cart.deliveryFeeUnavailable')
-            : t('menu.cart.calculatingDeliveryFee');
+      : editMode
+        ? '—'
+        : deliveryFeeStatus === 'requires_selection'
+          ? t('menu.cart.deliveryFeeNeedsExactAddress')
+          : deliveryFeeStatus === 'out_of_zone'
+            ? t('menu.cart.deliveryFeeOutOfZone')
+            : deliveryFeeStatus === 'unavailable'
+              ? t('menu.cart.deliveryFeeUnavailable')
+              : t('menu.cart.calculatingDeliveryFee');
   const isCheckoutBlocked =
     uniqueCartItems.length === 0 ||
     isAppliedDiscountOverMax ||
     isSaving ||
     (isBelowMinimum && !editMode) ||
-    (isDeliveryOrder && deliveryFeeStatus !== 'resolved');
+    (isDeliveryOrder && deliveryFeeStatus !== 'resolved' && !editMode);
 
   return (
     <div

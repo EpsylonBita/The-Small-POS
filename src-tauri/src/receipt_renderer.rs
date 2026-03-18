@@ -240,6 +240,13 @@ pub struct OrderReceiptDoc {
     pub masked_card: Option<String>,
     #[serde(default)]
     pub order_notes: Vec<String>,
+    /// Set by order_completed_receipt / order_canceled_receipt entity types.
+    /// When Some, a status banner is rendered at the top of the receipt.
+    #[serde(default)]
+    pub status_label: Option<String>,
+    /// Cancellation reason shown under the CANCELED banner.
+    #[serde(default)]
+    pub cancellation_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -430,6 +437,8 @@ pub struct LayoutConfig {
     pub text_scale: f32,
     /// User-configurable logo scale (0.5–2.0, default 1.0).
     pub logo_scale: f32,
+    /// CSS font-weight for body text (400–800). Controlled by local_settings receipt/body_boldness.
+    pub body_font_weight: u32,
 }
 
 impl Default for LayoutConfig {
@@ -467,6 +476,7 @@ impl Default for LayoutConfig {
             raster_threshold: 160,
             text_scale: 1.25,
             logo_scale: 1.0,
+            body_font_weight: 400,
         }
     }
 }
@@ -1960,6 +1970,7 @@ fn html_shell(title: &str, body: &str, cfg: &LayoutConfig) -> String {
     let logo_w = (60.0_f32 * cfg.logo_scale).round();
     let logo_h = logo_w;
     let logo_font = (11.0_f32 * cfg.logo_scale).round();
+    let body_font_weight = cfg.body_font_weight;
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -1972,6 +1983,7 @@ fn html_shell(title: &str, body: &str, cfg: &LayoutConfig) -> String {
 *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32px 16px; min-height: 100vh; }}
 .receipt {{ background: #fff; width: 300px; padding: 28px 22px 24px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); color: #000; position: relative; }}
+.receipt {{ font-weight: {body_font_weight}; }}
 .receipt::before, .receipt::after {{ content: ''; position: absolute; left: 0; right: 0; height: 8px; background: repeating-linear-gradient(90deg, #fff 0 8px, transparent 8px 16px); }}
 .receipt::before {{ top: -8px; }}
 .receipt::after {{ bottom: -8px; }}
@@ -2039,6 +2051,12 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
 .section {{ margin-top: 8px; border-top: 1px dashed #999; padding-top: 6px; }}
 .note {{ color: #666; font-size: 9px; }}
 .center {{ text-align: center; }}
+
+/* Status banner (completed / canceled receipts) */
+.status-banner {{ text-align: center; padding: 6px 0; margin-bottom: 10px; font-weight: 700; font-size: 13px; letter-spacing: 1px; border-radius: 4px; }}
+.status-banner.completed {{ background: #e6f4ea; color: #1a7a34; border: 1px solid #a8d5b5; }}
+.status-banner.canceled {{ background: #fce8e8; color: #b00020; border: 1px solid #f5b8b8; }}
+.status-banner .cancel-reason {{ font-weight: 400; font-size: 10px; margin-top: 3px; }}
 </style>
 </head>
 <body><div class="receipt {template_cls}">{body}</div></body>
@@ -2075,6 +2093,28 @@ body {{ background: #2a2a2a; display: flex; justify-content: center; padding: 32
     )
 }
 
+/// Build the HTML for the status banner shown at the top of completed / canceled
+/// receipts. Returns an empty string when `doc.status_label` is `None`.
+fn build_status_banner_html(doc: &OrderReceiptDoc) -> String {
+    let Some(ref label) = doc.status_label else {
+        return String::new();
+    };
+    let css_class = if label.to_uppercase().contains("CANCEL") {
+        "canceled"
+    } else {
+        "completed"
+    };
+    let reason_html = doc
+        .cancellation_reason
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .map(|r| format!("<div class=\"cancel-reason\">{}</div>", esc(r)))
+        .unwrap_or_default();
+    // SAFETY: `label` is only ever set to compile-time literals ("✓ COMPLETED" / "✗ CANCELED").
+    // If `status_label` is ever made user-configurable, wrap `label` with `esc()`.
+    format!("<div class=\"status-banner {css_class}\"><div>{label}</div>{reason_html}</div>")
+}
+
 pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
     let is_modern = cfg.template == ReceiptTemplate::Modern;
     let lang = cfg.language.as_str();
@@ -2086,6 +2126,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             let order_type_display = translate_order_type(lang, &doc.order_type);
             let delivery_method_only_payment = delivery_payment_method_label(doc, lang);
             let mut body = String::new();
+            let banner = build_status_banner_html(doc);
+            body.push_str(&banner);
             append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
 
             if is_modern {
@@ -2758,6 +2800,8 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             let lang = cfg.language.as_str();
             let cur = cfg.currency_symbol.as_str();
             let mut body = String::new();
+            let banner = build_status_banner_html(doc);
+            body.push_str(&banner);
             append_html_header_block(&mut body, cfg, lang, cfg.show_logo);
             // Order info block
             body.push_str(&format!(

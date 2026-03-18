@@ -301,6 +301,18 @@ const StatusIndicator: React.FC<{ state: PrinterState }> = ({ state }) => {
   )
 }
 
+const RECEIPT_ACTION_KEYS = [
+  'after_order', 'payment_receipt', 'split_receipt', 'shift_close',
+  'driver_assigned', 'z_report', 'kitchen_ticket', 'on_complete', 'on_cancel',
+] as const
+type ReceiptActionKey = typeof RECEIPT_ACTION_KEYS[number]
+const RECEIPT_ACTION_DEFAULTS: Record<ReceiptActionKey, boolean> = {
+  after_order: true, payment_receipt: true, split_receipt: true, shift_close: true,
+  driver_assigned: true, z_report: true, kitchen_ticket: true,
+  on_complete: false, on_cancel: false,
+}
+const camelCase = (s: string) => s.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+
 const PrinterSettingsModal: React.FC<Props> = ({
   isOpen,
   onClose,
@@ -437,6 +449,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
     encoding: false,
     calibration: false,
     roleDefaults: true,
+    receiptActions: true,
   })
   const toggleSection = (key: string) => setOpenSections(prev => ({ ...prev, [key as keyof typeof prev]: !prev[key as keyof typeof prev] }))
 
@@ -448,6 +461,10 @@ const PrinterSettingsModal: React.FC<Props> = ({
   const previewTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewRequestIdRef = useRef(0)
   const textScaleAutoSwitchToastShownRef = useRef(false)
+
+  // Receipt action toggles and body boldness
+  const [receiptActions, setReceiptActions] = useState<Record<ReceiptActionKey, boolean>>(RECEIPT_ACTION_DEFAULTS)
+  const [bodyBoldness, setBodyBoldness] = useState<number>(1)
 
   // Load printers and statuses
   const loadPrinters = useCallback(async () => {
@@ -496,6 +513,26 @@ const PrinterSettingsModal: React.FC<Props> = ({
     } catch (e) {
       console.error('Failed to load receipt logo settings:', e)
       setLogoLoaded(true)
+    }
+  }, [bridge])
+
+  const loadReceiptActionSettings = useCallback(async () => {
+    try {
+      const results = await Promise.all(
+        RECEIPT_ACTION_KEYS.map(key =>
+          bridge.settings.get({ category: 'receipt_actions', key, defaultValue: RECEIPT_ACTION_DEFAULTS[key] })
+        )
+      )
+      const loaded = Object.fromEntries(
+        RECEIPT_ACTION_KEYS.map((key, i) => [key, parseBooleanSetting(results[i])])
+      ) as Record<ReceiptActionKey, boolean>
+      setReceiptActions(loaded)
+
+      const boldnessRaw = await bridge.settings.get({ category: 'receipt', key: 'body_boldness' })
+      const parsed = parseInt(String(boldnessRaw), 10)
+      setBodyBoldness(Number.isFinite(parsed) && parsed >= 1 && parsed <= 5 ? parsed : 1)
+    } catch (e) {
+      console.error('Failed to load receipt action settings:', e)
     }
   }, [bridge])
 
@@ -550,14 +587,42 @@ const PrinterSettingsModal: React.FC<Props> = ({
     [t],
   )
 
+  const handleReceiptActionToggle = useCallback(async (key: ReceiptActionKey) => {
+    const newValue = !receiptActions[key]
+    setReceiptActions(prev => ({ ...prev, [key]: newValue }))
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'receipt_actions',
+        settings: { [key]: newValue },
+      })
+    } catch (e) {
+      console.error('Failed to save receipt action setting:', e)
+      setReceiptActions(prev => ({ ...prev, [key]: !newValue }))
+      toast.error(t('settings.printer.saveFailed', 'Failed to save setting'))
+    }
+  }, [bridge, receiptActions, t])
+
+  const handleBodyBoldnessChange = useCallback(async (value: number) => {
+    setBodyBoldness(value)
+    try {
+      await bridge.settings.updateLocal({
+        settingType: 'receipt',
+        settings: { body_boldness: value },
+      })
+    } catch (e) {
+      console.error('Failed to save body boldness:', e)
+    }
+  }, [bridge])
+
   // Initial load (status updates are pushed by Rust monitor events)
   useEffect(() => {
     if (!isOpen) return
     loadPrinters()
     loadStatuses()
     loadReceiptLogoSettings()
+    loadReceiptActionSettings()
     return
-  }, [isOpen, loadPrinters, loadStatuses, loadReceiptLogoSettings])
+  }, [isOpen, loadPrinters, loadStatuses, loadReceiptLogoSettings, loadReceiptActionSettings])
 
   useEffect(() => {
     if (!isOpen) return
@@ -1225,6 +1290,20 @@ const PrinterSettingsModal: React.FC<Props> = ({
     )
   }
 
+  // Section header helper — shared across list and form views
+  const renderSectionHeader = (key: string, labelKey: string, labelDefault: string) => (
+    <button
+      type="button"
+      onClick={() => toggleSection(key)}
+      className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 hover:bg-white/8 transition-colors"
+    >
+      <span className="text-xs font-semibold text-white/90 uppercase tracking-wider">
+        {t(labelKey, labelDefault)}
+      </span>
+      <ChevronDown className={`w-3.5 h-3.5 text-white/50 transition-transform ${openSections[key as keyof typeof openSections] ? 'rotate-180' : ''}`} />
+    </button>
+  )
+
   // Render printer list view
   const renderListView = () => (
     <div className="space-y-4">
@@ -1367,6 +1446,65 @@ const PrinterSettingsModal: React.FC<Props> = ({
           })}
         </div>
       )}
+
+      {/* Automatic Receipt Actions — global terminal setting */}
+      {renderSectionHeader('receiptActions', 'settings.printer.receiptActions.sectionTitle', 'Automatic Receipt Actions')}
+      {openSections.receiptActions && (
+        <div className="space-y-1 pl-1">
+          {RECEIPT_ACTION_KEYS.slice(0, 7).map(key => (
+            <div key={key} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/5">
+              <span className="text-xs text-white/80">
+                {t(`settings.printer.receiptActions.${camelCase(key)}`, key)}
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/10 text-white/40">
+                  AUTO
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleReceiptActionToggle(key)}
+                  className={`relative w-9 h-5 rounded-full transition-colors ${
+                    receiptActions[key] ? 'bg-emerald-500/80' : 'bg-white/15'
+                  }`}
+                  aria-checked={receiptActions[key]}
+                  role="switch"
+                >
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                    receiptActions[key] ? 'translate-x-4' : 'translate-x-0.5'
+                  }`} />
+                </button>
+              </span>
+            </div>
+          ))}
+          <div className="flex items-center gap-2 py-1 px-2">
+            <div className="flex-1 border-t border-white/10" />
+            <span className="text-[10px] uppercase tracking-wider text-white/30">
+              {t('settings.printer.receiptActions.newTriggersLabel', 'New triggers')}
+            </span>
+            <div className="flex-1 border-t border-white/10" />
+          </div>
+          {RECEIPT_ACTION_KEYS.slice(7).map(key => (
+            <div key={key} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/5">
+              <span className="text-xs text-white/80">
+                {t(`settings.printer.receiptActions.${camelCase(key)}`, key)}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleReceiptActionToggle(key)}
+                className={`relative w-9 h-5 rounded-full transition-colors ${
+                  receiptActions[key] ? 'bg-emerald-500/80' : 'bg-white/15'
+                }`}
+                aria-checked={receiptActions[key]}
+                role="switch"
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                  receiptActions[key] ? 'translate-x-4' : 'translate-x-0.5'
+                }`} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 
@@ -1466,20 +1604,6 @@ const PrinterSettingsModal: React.FC<Props> = ({
         'Classic Text mode ignores exact text sizing on paper. Moving this control switches the draft to Raster Exact.',
       )
       : t('settings.printer.textScaleHint', 'Adjust the overall text size on printed receipts.')
-
-    // Section header helper
-    const renderSectionHeader = (key: string, labelKey: string, labelDefault: string) => (
-      <button
-        type="button"
-        onClick={() => toggleSection(key)}
-        className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-white/5 hover:bg-white/8 transition-colors"
-      >
-        <span className="text-xs font-semibold text-white/90 uppercase tracking-wider">
-          {t(labelKey, labelDefault)}
-        </span>
-        <ChevronDown className={`w-3.5 h-3.5 text-white/50 transition-transform ${openSections[key as keyof typeof openSections] ? 'rotate-180' : ''}`} />
-      </button>
-    )
 
     return (
       <div className="space-y-4">
@@ -1824,6 +1948,20 @@ const PrinterSettingsModal: React.FC<Props> = ({
                       'Using the receipt text-size control switches Classic Text to Raster Exact so the preview and printed output can honor the requested size.',
                     )}
                   </div>
+                )}
+                {/* Body Boldness Slider — receipt printers only */}
+                {formData.role === 'receipt' && (
+                  <ReceiptScaleSlider
+                    label={t('settings.printer.bodyBoldness', 'Body Boldness')}
+                    value={bodyBoldness}
+                    min={1}
+                    max={5}
+                    step={1}
+                    defaultValue={1}
+                    onChange={handleBodyBoldnessChange}
+                    hint={t('settings.printer.bodyBoldnessHint', 'Controls the weight of body text on printed receipts.')}
+                    resetLabel={t('settings.printer.resetToDefault', 'Reset')}
+                  />
                 )}
               </div>
             )}

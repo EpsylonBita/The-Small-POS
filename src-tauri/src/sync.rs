@@ -2199,6 +2199,7 @@ fn sanitize_orders_since_cursor(raw: Option<String>) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn mark_order_queue_as_queued_remote(
     db: &DbState,
     order_items: &[&SyncItem],
@@ -3264,6 +3265,10 @@ async fn reconcile_remote_orders(
                     .get("payment_status")
                     .and_then(Value::as_str)
                     .unwrap_or("pending");
+                let cancellation_reason = str_any(
+                    &remote_order,
+                    &["cancellation_reason", "cancellationReason"],
+                );
 
                 // Check if order has genuinely unsynced queue entries rather than
                 // relying on orders.sync_status which can be reset by concurrent edits.
@@ -3329,7 +3334,8 @@ async fn reconcile_remote_orders(
                                      payment_status = ?3,
                                      sync_status = 'synced',
                                      last_synced_at = datetime('now'),
-                                     updated_at = ?4
+                                     updated_at = ?4,
+                                     cancellation_reason = COALESCE(?6, cancellation_reason)
                                  WHERE id = ?5
                                    AND (
                                      COALESCE(supabase_id, '') != COALESCE(?1, '')
@@ -3337,8 +3343,16 @@ async fn reconcile_remote_orders(
                                      OR COALESCE(payment_status, '') != COALESCE(?3, '')
                                      OR COALESCE(sync_status, '') != 'synced'
                                      OR COALESCE(updated_at, '') != COALESCE(?4, '')
+                                     OR COALESCE(cancellation_reason, '') != COALESCE(?6, '')
                                    )",
-                                params![remote_id, status, payment_status, updated_at, local_id],
+                                params![
+                                    remote_id,
+                                    status,
+                                    payment_status,
+                                    updated_at,
+                                    local_id,
+                                    cancellation_reason.as_deref()
+                                ],
                             )
                             .unwrap_or(0);
                         if updated > 0 {
@@ -3380,14 +3394,59 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if let Some(status) = status_event {
+            if let Some(ref new_status) = status_event {
                 let _ = app.emit(
                     "order_status_updated",
                     serde_json::json!({
                         "orderId": local_id.clone(),
-                        "status": status
+                        "status": new_status
                     }),
                 );
+
+                // on_complete trigger — enqueue completed/delivered receipt
+                if matches!(new_status.as_str(), "completed" | "delivered")
+                    && crate::print::is_print_action_enabled(db, "on_complete")
+                {
+                    if let Err(e) =
+                        print::enqueue_print_job(db, "order_completed_receipt", &local_id, None)
+                    {
+                        warn!(
+                            order_id = %local_id,
+                            error = %e,
+                            "Failed to enqueue order_completed_receipt"
+                        );
+                    }
+                }
+
+                // on_cancel trigger — re-read reason after UPDATE to get server-provided value
+                if matches!(new_status.as_str(), "cancelled" | "canceled")
+                    && crate::print::is_print_action_enabled(db, "on_cancel")
+                {
+                    let reason: Option<String> = {
+                        let conn = db.conn.lock().unwrap();
+                        conn.query_row(
+                            "SELECT cancellation_reason FROM orders WHERE id = ?1",
+                            params![local_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten()
+                    };
+                    let payload = serde_json::json!({ "cancellationReason": reason });
+                    if let Err(e) = print::enqueue_print_job_with_payload(
+                        db,
+                        "order_canceled_receipt",
+                        &local_id,
+                        None,
+                        Some(&payload),
+                    ) {
+                        warn!(
+                            order_id = %local_id,
+                            error = %e,
+                            "Failed to enqueue order_canceled_receipt"
+                        );
+                    }
+                }
             }
         }
 
@@ -3422,7 +3481,7 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if !skip_auto_print {
+            if !skip_auto_print && crate::print::is_print_action_enabled(db, "after_order") {
                 for entity_type in auto_print_types {
                     if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
                         warn!(
@@ -4692,17 +4751,30 @@ async fn sync_order_batch_via_direct_api(
         let payload_value: Value =
             serde_json::from_str(payload).unwrap_or_else(|_| serde_json::json!({}));
 
-        let status = payload_value
+        let mut status = payload_value
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim()
             .to_string();
 
+        // If payload has no status (e.g. item or financial updates), read
+        // the current order status from the local DB so the PATCH still works.
+        if status.is_empty() {
+            let local_order = get_order_by_id(db, entity_id).unwrap_or(Value::Null);
+            status = local_order
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+        }
+
         if status.is_empty() {
             outcome.record_permanent_failure(
                 *queue_id,
-                "Permanent failure: update payload missing status field".to_string(),
+                "Permanent failure: update payload missing status field and order not found locally"
+                    .to_string(),
             );
             continue;
         }
@@ -4729,6 +4801,43 @@ async fn sync_order_batch_via_direct_api(
                 body.as_object_mut()
                     .unwrap()
                     .insert("notes".to_string(), notes.clone());
+            }
+        }
+
+        // Forward financial fields when present (from order_update_financials)
+        for &(camel, snake) in &[
+            ("totalAmount", "total_amount"),
+            ("subtotal", "subtotal"),
+            ("discountAmount", "discount_amount"),
+            ("discountPercentage", "discount_percentage"),
+            ("taxAmount", "tax_amount"),
+            ("deliveryFee", "delivery_fee"),
+            ("tipAmount", "tip_amount"),
+            ("paymentStatus", "payment_status"),
+            ("paymentMethod", "payment_method"),
+        ] {
+            if let Some(v) = payload_value.get(camel) {
+                if !v.is_null() {
+                    body.as_object_mut()
+                        .unwrap()
+                        .insert(snake.to_string(), v.clone());
+                }
+            }
+        }
+
+        // Forward item updates when present (from order_update_items)
+        if let Some(items) = payload_value.get("items") {
+            if !items.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert("items".to_string(), items.clone());
+            }
+        }
+        if let Some(order_notes) = payload_value.get("orderNotes") {
+            if !order_notes.is_null() {
+                body.as_object_mut()
+                    .unwrap()
+                    .insert("order_notes".to_string(), order_notes.clone());
             }
         }
 
@@ -4796,6 +4905,7 @@ async fn sync_order_batch_via_direct_api(
 ///
 /// Returns the server response JSON so the caller can extract
 /// `receipt_id` and any server-assigned IDs.
+#[allow(dead_code)]
 async fn sync_order_batch(
     db: &DbState,
     admin_url: &str,
@@ -7601,5 +7711,151 @@ mod tests {
             Some("completed"),
             "cancelled"
         ));
+    }
+
+    #[test]
+    fn test_on_complete_trigger_enqueues_when_enabled() {
+        let db = test_db();
+
+        // Insert a local order
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-complete', '[]', 20.0, 'pending', 'synced', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            // Enable the on_complete receipt action
+            crate::db::set_setting(&conn, "receipt_actions", "on_complete", "true")
+                .expect("set on_complete setting");
+        }
+
+        // Simulate what the reconciled_order_events loop does: enqueue when status is 'completed'
+        let new_status = "completed".to_string();
+        if matches!(new_status.as_str(), "completed" | "delivered")
+            && crate::print::is_print_action_enabled(&db, "on_complete")
+        {
+            print::enqueue_print_job(&db, "order_completed_receipt", "ord-complete", None)
+                .expect("enqueue order_completed_receipt");
+        }
+
+        // Verify a print job was created
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'order_completed_receipt' AND entity_id = 'ord-complete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "expected one order_completed_receipt print job");
+    }
+
+    #[test]
+    fn test_on_cancel_trigger_suppressed_when_disabled() {
+        let db = test_db();
+
+        // Insert a local order with a cancellation reason
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, cancellation_reason, created_at, updated_at)
+                 VALUES ('ord-cancel', '[]', 15.0, 'cancelled', 'synced', 'Out of stock', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            // Do NOT set on_cancel — it defaults to false (not in the always-enabled list)
+        }
+
+        // Simulate what the reconciled_order_events loop does: on_cancel is NOT enabled
+        let new_status = "cancelled".to_string();
+        if matches!(new_status.as_str(), "cancelled" | "canceled")
+            && crate::print::is_print_action_enabled(&db, "on_cancel")
+        {
+            // This block should NOT run because on_cancel is disabled by default
+            let payload = serde_json::json!({ "cancellationReason": "Out of stock" });
+            print::enqueue_print_job_with_payload(
+                &db,
+                "order_canceled_receipt",
+                "ord-cancel",
+                None,
+                Some(&payload),
+            )
+            .expect("enqueue order_canceled_receipt");
+        }
+
+        // Verify no print job was created
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'order_canceled_receipt' AND entity_id = 'ord-cancel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "expected no order_canceled_receipt print job when on_cancel is disabled"
+        );
+    }
+
+    #[test]
+    fn test_on_cancel_trigger_enqueues_when_enabled() {
+        let db = test_db();
+
+        // Enable on_cancel and insert an order with a cancellation reason
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES ('receipt_actions', 'on_cancel', 'true')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, cancellation_reason, created_at, updated_at)
+                 VALUES ('ord-cancel2', '[]', 10.0, 'cancelled', 'synced', 'Customer request', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        // Simulate the reconciled_order_events on_cancel path
+        let new_status = "cancelled".to_string();
+        if matches!(new_status.as_str(), "cancelled" | "canceled")
+            && crate::print::is_print_action_enabled(&db, "on_cancel")
+        {
+            let reason: Option<String> = {
+                let conn = db.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT cancellation_reason FROM orders WHERE id = ?1",
+                    rusqlite::params!["ord-cancel2"],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten()
+            };
+            let payload = serde_json::json!({ "cancellationReason": reason });
+            print::enqueue_print_job_with_payload(
+                &db,
+                "order_canceled_receipt",
+                "ord-cancel2",
+                None,
+                Some(&payload),
+            )
+            .expect("enqueue order_canceled_receipt");
+        }
+
+        // Verify the print job was created
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM print_jobs WHERE entity_type = 'order_canceled_receipt' AND entity_id = 'ord-cancel2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "expected one order_canceled_receipt print job when on_cancel is enabled"
+        );
     }
 }

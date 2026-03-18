@@ -885,7 +885,7 @@ pub async fn order_save_from_remote(
     // Skip auto-print for ghost orders and pending/split payment orders (receipt
     // will be printed after split payments are individually recorded).
     let skip_auto_print = is_ghost || payment_method.as_deref() == Some("pending");
-    if !skip_auto_print {
+    if !skip_auto_print && crate::print::is_print_action_enabled(&db, "after_order") {
         for entity_type in print::auto_print_entity_types_for_order_type(&order_type) {
             if let Err(error) = print::enqueue_print_job(&db, entity_type, &local_id, None) {
                 tracing::warn!(
@@ -1313,23 +1313,30 @@ pub async fn order_assign_driver(
 
     drop(conn);
 
+    // Use is_print_action_enabled (not setting_bool) so the default-true behaviour
+    // is preserved on fresh installs where the key is absent from local_settings.
+    let driver_assigned_print_enabled =
+        crate::print::is_print_action_enabled(&db, "driver_assigned");
+
     let assign_slip_payload = serde_json::json!({
         "slip_mode": "assign_driver",
         "driverId": driver_id,
         "driverName": driver_name,
     });
-    if let Err(error) = print::enqueue_print_job_with_payload(
-        &db,
-        "delivery_slip",
-        &order_id,
-        None,
-        Some(&assign_slip_payload),
-    ) {
-        tracing::warn!(
-            order_id = %order_id,
-            error = %error,
-            "Failed to enqueue delivery slip print job"
-        );
+    if driver_assigned_print_enabled {
+        if let Err(error) = print::enqueue_print_job_with_payload(
+            &db,
+            "delivery_slip",
+            &order_id,
+            None,
+            Some(&assign_slip_payload),
+        ) {
+            tracing::warn!(
+                order_id = %order_id,
+                error = %error,
+                "Failed to enqueue delivery slip print job"
+            );
+        }
     }
 
     let payload = serde_json::json!({
@@ -1643,7 +1650,16 @@ pub async fn orders_force_sync_retry(
         )
         .map_err(|e| e.to_string())?;
     if updated == 0 {
-        let fallback_payload = serde_json::json!({ "orderId": order_id_raw });
+        // Include current status so sync doesn't fail with "missing status field"
+        let current_status: String = conn
+            .query_row(
+                "SELECT status FROM orders WHERE id = ?1",
+                rusqlite::params![order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "pending".to_string());
+        let fallback_payload =
+            serde_json::json!({ "orderId": order_id_raw, "status": current_status });
         let idem = format!(
             "order:force-retry:{}:{}",
             order_id_raw,

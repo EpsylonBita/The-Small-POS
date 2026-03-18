@@ -231,6 +231,9 @@ pub async fn payment_print_split_receipt(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payment_id = parse_payment_id_payload(arg0)?;
+    if !crate::print::is_print_action_enabled(&db, "split_receipt") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
     // Use split_receipt entity type for the print pipeline
     let enqueue_result = crate::print::enqueue_print_job(&db, "split_receipt", &payment_id, None)?;
 

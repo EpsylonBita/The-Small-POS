@@ -1799,7 +1799,22 @@
       "sectionCalibration": "Βαθμονόμηση",
       "sectionRoleDefaults": "Ρόλος & Προεπιλογές",
       "livePreview": "Ζωντανή Προεπισκόπηση",
-      "previewLoading": "Δημιουργία προεπισκόπησης..."
+      "previewLoading": "Δημιουργία προεπισκόπησης...",
+      "receiptActions": {
+        "sectionTitle": "Αυτόματες Ενέργειες Απόδειξης",
+        "afterOrder": "Μετά την παραλαβή παραγγελίας",
+        "paymentReceipt": "Μετά την πληρωμή",
+        "splitReceipt": "Μετά τη διαιρεμένη πληρωμή",
+        "shiftClose": "Μετά το κλείσιμο βάρδιας",
+        "driverAssigned": "Όταν ανατεθεί οδηγός",
+        "zReport": "Κατά τη δημιουργία Z-Report",
+        "kitchenTicket": "Εισιτήριο κουζίνας",
+        "onComplete": "Όταν η παραγγελία ολοκληρωθεί / παραδοθεί",
+        "onCancel": "Όταν η παραγγελία ακυρωθεί",
+        "newTriggersLabel": "Νέες ενέργειες"
+      },
+      "bodyBoldness": "Έντονη γραφή κειμένου",
+      "bodyBoldnessHint": "Ελέγχει το πάχος του κειμένου στις αποδείξεις."
     },
     "display": {
       "title": "Ρυθμίσεις Οθόνης",

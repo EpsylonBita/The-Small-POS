@@ -556,6 +556,10 @@ pub async fn payment_print_receipt(
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     drop(conn);
 
+    if !crate::print::is_print_action_enabled(&db, "payment_receipt") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
+
     let enqueue_result = print::enqueue_print_job(&db, entity_type, &order_id, None)?;
 
     // Process the job immediately instead of waiting for the background worker
@@ -577,6 +581,9 @@ pub async fn kitchen_print_ticket(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let order_id = parse_order_id_payload(arg0)?;
+    if !crate::print::is_print_action_enabled(&db, "kitchen_ticket") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
     let enqueue_result = print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None)?;
 
     // Process the job immediately instead of waiting for the background worker
@@ -3336,6 +3343,8 @@ fn build_sample_receipt_doc() -> receipt_renderer::OrderReceiptDoc {
         driver_id: None,
         driver_name: None,
         delivery_slip_mode: Default::default(),
+        status_label: None,
+        cancellation_reason: None,
     }
 }
 

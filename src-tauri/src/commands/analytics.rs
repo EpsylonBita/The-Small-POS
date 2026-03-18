@@ -1045,6 +1045,9 @@ pub async fn report_print_z_report(
         Utc::now().timestamp_millis()
     );
 
+    if !crate::print::is_print_action_enabled(&db, "z_report") {
+        return Ok(serde_json::json!({ "success": true, "skipped": true }));
+    }
     print::enqueue_print_job_with_payload(&db, "z_report", &synthetic_id, None, Some(&snapshot))
 }
 
@@ -1107,18 +1110,20 @@ pub async fn report_submit_z_report(
         .or_else(|| extract_z_report_id_from_payload(&payload));
 
     if let Some(z_report_id) = z_report_id {
-        match print::enqueue_print_job(&db, "z_report", &z_report_id, None) {
-            Ok(job) => {
-                if let Some(obj) = result.as_object_mut() {
-                    obj.insert("autoPrintJob".to_string(), job);
+        if crate::print::is_print_action_enabled(&db, "z_report") {
+            match print::enqueue_print_job(&db, "z_report", &z_report_id, None) {
+                Ok(job) => {
+                    if let Some(obj) = result.as_object_mut() {
+                        obj.insert("autoPrintJob".to_string(), job);
+                    }
                 }
-            }
-            Err(error) => {
-                warn!(
-                    z_report_id = %z_report_id,
-                    error = %error,
-                    "Failed to enqueue automatic z-report print job"
-                );
+                Err(error) => {
+                    warn!(
+                        z_report_id = %z_report_id,
+                        error = %error,
+                        "Failed to enqueue automatic z-report print job"
+                    );
+                }
             }
         }
     }
