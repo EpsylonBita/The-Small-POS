@@ -1796,7 +1796,22 @@
       "sectionCalibration": "Calibrage",
       "sectionRoleDefaults": "Rôle & Défauts",
       "livePreview": "Aperçu en direct",
-      "previewLoading": "Génération de l'aperçu..."
+      "previewLoading": "Génération de l'aperçu...",
+      "receiptActions": {
+        "sectionTitle": "[NEEDS TRANSLATION] Automatic Receipt Actions",
+        "afterOrder": "[NEEDS TRANSLATION] After order placed",
+        "paymentReceipt": "[NEEDS TRANSLATION] After payment / checkout",
+        "splitReceipt": "[NEEDS TRANSLATION] After split payment",
+        "shiftClose": "[NEEDS TRANSLATION] After shift close",
+        "driverAssigned": "[NEEDS TRANSLATION] When driver assigned",
+        "zReport": "[NEEDS TRANSLATION] When Z-Report generated",
+        "kitchenTicket": "[NEEDS TRANSLATION] Kitchen ticket",
+        "onComplete": "[NEEDS TRANSLATION] When order completed / delivered",
+        "onCancel": "[NEEDS TRANSLATION] When order canceled",
+        "newTriggersLabel": "[NEEDS TRANSLATION] New triggers"
+      },
+      "bodyBoldness": "[NEEDS TRANSLATION] Body Boldness",
+      "bodyBoldnessHint": "[NEEDS TRANSLATION] Controls the weight of body text on printed receipts."
     },
     "display": {
       "title": "Paramètres d'affichage",
