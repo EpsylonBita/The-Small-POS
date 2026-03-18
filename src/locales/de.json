@@ -607,8 +607,10 @@
     },
     "itemModal": {
       "customizeTitle": "{{item}} anpassen",
+      "currentSelection": "Aktuelle Auswahl",
       "maxIngredientsHint": "(Max. {{count}} Zutaten)",
       "ingredientsSelected": "{{count}} Zutat(en) ausgewählt",
+      "selectedLabel": "Ausgewählt",
       "extraPrice": "(+{{price}})",
       "savory": "Herzhaft",
       "sweet": "Süß",

@@ -47,6 +47,40 @@ struct EffectiveZReportWindow {
     report_date: String,
     period_start_at: String,
     cutoff_at: Option<String>,
+    lower_bound_mode: LowerBoundMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LowerBoundMode {
+    Inclusive,
+    Exclusive,
+}
+
+impl LowerBoundMode {
+    fn sql_operator(self) -> &'static str {
+        match self {
+            Self::Inclusive => ">=",
+            Self::Exclusive => ">",
+        }
+    }
+
+    fn sql_predicate(self, expr: &str, parameter: &str) -> String {
+        format!("{expr} {} {parameter}", self.sql_operator())
+    }
+}
+
+fn resolve_lower_bound_mode(conn: &Connection) -> LowerBoundMode {
+    if business_day::stored_period_start(conn)
+        .as_deref()
+        .filter(|value| !business_day::is_epoch_timestamp(value))
+        .is_some()
+    {
+        LowerBoundMode::Exclusive
+    } else {
+        // When there is no committed prior Z-report, period_start_at is inferred
+        // from the earliest branch activity and must include that boundary row.
+        LowerBoundMode::Inclusive
+    }
 }
 
 fn default_report_date() -> String {
@@ -234,11 +268,14 @@ fn resolve_effective_z_report_window(
     branch_id: &str,
     payload: &Value,
 ) -> EffectiveZReportWindow {
+    let lower_bound_mode = resolve_lower_bound_mode(conn);
+
     if let Some(context) = load_pending_z_report_context(conn, branch_id) {
         return EffectiveZReportWindow {
             report_date: context.report_date,
             period_start_at: context.period_start_at,
             cutoff_at: Some(context.cutoff_at),
+            lower_bound_mode,
         };
     }
 
@@ -246,6 +283,7 @@ fn resolve_effective_z_report_window(
         report_date: str_field(payload, "date").unwrap_or_else(default_report_date),
         period_start_at: resolve_period_start_at(conn, branch_id, None),
         cutoff_at: None,
+        lower_bound_mode,
     }
 }
 
@@ -584,9 +622,11 @@ fn load_drawer_rows_for_period(
     conn: &Connection,
     period_start: &str,
     cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
 ) -> Result<Vec<Value>, String> {
+    let opened_at_predicate = lower_bound_mode.sql_predicate("cds.opened_at", "?1");
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT cds.id, cds.staff_shift_id, ss.staff_name,
                     cds.opening_amount, cds.expected_amount, cds.closing_amount,
                     cds.variance_amount, cds.total_cash_sales, cds.total_card_sales,
@@ -594,10 +634,10 @@ fn load_drawer_rows_for_period(
                     cds.total_staff_payments, cds.opened_at, cds.closed_at, cds.reconciled
              FROM cash_drawer_sessions cds
              LEFT JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
-             WHERE cds.opened_at > ?1
+             WHERE {opened_at_predicate}
                AND (?2 IS NULL OR cds.opened_at <= ?2)
-             ORDER BY cds.opened_at ASC",
-        )
+             ORDER BY cds.opened_at ASC"
+        ))
         .map_err(|e| format!("prepare drawer rows for period: {e}"))?;
 
     let rows = stmt
@@ -676,8 +716,10 @@ fn load_sales_by_type_for_period(
     branch_id: &str,
     period_start: &str,
     cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
 ) -> Result<Value, String> {
     let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
     let sql = format!(
         "SELECT
             CASE
@@ -689,7 +731,7 @@ fn load_sales_by_type_for_period(
             COALESCE(SUM(op.amount), 0)
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
-         WHERE {financial_expr} > ?1
+         WHERE {financial_predicate}
            AND (?2 IS NULL OR {financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND op.status = 'completed'
@@ -1083,19 +1125,21 @@ fn load_driver_unsettled_counts_for_period(
     conn: &Connection,
     period_start: &str,
     cutoff_at: Option<&str>,
+    lower_bound_mode: LowerBoundMode,
 ) -> Result<HashMap<String, i64>, String> {
+    let created_at_predicate = lower_bound_mode.sql_predicate("de.created_at", "?1");
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT de.driver_id, COUNT(*)
              FROM driver_earnings de
              LEFT JOIN orders o ON o.id = de.order_id
-             WHERE de.created_at > ?1
+             WHERE {created_at_predicate}
                AND (?2 IS NULL OR de.created_at <= ?2)
                AND COALESCE(de.settled, 0) = 0
                AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
                AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))
-             GROUP BY de.driver_id",
-        )
+             GROUP BY de.driver_id"
+        ))
         .map_err(|e| format!("prepare driver unsettled counts for period: {e}"))?;
 
     let rows = stmt
@@ -2265,6 +2309,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let date = window.report_date.clone();
     let period_start = window.period_start_at.clone();
     let cutoff_at = window.cutoff_at.clone();
+    let lower_bound_mode = window.lower_bound_mode;
     let cutoff_param = cutoff_at.as_deref();
 
     info!(
@@ -2276,20 +2321,21 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     );
 
     // --- Query all closed shifts since period_start for this branch ---
+    let shift_start_predicate = lower_bound_mode.sql_predicate("check_in_time", "?1");
     let mut shift_stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT id, staff_id, staff_name, role_type, status,
                     opening_cash_amount, closing_cash_amount,
                     expected_cash_amount, cash_variance,
                     check_in_time, check_out_time, branch_id, terminal_id,
                     calculation_version
              FROM staff_shifts
-             WHERE check_in_time > ?1
+             WHERE {shift_start_predicate}
                AND (branch_id = ?2 OR branch_id IS NULL)
                AND status = 'closed'
                AND (?3 IS NULL OR COALESCE(check_out_time, check_in_time) <= ?3)
-             ORDER BY check_in_time ASC",
-        )
+             ORDER BY check_in_time ASC"
+        ))
         .map_err(|e| format!("prepare shift query: {e}"))?;
 
     let shifts: Vec<ReportStaffShift> = shift_stmt
@@ -2319,13 +2365,14 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     // --- Aggregate orders across all shifts in the period ---
     let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
     let order_agg_sql = format!(
         "SELECT COUNT(*) as cnt,
                 COALESCE(SUM(o.total_amount), 0) as gross,
                 COALESCE(SUM(o.discount_amount), 0) as discounts,
                 COALESCE(SUM(o.tip_amount), 0) as tips
          FROM orders o
-         WHERE {financial_expr} > ?1
+         WHERE {financial_predicate}
            AND (?2 IS NULL OR {financial_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
@@ -2350,11 +2397,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     // --- Payments: breakdown by method across all shifts ---
     let payment_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let payment_scope_predicate = lower_bound_mode.sql_predicate(&payment_scope_expr, "?1");
     let payment_scope_sql = format!(
         "SELECT op.method, COUNT(*) as cnt, COALESCE(SUM(op.amount), 0) as total
          FROM order_payments op
          JOIN orders o ON o.id = op.order_id
-         WHERE {payment_scope_expr} > ?1
+         WHERE {payment_scope_predicate}
            AND (?2 IS NULL OR {payment_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND op.status = 'completed'
@@ -2403,11 +2451,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     // --- Adjustments: refunds and voids across all shifts ---
     let adjustment_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let adjustment_scope_predicate = lower_bound_mode.sql_predicate(&adjustment_scope_expr, "?1");
     let adjustment_scope_sql = format!(
         "SELECT pa.adjustment_type, COALESCE(SUM(pa.amount), 0)
          FROM payment_adjustments pa
          JOIN orders o ON o.id = pa.order_id
-         WHERE {adjustment_scope_expr} > ?1
+         WHERE {adjustment_scope_predicate}
            AND (?2 IS NULL OR {adjustment_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
@@ -2439,10 +2488,13 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     // --- Expenses (excluding staff_payment type) across all shifts ---
     let expenses_total: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
-             WHERE created_at > ?1
+            &format!(
+                "SELECT COALESCE(SUM(amount), 0) FROM shift_expenses
+             WHERE {}
                AND (?2 IS NULL OR created_at <= ?2)
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
+                lower_bound_mode.sql_predicate("created_at", "?1")
+            ),
             params![period_start, cutoff_param],
             |row| row.get(0),
         )
@@ -2450,15 +2502,16 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     // Expense items for report_json
     let mut exp_stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT se.id, se.expense_type, se.amount, se.description, se.created_at, ss.staff_name
              FROM shift_expenses se
              LEFT JOIN staff_shifts ss ON ss.id = se.staff_shift_id
-             WHERE se.created_at > ?1
+             WHERE {}
                AND (?2 IS NULL OR se.created_at <= ?2)
                AND (se.expense_type IS NULL OR se.expense_type != 'staff_payment')
              ORDER BY se.created_at ASC",
-        )
+            lower_bound_mode.sql_predicate("se.created_at", "?1")
+        ))
         .map_err(|e| format!("prepare expense query: {e}"))?;
 
     let expense_items: Vec<Value> = exp_stmt
@@ -2479,7 +2532,8 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     // --- Cash drawer sessions (aggregate across all shifts) ---
     let mut drawer_agg = conn
         .query_row(
-            "SELECT COALESCE(SUM(opening_amount), 0),
+            &format!(
+                "SELECT COALESCE(SUM(opening_amount), 0),
                     COALESCE(SUM(closing_amount), 0),
                     COALESCE(SUM(expected_amount), 0),
                     COALESCE(SUM(variance_amount), 0),
@@ -2493,8 +2547,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
                     SUM(CASE WHEN (reconciled = 0 OR reconciled IS NULL) THEN 1 ELSE 0 END),
                     COALESCE(SUM(total_staff_payments), 0)
              FROM cash_drawer_sessions
-             WHERE opened_at > ?1
+             WHERE {}
                AND (?2 IS NULL OR opened_at <= ?2)",
+                lower_bound_mode.sql_predicate("opened_at", "?1")
+            ),
             params![period_start, cutoff_param],
             |row| {
                 Ok(serde_json::json!({
@@ -2543,10 +2599,11 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 
     // --- Order type breakdown across all shifts in the period ---
     let order_type_scope_expr = business_day::order_financial_timestamp_expr("o");
+    let order_type_scope_predicate = lower_bound_mode.sql_predicate(&order_type_scope_expr, "?1");
     let order_type_scope_sql = format!(
         "SELECT COALESCE(o.order_type, 'dine-in'), COUNT(*), COALESCE(SUM(o.total_amount), 0)
          FROM orders o
-         WHERE {order_type_scope_expr} > ?1
+         WHERE {order_type_scope_predicate}
            AND (?2 IS NULL OR {order_type_scope_expr} <= ?2)
            AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
            AND COALESCE(o.is_ghost, 0) = 0
@@ -2599,21 +2656,27 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     // --- Staff payments total across all shifts ---
     let staff_payments_total: f64 = conn
         .query_row(
-            "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
-             WHERE created_at > ?1
+            &format!(
+                "SELECT COALESCE(SUM(amount), 0) FROM staff_payments
+             WHERE {}
                AND (?2 IS NULL OR created_at <= ?2)",
+                lower_bound_mode.sql_predicate("created_at", "?1")
+            ),
             params![period_start, cutoff_param],
             |row| row.get(0),
         )
         .unwrap_or(0.0);
     let pending_expenses_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*)
+            &format!(
+                "SELECT COUNT(*)
              FROM shift_expenses
-             WHERE created_at > ?1
+             WHERE {}
                AND (?2 IS NULL OR created_at <= ?2)
                AND status = 'pending'
                AND (expense_type IS NULL OR expense_type != 'staff_payment')",
+                lower_bound_mode.sql_predicate("created_at", "?1")
+            ),
             params![period_start, cutoff_param],
             |row| row.get(0),
         )
@@ -2663,9 +2726,15 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "card": { "count": card_count, "total": card_sales },
         "other": { "count": other_count, "total": other_sales },
     });
-    let sales_by_type =
-        load_sales_by_type_for_period(&conn, branch_id.as_str(), &period_start, cutoff_param)?;
-    let drawer_rows = load_drawer_rows_for_period(&conn, &period_start, cutoff_param)?;
+    let sales_by_type = load_sales_by_type_for_period(
+        &conn,
+        branch_id.as_str(),
+        &period_start,
+        cutoff_param,
+        lower_bound_mode,
+    )?;
+    let drawer_rows =
+        load_drawer_rows_for_period(&conn, &period_start, cutoff_param, lower_bound_mode)?;
     let cash_breakdown_lookup = driver_cash_breakdown
         .iter()
         .chain(waiter_cash_breakdown.iter())
@@ -2683,7 +2752,12 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         .collect::<Result<Vec<_>, _>>()?;
     let driver_summary = build_driver_summary(
         &staff_reports,
-        &load_driver_unsettled_counts_for_period(&conn, &period_start, cutoff_param)?,
+        &load_driver_unsettled_counts_for_period(
+            &conn,
+            &period_start,
+            cutoff_param,
+            lower_bound_mode,
+        )?,
     );
 
     // Build Electron-compatible report_json
@@ -2940,9 +3014,12 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let unpaid_financial_expr = business_day::order_financial_timestamp_expr("o");
+        let unpaid_lower_bound = window
+            .lower_bound_mode
+            .sql_predicate(&unpaid_financial_expr, "?1");
         let unpaid_sql = format!(
             "SELECT COUNT(*) FROM orders o
-             WHERE {unpaid_financial_expr} > ?1
+             WHERE {unpaid_lower_bound}
                AND (?2 IS NULL OR {unpaid_financial_expr} <= ?2)
                AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
                AND COALESCE(o.is_ghost, 0) = 0
@@ -4182,6 +4259,36 @@ mod tests {
         assert_eq!(report_json_str["expenses"]["staffPaymentsTotal"], 0.0);
         assert_eq!(report_json_str["expenses"]["pendingCount"], 1);
         assert_eq!(report_json_str["drawers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_generate_z_report_for_date_includes_first_shift_at_inferred_period_start() {
+        let db = test_db();
+        seed_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let result =
+            generate_z_report_for_date(&db, &payload).expect("inferred-period-start generate");
+
+        assert_eq!(result["success"], true);
+        let report_json = result["report"]["reportJson"]
+            .as_object()
+            .expect("reportJson object");
+        let staff_reports = report_json["staffReports"]
+            .as_array()
+            .expect("staffReports array");
+        assert_eq!(
+            staff_reports.len(),
+            1,
+            "should include the first closed shift at inferred period start"
+        );
+        assert_eq!(staff_reports[0]["staffShiftId"], "shift-zr-1");
+        assert_eq!(report_json["cashDrawer"]["openingTotal"], 200.0);
+        assert_eq!(report_json["cashDrawer"]["cashSales"], 60.0);
+        assert_eq!(report_json["drawers"].as_array().unwrap().len(), 1);
     }
 
     #[test]

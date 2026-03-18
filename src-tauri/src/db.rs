@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 34;
+const CURRENT_SCHEMA_VERSION: i32 = 35;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -239,6 +239,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 34 {
         migrate_v34(conn)?;
+    }
+    if current < 35 {
+        migrate_v35(conn)?;
     }
 
     Ok(())
@@ -2345,6 +2348,46 @@ fn migrate_v34(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Migration v35: mark previously closed drawers as reconciled.
+///
+/// Cashier/manager closeout already captures the counted closing cash and
+/// computes expected/variance, so historical drawers that were closed before
+/// the reconciliation flag was wired up should not remain permanently
+/// unreconciled in reports.
+fn migrate_v35(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "UPDATE cash_drawer_sessions
+         SET reconciled = 1,
+             reconciled_at = COALESCE(
+                 reconciled_at,
+                 closed_at,
+                 (
+                     SELECT check_out_time
+                     FROM staff_shifts
+                     WHERE staff_shifts.id = cash_drawer_sessions.staff_shift_id
+                 )
+             ),
+             reconciled_by = COALESCE(
+                 reconciled_by,
+                 (
+                     SELECT closed_by
+                     FROM staff_shifts
+                     WHERE staff_shifts.id = cash_drawer_sessions.staff_shift_id
+                 )
+             )
+         WHERE closed_at IS NOT NULL
+           AND COALESCE(reconciled, 0) = 0",
+        [],
+    )
+    .map_err(|e| format!("migration v35 backfill closed drawers: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (35)", [])
+        .map_err(|e| format!("migration v35 mark schema version: {e}"))?;
+
+    info!("Applied migration v35 (backfilled closed cash drawers as reconciled)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -4009,6 +4052,85 @@ mod tests {
             verified_json.get("emulation").and_then(Value::as_str),
             Some("escpos")
         );
+    }
+
+    #[test]
+    fn test_migration_v35_backfills_closed_drawers_as_reconciled() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            INSERT INTO schema_version (version) VALUES (34);
+
+            CREATE TABLE staff_shifts (
+                id TEXT PRIMARY KEY,
+                check_out_time TEXT,
+                closed_by TEXT
+            );
+
+            CREATE TABLE cash_drawer_sessions (
+                id TEXT PRIMARY KEY,
+                staff_shift_id TEXT NOT NULL,
+                closed_at TEXT,
+                reconciled INTEGER DEFAULT 0,
+                reconciled_at TEXT,
+                reconciled_by TEXT
+            );
+            ",
+        )
+        .expect("create minimal v34 schema");
+
+        conn.execute(
+            "INSERT INTO staff_shifts (id, check_out_time, closed_by)
+             VALUES ('shift-closed', '2026-03-18T12:10:00Z', 'cashier-7')",
+            [],
+        )
+        .expect("insert closed shift");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, closed_at, reconciled, reconciled_at, reconciled_by
+             ) VALUES (
+                'drawer-closed', 'shift-closed', '2026-03-18T12:10:00Z', 0, NULL, NULL
+             )",
+            [],
+        )
+        .expect("insert unreconciled closed drawer");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, closed_at, reconciled, reconciled_at, reconciled_by
+             ) VALUES (
+                'drawer-open', 'shift-closed', NULL, 0, NULL, NULL
+             )",
+            [],
+        )
+        .expect("insert open drawer");
+
+        migrate_v35(&conn).expect("migration v35");
+
+        let (reconciled, reconciled_at, reconciled_by): (i64, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT reconciled, reconciled_at, reconciled_by
+                 FROM cash_drawer_sessions
+                 WHERE id = 'drawer-closed'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read closed drawer");
+        assert_eq!(reconciled, 1);
+        assert_eq!(reconciled_at.as_deref(), Some("2026-03-18T12:10:00Z"));
+        assert_eq!(reconciled_by.as_deref(), Some("cashier-7"));
+
+        let open_reconciled: i64 = conn
+            .query_row(
+                "SELECT reconciled FROM cash_drawer_sessions WHERE id = 'drawer-open'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read open drawer");
+        assert_eq!(open_reconciled, 0, "open drawers should stay unreconciled");
     }
 
     #[test]

@@ -6454,22 +6454,6 @@ fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
             .unwrap_or(0);
 
         if existing == 0 {
-            // Read the shift payload from the local table to rebuild the sync payload
-            let payload: Option<String> = conn
-                .query_row(
-                    "SELECT json_object(
-                        'staffId', staff_id,
-                        'staffName', staff_name,
-                        'roleType', role_type,
-                        'openingCash', COALESCE(opening_cash, 0),
-                        'checkInTime', check_in_time,
-                        'status', status
-                     ) FROM staff_shifts WHERE id = ?1",
-                    params![shift_id],
-                    |row| row.get(0),
-                )
-                .ok();
-
             let idem_key = format!("shift:requeue:{}:{}", shift_id, uuid::Uuid::new_v4());
             let status_str = conn
                 .query_row(
@@ -6483,6 +6467,123 @@ fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
                 "update"
             } else {
                 "insert"
+            };
+
+            let payload: Option<String> = if operation == "update" {
+                conn.query_row(
+                    "SELECT json_object(
+                        'shiftId', ss.id,
+                        'staffId', ss.staff_id,
+                        'staffName', ss.staff_name,
+                        'branchId', ss.branch_id,
+                        'terminalId', ss.terminal_id,
+                        'roleType', ss.role_type,
+                        'openingCash', COALESCE(ss.opening_cash_amount, 0),
+                        'checkInTime', ss.check_in_time,
+                        'checkOutTime', ss.check_out_time,
+                        'calculationVersion', COALESCE(ss.calculation_version, 2),
+                        'totalOrdersCount', COALESCE(ss.total_orders_count, 0),
+                        'totalSalesAmount', COALESCE(ss.total_sales_amount, 0),
+                        'totalCashSales', COALESCE(ss.total_cash_sales, 0),
+                        'totalCardSales', COALESCE(ss.total_card_sales, 0),
+                        'closingCash', ss.closing_cash_amount,
+                        'expectedCash', ss.expected_cash_amount,
+                        'variance', ss.cash_variance,
+                        'closedBy', ss.closed_by,
+                        'paymentAmount', ss.payment_amount,
+                        'cashDrawer', CASE
+                            WHEN cds.id IS NOT NULL THEN json_object(
+                                'id', cds.id,
+                                'cashierId', cds.cashier_id,
+                                'openingAmount', COALESCE(cds.opening_amount, 0),
+                                'closingAmount', cds.closing_amount,
+                                'expectedAmount', cds.expected_amount,
+                                'varianceAmount', cds.variance_amount,
+                                'totalCashSales', COALESCE(cds.total_cash_sales, 0),
+                                'totalCardSales', COALESCE(cds.total_card_sales, 0),
+                                'totalRefunds', COALESCE(cds.total_refunds, 0),
+                                'totalExpenses', COALESCE(cds.total_expenses, 0),
+                                'cashDrops', COALESCE(cds.cash_drops, 0),
+                                'driverCashGiven', COALESCE(cds.driver_cash_given, 0),
+                                'driverCashReturned', COALESCE(cds.driver_cash_returned, 0),
+                                'totalStaffPayments', COALESCE(cds.total_staff_payments, 0),
+                                'openedAt', cds.opened_at,
+                                'closedAt', cds.closed_at,
+                                'reconciled', CASE WHEN COALESCE(cds.reconciled, 0) = 0 THEN json('false') ELSE json('true') END,
+                                'reconciledAt', cds.reconciled_at,
+                                'reconciledBy', cds.reconciled_by
+                            )
+                            ELSE NULL
+                        END,
+                        'returnedCashTargetCashierShiftId', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
+                            ELSE NULL
+                        END,
+                        'returnedCashTargetDrawerId', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN (
+                                SELECT id
+                                FROM cash_drawer_sessions
+                                WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                                LIMIT 1
+                            )
+                            ELSE NULL
+                        END,
+                        'returnedCashAmount', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.closing_cash_amount, 0)
+                            ELSE NULL
+                        END,
+                        'resolvedCashierShiftId', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
+                            ELSE NULL
+                        END,
+                        'resolvedCashierDrawerId', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN (
+                                SELECT id
+                                FROM cash_drawer_sessions
+                                WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                                LIMIT 1
+                            )
+                            ELSE NULL
+                        END
+                     )
+                     FROM staff_shifts ss
+                     LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                     WHERE ss.id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .ok()
+            } else {
+                conn.query_row(
+                    "SELECT json_object(
+                        'shiftId', ss.id,
+                        'staffId', ss.staff_id,
+                        'staffName', ss.staff_name,
+                        'branchId', ss.branch_id,
+                        'terminalId', ss.terminal_id,
+                        'roleType', ss.role_type,
+                        'openingCash', COALESCE(ss.opening_cash_amount, 0),
+                        'checkInTime', ss.check_in_time,
+                        'calculationVersion', COALESCE(ss.calculation_version, 2),
+                        'responsibleCashierShiftId', ss.transferred_to_cashier_shift_id,
+                        'responsibleCashierDrawerId', (
+                            SELECT id
+                            FROM cash_drawer_sessions
+                            WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                            LIMIT 1
+                        ),
+                        'startingAmountSourceCashierShiftId', ss.transferred_to_cashier_shift_id,
+                        'borrowedStartingAmount', CASE
+                            WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.opening_cash_amount, 0)
+                            ELSE NULL
+                        END
+                     )
+                     FROM staff_shifts ss
+                     WHERE ss.id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .ok()
             };
 
             let _ = conn.execute(

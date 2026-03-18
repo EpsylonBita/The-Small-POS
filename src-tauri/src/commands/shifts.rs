@@ -677,10 +677,13 @@ pub async fn shift_record_staff_payment(
     let sync_payload = serde_json::json!({
         "id": payment_id,
         "cashierShiftId": cashier_shift_id,
+        "paidByCashierShiftId": cashier_shift_id,
         "paidToStaffId": paid_to_staff_id,
         "amount": amount,
         "paymentType": payment_type,
-        "notes": notes
+        "notes": notes,
+        "createdAt": created_at,
+        "updatedAt": created_at,
     });
     let idem = format!("staff-payment:{}:{}", payment_id, uuid::Uuid::new_v4());
     let _ = conn.execute(

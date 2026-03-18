@@ -607,8 +607,10 @@
     },
     "itemModal": {
       "customizeTitle": "Προσαρμόστε το {{item}} σας",
+      "currentSelection": "Τρέχουσα επιλογή",
       "maxIngredientsHint": "(Μέγιστο {{count}} υλικά)",
       "ingredientsSelected": "{{count}} υλικό/ά επιλεγμένο/α",
+      "selectedLabel": "Επιλεγμένα",
       "extraPrice": "(+{{price}})",
       "savory": "Αλμυρά",
       "sweet": "Γλυκά",

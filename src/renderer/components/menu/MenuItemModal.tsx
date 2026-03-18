@@ -212,6 +212,12 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     }
   };
 
+  const handleSelectedIngredientRemove = (ingredientId: string) => {
+    setSelectedIngredients(prev =>
+      prev.filter(si => si.ingredient.id !== ingredientId)
+    );
+  };
+
   const handleAddToCart = () => {
     onAddToCart(menuItem, quantity, selectedIngredients, notes);
     onClose();
@@ -276,6 +282,21 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
     }, {} as { [key: string]: Ingredient[] });
   }, [filteredIngredients]);
 
+  const selectedExtras = useMemo(
+    () => selectedIngredients.filter(si => !si.isWithout),
+    [selectedIngredients]
+  );
+
+  const selectedWithoutItems = useMemo(
+    () => selectedIngredients.filter(si => si.isWithout),
+    [selectedIngredients]
+  );
+
+  const totalSelectedExtrasCount = useMemo(
+    () => selectedExtras.reduce((sum, si) => sum + si.quantity, 0),
+    [selectedExtras]
+  );
+
   return (
     <>
       {/* Backdrop */}
@@ -285,38 +306,38 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
       />
 
       {/* Modal Container */}
-      <div role="dialog" aria-modal="true" className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[95vh] z-[1101] flex flex-col">
+      <div role="dialog" aria-modal="true" className="liquid-glass-modal-shell fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-5xl max-h-[98vh] z-[1101] flex flex-col">
         {/* Non-scrolling Header */}
-        <div className="flex-shrink-0 px-6 pt-4 pb-2 space-y-3">
+        <div className="flex-shrink-0 px-5 pt-3 pb-1.5 space-y-2">
           {/* Title row with mode toggles and close */}
           <div className="flex items-center justify-between">
             <div>
-              <h3 className="text-lg font-semibold liquid-glass-modal-text">
+              <h3 className="text-[1.05rem] font-semibold liquid-glass-modal-text">
                 {menuItem.is_customizable
                   ? t('menu.itemModal.customizeTitle', { item: menuItem.name })
                   : t('menu.itemModal.extrasTitle') || 'Extras & Modifications'}
               </h3>
               {menuItem.is_customizable && menuItem.max_ingredients && (
-                <p className="text-sm liquid-glass-modal-text-muted mt-1">
+                <p className="text-xs liquid-glass-modal-text-muted mt-0.5">
                   {t('menu.itemModal.maxIngredientsHint', { count: menuItem.max_ingredients })}
                 </p>
               )}
               {!menuItem.is_customizable && (
-                <p className="text-sm liquid-glass-modal-text-muted mt-1">
+                <p className="text-xs liquid-glass-modal-text-muted mt-0.5">
                   {t('menu.itemModal.extrasHint') || 'Add extras or mark ingredients as "without"'}
                 </p>
               )}
             </div>
 
             {/* Mode Toggles + Close button */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               {/* Without Mode Toggle - Red glow */}
               <button
                 onClick={() => {
                   setIsWithoutMode(!isWithoutMode);
                   if (!isWithoutMode) setIsLittleMode(false);
                 }}
-                className={`px-4 py-2 rounded-full font-semibold text-sm transition-all duration-300 ${
+                className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
                   isWithoutMode
                     ? 'bg-red-500 text-white shadow-[0_0_20px_rgba(239,68,68,0.6),0_0_40px_rgba(239,68,68,0.3)] scale-105 border-2 border-red-300'
                     : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-red-100 dark:hover:bg-red-900/30 hover:border-red-300 dark:hover:border-red-700'
@@ -336,7 +357,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   setIsLittleMode(!isLittleMode);
                   if (!isLittleMode) setIsWithoutMode(false);
                 }}
-                className={`px-4 py-2 rounded-full font-semibold text-sm transition-all duration-300 ${
+                className={`px-3.5 py-1.5 rounded-full font-semibold text-sm transition-all duration-300 ${
                   isLittleMode
                     ? 'bg-orange-500 text-white shadow-[0_0_20px_rgba(249,115,22,0.6),0_0_40px_rgba(249,115,22,0.3)] scale-105 border-2 border-orange-300'
                     : 'bg-gray-200/50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 border-2 border-transparent hover:bg-orange-100 dark:hover:bg-orange-900/30 hover:border-orange-300 dark:hover:border-orange-700'
@@ -353,10 +374,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               {/* Close button */}
               <button
                 onClick={onClose}
-                className="liquid-glass-modal-button p-2 min-h-0 min-w-0"
+                className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
                 aria-label={t('common.actions.close')}
               >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
@@ -373,7 +394,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
               value={ingredientSearch}
               onChange={(e) => setIngredientSearch(e.target.value)}
               placeholder={t('menu.itemModal.searchIngredients', 'Search ingredients...')}
-              className="w-full pl-9 pr-8 py-2 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-full pl-9 pr-8 py-1.5 rounded-lg bg-white/10 border border-white/20 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
             {ingredientSearch && (
               <button
@@ -386,10 +407,10 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
           </div>
 
           {/* Flavor Type Tabs */}
-          <div className="flex gap-2 pb-3 border-b liquid-glass-modal-border">
+          <div className="flex gap-2 pb-2 border-b liquid-glass-modal-border">
                   <button
                     onClick={() => setActiveFlavorType('savory')}
-                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'savory'
+                    className={`px-3.5 py-1.5 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'savory'
                         ? 'bg-orange-500 text-white shadow-lg'
                         : 'liquid-glass-modal-button'
                       }`}
@@ -398,7 +419,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                   </button>
                   <button
                     onClick={() => setActiveFlavorType('sweet')}
-                    className={`px-4 py-2 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'sweet'
+                    className={`px-3.5 py-1.5 rounded-full font-medium transition-all duration-200 ${activeFlavorType === 'sweet'
                         ? 'bg-pink-500 text-white shadow-lg'
                         : 'liquid-glass-modal-button'
                       }`}
@@ -409,8 +430,8 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         </div>
 
         {/* Scrollable Ingredients Body */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 pb-4 min-h-0 pos-scrollbar-glass">
-          <div className="space-y-6">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-5 pb-2 min-h-0 pos-scrollbar-glass">
+          <div className="space-y-4">
                   {Object.keys(filteredByColor).length === 0 ? (
                     <div className="text-center py-8 liquid-glass-modal-text-muted">
                       <p>No ingredients available for this filter.</p>
@@ -423,7 +444,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                       return (
                       <div key={color}>
                         {/* Color Header with Category Name */}
-                        <div className="flex items-center gap-2 mb-3">
+                        <div className="flex items-center gap-2 mb-2">
                           <span
                             className="h-4 w-4 rounded-full border-2 shadow-lg"
                             style={{
@@ -437,7 +458,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
                         </div>
 
                         {/* Ingredients Grid */}
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
                           {ingredients.map((ingredient) => {
                             const isSelected = isIngredientSelected(ingredient);
                             const selectedItem = selectedIngredients.find(si => si.ingredient.id === ingredient.id);
@@ -600,23 +621,120 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
         </div>
 
         {/* Footer - Compact */}
-        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-6 py-3 space-y-3 bg-black/40 backdrop-blur-sm relative z-10">
+        <div className="flex-shrink-0 border-t liquid-glass-modal-border px-5 py-2 space-y-2 bg-black/40 backdrop-blur-sm relative z-10">
+          {selectedIngredients.length > 0 && (
+            <div className="rounded-xl border border-white/10 bg-black/25 px-2.5 py-1.5 shadow-[0_8px_24px_rgba(0,0,0,0.18)]">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 shrink-0 whitespace-nowrap">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.18em] liquid-glass-modal-text-muted">
+                    {t('menu.itemModal.currentSelection', { defaultValue: 'Current selection' })}
+                  </span>
+                  {totalSelectedExtrasCount > 0 && (
+                    <span className="text-xs liquid-glass-modal-text-muted">
+                      {t('menu.itemModal.ingredientsSelected', { count: totalSelectedExtrasCount })}
+                      {ingredientPrice > 0 && (
+                        <span className="ml-1 text-green-500 font-semibold">
+                          {t('menu.itemModal.extraPrice', {
+                            price: formatCurrency(ingredientPrice)
+                          })}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {selectedWithoutItems.length > 0 && (
+                    <span className="text-xs text-red-400 inline-flex items-center gap-1">
+                      <Ban className="w-3 h-3 flex-shrink-0" />
+                      {t('menu.itemModal.withoutCount', { count: selectedWithoutItems.length })}
+                    </span>
+                  )}
+                  <span className="text-[11px] liquid-glass-modal-text-muted">
+                    {menuItem.max_ingredients
+                      ? `${selectedIngredients.length}/${menuItem.max_ingredients}`
+                      : selectedIngredients.length}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden pos-scrollbar-glass">
+                  <div className="flex items-center gap-1.5 w-max min-w-full pb-0.5">
+                    {selectedExtras.map((selectedItem) => {
+                      const ingredientName = getIngredientName(selectedItem.ingredient);
+                      const priceImpact = getIngredientUnitPrice(selectedItem.ingredient) * selectedItem.quantity;
+
+                      return (
+                        <span
+                          key={`selected-${selectedItem.ingredient.id}`}
+                          className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-blue-500/15 text-blue-700 dark:bg-blue-500/25 dark:text-blue-200 border border-blue-500/20"
+                        >
+                          <span className="max-w-[180px] truncate">
+                            + {ingredientName}
+                          </span>
+                          {selectedItem.quantity > 1 && (
+                            <span className="font-bold text-blue-800 dark:text-blue-100">
+                              ×{selectedItem.quantity}
+                            </span>
+                          )}
+                          {selectedItem.isLittle && (
+                            <span className="opacity-80">
+                              ({t('menu.itemModal.little')})
+                            </span>
+                          )}
+                          {priceImpact > 0 && (
+                            <span className="font-semibold text-green-600 dark:text-green-300">
+                              +{formatCurrency(priceImpact)}
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
+                            className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-blue-500/20 hover:bg-blue-500/35 transition-colors"
+                            title={t('common.actions.remove')}
+                            aria-label={t('common.actions.remove')}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+
+                    {selectedWithoutItems.map((selectedItem) => (
+                      <span
+                        key={`without-${selectedItem.ingredient.id}`}
+                        className="inline-flex shrink-0 items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium antialiased bg-red-500/15 text-red-700 dark:bg-red-500/25 dark:text-red-200 border border-red-500/20"
+                      >
+                        <Ban className="w-3 h-3" aria-hidden="true" />
+                        <span className="max-w-[180px] truncate line-through">
+                          {getIngredientName(selectedItem.ingredient)}
+                        </span>
+                        <button
+                          onClick={() => handleSelectedIngredientRemove(selectedItem.ingredient.id)}
+                          className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-500/20 hover:bg-red-500/35 transition-colors"
+                          title={t('common.actions.remove')}
+                          aria-label={t('common.actions.remove')}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Row: Quantity + Notes + Total */}
           <div className="flex items-center justify-between gap-3">
             {/* Quantity - inline */}
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                className="liquid-glass-modal-button w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
+                className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold"
               >
                 <Minus className="w-4 h-4" />
               </button>
-              <span className="text-xl font-bold liquid-glass-modal-text min-w-[2rem] text-center">
+              <span className="text-lg font-bold liquid-glass-modal-text min-w-[1.75rem] text-center">
                 {quantity}
               </span>
               <button
                 onClick={() => setQuantity(quantity + 1)}
-                className="liquid-glass-modal-button w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold"
+                className="liquid-glass-modal-button w-9 h-9 rounded-full flex items-center justify-center text-base font-bold"
               >
                 +
               </button>
@@ -625,7 +743,7 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             {/* Notes button */}
             <button
               onClick={() => setShowNotesOverlay(true)}
-              className="liquid-glass-modal-button px-3 py-2 rounded-lg text-sm flex items-center gap-2"
+              className="liquid-glass-modal-button px-3 py-1.5 rounded-lg text-xs sm:text-sm flex items-center gap-2"
             >
               <MessageSquare className="w-4 h-4" />
               {notes
@@ -635,47 +753,14 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
             </button>
 
             {/* Total */}
-            <span className="text-2xl font-bold text-green-500">
+            <span className="text-xl font-bold text-green-500">
               {formatCurrency(totalPrice)}
             </span>
           </div>
 
-          {selectedIngredients.length > 0 && (
-            <div className="text-sm liquid-glass-modal-text-muted">
-              {(() => {
-                const extras = selectedIngredients.filter(si => !si.isWithout);
-                const withoutItems = selectedIngredients.filter(si => si.isWithout);
-                const totalExtrasCount = extras.reduce((sum, si) => sum + si.quantity, 0);
-
-                return (
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {totalExtrasCount > 0 && (
-                      <span>
-                        {t('menu.itemModal.ingredientsSelected', { count: totalExtrasCount })}
-                        {ingredientPrice > 0 && (
-                          <span className="ml-1 text-green-500 font-semibold">
-                            {t('menu.itemModal.extraPrice', {
-                              price: formatCurrency(ingredientPrice)
-                            })}
-                          </span>
-                        )}
-                      </span>
-                    )}
-                    {withoutItems.length > 0 && (
-                      <span className="text-red-400 inline-flex items-center gap-1">
-                        <Ban className="w-3 h-3" />
-                        {t('menu.itemModal.withoutCount', { count: withoutItems.length }) || `Without: ${withoutItems.length} item(s)`}
-                      </span>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-
           <button
             onClick={handleAddToCart}
-            className={`liquid-glass-modal-button w-full py-4 rounded-xl font-bold text-lg text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
+            className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
                 ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700'
                 : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
               }`}

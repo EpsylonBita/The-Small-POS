@@ -1290,6 +1290,8 @@ pub async fn order_assign_driver(
                 "cash_collected": assignment.cash_collected,
                 "card_amount": assignment.card_amount,
                 "cash_to_return": assignment.cash_collected,
+                "createdAt": now,
+                "updatedAt": now,
             })
             .to_string(),
             format!("driver_earning:{earning_id}")

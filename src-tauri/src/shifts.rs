@@ -8,7 +8,7 @@
 //! get_active_by_terminal_loose, get_active_cashier_by_terminal.
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tracing::{info, warn};
@@ -71,12 +71,14 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
-        let responsible_cashier_shift_id = if role_returns_cash(&role_type) {
+        let responsible_cashier_assignment = if role_returns_cash(&role_type) {
             find_active_cashier_assignment(&conn, &branch_id, &terminal_id)?
-                .map(|(cashier_shift_id, _)| cashier_shift_id)
         } else {
             None
         };
+        let responsible_cashier_shift_id = responsible_cashier_assignment
+            .as_ref()
+            .map(|(cashier_shift_id, _)| cashier_shift_id.clone());
 
         conn.execute(
             "INSERT INTO staff_shifts (
@@ -136,10 +138,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         // Driver/server starting amount: deduct from the responsible cashier drawer.
         if role_returns_cash(&role_type) && opening_cash > 0.0 {
-            let cashier_assignment =
-                find_active_cashier_assignment(&conn, &branch_id, &terminal_id)?;
-
-            match cashier_assignment {
+            match responsible_cashier_assignment.as_ref() {
                 Some((_cashier_shift_id, drawer_id)) => {
                     conn.execute(
                         "UPDATE cash_drawer_sessions SET
@@ -167,7 +166,24 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         // Enqueue for sync
         let idempotency_key = format!("shift:open:{shift_id}:{}", Uuid::new_v4());
-        let sync_payload = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+        let sync_payload = build_shift_open_sync_payload(
+            &shift_id,
+            &staff_id,
+            staff_name.as_deref(),
+            &branch_id,
+            &terminal_id,
+            &role_type,
+            opening_cash,
+            &now,
+            2,
+            responsible_cashier_assignment
+                .as_ref()
+                .map(|(cashier_shift_id, _)| cashier_shift_id.as_str()),
+            responsible_cashier_assignment
+                .as_ref()
+                .map(|(_, drawer_id)| drawer_id.as_str()),
+        )
+        .to_string();
 
         conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
@@ -199,6 +215,86 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     }))
 }
 
+fn build_shift_open_sync_payload(
+    shift_id: &str,
+    staff_id: &str,
+    staff_name: Option<&str>,
+    branch_id: &str,
+    terminal_id: &str,
+    role_type: &str,
+    opening_cash: f64,
+    check_in_time: &str,
+    calculation_version: i64,
+    responsible_cashier_shift_id: Option<&str>,
+    responsible_cashier_drawer_id: Option<&str>,
+) -> Value {
+    let mut payload = serde_json::json!({
+        "shiftId": shift_id,
+        "staffId": staff_id,
+        "staffName": staff_name,
+        "branchId": branch_id,
+        "terminalId": terminal_id,
+        "roleType": role_type,
+        "openingCash": opening_cash,
+        "checkInTime": check_in_time,
+        "calculationVersion": calculation_version,
+    });
+
+    if role_returns_cash(role_type) && opening_cash > 0.0 {
+        payload["responsibleCashierShiftId"] = responsible_cashier_shift_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null);
+        payload["responsibleCashierDrawerId"] = responsible_cashier_drawer_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null);
+        payload["startingAmountSourceCashierShiftId"] = payload["responsibleCashierShiftId"].clone();
+        payload["borrowedStartingAmount"] = serde_json::json!(opening_cash);
+    }
+
+    payload
+}
+
+fn load_cash_drawer_snapshot_for_shift(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<Value>, String> {
+    conn.query_row(
+        "SELECT id, cashier_id, opening_amount, closing_amount, expected_amount,
+                variance_amount, total_cash_sales, total_card_sales, total_refunds,
+                total_expenses, cash_drops, driver_cash_given, driver_cash_returned,
+                total_staff_payments, opened_at, closed_at, reconciled,
+                reconciled_at, reconciled_by
+         FROM cash_drawer_sessions
+         WHERE staff_shift_id = ?1",
+        params![shift_id],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "cashierId": row.get::<_, Option<String>>(1)?,
+                "openingAmount": row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                "closingAmount": row.get::<_, Option<f64>>(3)?,
+                "expectedAmount": row.get::<_, Option<f64>>(4)?,
+                "varianceAmount": row.get::<_, Option<f64>>(5)?,
+                "totalCashSales": row.get::<_, Option<f64>>(6)?.unwrap_or(0.0),
+                "totalCardSales": row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                "totalRefunds": row.get::<_, Option<f64>>(8)?.unwrap_or(0.0),
+                "totalExpenses": row.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+                "cashDrops": row.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+                "driverCashGiven": row.get::<_, Option<f64>>(11)?.unwrap_or(0.0),
+                "driverCashReturned": row.get::<_, Option<f64>>(12)?.unwrap_or(0.0),
+                "totalStaffPayments": row.get::<_, Option<f64>>(13)?.unwrap_or(0.0),
+                "openedAt": row.get::<_, String>(14)?,
+                "closedAt": row.get::<_, Option<String>>(15)?,
+                "reconciled": row.get::<_, Option<i64>>(16)?.unwrap_or(0) != 0,
+                "reconciledAt": row.get::<_, Option<String>>(17)?,
+                "reconciledBy": row.get::<_, Option<String>>(18)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load shift cash drawer snapshot: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Close shift
 // ---------------------------------------------------------------------------
@@ -228,7 +324,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     // Fetch the active shift (include branch_id/terminal_id for driver return + transfer logic)
     let shift = conn
         .query_row(
-            "SELECT id, staff_id, role_type, opening_cash_amount, calculation_version,
+            "SELECT id, staff_id, staff_name, role_type, opening_cash_amount, calculation_version,
                     branch_id, terminal_id, check_in_time
              FROM staff_shifts WHERE id = ?1 AND status = 'active'",
             params![shift_id],
@@ -236,12 +332,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, f64>(3)?,
-                    row.get::<_, Option<i32>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, Option<i32>>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             },
         )
@@ -249,7 +346,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     let (
         _id,
-        _staff_id,
+        staff_id,
+        staff_name,
         role_type,
         opening_cash,
         calc_version,
@@ -273,6 +371,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let result = (|| -> Result<(f64, f64), String> {
         #[allow(clippy::needless_late_init)]
         let expected: f64;
+        let mut returned_cash_target: Option<(String, String, f64)> = None;
 
         order_ownership::repair_historical_pickup_financial_attribution(
             &conn,
@@ -477,14 +576,24 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         let variance = closing_cash - expected;
 
-        // Update cash drawer session (if cashier/manager)
+        // Update cash drawer session (if cashier/manager) and persist the
+        // reconciliation metadata captured during closeout.
         if role_type == "cashier" || role_type == "manager" {
             conn.execute(
                 "UPDATE cash_drawer_sessions SET
                     closing_amount = ?1, expected_amount = ?2,
-                    variance_amount = ?3, closed_at = ?4, updated_at = ?4
-                 WHERE staff_shift_id = ?5",
-                params![closing_cash, expected, variance, now, shift_id,],
+                    variance_amount = ?3, reconciled = 1,
+                    closed_at = ?4, reconciled_at = ?4, reconciled_by = ?5,
+                    updated_at = ?4
+                 WHERE staff_shift_id = ?6",
+                params![
+                    closing_cash,
+                    expected,
+                    variance,
+                    now,
+                    closed_by.as_deref(),
+                    shift_id,
+                ],
             )
             .map_err(|e| format!("update cash drawer: {e}"))?;
         }
@@ -505,6 +614,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                         params![closing_cash, now, drawer_id],
                     )
                     .map_err(|e| format!("update cashier drawer for staff return: {e}"))?;
+                    returned_cash_target =
+                        Some((cashier_shift_id.clone(), drawer_id.clone(), closing_cash));
                     info!(
                         staff_shift = %shift_id,
                         cashier_shift = %cashier_shift_id,
@@ -574,15 +685,40 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
         // Enqueue for sync
         let idempotency_key = format!("shift:close:{shift_id}:{}", Uuid::new_v4());
-        let sync_payload = serde_json::json!({
+        let cash_drawer_snapshot = load_cash_drawer_snapshot_for_shift(&conn, &shift_id)?;
+        let mut sync_payload = serde_json::json!({
             "shiftId": shift_id,
+            "staffId": staff_id,
+            "staffName": staff_name,
+            "branchId": shift_branch_id,
+            "terminalId": shift_terminal_id,
+            "roleType": role_type,
+            "openingCash": opening_cash,
+            "checkInTime": shift_check_in_time,
+            "checkOutTime": now,
+            "calculationVersion": calc_version,
+            "totalOrdersCount": order_count,
+            "totalSalesAmount": total_sales,
+            "totalCashSales": shift_cash_sales,
+            "totalCardSales": shift_card_sales,
             "closingCash": closing_cash,
             "expectedCash": expected,
             "variance": variance,
             "closedBy": closed_by,
             "paymentAmount": payment_amount,
-        })
-        .to_string();
+        });
+        if let Some(drawer_snapshot) = cash_drawer_snapshot {
+            sync_payload["cashDrawer"] = drawer_snapshot;
+        }
+        if let Some((cashier_shift_id, drawer_id, returned_amount)) = returned_cash_target {
+            sync_payload["returnedCashTargetCashierShiftId"] =
+                Value::String(cashier_shift_id.clone());
+            sync_payload["returnedCashTargetDrawerId"] = Value::String(drawer_id.clone());
+            sync_payload["returnedCashAmount"] = serde_json::json!(returned_amount);
+            sync_payload["resolvedCashierShiftId"] = Value::String(cashier_shift_id);
+            sync_payload["resolvedCashierDrawerId"] = Value::String(drawer_id);
+        }
+        let sync_payload = sync_payload.to_string();
 
         conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
@@ -590,6 +726,25 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             params![shift_id, sync_payload, idempotency_key],
         )
         .map_err(|e| format!("enqueue shift close sync: {e}"))?;
+
+        let remaining_active_shifts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM staff_shifts
+                 WHERE branch_id = ?1
+                   AND status = 'active'",
+                params![shift_branch_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        if remaining_active_shifts == 0 {
+            crate::zreport::ensure_pending_z_report_context_for_branch(
+                &conn,
+                &shift_branch_id,
+                &now,
+            )?;
+        }
 
         Ok((expected, variance))
     })();
@@ -1173,6 +1328,9 @@ pub fn record_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
             "amount": amount,
             "description": description,
             "receiptNumber": receipt_number,
+            "status": "pending",
+            "createdAt": now,
+            "updatedAt": now,
         })
         .to_string();
 
@@ -2102,7 +2260,8 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::db;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
+    use serde_json::Value;
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -2117,6 +2276,28 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    fn load_latest_shift_sync_payload(
+        db: &DbState,
+        operation: &str,
+        shift_id: &str,
+    ) -> Value {
+        let conn = db.conn.lock().unwrap();
+        let payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND operation = ?1
+                   AND entity_id = ?2
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![operation, shift_id],
+                |row| row.get(0),
+            )
+            .expect("shift sync payload should exist");
+        serde_json::from_str(&payload).expect("shift sync payload should be valid json")
     }
 
     #[test]
@@ -2247,9 +2428,210 @@ mod tests {
             serde_json::from_str(&stored).expect("pending z-report context should be valid json");
 
         assert_eq!(parsed["branchId"], "branch-ctx");
-        assert_eq!(parsed["periodStartAt"], "1970-01-01T00:00:00Z");
+        assert_eq!(parsed["periodStartAt"], "2026-03-12T08:00:00Z");
         assert!(parsed["reportDate"].as_str().is_some());
         assert!(parsed["cutoffAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_shift_open_sync_payload_includes_actual_check_in_and_cashier_context() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'cashier-sync-open', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T08:00:00Z', 200.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, driver_cash_given, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-sync-open', 'cashier-sync-open', 'cashier-1', 'branch-1', 'term-1',
+                    200.0, 0.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "driver-1",
+                "staffName": "Driver One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "driver",
+                "openingCash": 40.0,
+            }),
+        )
+        .expect("driver shift should open");
+
+        let driver_shift_id = result["shiftId"]
+            .as_str()
+            .expect("shiftId should be present")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        let actual_check_in: String = conn
+            .query_row(
+                "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                params![driver_shift_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let payload = load_latest_shift_sync_payload(&db, "insert", &driver_shift_id);
+        assert_eq!(payload["staffId"], "driver-1");
+        assert_eq!(payload["staffName"], "Driver One");
+        assert_eq!(payload["checkInTime"], actual_check_in);
+        assert_eq!(payload["calculationVersion"], 2);
+        assert_eq!(payload["responsibleCashierShiftId"], "cashier-sync-open");
+        assert_eq!(payload["responsibleCashierDrawerId"], "drawer-sync-open");
+        assert_eq!(payload["startingAmountSourceCashierShiftId"], "cashier-sync-open");
+        assert_eq!(payload["borrowedStartingAmount"], 40.0);
+    }
+
+    #[test]
+    fn test_cashier_close_marks_drawer_reconciled() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-reconcile', 'cashier-1', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T08:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-reconcile', 'cashier-reconcile', 'cashier-1', 'branch-1', 'term-1',
+                    100.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-reconcile",
+                "closingCash": 100.0,
+                "closedBy": "manager-1",
+            }),
+        )
+        .expect("close shift should reconcile drawer");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (reconciled, reconciled_at, reconciled_by, closed_at): (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT reconciled, reconciled_at, reconciled_by, closed_at
+                 FROM cash_drawer_sessions
+                 WHERE id = 'drawer-reconcile'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(reconciled, 1, "closed cashier drawer should be reconciled");
+        assert_eq!(reconciled_by.as_deref(), Some("manager-1"));
+        assert_eq!(
+            reconciled_at, closed_at,
+            "drawer reconciliation timestamp should match close timestamp"
+        );
+    }
+
+    #[test]
+    fn test_cashier_close_sync_payload_includes_drawer_snapshot_and_reconciliation() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-sync-close', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T09:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-sync-close', 'cashier-sync-close', 'cashier-1', 'branch-1', 'term-1',
+                    100.0, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-sync-close",
+                "closingCash": 100.0,
+                "closedBy": "manager-1",
+            }),
+        )
+        .expect("cashier close should succeed");
+
+        let payload = load_latest_shift_sync_payload(&db, "update", "cashier-sync-close");
+        let cash_drawer = &payload["cashDrawer"];
+
+        assert_eq!(payload["staffId"], "cashier-1");
+        assert_eq!(payload["staffName"], "Cashier One");
+        assert_eq!(payload["checkInTime"], "2026-03-18T09:00:00Z");
+        assert!(payload["checkOutTime"].as_str().is_some());
+        assert_eq!(payload["totalOrdersCount"], 0);
+        assert_eq!(payload["totalSalesAmount"], 0.0);
+        assert_eq!(payload["totalCashSales"], 0.0);
+        assert_eq!(payload["totalCardSales"], 0.0);
+        assert_eq!(cash_drawer["id"], "drawer-sync-close");
+        assert_eq!(cash_drawer["openingAmount"], 100.0);
+        assert_eq!(cash_drawer["closingAmount"], 100.0);
+        assert_eq!(cash_drawer["expectedAmount"], 100.0);
+        assert_eq!(cash_drawer["varianceAmount"], 0.0);
+        assert_eq!(cash_drawer["reconciled"], true);
+        assert_eq!(cash_drawer["reconciledBy"], "manager-1");
+        assert_eq!(cash_drawer["reconciledAt"], cash_drawer["closedAt"]);
     }
 
     #[test]
@@ -2362,6 +2744,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dcg, 0.0, "driver_cash_given should be 75 - 75 = 0");
+    }
+
+    #[test]
+    fn test_driver_close_sync_payload_includes_return_target_context() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    created_at, updated_at)
+                 VALUES ('cashier-sync-target', 'cashier-1', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T08:00:00Z', 500.0, 'active', 2, 'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (id, staff_shift_id, cashier_id, branch_id,
+                    terminal_id, opening_amount, driver_cash_given, opened_at, created_at, updated_at)
+                 VALUES ('drawer-sync-target', 'cashier-sync-target', 'cashier-1', 'branch-1', 'term-1',
+                    500.0, 50.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    created_at, updated_at)
+                 VALUES ('driver-sync-target', 'driver-1', 'Driver One', 'driver', 'branch-1', 'term-1',
+                    '2026-03-18T09:00:00Z', 50.0, 'active', 2, 'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+                 VALUES ('ord-sync-target', '[]', 30.0, 'completed', 'pending', '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO driver_earnings (id, driver_id, staff_shift_id, order_id, branch_id,
+                    total_earning, payment_method, cash_collected, created_at, updated_at)
+                 VALUES ('de-sync-target', 'driver-1', 'driver-sync-target', 'ord-sync-target', 'branch-1',
+                    30.0, 'cash', 30.0, '2026-03-18T09:30:00Z', '2026-03-18T09:30:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "driver-sync-target",
+                "closingCash": 80.0,
+            }),
+        )
+        .expect("driver close should succeed");
+
+        let payload = load_latest_shift_sync_payload(&db, "update", "driver-sync-target");
+        assert_eq!(payload["staffId"], "driver-1");
+        assert_eq!(payload["staffName"], "Driver One");
+        assert_eq!(payload["returnedCashTargetCashierShiftId"], "cashier-sync-target");
+        assert_eq!(payload["returnedCashTargetDrawerId"], "drawer-sync-target");
+        assert_eq!(payload["returnedCashAmount"], 80.0);
+        assert_eq!(payload["resolvedCashierShiftId"], "cashier-sync-target");
+        assert_eq!(payload["resolvedCashierDrawerId"], "drawer-sync-target");
     }
 
     #[test]
