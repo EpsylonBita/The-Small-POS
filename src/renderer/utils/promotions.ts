@@ -7,6 +7,7 @@
  */
 
 import type { CustomerType } from '../types/orders';
+import { toLocalDateString } from './date';
 
 // Promotion types matching the shared types
 export type PromotionType = 'percentage' | 'fixed_amount' | 'bogo' | 'tiered' | 'bundle';
@@ -98,7 +99,7 @@ export interface CartPromotionSummary {
  * Check if a promotion is currently valid based on schedule
  */
 export function isPromotionScheduleValid(promotion: POSPromotion, now: Date = new Date()): boolean {
-  const currentDate = now.toISOString().split('T')[0];
+  const currentDate = toLocalDateString(now);
   const currentTime = now.toTimeString().slice(0, 5); // HH:MM
   const currentDayOfWeek = now.getDay();
 

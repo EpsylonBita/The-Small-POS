@@ -467,6 +467,48 @@ export const MenuCart: React.FC<MenuCartProps> = ({
     return Math.max(0, parsed);
   };
 
+  const formatManualPriceInput = React.useCallback((value: string) => {
+    const cleaned = value.replace(/[^\d.,]/g, '');
+    if (!cleaned) {
+      return '';
+    }
+
+    const lastSeparatorIndex = Math.max(cleaned.lastIndexOf(','), cleaned.lastIndexOf('.'));
+    if (lastSeparatorIndex >= 0) {
+      const integerDigits = cleaned.slice(0, lastSeparatorIndex).replace(/\D/g, '');
+      const fractionDigits = cleaned.slice(lastSeparatorIndex + 1).replace(/\D/g, '');
+
+      if (fractionDigits.length <= 2) {
+        if (cleaned.endsWith(',') || cleaned.endsWith('.')) {
+          return `${integerDigits || '0'},`;
+        }
+        return `${integerDigits || '0'},${fractionDigits}`;
+      }
+    }
+
+    const digitsOnly = cleaned.replace(/\D/g, '');
+    if (!digitsOnly) {
+      return '';
+    }
+
+    if (digitsOnly.length <= 2) {
+      return digitsOnly;
+    }
+
+    const integerPart = digitsOnly.slice(0, -2).replace(/^0+(?=\d)/, '');
+    const fractionPart = digitsOnly.slice(-2);
+    return `${integerPart || '0'},${fractionPart}`;
+  }, []);
+
+  const parseManualPriceValue = React.useCallback((value: string) => {
+    const normalized = value.replace(',', '.').trim();
+    const parsed = Number.parseFloat(normalized);
+    if (!Number.isFinite(parsed)) {
+      return 0;
+    }
+    return Math.max(0, parsed);
+  }, []);
+
   const openDiscountModal = () => {
     const mode = onManualDiscountChange ? manualDiscountMode : 'percentage';
     const current = onManualDiscountChange ? manualDiscountValue : discountPercentage || 0;
@@ -519,6 +561,19 @@ export const MenuCart: React.FC<MenuCartProps> = ({
   };
 
   const isDraftOverMax = discountModeDraft === 'percentage' && discountDraft > maxDiscountPercentage;
+  const parsedManualPrice = parseManualPriceValue(manualPrice);
+  const canAddManualItem = parsedManualPrice > 0;
+
+  const commitManualItem = React.useCallback(() => {
+    if (!onAddManualItem || parsedManualPrice <= 0) {
+      return;
+    }
+
+    onAddManualItem(parsedManualPrice, manualName.trim() || undefined);
+    setManualPrice('');
+    setManualName('');
+    setShowManualInput(false);
+  }, [manualName, onAddManualItem, parsedManualPrice]);
 
   // Helper function to get localized ingredient name
   const getIngredientName = (ingredient: {
@@ -644,39 +699,25 @@ export const MenuCart: React.FC<MenuCartProps> = ({
             </div>
             <div className="flex gap-2">
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 value={manualPrice}
-                onChange={(e) => setManualPrice(e.target.value)}
+                onChange={(e) => setManualPrice(formatManualPriceInput(e.target.value))}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    const price = parseFloat(manualPrice);
-                    if (price > 0) {
-                      onAddManualItem(price, manualName.trim() || undefined);
-                      setManualPrice('');
-                      setManualName('');
-                      setShowManualInput(false);
-                    }
+                    e.preventDefault();
+                    commitManualItem();
                   }
                 }}
-                min="0.01"
-                step="0.01"
-                placeholder={t('menu.cart.manualPricePlaceholder', 'Price')}
+                placeholder={`${t('menu.cart.manualPricePlaceholder', 'Price')} (0,00)`}
                 className="flex-1 px-2.5 py-1.5 text-sm border rounded-lg antialiased bg-black/5 dark:bg-white/10 border-black/10 dark:border-white/15 liquid-glass-modal-text placeholder:text-black/40 dark:placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 autoFocus
               />
               <button
-                onClick={() => {
-                  const price = parseFloat(manualPrice);
-                  if (price > 0) {
-                    onAddManualItem(price, manualName.trim() || undefined);
-                    setManualPrice('');
-                    setManualName('');
-                    setShowManualInput(false);
-                  }
-                }}
-                disabled={!manualPrice || parseFloat(manualPrice) <= 0}
+                onClick={commitManualItem}
+                disabled={!canAddManualItem}
                 className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
-                  !manualPrice || parseFloat(manualPrice) <= 0
+                  !canAddManualItem
                     ? 'bg-black/10 dark:bg-white/10 text-black/30 dark:text-white/30 cursor-not-allowed'
                     : 'bg-blue-500 text-white hover:bg-blue-600'
                 }`}

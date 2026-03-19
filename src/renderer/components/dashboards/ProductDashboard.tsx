@@ -2,6 +2,7 @@ import React, { memo, useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../contexts/theme-context';
 import { useOrderStore } from '../../hooks/useOrderStore';
+import { useSystemClock } from '../../hooks/useSystemClock';
 import { useModules } from '../../contexts/module-context';
 import { useNavigationSafe } from '../../contexts/navigation-context';
 import { OrderDashboard } from '../OrderDashboard';
@@ -9,6 +10,7 @@ import OrderFlow from '../OrderFlow';
 import { OrderConflictBanner } from '../OrderConflictBanner';
 import { DashboardCard } from '../DashboardCard';
 import { formatTime } from '../../utils/format';
+import { toLocalDateString } from '../../utils/date';
 import { getBridge, offEvent, onEvent } from '../../../lib';
 import {
   Package,
@@ -50,9 +52,11 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { initializeOrders, conflicts, orders } = useOrderStore();
+  const now = useSystemClock();
   const { isModuleEnabled } = useModules();
   const navigation = useNavigationSafe();
   const isDark = resolvedTheme === 'dark';
+  const today = toLocalDateString(now);
 
   // Product metrics state
   const [metrics, setMetrics] = useState<ProductMetrics>({
@@ -126,9 +130,6 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
    * This provides real-time order counts
    */
   const deriveMetricsFromOrders = useCallback(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
     // Active orders (pending, preparing, ready)
     const activeOrders = orders.filter((o) =>
       ['pending', 'confirmed', 'preparing', 'ready'].includes(o.status)
@@ -136,9 +137,8 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
 
     // Today's orders
     const todayOrders = orders.filter((order) => {
-      const orderDate = new Date(order.createdAt || '');
-      orderDate.setHours(0, 0, 0, 0);
-      return orderDate.getTime() === today.getTime();
+      const orderDate = toLocalDateString(order.createdAt || '');
+      return orderDate === today;
     });
 
     const deliveredToday = todayOrders.filter((o) =>
@@ -154,7 +154,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
       canceledToday,
       isLoading: false,
     }));
-  }, [orders]);
+  }, [orders, today]);
 
   // Initialize orders when dashboard loads
   useEffect(() => {
@@ -257,7 +257,7 @@ export const ProductDashboard = memo<ProductDashboardProps>(({ className = '' })
           </h1>
           <span className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
             <Clock className="w-4 h-4 inline mr-1" />
-            {formatTime(new Date(), { hour: '2-digit', minute: '2-digit' })}
+            {formatTime(now, { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
 

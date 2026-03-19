@@ -306,6 +306,10 @@ pub struct ShiftCheckoutDoc {
     pub cash_refunds: f64,
     pub opening_amount: f64,
     #[serde(default)]
+    pub transferred_staff_count: i64,
+    #[serde(default)]
+    pub transferred_staff_returns: f64,
+    #[serde(default)]
     pub expected_amount: Option<f64>,
     #[serde(default)]
     pub closing_amount: Option<f64>,
@@ -574,6 +578,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Drops" => "Αποσύρσεις Μετρητών",
             "Driver Given" => "Δόθηκαν σε Οδηγό",
             "Driver Returned" => "Επιστράφηκαν από Οδηγό",
+            "Transferred Staff" => "Μεταφερμένο Προσωπικό",
+            "Transferred Staff Returns" => "Επιστροφές Μεταφερμένου Προσωπικού",
+            "Expected In Drawer" => "Αναμενόμενο στο Ταμείο",
             "Staff Payments*" => "Πληρωμές Προσωπικού*",
             "Informational only" => "Μόνο για ενημέρωση",
             "KITCHEN TICKET" => "\u{0394}\u{0395}\u{039B}\u{03A4}\u{0399}\u{039F} \u{039A}\u{039F}\u{03A5}\u{0396}\u{0399}\u{039D}\u{0391}\u{03A3}",
@@ -676,6 +683,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Drops" => "Barentnahmen",
             "Driver Given" => "Fahrer ausgezahlt",
             "Driver Returned" => "Vom Fahrer retour",
+            "Transferred Staff" => "Übertragenes Personal",
+            "Transferred Staff Returns" => "Übernommene Personalrückgaben",
+            "Expected In Drawer" => "Erwartet in der Kasse",
             "Staff Payments*" => "Mitarbeiterzahlungen*",
             "Informational only" => "Nur Information",
             "KITCHEN TICKET" => "K\u{00DC}CHENBON",
@@ -778,6 +788,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Drops" => "Sorties especes",
             "Driver Given" => "Donne au livreur",
             "Driver Returned" => "Rendu par livreur",
+            "Transferred Staff" => "Personnel transfere",
+            "Transferred Staff Returns" => "Retours du personnel transfere",
+            "Expected In Drawer" => "Attendu en caisse",
             "Staff Payments*" => "Paiements personnel*",
             "Informational only" => "Information seulement",
             "KITCHEN TICKET" => "BON CUISINE",
@@ -880,6 +893,9 @@ pub fn receipt_label<'a>(lang: &str, key: &'a str) -> &'a str {
             "Cash Drops" => "Prelievi contanti",
             "Driver Given" => "Dato al corriere",
             "Driver Returned" => "Reso dal corriere",
+            "Transferred Staff" => "Personale trasferito",
+            "Transferred Staff Returns" => "Restituzioni personale trasferito",
+            "Expected In Drawer" => "Atteso in cassa",
             "Staff Payments*" => "Pagamenti staff*",
             "Informational only" => "Solo informativo",
             "KITCHEN TICKET" => "COMANDA CUCINA",
@@ -2969,9 +2985,6 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "Check-in")),
                 esc(&format_datetime_human(&doc.check_in)),
@@ -2987,6 +3000,21 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 money(doc.cash_refunds),
                 esc(receipt_label(lang, "Opening")),
                 money(doc.opening_amount),
+            ));
+            if doc.transferred_staff_count > 0 {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>+{}</span></div>",
+                    esc(receipt_label(lang, "Transferred Staff")),
+                    doc.transferred_staff_count,
+                    esc(receipt_label(lang, "Transferred Staff Returns")),
+                    money(doc.transferred_staff_returns),
+                ));
+            }
+            body.push_str(&format!(
+                "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "Expected")),
                 expected,
                 esc(receipt_label(lang, "Closing")),
@@ -3043,6 +3071,15 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                     esc(receipt_label(lang, "= To Return")),
                     money(doc.amount_to_return),
                 ));
+            }
+            if !should_render_shift_checkout_driver_summary(doc) {
+                if let Some(expected_amount) = doc.expected_amount {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                        esc(receipt_label(lang, "Expected In Drawer")),
+                        money(expected_amount),
+                    ));
+                }
             }
             body.push_str("</div>");
             html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg)
@@ -5760,6 +5797,21 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &money_with_currency_locale(doc.opening_amount, &cur, comma),
                 preset.item_style,
             );
+            if doc.transferred_staff_count > 0 {
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Transferred Staff")),
+                    &doc.transferred_staff_count.to_string(),
+                    preset.item_style,
+                );
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Transferred Staff Returns")),
+                    &format!(
+                        "+{}",
+                        money_with_currency_locale(doc.transferred_staff_returns, &cur, comma)
+                    ),
+                    preset.item_style,
+                );
+            }
             if let Some(expected) = doc.expected_amount {
                 canvas.draw_pair(
                     &format!("{}:", receipt_label(lang, "Expected")),
@@ -5780,6 +5832,16 @@ fn render_classic_non_customer_raster_exact_ttf(
                     &money_with_currency_locale(variance, &cur, comma),
                     preset.item_style,
                 );
+            }
+            if !should_render_shift_checkout_driver_summary(doc) {
+                if let Some(expected) = doc.expected_amount {
+                    canvas.draw_rule();
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Expected In Drawer")),
+                        &money_with_currency_locale(expected, &cur, comma),
+                        preset.total_style,
+                    );
+                }
             }
             if should_render_shift_checkout_driver_summary(doc) {
                 if !doc.driver_deliveries.is_empty() {
@@ -7079,6 +7141,20 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &money_locale(doc.opening_amount, comma),
                 width,
             );
+            if doc.transferred_staff_count > 0 {
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Transferred Staff"),
+                    &doc.transferred_staff_count.to_string(),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Transferred Staff Returns"),
+                    &format!("+{}", money_locale(doc.transferred_staff_returns, comma)),
+                    width,
+                );
+            }
             emit_pair(
                 &mut builder,
                 receipt_label(lang, "Expected"),
@@ -7103,6 +7179,17 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     .unwrap_or_else(|| "N/A".to_string()),
                 width,
             );
+            if !should_render_shift_checkout_driver_summary(doc) {
+                if let Some(expected) = doc.expected_amount {
+                    emit_rule(&mut builder, width, '-');
+                    emit_pair_bold(
+                        &mut builder,
+                        receipt_label(lang, "Expected In Drawer"),
+                        &money_locale(expected, comma),
+                        width,
+                    );
+                }
+            }
 
             // Driver-specific delivery breakdown
             if should_render_shift_checkout_driver_summary(doc) {
@@ -8883,6 +8970,39 @@ mod tests {
     }
 
     #[test]
+    fn classic_text_cashier_shift_checkout_renders_transferred_staff_returns() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-CASHIER-002".to_string(),
+            role_type: "cashier".to_string(),
+            staff_name: "Cashier Two".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 12,
+            sales_amount: 120.5,
+            total_expenses: 8.0,
+            cash_refunds: 1.5,
+            opening_amount: 50.0,
+            transferred_staff_count: 2,
+            transferred_staff_returns: 63.5,
+            expected_amount: Some(161.0),
+            closing_amount: Some(160.0),
+            variance_amount: Some(-1.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+
+        assert!(text.contains("Transferred Staff"));
+        assert!(text.contains("63.50") || text.contains("63,50"));
+    }
+
+    #[test]
     fn html_driver_shift_checkout_renders_check_times_and_summary_without_delivery_rows() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
@@ -8910,6 +9030,86 @@ mod tests {
         assert!(html.contains("Starting"));
         assert!(html.contains("= To Return"));
         assert!(!html.contains("DRIVER DELIVERIES"));
+    }
+
+    #[test]
+    fn html_cashier_shift_checkout_renders_transferred_staff_returns() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            ..LayoutConfig::default()
+        };
+        let html = render_html(
+            &ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                shift_id: "SHIFT-CASHIER-003".to_string(),
+                role_type: "cashier".to_string(),
+                staff_name: "Cashier Three".to_string(),
+                terminal_name: "Front Counter".to_string(),
+                check_in: "2026-03-05T08:00:00Z".to_string(),
+                check_out: "2026-03-05T16:00:00Z".to_string(),
+                orders_count: 12,
+                sales_amount: 120.5,
+                total_expenses: 8.0,
+                cash_refunds: 1.5,
+                opening_amount: 50.0,
+                transferred_staff_count: 1,
+                transferred_staff_returns: 60.0,
+                expected_amount: Some(161.0),
+                closing_amount: Some(160.0),
+                variance_amount: Some(-1.0),
+                ..ShiftCheckoutDoc::default()
+            }),
+            &cfg,
+        );
+
+        assert!(html.contains("Transferred Staff"));
+        assert!(html.contains("Transferred Staff Returns"));
+        assert!(html.contains("Expected In Drawer"));
+        assert!(html.contains("60.00"));
+    }
+
+    #[test]
+    fn classic_shift_checkout_raster_exact_expands_for_transferred_staff_audit_lines() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let base_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-CASHIER-BASE".to_string(),
+            role_type: "cashier".to_string(),
+            staff_name: "Cashier Base".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 12,
+            sales_amount: 120.5,
+            total_expenses: 8.0,
+            cash_refunds: 1.5,
+            opening_amount: 50.0,
+            expected_amount: Some(161.0),
+            closing_amount: Some(160.0),
+            variance_amount: Some(-1.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let transfer_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            transferred_staff_count: 2,
+            transferred_staff_returns: 63.5,
+            ..match &base_doc {
+                ReceiptDocument::ShiftCheckout(doc) => doc.clone(),
+                _ => unreachable!(),
+            }
+        });
+
+        let base_image = render_classic_non_customer_raster_exact_ttf(&base_doc, &cfg)
+            .expect("render base cashier raster image");
+        let transfer_image = render_classic_non_customer_raster_exact_ttf(&transfer_doc, &cfg)
+            .expect("render cashier transfer raster image");
+
+        assert!(
+            transfer_image.height() > base_image.height(),
+            "cashier raster receipt should grow when transferred staff audit lines are rendered"
+        );
     }
 
     #[test]

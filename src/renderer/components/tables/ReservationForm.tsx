@@ -11,11 +11,13 @@
  * **Validates: Requirements 4.2**
  */
 
-import React, { memo, useState, useCallback, useMemo, useEffect } from 'react';
+import React, { memo, useState, useCallback, useEffect } from 'react';
 import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import type { RestaurantTable } from '../../types/tables';
 import { reservationsService, type Reservation } from '../../services/ReservationsService';
+import { useSystemClock } from '../../hooks/useSystemClock';
+import { toLocalDateString } from '../../utils/date';
 import { X, Calendar, Clock, Users, Phone, User, MessageSquare, AlertCircle, AlertTriangle } from 'lucide-react';
 
 export interface CreateReservationDto {
@@ -84,6 +86,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
 }) => {
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
+  const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
 
   // Form state
@@ -126,10 +129,7 @@ export const ReservationForm: React.FC<ReservationFormProps> = memo(({
   }, [reservationDate, reservationTime, tableId]);
 
   // Get minimum date (today)
-  const minDate = useMemo(() => {
-    const today = new Date();
-    return today.toISOString().split('T')[0];
-  }, []);
+  const minDate = toLocalDateString(now);
 
   // Validate form
   const validateForm = useCallback((): boolean => {

@@ -23,6 +23,7 @@ import {
   applyPromotion,
   findBestPromotion,
 } from '../utils/promotions';
+import { toLocalDateString } from '../utils/date';
 
 interface PromotionFromAPI {
   id: string;
@@ -192,7 +193,7 @@ class PromotionsService {
     }
 
     try {
-      const now = new Date().toISOString().split('T')[0];
+      const now = toLocalDateString();
 
       let query = supabase
         .from('product_promotions')

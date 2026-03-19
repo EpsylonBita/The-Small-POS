@@ -58,6 +58,10 @@ interface Order {
   table_number?: string;
   special_instructions?: string;
   name_on_ringer?: string;
+  driver_id?: string;
+  driver_name?: string;
+  driverId?: string;
+  driverName?: string;
   order_items: OrderItem[];
   created_at: string;
   updated_at: string;
@@ -100,6 +104,8 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
 
   const createdAt = asString(raw.created_at) || asString(raw.createdAt) || new Date().toISOString();
   const updatedAt = asString(raw.updated_at) || asString(raw.updatedAt) || createdAt;
+  const driverId = asString(raw.driver_id) || asString(raw.driverId);
+  const driverName = asString(raw.driver_name) || asString(raw.driverName);
   const orderItems = Array.isArray(raw.order_items)
     ? raw.order_items
     : Array.isArray(raw.items)
@@ -129,6 +135,10 @@ const normalizeOrder = (raw: any, source: 'local' | 'remote'): Order | null => {
     table_number: asString(raw.table_number) || asString(raw.tableNumber),
     special_instructions: asString(raw.special_instructions) || asString(raw.specialInstructions),
     name_on_ringer: asString(raw.name_on_ringer) || asString(raw.nameOnRinger),
+    driver_id: driverId,
+    driver_name: driverName,
+    driverId,
+    driverName,
     order_items: orderItems as OrderItem[],
     created_at: createdAt,
     updated_at: updatedAt,
@@ -524,56 +534,75 @@ const OrdersPage: React.FC = () => {
         ) : (
           <div className="space-y-3">
             {orders.map((order) => (
-              <motion.div
-                key={order.id}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 hover:border-cyan-500/50 hover:bg-zinc-900' : 'border-gray-200 bg-white hover:border-blue-400 hover:shadow-md'}`}
-                onClick={() => setSelectedOrder(order)}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <span className="font-mono font-bold text-lg">#{order.order_number}</span>
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(order.status)}`}>
-                        {order.status}
-                      </span>
-                      <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isDark ? 'bg-zinc-800 border border-zinc-700 text-zinc-200' : 'bg-gray-100 border border-gray-200 text-gray-700'}`}>
-                        {getOrderTypeIcon(order.order_type)}
-                        <span>{order.order_type}</span>
+              (() => {
+                const orderStatus = String(order.status || '').toLowerCase();
+                const orderType = String(order.order_type || '').toLowerCase();
+                const deliveredDriverName = order.driver_name || order.driverName || '';
+                const showDeliveredDriver =
+                  orderType === 'delivery' &&
+                  (orderStatus === 'completed' || orderStatus === 'delivered') &&
+                  !!deliveredDriverName;
+
+                return (
+                  <motion.div
+                    key={order.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`p-5 rounded-xl border cursor-pointer transition-all ${isDark ? 'border-zinc-800 bg-zinc-950/80 hover:border-cyan-500/50 hover:bg-zinc-900' : 'border-gray-200 bg-white hover:border-blue-400 hover:shadow-md'}`}
+                    onClick={() => setSelectedOrder(order)}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-2">
+                          <span className="font-mono font-bold text-lg">#{order.order_number}</span>
+                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusBadge(order.status)}`}>
+                            {order.status}
+                          </span>
+                          <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs ${isDark ? 'bg-zinc-800 border border-zinc-700 text-zinc-200' : 'bg-gray-100 border border-gray-200 text-gray-700'}`}>
+                            {getOrderTypeIcon(order.order_type)}
+                            <span>{order.order_type}</span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+                          {order.customer_name && (
+                            <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                              <User className="w-4 h-4 opacity-50" />
+                              <span>{order.customer_name}</span>
+                            </div>
+                          )}
+                          {order.customer_phone && (
+                            <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
+                              <Phone className="w-4 h-4 opacity-50" />
+                              <span>{order.customer_phone}</span>
+                            </div>
+                          )}
+                          <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
+                            <Package className="w-4 h-4 opacity-50" />
+                            <span>{order.order_items?.length || 0} items</span>
+                          </div>
+                        </div>
+
+                        {showDeliveredDriver && (
+                          <div className={`mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${isDark ? 'bg-green-950/70 border border-green-800 text-green-200' : 'bg-green-50 border border-green-200 text-green-700'}`}>
+                            <Truck className="w-3.5 h-3.5" />
+                            <span>{t('orders.deliveredBy', { defaultValue: 'Delivered by {{name}}', name: deliveredDriverName })}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="text-right">
+                        <div className={`text-3xl font-bold mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                          {formatMoney(order.total_amount)}
+                        </div>
+                        <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
+                          {new Date(order.created_at).toLocaleString()}
+                        </div>
                       </div>
                     </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-                      {order.customer_name && (
-                        <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-                          <User className="w-4 h-4 opacity-50" />
-                          <span>{order.customer_name}</span>
-                        </div>
-                      )}
-                      {order.customer_phone && (
-                        <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-200' : 'text-gray-700'}`}>
-                          <Phone className="w-4 h-4 opacity-50" />
-                          <span>{order.customer_phone}</span>
-                        </div>
-                      )}
-                      <div className={`flex items-center gap-2 ${isDark ? 'text-zinc-300' : 'text-gray-700'}`}>
-                        <Package className="w-4 h-4 opacity-50" />
-                        <span>{order.order_items?.length || 0} items</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="text-right">
-                    <div className={`text-3xl font-bold mb-1 ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                      {formatMoney(order.total_amount)}
-                    </div>
-                    <div className={`text-xs ${isDark ? 'text-zinc-400' : 'text-gray-500'}`}>
-                      {new Date(order.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
+                  </motion.div>
+                );
+              })()
             ))}
           </div>
         )}

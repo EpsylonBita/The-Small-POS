@@ -3,11 +3,13 @@ import { useTheme } from '../../contexts/theme-context';
 import { useI18n } from '../../contexts/i18n-context';
 import { useOrderStore } from '../../hooks/useOrderStore';
 import { useTables } from '../../hooks/useTables';
+import { useSystemClock } from '../../hooks/useSystemClock';
 import { ReservationInfoPanel } from './ReservationInfoPanel';
 import type { Order } from '../../types/orders';
 import type { RestaurantTable, TablesDashboardTab, TabConfig, TableStatus } from '../../types/tables';
-import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Plus } from 'lucide-react';
+import { ClipboardList, CheckCircle, XCircle, LayoutGrid, Users, RefreshCw, Plus, Truck } from 'lucide-react';
 import { formatCurrency, formatTime as formatTimeValue } from '../../utils/format';
+import { toLocalDateString } from '../../utils/date';
 
 interface TablesDashboardProps {
   branchId: string;
@@ -38,6 +40,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
   const { orders, loadOrders, isLoading: ordersLoading } = useOrderStore();
+  const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
 
   // Use the useTables hook for real-time table data
@@ -73,10 +76,7 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
   }, [loadOrders, refetchTables]);
 
   // Get today's date for filtering
-  const today = useMemo(() => {
-    const now = new Date();
-    return now.toISOString().split('T')[0];
-  }, []);
+  const today = toLocalDateString(now);
 
   // Filter orders for table-related orders (dine-in orders with table assignment)
   const tableOrders = useMemo(() => {
@@ -94,13 +94,13 @@ export const TablesDashboard: React.FC<TablesDashboardProps> = memo(({
     );
 
     const deliveredOrders = tableOrders.filter(order => {
-      const orderDate = (order.createdAt || order.created_at || '').split('T')[0];
+      const orderDate = toLocalDateString(order.createdAt || order.created_at || '');
       return (order.status === 'delivered' || order.status === 'completed') && 
              orderDate === today;
     });
 
     const canceledOrders = tableOrders.filter(order => {
-      const orderDate = (order.createdAt || order.created_at || '').split('T')[0];
+      const orderDate = toLocalDateString(order.createdAt || order.created_at || '');
       return order.status === 'cancelled' && orderDate === today;
     });
 
@@ -482,7 +482,7 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
   // Filter to show only today's delivered/completed orders
   const deliveredOrders = useMemo(() => {
     return orders.filter(order => {
-      const orderDate = (order.createdAt || order.created_at || '').split('T')[0];
+      const orderDate = toLocalDateString(order.createdAt || order.created_at || '');
       return (order.status === 'delivered' || order.status === 'completed') && 
              orderDate === today;
     }).sort((a, b) => {
@@ -535,6 +535,9 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
         const createdAt = order.createdAt || order.created_at || '';
         const updatedAt = order.updatedAt || order.updated_at || '';
         const customerName = order.customerName || order.customer_name || '';
+        const driverName = order.driverName || order.driver_name || '';
+        const orderType = String(order.orderType || order.order_type || '').toLowerCase();
+        const showDeliveredDriver = orderType === 'delivery' && !!driverName;
 
         return (
           <div
@@ -557,9 +560,19 @@ const DeliveredTabContent: React.FC<DeliveredTabContentProps> = memo(({ orders, 
                   </span>
                 </div>
                 
-                {customerName && (
-                  <div className={`text-sm ${isDark ? 'text-white/70' : 'text-gray-600'}`}>
-                    {customerName}
+                {(customerName || showDeliveredDriver) && (
+                  <div className="flex flex-col gap-1">
+                    {customerName && (
+                      <div className={`text-sm ${isDark ? 'text-white/70' : 'text-gray-600'}`}>
+                        {customerName}
+                      </div>
+                    )}
+                    {showDeliveredDriver && (
+                      <div className={`inline-flex items-center gap-1.5 text-xs font-medium ${isDark ? 'text-green-300' : 'text-green-700'}`}>
+                        <Truck className="w-3 h-3" />
+                        {t('tablesDashboard.deliveredBy', { defaultValue: 'Delivered by {{name}}', name: driverName })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -634,7 +647,7 @@ const CanceledTabContent: React.FC<CanceledTabContentProps> = memo(({ orders, to
   // Filter to show only today's canceled orders
   const canceledOrders = useMemo(() => {
     return orders.filter(order => {
-      const orderDate = (order.createdAt || order.created_at || '').split('T')[0];
+      const orderDate = toLocalDateString(order.createdAt || order.created_at || '');
       return order.status === 'cancelled' && orderDate === today;
     }).sort((a, b) => {
       // Sort by updated time (most recently canceled first)

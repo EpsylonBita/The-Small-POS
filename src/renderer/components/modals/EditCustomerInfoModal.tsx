@@ -16,7 +16,7 @@ import {
 } from '../../services/address-workflow';
 import { getResolvedTerminalCredentials } from '../../services/terminal-credentials';
 
-interface CustomerInfo {
+export interface EditCustomerInfoFormData {
   name: string;
   phone: string;
   address: string;
@@ -27,8 +27,8 @@ interface CustomerInfo {
 interface EditCustomerInfoModalProps {
   isOpen: boolean;
   orderCount: number;
-  initialCustomerInfo: CustomerInfo;
-  onSave: (customerInfo: CustomerInfo) => void;
+  initialCustomerInfo: EditCustomerInfoFormData;
+  onSave: (customerInfo: EditCustomerInfoFormData) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -51,7 +51,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   onClose,
 }) => {
   const { t } = useTranslation();
-  const [customerInfo, setCustomerInfo] = useState<CustomerInfo>(initialCustomerInfo);
+  const [customerInfo, setCustomerInfo] = useState<EditCustomerInfoFormData>(initialCustomerInfo);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
   const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
@@ -340,30 +340,13 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
 
     setIsSaving(true);
     try {
-      // Keep exact selected suggestion coordinates when persisting.
-      const coords = selectedAddressDetails?.coordinates || addressCoordinates || validation?.coordinates || null;
-      const payload = {
-        ...customerInfo,
-        coordinates: coords,
-        latitude: coords?.lat ?? null,
-        longitude: coords?.lng ?? null,
-        delivery_validation: validation ? {
-          override_applied: overrideApplied,
-          override_reason: overrideApplied ? overrideReason.trim() : null,
-          validation_status: validation.validation_status,
-          zone_id: validation.selectedZone?.id || null,
-          validated_at: new Date().toISOString(),
-          validation_source: validation.validation_source || null,
-          address_fingerprint:
-            validation.address_fingerprint
-            || validationSnapshot
-            || buildAddressFingerprint(customerInfo.address.trim(), coords || undefined),
-          place_id: selectedAddressDetails?.placeId || null,
-          input_street_number: extractStreetNumber(customerInfo.address.trim()) || null,
-          resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
-        } : null,
-      };
-      onSave(payload as any);
+      await onSave({
+        name: customerInfo.name.trim(),
+        phone: customerInfo.phone.trim(),
+        address: customerInfo.address.trim(),
+        postal_code: customerInfo.postal_code?.trim() || undefined,
+        notes: customerInfo.notes?.trim() || undefined,
+      });
       setIsSaving(false);
     } catch (error) {
       setIsSaving(false);
@@ -384,7 +367,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     onClose();
   };
 
-  const handleInputChange = (field: keyof CustomerInfo, value: string) => {
+  const handleInputChange = (field: keyof EditCustomerInfoFormData, value: string) => {
     setCustomerInfo((prev) => ({
       ...prev,
       [field]: value,
@@ -466,7 +449,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
             </div>
 
             {addressSuggestions.length > 0 && (
-              <div className="absolute z-60 w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
+              <div className="absolute z-[9999] w-full mt-1 bg-white/90 dark:bg-gray-800/90 border liquid-glass-modal-border rounded-lg shadow-lg max-h-48 overflow-y-auto scrollbar-hide">
                 {addressSuggestions.map((suggestion, index) => (
                   <button
                     key={suggestion.place_id || index}

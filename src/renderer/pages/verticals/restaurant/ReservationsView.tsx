@@ -11,8 +11,10 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
 import { useAcquiredModules } from '../../../hooks/useAcquiredModules';
+import { useSystemClock } from '../../../hooks/useSystemClock';
 import { useReservations } from '../../../hooks/useReservations';
 import { formatDate, formatTime } from '../../../utils/format';
+import { addLocalDays, parseLocalDateString, startOfLocalDay, toLocalDateString } from '../../../utils/date';
 import {
   Calendar,
   Users,
@@ -43,7 +45,7 @@ import {
 } from '../../../services/terminal-credentials';
 import { offEvent, onEvent } from '../../../../lib';
 
-type QuickFilter = 'today' | 'tomorrow' | 'week';
+type QuickFilter = 'today' | 'tomorrow' | 'week' | 'custom';
 type ViewMode = 'timeline' | 'list';
 type ReservationTab = 'tables' | 'rooms';
 
@@ -61,6 +63,7 @@ export const ReservationsView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
+  const now = useSystemClock();
   const { hasTablesModule, hasRoomsModule } = useAcquiredModules();
   
   // Get branchId from terminal credential cache / IPC
@@ -107,7 +110,7 @@ export const ReservationsView: React.FC = memo(() => {
   const effectiveOrgId = organizationId || localOrgId;
   
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [selectedDate, setSelectedDate] = useState(() => startOfLocalDay(new Date()));
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('today');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [activeTab, setActiveTab] = useState<ReservationTab>(() => {
@@ -148,9 +151,22 @@ export const ReservationsView: React.FC = memo(() => {
   useEffect(() => {
     setCreateForm((prev) => ({
       ...prev,
-      reservationDate: selectedDate.toISOString().split('T')[0],
+      reservationDate: toLocalDateString(selectedDate),
     }));
   }, [selectedDate]);
+
+  useEffect(() => {
+    if (quickFilter === 'today') {
+      const nextDate = startOfLocalDay(now);
+      setSelectedDate((prev) => (prev.getTime() === nextDate.getTime() ? prev : nextDate));
+      return;
+    }
+
+    if (quickFilter === 'tomorrow') {
+      const nextDate = addLocalDays(now, 1);
+      setSelectedDate((prev) => (prev.getTime() === nextDate.getTime() ? prev : nextDate));
+    }
+  }, [now, quickFilter]);
 
   useEffect(() => {
     setTableAssignmentId(selectedReservation?.tableId || '');
@@ -165,10 +181,10 @@ export const ReservationsView: React.FC = memo(() => {
       weekStart.setDate(weekStart.getDate() - weekStart.getDay());
       const weekEnd = new Date(weekStart);
       weekEnd.setDate(weekEnd.getDate() + 6);
-      baseFilters.dateFrom = weekStart.toISOString().split('T')[0];
-      baseFilters.dateTo = weekEnd.toISOString().split('T')[0];
+      baseFilters.dateFrom = toLocalDateString(weekStart);
+      baseFilters.dateTo = toLocalDateString(weekEnd);
     } else {
-      const dateStr = selectedDate.toISOString().split('T')[0];
+      const dateStr = toLocalDateString(selectedDate);
       baseFilters.dateFrom = dateStr;
       baseFilters.dateTo = dateStr;
     }
@@ -229,23 +245,21 @@ export const ReservationsView: React.FC = memo(() => {
 
   const handleQuickFilter = useCallback((filter: QuickFilter) => {
     setQuickFilter(filter);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = startOfLocalDay(now);
     
     if (filter === 'today') {
       setSelectedDate(today);
     } else if (filter === 'tomorrow') {
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrow = addLocalDays(today, 1);
       setSelectedDate(tomorrow);
     }
-  }, []);
+  }, [now]);
 
   const navigateDate = useCallback((direction: 'prev' | 'next') => {
     const newDate = new Date(selectedDate);
     newDate.setDate(newDate.getDate() + (direction === 'next' ? 1 : -1));
     setSelectedDate(newDate);
-    setQuickFilter('today');
+    setQuickFilter('custom');
   }, [selectedDate]);
 
   const handleStatusChange = useCallback(async (reservationId: string, status: ReservationStatus) => {
@@ -312,7 +326,7 @@ export const ReservationsView: React.FC = memo(() => {
       customerPhone: '',
       customerEmail: '',
       partySize: '2',
-      reservationDate: selectedDate.toISOString().split('T')[0],
+      reservationDate: toLocalDateString(selectedDate),
       reservationTime: '19:00',
       durationMinutes: '90',
       tableId: '',
@@ -502,7 +516,7 @@ export const ReservationsView: React.FC = memo(() => {
             onClick={() => {
               setCreateForm((prev) => ({
                 ...prev,
-                reservationDate: selectedDate.toISOString().split('T')[0],
+                reservationDate: toLocalDateString(selectedDate),
               }));
               setShowCreateModal(true);
             }}
@@ -538,7 +552,7 @@ export const ReservationsView: React.FC = memo(() => {
       <div className="flex items-center justify-between mb-4">
         {/* Quick Filters */}
         <div className="flex gap-2">
-          {(['today', 'tomorrow', 'week'] as QuickFilter[]).map(filter => (
+          {(['today', 'tomorrow', 'week'] as const).map(filter => (
             <button
               key={filter}
               onClick={() => handleQuickFilter(filter)}
@@ -560,8 +574,13 @@ export const ReservationsView: React.FC = memo(() => {
           </button>
           <input
             type="date"
-            value={selectedDate.toISOString().split('T')[0]}
-            onChange={(e) => setSelectedDate(new Date(e.target.value))}
+            value={toLocalDateString(selectedDate)}
+            onChange={(e) => {
+              const parsed = parseLocalDateString(e.target.value);
+              if (Number.isNaN(parsed.getTime())) return;
+              setSelectedDate(parsed);
+              setQuickFilter('custom');
+            }}
             className={`px-3 py-2 rounded-lg ${isDark ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-200'} border`}
           />
           <button onClick={() => navigateDate('next')} className={`p-2 rounded-lg ${isDark ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}>

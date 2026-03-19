@@ -23,6 +23,7 @@ import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import type { RestaurantTable } from '../types/tables';
 import { ActivityTracker } from '../services/ActivityTracker';
+import { toLocalDateString } from '../utils/date';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
 import { AlertTriangle } from 'lucide-react';
@@ -561,7 +562,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       reservationsService.setContext(branchId, organizationId);
       
       // Format date and time from the Date object
-      const reservationDate = data.reservationTime.toISOString().split('T')[0];
+      const reservationDate = toLocalDateString(data.reservationTime);
       const reservationTime = data.reservationTime.toTimeString().slice(0, 5);
       
       // Create the reservation with table status update

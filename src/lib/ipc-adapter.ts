@@ -500,6 +500,16 @@ export interface OrderFinancialsUpdateParams {
   tipAmount?: number;
 }
 
+export interface OrderCustomerInfoUpdateParams {
+  orderId: string;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string | null;
+  deliveryAddress: string;
+  deliveryPostalCode?: string | null;
+  deliveryNotes?: string | null;
+}
+
 // -- Sync --------------------------------------------------------------------
 
 export interface SyncStatus {
@@ -773,6 +783,7 @@ export interface PlatformBridge {
     create(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
     updateStatus(orderId: string, status: string): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
+    updateCustomerInfo(payload: OrderCustomerInfoUpdateParams): Promise<IpcResult>;
     updateFinancials(payload: OrderFinancialsUpdateParams): Promise<IpcResult>;
     delete(orderId: string): Promise<IpcResult>;
     saveFromRemote(order: any): Promise<IpcResult>;
@@ -1275,6 +1286,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'order:create': 'orders.create',
   'order:update-status': 'orders.updateStatus',
   'order:update-items': 'orders.updateItems',
+  'order:update-customer-info': 'orders.updateCustomerInfo',
   'order:update-financials': 'orders.updateFinancials',
   'order:delete': 'orders.delete',
   'order:save-from-remote': 'orders.saveFromRemote',
@@ -1726,6 +1738,8 @@ export class TauriBridge implements PlatformBridge {
     create: (p: CreateOrderPayload) => this.inv('order:create', p),
     updateStatus: (id: string, s: string) => this.inv('order:update-status', id, s),
     updateItems: (id: string, items: OrderItem[]) => this.inv('order:update-items', id, items),
+    updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>
+      this.inv('order:update-customer-info', payload),
     updateFinancials: (payload: OrderFinancialsUpdateParams) => this.inv('order:update-financials', payload),
     delete: (id: string) => this.inv('order:delete', id),
     saveFromRemote: (o: any) => this.inv('order:save-from-remote', o),

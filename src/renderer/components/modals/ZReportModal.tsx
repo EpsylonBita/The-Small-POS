@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { useFeatures } from '../../hooks/useFeatures';
+import { useSystemClock } from '../../hooks/useSystemClock';
 import type { ZReportData } from '../../types/reports';
 import { exportZReportToCSV, exportArrayToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
 import { formatDate, formatTime } from '../../utils/format';
+import { toLocalDateString } from '../../utils/date';
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { clearBusinessDayStorage } from '../../utils/session-utils';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
@@ -52,14 +54,17 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const bridge = getBridge();
   const { clearShift } = useShift();
   const { t } = useTranslation();
+  const now = useSystemClock();
   const { isFeatureEnabled, isMainTerminal, isMobileWaiter, loading: featuresLoading, parentTerminalId } = useFeatures();
   const canExecuteZReport =
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
   const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
   const isPendingLocalSubmit = lockDate;
+  const currentDate = toLocalDateString(now);
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
-  const [selectedDate, setSelectedDate] = useState<string>(date || new Date().toISOString().slice(0, 10));
+  const [selectedDate, setSelectedDate] = useState<string>(() => date || toLocalDateString(new Date()));
+  const [isUsingLiveDefaultDate, setIsUsingLiveDefaultDate] = useState(() => !date);
   const [zReport, setZReport] = useState<ZReportData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,8 +180,14 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
 
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedDate(date || new Date().toISOString().slice(0, 10));
+    setSelectedDate(date || toLocalDateString(new Date()));
+    setIsUsingLiveDefaultDate(!date);
   }, [date, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || date || !isUsingLiveDefaultDate || !currentDate) return;
+    setSelectedDate((prev) => (prev === currentDate ? prev : currentDate));
+  }, [currentDate, date, isOpen, isUsingLiveDefaultDate]);
 
 
 
@@ -226,7 +237,10 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           <input
             type="date"
             value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
+            onChange={(e) => {
+              setIsUsingLiveDefaultDate(false);
+              setSelectedDate(e.target.value);
+            }}
             className="liquid-glass-modal-input font-semibold"
             aria-label={t('modals.zReport.selectDate')}
             disabled={lockDate}
@@ -878,7 +892,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           {t('modals.zReport.exportCSV')}
         </button>
         <button
-          onClick={() => zReport?.staffReports && exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${new Date().toISOString().split('T')[0]}`)}
+          onClick={() => zReport?.staffReports && exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${currentDate}`)}
           className={liquidGlassModalButton('secondary', 'sm') + ' text-sm'}
           disabled={!zReport}
         >

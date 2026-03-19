@@ -7,6 +7,7 @@
 
 import { getBridge, isBrowser } from '../../lib';
 import { posApiGet, posApiPatch, posApiPost } from '../utils/api-helpers';
+import { toLocalDateString } from '../utils/date';
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -508,7 +509,7 @@ class ReservationsService {
     const reservation = await this.createReservation(data);
 
     if (data.tableId) {
-      const today = new Date().toISOString().split('T')[0];
+      const today = toLocalDateString();
       if (data.reservationDate === today) {
         await this.updateTableStatusToReserved(data.tableId);
       }
@@ -545,7 +546,7 @@ class ReservationsService {
 
   async getTodayReservationForTable(tableId: string): Promise<Reservation | null> {
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = toLocalDateString();
       const response = await this.listReservations({ date: today, table_id: tableId });
       if (response.error) {
         console.error(
@@ -619,7 +620,7 @@ class ReservationsService {
 
   async syncTableStatusesForToday(): Promise<void> {
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const today = toLocalDateString();
       const response = await this.listReservations({ date: today });
       if (response.error) {
         console.error('[ReservationsService] Error fetching today reservations:', response.error);

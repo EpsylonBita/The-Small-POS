@@ -271,8 +271,8 @@ export const OrderCard = memo<OrderCardProps>(({
   const isExternal = isExternalPlatform(orderPlugin);
 
   // Normalize driver info for display
-  const driverIdNormalized = order.driver_id || order.driverId || (order as any).driver_id || '';
-  const driverNameNormalized = order.driverName || (order as any).driver_name || '';
+  const driverIdNormalized = order.driver_id || order.driverId || '';
+  const driverNameNormalized = order.driverName || order.driver_name || '';
   const orderStatusNormalized = (order.status || '').toLowerCase();
   const isDeliveredOrCompleted = orderStatusNormalized === 'completed' || orderStatusNormalized === 'delivered';
   const showReadyStatusPill = orderStatusNormalized === 'ready' || isDeliveredOrCompleted;
@@ -289,6 +289,7 @@ export const OrderCard = memo<OrderCardProps>(({
       orderStatus: order.status,
       driver_id: order.driver_id,
       driverId: order.driverId,
+      driver_name: order.driver_name,
       driverName: order.driverName,
       isDeliveredOrCompleted,
       driverIdNormalized,
@@ -412,7 +413,7 @@ export const OrderCard = memo<OrderCardProps>(({
                   </div>
                 )}
                 {/* Driver badge for completed/delivered orders */}
-                {isDeliveredOrCompleted && driverIdNormalized && (
+                {isDeliveredOrCompleted && (driverIdNormalized || driverNameNormalized) && (
                   <div className="flex items-center gap-1 mt-1">
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${resolvedTheme === 'light'
                       ? 'bg-green-100 text-green-700 border border-green-200'

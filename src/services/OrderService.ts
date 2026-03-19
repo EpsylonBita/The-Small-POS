@@ -14,6 +14,26 @@ import {
 
 // Utility functions - now using centralized debug logger
 
+const normalizeOptionalText = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const normalizeDriverFields = <T extends Record<string, unknown>>(order: T): T => {
+  const driverId = normalizeOptionalText(order.driverId) || normalizeOptionalText(order.driver_id);
+  const driverName = normalizeOptionalText(order.driverName) || normalizeOptionalText(order.driver_name);
+
+  return {
+    ...order,
+    ...(driverId ? { driverId, driver_id: driverId } : {}),
+    ...(driverName ? { driverName, driver_name: driverName } : {}),
+  };
+};
+
 export class OrderService {
   private static instance: OrderService;
   private cachedOrganizationId: string | null = null;
@@ -189,10 +209,12 @@ export class OrderService {
           const orders = result?.data ?? result;
           if (Array.isArray(orders)) {
             // Normalize statuses for POS UI (map server 'completed' -> POS 'delivered')
-            const normalized = (orders as any[]).map((o) => ({
-              ...o,
-              status: o?.status ? mapStatusForPOS(o.status as any) : o?.status
-            }));
+            const normalized = (orders as Record<string, unknown>[]).map((order) =>
+              normalizeDriverFields({
+                ...order,
+                status: order?.status ? mapStatusForPOS(order.status as any) : order?.status
+              })
+            );
             debugLogger.info(`Fetched ${normalized.length} orders via bridge (local DB)`, 'OrderService');
             return normalized as Order[];
           }
@@ -236,12 +258,14 @@ export class OrderService {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const result = await response.json();
-      const ordersRaw = Array.isArray(result) ? result : (result.data || []);
+      const ordersRaw = Array.isArray(result) ? result : (result.orders || result.data || []);
       // Map server statuses to POS statuses to keep Delivered/Canceled sticky in UI
-      const orders = ordersRaw.map((o: any) => ({
-        ...o,
-        status: o?.status ? mapStatusForPOS(o.status as any) : o?.status
-      }));
+      const orders = ordersRaw.map((order: Record<string, unknown>) =>
+        normalizeDriverFields({
+          ...order,
+          status: order?.status ? mapStatusForPOS(order.status as any) : order?.status
+        })
+      );
       debugLogger.info(`Fetched ${orders.length} orders from Admin API`, 'OrderService');
       return orders;
     } catch (error) {

@@ -10,8 +10,10 @@ import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
 import { useTheme } from '../../../contexts/theme-context';
 import { useModules } from '../../../contexts/module-context';
+import { useSystemClock } from '../../../hooks/useSystemClock';
 import { useRooms } from '../../../hooks/useRooms';
 import { formatDate } from '../../../utils/format';
+import { addLocalDays, parseLocalDateString, toLocalDateString } from '../../../utils/date';
 import { reservationsService } from '../../../services/ReservationsService';
 import { OrderService } from '../../../../services/OrderService';
 import { 
@@ -62,7 +64,22 @@ interface ReservationData {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const formatIsoDate = (date: Date): string => date.toISOString().split('T')[0];
+const getDefaultReservationDates = (base: Date) => ({
+  checkInDate: toLocalDateString(base),
+  checkOutDate: toLocalDateString(addLocalDays(base, 1)),
+});
+
+const toReservationDateTimestamp = (value?: string | null): number => {
+  if (!value) return 0;
+
+  const localDate = parseLocalDateString(value);
+  if (!Number.isNaN(localDate.getTime())) {
+    return localDate.getTime();
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+};
 
 const mapPaymentMethod = (method: 'cash' | 'card' | 'transfer'): 'cash' | 'card' | 'digital' => {
   if (method === 'cash') return 'cash';
@@ -75,7 +92,9 @@ export const RoomsView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const { organizationId } = useModules();
+  const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
+  const reservationDefaultDates = useMemo(() => getDefaultReservationDates(now), [now]);
 
   const [branchId, setBranchId] = useState<string | null>(null);
   const [localOrgId, setLocalOrgId] = useState<string | null>(null);
@@ -103,10 +122,10 @@ export const RoomsView: React.FC = memo(() => {
   const [reservationData, setReservationData] = useState<ReservationData>({
     guestInfo: { name: '', phone: '', email: '', idNumber: '' },
     roomId: '',
-    checkInDate: new Date().toISOString().split('T')[0],
-    checkOutDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+    ...getDefaultReservationDates(new Date()),
     notes: '',
   });
+  const [reservationDatesFollowClock, setReservationDatesFollowClock] = useState(true);
 
   useEffect(() => {
     let disposed = false;
@@ -185,11 +204,35 @@ export const RoomsView: React.FC = memo(() => {
   };
 
   const openReservationModal = (room?: Room) => {
-    if (room) {
-      setReservationData(prev => ({ ...prev, roomId: room.id }));
-    }
+    const defaults = getDefaultReservationDates(new Date());
+    setReservationDatesFollowClock(true);
+    setReservationData(prev => ({
+      ...prev,
+      roomId: room ? room.id : prev.roomId,
+      checkInDate: defaults.checkInDate,
+      checkOutDate: defaults.checkOutDate,
+    }));
     setModalType('reservation');
   };
+
+  useEffect(() => {
+    if (modalType !== 'reservation' || !reservationDatesFollowClock) return;
+
+    setReservationData((prev) => {
+      if (
+        prev.checkInDate === reservationDefaultDates.checkInDate &&
+        prev.checkOutDate === reservationDefaultDates.checkOutDate
+      ) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        checkInDate: reservationDefaultDates.checkInDate,
+        checkOutDate: reservationDefaultDates.checkOutDate,
+      };
+    });
+  }, [modalType, reservationDatesFollowClock, reservationDefaultDates.checkInDate, reservationDefaultDates.checkOutDate]);
 
   const handleCheckin = async () => {
     if (!checkinData.roomId || !checkinData.guestInfo.name) return;
@@ -207,8 +250,8 @@ export const RoomsView: React.FC = memo(() => {
       }
 
       const now = new Date();
-      const checkInDate = formatIsoDate(now);
-      const checkOutDate = formatIsoDate(new Date(now.getTime() + (checkinData.nights * DAY_MS)));
+      const checkInDate = toLocalDateString(now);
+      const checkOutDate = toLocalDateString(addLocalDays(now, checkinData.nights));
       const reservationTime = now.toTimeString().slice(0, 5);
 
       reservationsService.setContext(branchId, effectiveOrgId);
@@ -294,11 +337,13 @@ export const RoomsView: React.FC = memo(() => {
       toast.success('Reservation created successfully');
       
       // Reset and close
+      const defaults = getDefaultReservationDates(new Date());
+      setReservationDatesFollowClock(true);
       setReservationData({
         guestInfo: { name: '', phone: '', email: '', idNumber: '' },
         roomId: '',
-        checkInDate: new Date().toISOString().split('T')[0],
-        checkOutDate: new Date(Date.now() + 86400000).toISOString().split('T')[0],
+        checkInDate: defaults.checkInDate,
+        checkOutDate: defaults.checkOutDate,
         notes: '',
       });
       setModalType('none');
@@ -318,7 +363,7 @@ export const RoomsView: React.FC = memo(() => {
       }
 
       reservationsService.setContext(branchId, effectiveOrgId);
-      const today = formatIsoDate(new Date());
+      const today = toLocalDateString();
       const reservations = await reservationsService.fetchReservations({
         dateFrom: today,
         dateTo: today,
@@ -329,13 +374,19 @@ export const RoomsView: React.FC = memo(() => {
           reservation.roomId === actionRoom.id &&
           ['pending', 'confirmed', 'seated'].includes(reservation.status)
         )
-        .sort((a, b) => new Date(b.checkInDate || b.createdAt).getTime() - new Date(a.checkInDate || a.createdAt).getTime())[0];
+        .sort(
+          (a, b) =>
+            toReservationDateTimestamp(b.checkInDate || b.createdAt) -
+            toReservationDateTimestamp(a.checkInDate || a.createdAt),
+        )[0];
 
       if (activeReservation) {
         await reservationsService.updateStatus(activeReservation.id, 'completed');
       }
 
-      const checkInDate = activeReservation?.checkInDate ? new Date(activeReservation.checkInDate) : null;
+      const checkInDate = activeReservation?.checkInDate
+        ? parseLocalDateString(activeReservation.checkInDate)
+        : null;
       const checkoutDate = new Date();
       const nightsStayed = checkInDate
         ? Math.max(1, Math.ceil((checkoutDate.getTime() - checkInDate.getTime()) / DAY_MS))
@@ -817,7 +868,10 @@ export const RoomsView: React.FC = memo(() => {
                 <input
                   type="date"
                   value={reservationData.checkInDate}
-                  onChange={(e) => setReservationData(prev => ({ ...prev, checkInDate: e.target.value }))}
+                  onChange={(e) => {
+                    setReservationDatesFollowClock(false);
+                    setReservationData(prev => ({ ...prev, checkInDate: e.target.value }));
+                  }}
                   className={`w-full px-3 py-2.5 rounded-xl text-sm ${
                     isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
                   } border focus:ring-2 focus:ring-blue-500`}
@@ -830,7 +884,10 @@ export const RoomsView: React.FC = memo(() => {
                 <input
                   type="date"
                   value={reservationData.checkOutDate}
-                  onChange={(e) => setReservationData(prev => ({ ...prev, checkOutDate: e.target.value }))}
+                  onChange={(e) => {
+                    setReservationDatesFollowClock(false);
+                    setReservationData(prev => ({ ...prev, checkOutDate: e.target.value }));
+                  }}
                   className={`w-full px-3 py-2.5 rounded-xl text-sm ${
                     isDark ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-200 text-gray-900'
                   } border focus:ring-2 focus:ring-blue-500`}

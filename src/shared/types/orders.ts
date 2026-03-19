@@ -153,6 +153,7 @@ export interface Order {
 
   // Driver information (for delivery orders)
   driver_id?: string; // Assigned driver for delivery orders
+  driver_name?: string; // Raw driver name from local/remote payloads
   driverId?: string; // For backward compatibility
   driverName?: string; // Driver name for display
 
@@ -246,6 +247,7 @@ export interface OrderRow {
   ghost_source?: string | null;
   ghost_metadata?: string | null;
   driver_id?: string;
+  driver_name?: string;
   terminal_id?: string | null;
   owner_terminal_id?: string | null;
   branch_id?: string | null;

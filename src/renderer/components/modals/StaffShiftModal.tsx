@@ -9,6 +9,7 @@ import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-c
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { formatTime, formatCurrency } from '../../utils/format';
+import { toLocalDateString } from '../../utils/date';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
@@ -492,6 +493,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const effectiveMode = (localMode ?? mode);
   const effectiveShift = (checkoutShift ?? activeShift);
   const isKitchenRole = effectiveShift?.role_type === 'kitchen';
+  const canRecordInlineExpenses =
+    effectiveShift?.role_type === 'cashier' || effectiveShift?.role_type === 'manager';
   const isDriverRole = effectiveShift?.role_type === 'driver';
   const isModalCloseBlocked = loading || showPaymentConfirm || confirmDialog.isOpen;
   const handleModalClose = () => {
@@ -600,6 +603,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setStaffPaymentsList([]);
     }
   }, [isOpen, effectiveMode, effectiveShift]);
+
+  useEffect(() => {
+    if (!canRecordInlineExpenses) {
+      setShowExpenseForm(false);
+    }
+  }, [canRecordInlineExpenses]);
 
   // Load active shifts for each staff member to show status and sort
   const loadActiveShiftsForStaff = async (staffList: StaffMember[]) => {
@@ -858,7 +867,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
    */
   const loadPaymentHistoryForStaff = async (staffId: string, dateStr?: string) => {
     try {
-      const targetDate = dateStr || new Date().toISOString().split('T')[0];
+      const targetDate = dateStr || toLocalDateString();
       const payments = await bridge.shifts.getStaffPaymentsByStaff({
         staffId,
         dateFrom: targetDate,
@@ -932,7 +941,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
         await loadStaffPayments(effectiveShift.id);
         // Use effectiveShift date context if possible
-        const shiftDate = effectiveShift.check_in_time ? new Date(effectiveShift.check_in_time).toISOString().split('T')[0] : undefined;
+        const shiftDate = effectiveShift.check_in_time
+          ? toLocalDateString(effectiveShift.check_in_time)
+          : undefined;
         await loadPaymentHistoryForStaff(selectedStaffForPayment.id, shiftDate);
 
         const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
@@ -1750,6 +1761,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       return;
     }
 
+    if (!canRecordInlineExpenses) {
+      setError(
+        t('modals.staffShift.cashierExpenseOnly', {
+          defaultValue: 'Expenses can only be recorded from cashier checkout',
+        }),
+      );
+      return;
+    }
+
     const amount = parseFloat(expenseAmount);
     if (isNaN(amount) || amount <= 0) {
       setError(t('modals.expense.invalidAmount'));
@@ -1937,7 +1957,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   )}
                   {(lastShiftResult.breakdown.inheritedDriverExpectedReturns || 0) > 0 && (
                     <div className="flex justify-between items-center p-2 rounded hover:bg-white/5">
-                      <span className="text-gray-400">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Inherited Driver Returns')}</span>
+                      <span className="text-gray-400">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns')}</span>
                       <span className="font-medium text-green-300">+{(lastShiftResult.breakdown.inheritedDriverExpectedReturns || 0).toFixed(2)}</span>
                     </div>
                   )}
@@ -2655,7 +2675,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
                     )}
 
-                    {/* Plus Inherited Driver Returns */}
+                    {/* Plus transferred staff returns */}
                     {(() => {
                       const inheritedDrivers = shiftSummary?.transferredDrivers || [];
                       const inheritedWaiters = shiftSummary?.transferredWaiters || [];
@@ -2664,9 +2684,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       return (
                         <div className="flex justify-between items-center p-3 bg-purple-900/30 rounded-lg border border-purple-600/40">
                           <div className="flex flex-col">
-                            <span className="text-sm text-purple-200">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Inherited staff returns')}</span>
+                            <span className="text-sm text-purple-200">{t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns')}</span>
                             <span className="text-xs text-purple-300/70">
-                              {inheritedDrivers.length + inheritedWaiters.length} {t('modals.staffShift.transferredDriversCount', 'staff transferred')}
+                              {inheritedDrivers.length + inheritedWaiters.length} {t('modals.staffShift.transferredDriversCount', 'staff transferred to this cashier')}
                             </span>
                           </div>
                           <span className="font-bold text-purple-300">+{formatCurrency(inheritedDriverExpectedReturns)}</span>
@@ -2716,16 +2736,27 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-xl font-bold liquid-glass-modal-text mb-4">{t('modals.staffShift.expenses')}</h3>
-                    <button
-                      onClick={() => setShowExpenseForm(!showExpenseForm)}
-                      className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-[0_2px_8px_0_rgba(59,130,246,0.4)] transition-all duration-300"
-                    >
-                      <Plus className="w-4 h-4" />
-                      {t('modals.staffShift.addExpense')}
-                    </button>
+                    {canRecordInlineExpenses && (
+                      <button
+                        onClick={() => setShowExpenseForm(!showExpenseForm)}
+                        className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-[0_2px_8px_0_rgba(59,130,246,0.4)] transition-all duration-300"
+                      >
+                        <Plus className="w-4 h-4" />
+                        {t('modals.staffShift.addExpense')}
+                      </button>
+                    )}
                   </div>
 
-                  {showExpenseForm && (
+                  {!canRecordInlineExpenses && (
+                    <p className="text-xs text-gray-400 mb-4">
+                      {t('modals.staffShift.expensesReadOnly', {
+                        defaultValue:
+                          'Expenses are recorded from cashier checkout. Existing shift expenses are shown here for reference.',
+                      })}
+                    </p>
+                  )}
+
+                  {canRecordInlineExpenses && showExpenseForm && (
                     <div className={liquidGlassModalCard() + ' space-y-3 mb-4'}>
                       <select
                         value={expenseType}
@@ -3461,10 +3492,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 setSelectedStaffForPayment({
                                   id: selected.id,
                                   name: selected.name,
-                                  role: selected.roles?.[0]?.role_name || 'staff'
-                                });
+                                role: selected.roles?.[0]?.role_name || 'staff'
+                              });
                                 // Load history for this staff, using effective shift date context
-                                const shiftDate = effectiveShift?.check_in_time ? new Date(effectiveShift.check_in_time).toISOString().split('T')[0] : undefined;
+                                const shiftDate = effectiveShift?.check_in_time
+                                  ? toLocalDateString(effectiveShift.check_in_time)
+                                  : undefined;
                                 await loadPaymentHistoryForStaff(selected.id, shiftDate);
 
                                 // Calculate expected payment based on their hourly rate and active shift

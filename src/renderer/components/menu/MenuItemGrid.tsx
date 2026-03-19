@@ -17,6 +17,7 @@ interface MenuItemGridProps {
   searchQuery?: string;
   // Top seller IDs for featured category filtering
   topSellerIds?: Set<string>;
+  featuredRankedIds?: string[];
   // Combo mode
   comboMode?: boolean;
   combos?: MenuCombo[];
@@ -32,6 +33,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
   onQuickAdd,
   searchQuery = '',
   topSellerIds,
+  featuredRankedIds = [],
   comboMode = false,
   combos = [],
   onComboSelect,
@@ -55,8 +57,20 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
           items = await menuService.getMenuItems();
         } else if (selectedCategory === 'featured') {
           const allItems = await menuService.getMenuItems();
-          if (topSellerIds && topSellerIds.size > 0) {
-            items = allItems.filter(item => topSellerIds.has(item.id));
+          if (featuredRankedIds.length > 0) {
+            const itemsById = new Map(allItems.map(item => [item.id, item]));
+            const rankedItems = featuredRankedIds
+              .map((itemId) => itemsById.get(itemId))
+              .filter((item): item is MenuItem => Boolean(item));
+
+            items = rankedItems.length > 0
+              ? rankedItems
+              : allItems.filter(item => item.is_featured || false);
+          } else if (topSellerIds && topSellerIds.size > 0) {
+            const filteredItems = allItems.filter(item => topSellerIds.has(item.id));
+            items = filteredItems.length > 0
+              ? filteredItems
+              : allItems.filter(item => item.is_featured || false);
           } else {
             items = allItems.filter(item => item.is_featured || false);
           }
@@ -141,7 +155,7 @@ export const MenuItemGrid: React.FC<MenuItemGridProps> = ({
       console.error('Error setting up real-time subscription:', error);
       // Continue without real-time updates
     }
-  }, [selectedCategory, selectedSubcategory, searchQuery, topSellerIds]);
+  }, [featuredRankedIds, searchQuery, selectedCategory, selectedSubcategory, topSellerIds]);
 
   // Combo mode - render combo cards instead of menu items
   if (comboMode && onComboSelect) {

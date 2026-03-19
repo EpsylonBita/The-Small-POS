@@ -127,7 +127,10 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     isValidating: isValidatingDeliveryFee,
   } = useDeliveryValidation({ debounceMs: 0 });
   const { staff } = useShift();
-  const { topSellerIds } = useFeaturedItems(staff?.branchId || null);
+  const { topSellerIds, rankedTopSellerIds } = useFeaturedItems(staff?.branchId || null, {
+    strategy: 'daily_then_weekly',
+    limit: 20,
+  });
   const { hasModule } = useAcquiredModules();
   const hasDeliveryZonesModule = hasModule(MODULE_IDS.DELIVERY_ZONES);
   const bridge = getBridge();
@@ -1611,6 +1614,7 @@ export const MenuModal: React.FC<MenuModalProps> = ({
               onItemSelect={(item) => { setSelectedMenuItem(item); setMenuSearchQuery(''); setTimeout(() => menuSearchRef.current?.focus(), 50); }}
               onQuickAdd={handleQuickAdd}
               topSellerIds={topSellerIds}
+              featuredRankedIds={rankedTopSellerIds}
               comboMode={selectedCategory === 'combos'}
               combos={combos}
               onComboSelect={handleComboSelect}

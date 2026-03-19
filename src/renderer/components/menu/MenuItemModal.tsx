@@ -760,9 +760,9 @@ export const MenuItemModal: React.FC<MenuItemModalProps> = ({
 
           <button
             onClick={handleAddToCart}
-            className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base text-white shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
-                ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700'
-                : 'bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700'
+            className={`liquid-glass-modal-button w-full py-3 rounded-xl font-bold text-base shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-[1.02] active:scale-98 ${isEditMode
+                ? 'liquid-glass-modal-warning'
+                : 'liquid-glass-modal-success shadow-[0_0_24px_rgba(34,197,94,0.24)] hover:shadow-[0_0_32px_rgba(34,197,94,0.32)]'
               }`}
           >
             {isEditMode ? (

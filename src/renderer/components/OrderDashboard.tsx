@@ -10,7 +10,7 @@ import DriverAssignmentModal from './modals/DriverAssignmentModal';
 import OrderCancellationModal from './modals/OrderCancellationModal';
 import EditOptionsModal from './modals/EditOptionsModal';
 import EditPaymentMethodModal from './modals/EditPaymentMethodModal';
-import { EditCustomerInfoModal } from './modals/EditCustomerInfoModal';
+import { EditCustomerInfoModal, type EditCustomerInfoFormData } from './modals/EditCustomerInfoModal';
 import EditOrderItemsModal from './modals/EditOrderItemsModal';
 import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { CustomerInfoModal } from './modals/CustomerInfoModal';
@@ -23,6 +23,7 @@ import { OrderConflictBanner } from './OrderConflictBanner';
 import { LiquidGlassModal } from './ui/pos-glass-components';
 import { TableSelector, TableActionModal, ReservationForm } from './tables';
 import type { CreateReservationDto } from './tables';
+import { toLocalDateString } from '../utils/date';
 import { reservationsService } from '../services/ReservationsService';
 import { PrintPreviewModal } from './modals/PrintPreviewModal';
 import { Plus } from 'lucide-react';
@@ -54,6 +55,25 @@ interface OrderDashboardProps {
   className?: string;
   orderFilter?: (order: Order) => boolean;
 }
+
+const extractOrderDashboardErrorMessage = (error: unknown): string | null => {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+  if (error && typeof error === 'object') {
+    const candidate = error as { error?: unknown; message?: unknown };
+    if (typeof candidate.error === 'string' && candidate.error.trim()) {
+      return candidate.error;
+    }
+    if (typeof candidate.message === 'string' && candidate.message.trim()) {
+      return candidate.message;
+    }
+  }
+  return null;
+};
 
 export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', orderFilter }) => {
   const bridge = getBridge();
@@ -196,9 +216,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [editingOrderType, setEditingOrderType] = useState<'pickup' | 'delivery'>('pickup'); // Track order type for editing
   // Snapshot of customer info captured when "Edit Customer Info" is clicked
   // (avoids depending on pendingEditOrders surviving the modal transition)
-  const [editCustomerSnapshot, setEditCustomerSnapshot] = useState<{
-    name: string; phone: string; address: string; postal_code?: string; notes?: string;
-  } | null>(null);
+  const [editCustomerSnapshot, setEditCustomerSnapshot] = useState<EditCustomerInfoFormData | null>(null);
+  const [editCustomerOrderIds, setEditCustomerOrderIds] = useState<string[]>([]);
 
   // Store edit order details separately to persist while modal is open
   const [currentEditOrderId, setCurrentEditOrderId] = useState<string | undefined>(undefined);
@@ -776,7 +795,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       reservationsService.setContext(branchId, organizationId);
 
       // Format date and time from the Date object
-      const reservationDate = data.reservationTime.toISOString().split('T')[0];
+      const reservationDate = toLocalDateString(data.reservationTime);
       const reservationTime = data.reservationTime.toTimeString().slice(0, 5);
 
       // Create the reservation with table status update
@@ -1933,8 +1952,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // Handle edit options
   const handleEditInfo = () => {
+    const targetOrderIds = pendingEditOrders.length > 0
+      ? pendingEditOrders
+      : editingSingleOrder
+        ? [editingSingleOrder]
+        : [];
+
     // Capture the customer info NOW while pendingEditOrders is still populated
     setEditCustomerSnapshot(getSelectedOrderCustomerInfo());
+    setEditCustomerOrderIds(targetOrderIds);
     setShowEditOptionsModal(false);
     setShowEditCustomerModal(true);
   };
@@ -2091,31 +2117,73 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   };
 
   // Handle customer info edit
-  const handleCustomerInfoSave = async (customerInfo: { name: string; phone: string; email?: string; address?: string }) => {
+  const handleCustomerInfoSave = async (customerInfo: EditCustomerInfoFormData) => {
+    const targetOrderIds = editCustomerOrderIds.length > 0
+      ? editCustomerOrderIds
+      : pendingEditOrders.length > 0
+        ? pendingEditOrders
+        : editingSingleOrder
+          ? [editingSingleOrder]
+          : [];
+
+    if (targetOrderIds.length === 0) {
+      toast.error(t('orderDashboard.customerInfoFailed'));
+      return;
+    }
+
     try {
-      // Update customer info for all pending edit orders
-      for (const orderId of pendingEditOrders) {
-        // Here you would typically call an API to update the order
-        // await updateOrderCustomerInfo(orderId, customerInfo);
+      const updatePayload = {
+        customerName: customerInfo.name.trim(),
+        customerPhone: customerInfo.phone.trim(),
+        deliveryAddress: customerInfo.address.trim(),
+        deliveryPostalCode: customerInfo.postal_code?.trim() || null,
+        deliveryNotes: customerInfo.notes?.trim() || null,
+      };
+      const submitCustomerInfoUpdate = (payload: { orderId: string } & typeof updatePayload) => {
+        if (typeof bridge.orders.updateCustomerInfo === 'function') {
+          return bridge.orders.updateCustomerInfo(payload);
+        }
+        return bridge.invoke('order:update-customer-info', payload);
+      };
+
+      for (const orderId of targetOrderIds) {
+        const result = await submitCustomerInfoUpdate({
+          orderId,
+          ...updatePayload,
+        });
+
+        if (!result?.success) {
+          throw new Error(result?.error || 'Failed to update customer info');
+        }
       }
 
-      toast.success(t('orderDashboard.customerInfoUpdated', { count: pendingEditOrders.length }));
+      await loadOrders();
+
+      toast.success(t('orderDashboard.customerInfoUpdated', { count: targetOrderIds.length }));
 
       // Close modal and clear state
       setShowEditCustomerModal(false);
       setEditCustomerSnapshot(null);
+      setEditCustomerOrderIds([]);
       setPendingEditOrders([]);
       setEditingSingleOrder(null);
       clearBulkSelection();
     } catch (error) {
       console.error('Failed to update customer info:', error);
-      toast.error(t('orderDashboard.customerInfoFailed'));
+      try {
+        await loadOrders();
+      } catch (reloadError) {
+        console.error('Failed to reload orders after customer info update:', reloadError);
+      }
+      const errorMessage = extractOrderDashboardErrorMessage(error);
+      toast.error(errorMessage || t('orderDashboard.customerInfoFailed'));
     }
   };
 
   const handleEditCustomerClose = () => {
     setShowEditCustomerModal(false);
     setEditCustomerSnapshot(null);
+    setEditCustomerOrderIds([]);
     setPendingEditOrders([]);
     setEditingSingleOrder(null);
   };
@@ -2207,7 +2275,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   };
 
   // Get customer info for the first selected order (for editing)
-  const getSelectedOrderCustomerInfo = () => {
+  const getSelectedOrderCustomerInfo = (): EditCustomerInfoFormData => {
     if (pendingEditOrders.length === 0 && !editingSingleOrder) return { name: '', phone: '', address: '', notes: '' };
 
     const targetId = pendingEditOrders[0] || editingSingleOrder;
@@ -2644,7 +2712,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
       <EditCustomerInfoModal
         isOpen={showEditCustomerModal}
-        orderCount={pendingEditOrders.length || (editCustomerSnapshot ? 1 : 0)}
+        orderCount={editCustomerOrderIds.length || pendingEditOrders.length || (editCustomerSnapshot ? 1 : 0)}
         initialCustomerInfo={editCustomerSnapshot || getSelectedOrderCustomerInfo()}
         onSave={handleCustomerInfoSave}
         onClose={handleEditCustomerClose}

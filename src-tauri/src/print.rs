@@ -2751,6 +2751,24 @@ fn build_shift_checkout_doc(
         resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
             .unwrap_or_default()
     };
+    let transferred_staff_groups = [
+        summary.get("transferredDrivers").and_then(Value::as_array),
+        summary.get("transferredWaiters").and_then(Value::as_array),
+    ];
+    let mut transferred_staff_count = 0_i64;
+    let mut transferred_staff_returns = 0.0_f64;
+    for group in transferred_staff_groups.into_iter().flatten() {
+        transferred_staff_count += group.len() as i64;
+        transferred_staff_returns += group
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("net_cash_amount")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0)
+            })
+            .sum::<f64>();
+    }
 
     let mut doc = Ok(ShiftCheckoutDoc {
         shift_id: shift_id.to_string(),
@@ -2803,6 +2821,8 @@ fn build_shift_checkout_doc(
         opening_amount: number_from_paths(&cash_drawer, &["/opening_amount", "/openingAmount"])
             .or_else(|| number_from_paths(&shift, &["/opening_cash_amount", "/openingCashAmount"]))
             .unwrap_or(0.0),
+        transferred_staff_count,
+        transferred_staff_returns,
         expected_amount: number_from_paths(&cash_drawer, &["/expected_amount", "/expectedAmount"])
             .or_else(|| {
                 number_from_paths(&shift, &["/expected_cash_amount", "/expectedCashAmount"])
@@ -4515,6 +4535,79 @@ mod tests {
             ReceiptDocument::ShiftCheckout(doc) => {
                 assert_eq!(doc.terminal_name, "Front Counter");
                 assert_eq!(doc.role_type, "cashier");
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_cashier_shift_checkout_includes_transferred_staff_returns() {
+        let db = test_db();
+
+        let cashier_one = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-1",
+                "staffName": "Cashier One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 500.0,
+            }),
+        )
+        .expect("open cashier one");
+        let cashier_one_shift_id = cashier_one["shiftId"]
+            .as_str()
+            .expect("cashier one shift id")
+            .to_string();
+
+        crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "driver-1",
+                "staffName": "Driver One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "driver",
+                "openingCash": 60.0,
+            }),
+        )
+        .expect("open driver");
+
+        crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": cashier_one_shift_id,
+                "closingCash": 440.0,
+            }),
+        )
+        .expect("close cashier one");
+
+        let cashier_two = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-2",
+                "staffName": "Cashier Two",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 300.0,
+            }),
+        )
+        .expect("open cashier two");
+        let cashier_two_shift_id = cashier_two["shiftId"]
+            .as_str()
+            .expect("cashier two shift id")
+            .to_string();
+
+        let doc =
+            build_document_for_job(&db, "shift_checkout", cashier_two_shift_id.as_str(), None)
+                .expect("build shift checkout doc");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.transferred_staff_count, 1);
+                assert_eq!(doc.transferred_staff_returns, 60.0);
             }
             _ => panic!("expected shift checkout document"),
         }

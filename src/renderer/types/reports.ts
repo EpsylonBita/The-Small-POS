@@ -17,6 +17,8 @@ export interface SalesTrendData {
 }
 
 export interface TopItemData {
+  menuItemId?: string;
+  categoryId?: string | null;
   name: string;
   quantity: number;
   revenue: number;

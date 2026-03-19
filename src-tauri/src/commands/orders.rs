@@ -73,6 +73,32 @@ struct OrderUpdateFinancialsPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OrderUpdateCustomerInfoPayload {
+    #[serde(alias = "order_id")]
+    #[serde(alias = "id")]
+    #[serde(alias = "supabaseId")]
+    #[serde(alias = "supabase_id")]
+    order_id: String,
+    #[serde(alias = "customer_name")]
+    customer_name: String,
+    #[serde(default, alias = "customer_email")]
+    customer_email: Option<String>,
+    #[serde(alias = "customer_phone")]
+    customer_phone: String,
+    #[serde(alias = "delivery_address")]
+    #[serde(alias = "address")]
+    delivery_address: String,
+    #[serde(default, alias = "delivery_postal_code")]
+    #[serde(alias = "postal_code")]
+    #[serde(alias = "postalCode")]
+    delivery_postal_code: Option<String>,
+    #[serde(default, alias = "delivery_notes")]
+    #[serde(alias = "notes")]
+    delivery_notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OrderDeletePayload {
     #[serde(alias = "order_id")]
     #[serde(alias = "id")]
@@ -143,6 +169,7 @@ fn ensure_order_status_transition_allowed(
     }
 }
 
+#[cfg(test)]
 fn is_invalid_status_transition_failure_message(message: &str) -> bool {
     message
         .to_ascii_lowercase()
@@ -328,6 +355,43 @@ fn parse_order_update_financials_payload(
     Ok(parsed)
 }
 
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
+fn parse_order_update_customer_info_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<OrderUpdateCustomerInfoPayload, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let mut parsed: OrderUpdateCustomerInfoPayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid order customer info payload: {e}"))?;
+
+    parsed.order_id = parsed.order_id.trim().to_string();
+    parsed.customer_name = parsed.customer_name.trim().to_string();
+    parsed.customer_phone = parsed.customer_phone.trim().to_string();
+    parsed.delivery_address = parsed.delivery_address.trim().to_string();
+    parsed.customer_email = normalize_optional_text(parsed.customer_email);
+    parsed.delivery_postal_code = normalize_optional_text(parsed.delivery_postal_code);
+    parsed.delivery_notes = normalize_optional_text(parsed.delivery_notes);
+
+    if parsed.order_id.is_empty() {
+        return Err("Missing orderId".into());
+    }
+    if parsed.customer_name.is_empty() {
+        return Err("Missing customerName".into());
+    }
+    if parsed.customer_phone.is_empty() {
+        return Err("Missing customerPhone".into());
+    }
+    if parsed.delivery_address.is_empty() {
+        return Err("Missing deliveryAddress".into());
+    }
+
+    Ok(parsed)
+}
+
 fn resolve_driver_display_name(conn: &rusqlite::Connection, driver_id: &str) -> Option<String> {
     let driver_id = driver_id.trim();
     if driver_id.is_empty() {
@@ -498,6 +562,87 @@ pub async fn order_update_status(
     });
     let _ = app.emit("order_status_updated", event_payload.clone());
     let _ = app.emit("order_realtime_update", event_payload);
+
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": actual_order_id
+    }))
+}
+
+#[tauri::command]
+pub async fn order_update_customer_info(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_order_update_customer_info_payload(arg0)?;
+    let now = Utc::now().to_rfc3339();
+
+    let OrderUpdateCustomerInfoPayload {
+        order_id,
+        customer_name,
+        customer_email,
+        customer_phone,
+        delivery_address,
+        delivery_postal_code,
+        delivery_notes,
+    } = payload;
+
+    let actual_order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_order_id(&conn, &order_id).ok_or("Order not found")?
+    };
+
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE orders
+             SET customer_name = ?1,
+                 customer_phone = ?2,
+                 customer_email = COALESCE(?3, customer_email),
+                 delivery_address = ?4,
+                 delivery_postal_code = ?5,
+                 delivery_notes = ?6,
+                 sync_status = 'pending',
+                 updated_at = ?7
+             WHERE id = ?8",
+            rusqlite::params![
+                &customer_name,
+                &customer_phone,
+                customer_email.as_deref(),
+                &delivery_address,
+                delivery_postal_code.as_deref(),
+                delivery_notes.as_deref(),
+                &now,
+                &actual_order_id,
+            ],
+        )
+        .map_err(|e| format!("update order customer info: {e}"))?;
+
+        let sync_payload = serde_json::json!({
+            "orderId": actual_order_id,
+            "customerName": customer_name,
+            "customerEmail": customer_email,
+            "customerPhone": customer_phone,
+            "deliveryAddress": delivery_address,
+            "deliveryPostalCode": delivery_postal_code,
+            "deliveryNotes": delivery_notes,
+        });
+        let idem = format!(
+            "order:update-customer-info:{}:{}",
+            actual_order_id,
+            uuid::Uuid::new_v4()
+        );
+        let _ = conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+             VALUES ('order', ?1, 'update', ?2, ?3)",
+            rusqlite::params![actual_order_id, sync_payload.to_string(), idem],
+        );
+    }
+
+    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let _ = app.emit("order_realtime_update", order_json);
+    }
 
     Ok(serde_json::json!({
         "success": true,
@@ -1858,6 +2003,28 @@ mod dto_tests {
             parse_order_delete_payload(Some(serde_json::json!({})), Some("order-5".into()))
                 .expect("delete payload should parse");
         assert_eq!(parsed.order_id, "order-5");
+    }
+
+    #[test]
+    fn parse_customer_info_payload_trims_and_normalizes_optional_fields() {
+        let parsed = parse_order_update_customer_info_payload(Some(serde_json::json!({
+            "orderId": " order-6 ",
+            "customerName": "  Test Customer  ",
+            "customerPhone": "  12345  ",
+            "customerEmail": "   ",
+            "deliveryAddress": "  Main St 42  ",
+            "deliveryPostalCode": "  10558  ",
+            "deliveryNotes": "  Ring once  ",
+        })))
+        .expect("customer info payload should parse");
+
+        assert_eq!(parsed.order_id, "order-6");
+        assert_eq!(parsed.customer_name, "Test Customer");
+        assert_eq!(parsed.customer_phone, "12345");
+        assert_eq!(parsed.customer_email, None);
+        assert_eq!(parsed.delivery_address, "Main St 42");
+        assert_eq!(parsed.delivery_postal_code.as_deref(), Some("10558"));
+        assert_eq!(parsed.delivery_notes.as_deref(), Some("Ring once"));
     }
 }
 

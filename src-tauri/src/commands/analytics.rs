@@ -1,6 +1,8 @@
 use chrono::{Local, Utc};
 use rusqlite::params;
 use serde::Deserialize;
+use serde_json::Value;
+use std::cmp::Ordering;
 use tauri::Emitter;
 use tracing::{info, warn};
 
@@ -175,6 +177,151 @@ fn is_cancelled_status(status: &str) -> bool {
         status.to_ascii_lowercase().as_str(),
         "cancelled" | "canceled"
     )
+}
+
+#[derive(Debug, Clone)]
+struct AggregatedTopItem {
+    menu_item_id: String,
+    name: String,
+    quantity: f64,
+    revenue: f64,
+    category_id: Option<String>,
+}
+
+fn truthy_from_keys(value: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        value.get(*key).is_some_and(|raw| match raw {
+            Value::Bool(flag) => *flag,
+            Value::Number(num) => num.as_i64().map(|v| v != 0).unwrap_or(false),
+            Value::String(text) => matches!(
+                text.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            ),
+            _ => false,
+        })
+    })
+}
+
+fn parse_top_item_quantity(item: &Value) -> f64 {
+    let quantity = crate::value_f64(item, &["quantity"]).unwrap_or(1.0);
+    if quantity > 0.0 {
+        quantity
+    } else {
+        1.0
+    }
+}
+
+fn parse_top_item_revenue(item: &Value, quantity: f64) -> f64 {
+    crate::value_f64(item, &["total_price", "totalPrice"])
+        .unwrap_or_else(|| {
+            crate::value_f64(item, &["unit_price", "unitPrice", "price"]).unwrap_or(0.0) * quantity
+        })
+        .max(0.0)
+}
+
+fn normalize_top_item_menu_item_id(item: &Value) -> Option<String> {
+    value_str(item, &["menu_item_id", "menuItemId"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("manual"))
+}
+
+fn aggregate_top_items_from_order_rows(
+    orders: impl IntoIterator<Item = (String, String)>,
+) -> Vec<AggregatedTopItem> {
+    let mut by_menu_item_id: std::collections::HashMap<String, AggregatedTopItem> =
+        std::collections::HashMap::new();
+
+    for (status, items_json) in orders {
+        if is_cancelled_status(&status) {
+            continue;
+        }
+
+        let parsed =
+            serde_json::from_str::<Value>(&items_json).unwrap_or_else(|_| serde_json::json!([]));
+        let Some(items) = parsed.as_array() else {
+            continue;
+        };
+
+        for item in items {
+            if truthy_from_keys(item, &["is_manual", "isManual"])
+                || truthy_from_keys(item, &["is_combo", "isCombo"])
+                || value_str(item, &["combo_id", "comboId"]).is_some()
+            {
+                continue;
+            }
+
+            let Some(menu_item_id) = normalize_top_item_menu_item_id(item) else {
+                continue;
+            };
+
+            let quantity = parse_top_item_quantity(item);
+            let revenue = parse_top_item_revenue(item, quantity);
+            let item_name = value_str(item, &["name", "item_name", "title"])
+                .unwrap_or_else(|| "Item".to_string());
+            let category_id = value_str(item, &["category_id", "categoryId"]).and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+
+            let entry = by_menu_item_id
+                .entry(menu_item_id.clone())
+                .or_insert_with(|| AggregatedTopItem {
+                    menu_item_id: menu_item_id.clone(),
+                    name: item_name.clone(),
+                    quantity: 0.0,
+                    revenue: 0.0,
+                    category_id: category_id.clone(),
+                });
+
+            if (entry.name.trim().is_empty() || entry.name == "Item")
+                && !item_name.trim().is_empty()
+            {
+                entry.name = item_name;
+            }
+            if entry.category_id.is_none() && category_id.is_some() {
+                entry.category_id = category_id;
+            }
+
+            entry.quantity += quantity;
+            entry.revenue += revenue;
+        }
+    }
+
+    let mut items: Vec<AggregatedTopItem> = by_menu_item_id.into_values().collect();
+    items.sort_by(|left, right| {
+        right
+            .quantity
+            .partial_cmp(&left.quantity)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                right
+                    .revenue
+                    .partial_cmp(&left.revenue)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
+fn top_items_to_json(items: Vec<AggregatedTopItem>, limit: usize) -> Vec<serde_json::Value> {
+    items
+        .into_iter()
+        .take(limit)
+        .map(|item| {
+            serde_json::json!({
+                "menuItemId": item.menu_item_id,
+                "name": item.name,
+                "quantity": item.quantity,
+                "revenue": item.revenue,
+                "categoryId": item.category_id,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::type_complexity)]
@@ -755,20 +902,12 @@ pub async fn report_get_top_items(
     let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let orders = crate::load_orders_for_period(&conn, &branch_id, &date, &date)?;
-    let mut qty_by_item: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    for (_id, _status, _created, items, _staff, _payment_method) in orders {
-        let (_total, map) = crate::parse_item_totals(&items);
-        for (name, qty) in map {
-            *qty_by_item.entry(name).or_insert(0.0) += qty;
-        }
-    }
-    let mut items: Vec<(String, f64)> = qty_by_item.into_iter().collect();
-    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top: Vec<serde_json::Value> = items
-        .into_iter()
-        .take(limit)
-        .map(|(name, quantity)| serde_json::json!({ "name": name, "quantity": quantity }))
-        .collect();
+    let aggregated = aggregate_top_items_from_order_rows(
+        orders
+            .into_iter()
+            .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
+    );
+    let top = top_items_to_json(aggregated, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
 
@@ -790,20 +929,12 @@ pub async fn report_get_weekly_top_items(
         .to_string();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let orders = crate::load_orders_for_period(&conn, &branch_id, &from, &today)?;
-    let mut qty_by_item: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    for (_id, _status, _created, items, _staff, _payment_method) in orders {
-        let (_total, map) = crate::parse_item_totals(&items);
-        for (name, qty) in map {
-            *qty_by_item.entry(name).or_insert(0.0) += qty;
-        }
-    }
-    let mut items: Vec<(String, f64)> = qty_by_item.into_iter().collect();
-    items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let top: Vec<serde_json::Value> = items
-        .into_iter()
-        .take(limit)
-        .map(|(name, quantity)| serde_json::json!({ "name": name, "quantity": quantity }))
-        .collect();
+    let aggregated = aggregate_top_items_from_order_rows(
+        orders
+            .into_iter()
+            .map(|(_id, status, _created, items, _staff, _payment_method)| (status, items)),
+    );
+    let top = top_items_to_json(aggregated, limit);
     Ok(serde_json::json!({ "success": true, "data": top }))
 }
 
@@ -1197,6 +1328,126 @@ mod dto_tests {
         let parsed = parse_report_top_items_payload(Some(serde_json::json!("branch-3")));
         assert_eq!(parsed.branch_id.as_deref(), Some("branch-3"));
         assert_eq!(parsed.limit, None);
+    }
+
+    #[test]
+    fn aggregate_top_items_uses_menu_item_ids_and_skips_invalid_rows() {
+        let rows = vec![
+            (
+                "pending".to_string(),
+                serde_json::json!([
+                    {
+                        "menu_item_id": "item-1",
+                        "name": "Burger",
+                        "category_id": "cat-1",
+                        "quantity": 2.0,
+                        "total_price": 12.4
+                    },
+                    {
+                        "menu_item_id": "manual",
+                        "name": "Manual item",
+                        "quantity": 1.0,
+                        "total_price": 8.0
+                    },
+                    {
+                        "menu_item_id": "combo-1",
+                        "name": "Lunch Combo",
+                        "quantity": 1.0,
+                        "total_price": 9.0,
+                        "is_combo": true
+                    }
+                ])
+                .to_string(),
+            ),
+            (
+                "completed".to_string(),
+                serde_json::json!([
+                    {
+                        "menuItemId": "item-1",
+                        "name": "Burger Deluxe",
+                        "quantity": 1.0,
+                        "unitPrice": 6.2
+                    },
+                    {
+                        "menu_item_id": "item-2",
+                        "name": "Fries",
+                        "quantity": 3.0,
+                        "total_price": 9.0,
+                        "is_manual": true
+                    },
+                    {
+                        "menu_item_id": "item-3",
+                        "name": "Wrap",
+                        "quantity": 1.0,
+                        "total_price": 7.0,
+                        "combo_id": "combo-wrap"
+                    }
+                ])
+                .to_string(),
+            ),
+            (
+                "cancelled".to_string(),
+                serde_json::json!([
+                    {
+                        "menu_item_id": "item-2",
+                        "name": "Fries",
+                        "quantity": 5.0,
+                        "total_price": 15.0
+                    }
+                ])
+                .to_string(),
+            ),
+        ];
+
+        let aggregated = aggregate_top_items_from_order_rows(rows);
+        assert_eq!(aggregated.len(), 1);
+
+        let burger = &aggregated[0];
+        assert_eq!(burger.menu_item_id, "item-1");
+        assert_eq!(burger.name, "Burger");
+        assert_eq!(burger.category_id.as_deref(), Some("cat-1"));
+        assert!((burger.quantity - 3.0).abs() < f64::EPSILON);
+        assert!((burger.revenue - 18.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn top_items_json_preserves_legacy_fields_and_adds_menu_item_id() {
+        let rows = vec![(
+            "pending".to_string(),
+            serde_json::json!([
+                {
+                    "menu_item_id": "item-9",
+                    "name": "Crepe",
+                    "categoryId": "cat-9",
+                    "quantity": 2.0,
+                    "totalPrice": 11.0
+                }
+            ])
+            .to_string(),
+        )];
+
+        let json_rows = top_items_to_json(aggregate_top_items_from_order_rows(rows), 10);
+        assert_eq!(json_rows.len(), 1);
+        assert_eq!(
+            json_rows[0].get("menuItemId").and_then(|v| v.as_str()),
+            Some("item-9")
+        );
+        assert_eq!(
+            json_rows[0].get("name").and_then(|v| v.as_str()),
+            Some("Crepe")
+        );
+        assert_eq!(
+            json_rows[0].get("categoryId").and_then(|v| v.as_str()),
+            Some("cat-9")
+        );
+        assert_eq!(
+            json_rows[0].get("quantity").and_then(|v| v.as_f64()),
+            Some(2.0)
+        );
+        assert_eq!(
+            json_rows[0].get("revenue").and_then(|v| v.as_f64()),
+            Some(11.0)
+        );
     }
 
     #[test]

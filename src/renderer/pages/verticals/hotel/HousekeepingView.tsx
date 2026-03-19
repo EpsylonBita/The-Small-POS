@@ -3,7 +3,9 @@ import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 import { Clock, User, Filter, RefreshCw, WifiOff } from 'lucide-react';
 import { useTheme } from '../../../contexts/theme-context';
+import { useSystemClock } from '../../../hooks/useSystemClock';
 import { posApiGet, posApiPatch } from '../../../utils/api-helpers';
+import { toLocalDateString } from '../../../utils/date';
 import { offEvent, onEvent } from '../../../../lib';
 
 type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'verified' | 'cancelled';
@@ -40,7 +42,9 @@ const HOUSEKEEPING_REFRESH_MIN_MS = 30000;
 export const HousekeepingView: React.FC = memo(() => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
+  const now = useSystemClock();
   const isDark = resolvedTheme === 'dark';
+  const today = toLocalDateString(now);
 
   const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
@@ -250,9 +254,8 @@ export const HousekeepingView: React.FC = memo(() => {
   }, [tasks, floorFilter, taskTypeFilter, priorityFilter, staffFilter]);
 
   const completedToday = useMemo(() => {
-    const today = new Date().toISOString().split('T')[0];
-    return tasks.filter((task) => (task.completed_at || '').startsWith(today)).length;
-  }, [tasks]);
+    return tasks.filter((task) => toLocalDateString(task.completed_at || '') === today).length;
+  }, [tasks, today]);
 
   const avgCompletionTime = useMemo(() => {
     const completed = tasks
@@ -473,4 +476,3 @@ export const HousekeepingView: React.FC = memo(() => {
 HousekeepingView.displayName = 'HousekeepingView';
 
 export default HousekeepingView;
-
