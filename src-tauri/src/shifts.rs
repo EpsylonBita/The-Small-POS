@@ -317,9 +317,18 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let closing_cash = num_field(payload, "closingCash")
         .or_else(|| num_field(payload, "closing_cash"))
         .ok_or("Missing closingCash")?;
-    let closed_by = str_field(payload, "closedBy").or_else(|| str_field(payload, "closed_by"));
+    let raw_closed_by = str_field(payload, "closedBy").or_else(|| str_field(payload, "closed_by"));
+    let closed_by = sanitize_database_uuid(raw_closed_by.clone());
     let payment_amount =
         num_field(payload, "paymentAmount").or_else(|| num_field(payload, "payment_amount"));
+
+    if raw_closed_by.is_some() && closed_by.is_none() {
+        warn!(
+            shift_id = %shift_id,
+            closed_by = raw_closed_by.as_deref().unwrap_or_default(),
+            "Ignoring non-UUID closedBy for shift close"
+        );
+    }
 
     // Fetch the active shift (include branch_id/terminal_id for driver return + transfer logic)
     let shift = conn
@@ -2248,6 +2257,17 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(String::from)
 }
 
+fn sanitize_database_uuid(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || Uuid::parse_str(trimmed).is_err() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn num_field(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64)
 }
@@ -2262,6 +2282,8 @@ mod tests {
     use crate::db;
     use rusqlite::{params, Connection};
     use serde_json::Value;
+
+    const TEST_MANAGER_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -2541,7 +2563,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": "cashier-reconcile",
                 "closingCash": 100.0,
-                "closedBy": "manager-1",
+                "closedBy": TEST_MANAGER_UUID,
             }),
         )
         .expect("close shift should reconcile drawer");
@@ -2564,7 +2586,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(reconciled, 1, "closed cashier drawer should be reconciled");
-        assert_eq!(reconciled_by.as_deref(), Some("manager-1"));
+        assert_eq!(reconciled_by.as_deref(), Some(TEST_MANAGER_UUID));
         assert_eq!(
             reconciled_at, closed_at,
             "drawer reconciliation timestamp should match close timestamp"
@@ -2608,7 +2630,7 @@ mod tests {
             &serde_json::json!({
                 "shiftId": "cashier-sync-close",
                 "closingCash": 100.0,
-                "closedBy": "manager-1",
+                "closedBy": TEST_MANAGER_UUID,
             }),
         )
         .expect("cashier close should succeed");
@@ -2630,8 +2652,70 @@ mod tests {
         assert_eq!(cash_drawer["expectedAmount"], 100.0);
         assert_eq!(cash_drawer["varianceAmount"], 0.0);
         assert_eq!(cash_drawer["reconciled"], true);
-        assert_eq!(cash_drawer["reconciledBy"], "manager-1");
+        assert_eq!(cash_drawer["reconciledBy"], TEST_MANAGER_UUID);
         assert_eq!(cash_drawer["reconciledAt"], cash_drawer["closedAt"]);
+    }
+
+    #[test]
+    fn test_cashier_close_drops_placeholder_closed_by_from_local_state_and_sync_payload() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-placeholder-close', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T09:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-placeholder-close', 'cashier-placeholder-close', 'cashier-1', 'branch-1', 'term-1',
+                    100.0, '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-placeholder-close",
+                "closingCash": 100.0,
+                "closedBy": "admin-user",
+            }),
+        )
+        .expect("cashier close should tolerate placeholder closedBy");
+
+        let conn = db.conn.lock().unwrap();
+        let (closed_by, reconciled_by): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT ss.closed_by, cds.reconciled_by
+                 FROM staff_shifts ss
+                 LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                 WHERE ss.id = 'cashier-placeholder-close'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(closed_by, None);
+        assert_eq!(reconciled_by, None);
+        drop(conn);
+
+        let payload = load_latest_shift_sync_payload(&db, "update", "cashier-placeholder-close");
+        assert!(payload["closedBy"].is_null());
+        assert!(payload["cashDrawer"]["reconciledBy"].is_null());
     }
 
     #[test]

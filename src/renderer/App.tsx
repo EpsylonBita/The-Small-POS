@@ -491,6 +491,7 @@ function AppContent() {
             setUser(enrichedUser);
             setStaff({
               staffId: enrichedUser.staffId,
+              databaseStaffId: enrichedUser.databaseStaffId,
               name: enrichedUser.staffName,
               role: enrichedUser.role?.name || 'staff',
               branchId: enrichedUser.branchId || 'default-branch',
@@ -535,6 +536,7 @@ function AppContent() {
           // Set staff in shift context
           setStaff({
             staffId: enrichedUser.staffId,
+            databaseStaffId: enrichedUser.databaseStaffId,
             name: enrichedUser.staffName,
             role: enrichedUser.role?.name || 'staff',
             branchId: enrichedUser.branchId || 'default-branch',
@@ -600,6 +602,7 @@ function AppContent() {
         setUser(enrichedUser);
         setStaff({
           staffId: enrichedUser.staffId,
+          databaseStaffId: enrichedUser.databaseStaffId,
           name: enrichedUser.staffName,
           role: enrichedUser.role?.name || 'staff',
           branchId: enrichedUser.branchId || 'default-branch',

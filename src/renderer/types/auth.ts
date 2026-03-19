@@ -1,6 +1,7 @@
 // Basic user interface definition
 export interface User {
   staffId: string;
+  databaseStaffId?: string | null;
   staffName?: string;
   role: {
     name: string;

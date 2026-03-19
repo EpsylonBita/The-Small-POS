@@ -8,6 +8,7 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 
 interface StaffData {
   staffId: string;
+  databaseStaffId?: string | null;
   name: string;
   role: string;
   branchId: string;

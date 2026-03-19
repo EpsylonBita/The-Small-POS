@@ -88,6 +88,7 @@ export interface AuthLoginResponse {
   success: boolean;
   user?: {
     staffId: string;
+    databaseStaffId?: string | null;
     staffName: string;
     role: { name: string; permissions?: string[] };
     branchId: string;
@@ -603,7 +604,7 @@ export interface OpenShiftParams {
 export interface CloseShiftParams {
   shiftId: string;
   closingCash: number;
-  closedBy: string;
+  closedBy?: string;
   paymentAmount?: number;
 }
 

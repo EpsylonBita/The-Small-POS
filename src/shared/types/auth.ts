@@ -3,6 +3,7 @@
 export interface User {
   id?: string;
   staffId: string;
+  databaseStaffId?: string | null;
   staffName?: string;
   role: {
     name: string;

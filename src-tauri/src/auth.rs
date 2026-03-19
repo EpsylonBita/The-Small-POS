@@ -73,6 +73,15 @@ impl StaffSession {
         false
     }
 
+    fn database_staff_id(&self) -> Option<&str> {
+        let staff_id = self.staff_id.trim();
+        if Uuid::parse_str(staff_id).is_ok() {
+            Some(staff_id)
+        } else {
+            None
+        }
+    }
+
     /// Convert to the JSON shape the React frontend expects.
     fn to_user_json(&self) -> Value {
         let branch_id =
@@ -82,6 +91,7 @@ impl StaffSession {
 
         serde_json::json!({
             "staffId": self.staff_id,
+            "databaseStaffId": self.database_staff_id(),
             "staffName": if self.role == "admin" { "Administrator" } else { "Staff" },
             "role": {
                 "name": self.role,
@@ -1508,5 +1518,36 @@ mod tests {
             PrivilegedActionScope::SystemControl,
             Utc::now()
         ));
+    }
+
+    #[test]
+    fn to_user_json_exposes_database_staff_id_only_for_real_uuids() {
+        let now = Utc::now();
+        let valid_staff_id = "11111111-1111-4111-8111-111111111111";
+
+        let db_backed_session = StaffSession {
+            session_id: Uuid::new_v4().to_string(),
+            staff_id: valid_staff_id.to_string(),
+            role: "staff".to_string(),
+            permissions: vec![],
+            login_time: now,
+            last_activity: now,
+            expires_at: now,
+        };
+        assert_eq!(
+            db_backed_session.to_user_json()["databaseStaffId"].as_str(),
+            Some(valid_staff_id)
+        );
+
+        let placeholder_session = StaffSession {
+            session_id: Uuid::new_v4().to_string(),
+            staff_id: "admin-user".to_string(),
+            role: "admin".to_string(),
+            permissions: vec![],
+            login_time: now,
+            last_activity: now,
+            expires_at: now,
+        };
+        assert!(placeholder_session.to_user_json()["databaseStaffId"].is_null());
     }
 }

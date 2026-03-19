@@ -116,6 +116,15 @@ function extractErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function isUuidValue(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      value.trim(),
+    )
+  );
+}
+
 function buildStaffAuthCacheKey(branchId: string): string {
   return `branch_${branchId.trim()}`;
 }
@@ -1650,11 +1659,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const isDriver = effectiveShift.role_type === 'driver';
       const driverPaymentAmount = isDriver ? parseFloat(staffPayment || '0') : undefined;
       const cashierPaymentAmount = effectiveShift.role_type === 'cashier' ? cashierPayout : undefined;
+      const closedBy =
+        staff.databaseStaffId ||
+        (isUuidValue(staff.staffId) ? staff.staffId.trim() : undefined);
 
       const result = await bridge.shifts.close({
         shiftId: effectiveShift.id,
         closingCash: closingAmount,
-        closedBy: staff.staffId,
+        closedBy,
         paymentAmount: isDriver ? driverPaymentAmount : cashierPaymentAmount
       }) as unknown as ShiftIpcResult;
       console.log('closeShift result:', result);
