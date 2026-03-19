@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use chrono::DateTime;
+use chrono::{DateTime, Local};
 use font8x8::UnicodeFonts;
 use image::{GrayImage, Luma};
 use rusttype::{point, Font as RustFont, Scale};
@@ -1277,13 +1277,21 @@ fn append_html_header_block(
 /// Format an ISO-8601 timestamp to `DD/MM/YYYY HH:MM`.
 fn format_datetime_human(iso: &str) -> String {
     DateTime::parse_from_rfc3339(iso)
-        .map(|dt| dt.format("%d/%m/%Y %H:%M").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%d/%m/%Y %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| {
             let trimmed = &iso[..iso.len().min(26)];
             chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f")
                 .map(|dt| dt.format("%d/%m/%Y %H:%M").to_string())
                 .unwrap_or_else(|_| iso.to_string())
         })
+}
+
+fn should_render_shift_checkout_driver_summary(doc: &ShiftCheckoutDoc) -> bool {
+    doc.role_type == "driver"
 }
 
 fn customization_qty(value: f64) -> String {
@@ -2925,15 +2933,6 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let role_display = receipt_role_text(lang, &doc.role_type);
-            let terminal_line = non_empty_receipt_value(&doc.terminal_name)
-                .map(|terminal_name| {
-                    format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(receipt_label(lang, "Terminal")),
-                        esc(terminal_name)
-                    )
-                })
-                .unwrap_or_default();
             let expected = doc
                 .expected_amount
                 .map(money)
@@ -2946,23 +2945,38 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 .variance_amount
                 .map(money)
                 .unwrap_or_else(|| "N/A".to_string());
-            let body = format!(
-                "<div class=\"center\"><strong>{}</strong></div>\
-                 <div class=\"section\"><div class=\"line\"><span>{}</span><span>{}</span></div>\
+            let mut body = format!(
+                "<div class=\"center\"><strong>{}</strong></div><div class=\"section\">\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>{}</div>",
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "SHIFT CHECKOUT")),
                 esc(receipt_label(lang, "Role")),
                 esc(&role_display),
                 esc(receipt_label(lang, "Staff")),
                 esc(&doc.staff_name),
+            );
+            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Terminal")),
+                    esc(terminal_name)
+                ));
+            }
+            body.push_str(&format!(
+                "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                esc(receipt_label(lang, "Check-in")),
+                esc(&format_datetime_human(&doc.check_in)),
+                esc(receipt_label(lang, "Check-out")),
+                esc(&format_datetime_human(&doc.check_out)),
                 esc(receipt_label(lang, "Orders")),
                 doc.orders_count,
                 esc(receipt_label(lang, "Sales")),
@@ -2979,8 +2993,58 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 closing,
                 esc(receipt_label(lang, "Variance")),
                 variance,
-                terminal_line
-            );
+            ));
+            if !doc.driver_deliveries.is_empty() {
+                body.push_str(&format!(
+                    "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "DRIVER DELIVERIES"))
+                ));
+                for line in &doc.driver_deliveries {
+                    let label = format!("#{} {}", line.order_number, line.payment_method);
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(&label),
+                        money(line.total_amount),
+                    ));
+                }
+            }
+            if should_render_shift_checkout_driver_summary(doc) {
+                body.push_str(&format!(
+                    "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "DRIVER SUMMARY")),
+                    esc(receipt_label(lang, "Cash Collected")),
+                    money(doc.total_cash_collected),
+                    esc(receipt_label(lang, "Card Collected")),
+                    money(doc.total_card_collected),
+                    esc(receipt_label(lang, "Delivery Fees")),
+                    money(doc.total_delivery_fees),
+                    esc(receipt_label(lang, "Tips")),
+                    money(doc.total_tips),
+                    esc(receipt_label(lang, "Starting")),
+                    money(doc.opening_amount),
+                    esc(receipt_label(lang, "+ Cash")),
+                    money(doc.total_cash_collected),
+                ));
+                if doc.total_expenses > 0.0 {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "- Expenses")),
+                        money(doc.total_expenses),
+                    ));
+                }
+                body.push_str(&format!(
+                    "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                    esc(receipt_label(lang, "= To Return")),
+                    money(doc.amount_to_return),
+                ));
+            }
+            body.push_str("</div>");
             html_shell(receipt_label(lang, "SHIFT CHECKOUT"), &body, cfg)
         }
         ReceiptDocument::ZReport(doc) => {
@@ -5717,22 +5781,74 @@ fn render_classic_non_customer_raster_exact_ttf(
                     preset.item_style,
                 );
             }
-            if !doc.driver_deliveries.is_empty() {
+            if should_render_shift_checkout_driver_summary(doc) {
+                if !doc.driver_deliveries.is_empty() {
+                    canvas.draw_rule();
+                    canvas.draw_text_line(
+                        receipt_label(lang, "DRIVER DELIVERIES"),
+                        BitmapAlign::Left,
+                        preset.section_style,
+                    );
+                    canvas.draw_rule();
+                    for line in &doc.driver_deliveries {
+                        let label = format!("#{} {}", line.order_number, line.payment_method);
+                        canvas.draw_pair(
+                            &label,
+                            &money_with_currency_locale(line.total_amount, &cur, comma),
+                            preset.item_style,
+                        );
+                    }
+                }
                 canvas.draw_rule();
                 canvas.draw_text_line(
-                    receipt_label(lang, "DRIVER DELIVERIES"),
+                    receipt_label(lang, "DRIVER SUMMARY"),
                     BitmapAlign::Left,
                     preset.section_style,
                 );
                 canvas.draw_rule();
-                for line in &doc.driver_deliveries {
-                    let label = format!("#{} {}", line.order_number, line.payment_method);
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Cash Collected")),
+                    &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
+                    preset.item_style,
+                );
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Card Collected")),
+                    &money_with_currency_locale(doc.total_card_collected, &cur, comma),
+                    preset.item_style,
+                );
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Delivery Fees")),
+                    &money_with_currency_locale(doc.total_delivery_fees, &cur, comma),
+                    preset.item_style,
+                );
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Tips")),
+                    &money_with_currency_locale(doc.total_tips, &cur, comma),
+                    preset.item_style,
+                );
+                canvas.draw_rule();
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "Starting")),
+                    &money_with_currency_locale(doc.opening_amount, &cur, comma),
+                    preset.item_style,
+                );
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "+ Cash")),
+                    &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
+                    preset.item_style,
+                );
+                if doc.total_expenses > 0.0 {
                     canvas.draw_pair(
-                        &label,
-                        &money_with_currency_locale(line.total_amount, &cur, comma),
+                        &format!("{}:", receipt_label(lang, "- Expenses")),
+                        &money_with_currency_locale(doc.total_expenses, &cur, comma),
                         preset.item_style,
                     );
                 }
+                canvas.draw_pair(
+                    &format!("{}:", receipt_label(lang, "= To Return")),
+                    &money_with_currency_locale(doc.amount_to_return, &cur, comma),
+                    preset.item_style,
+                );
             }
         }
         ReceiptDocument::ZReport(doc) => {
@@ -6923,6 +7039,18 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             }
             emit_pair(
                 &mut builder,
+                receipt_label(lang, "Check-in"),
+                &format_datetime_human(&doc.check_in),
+                width,
+            );
+            emit_pair(
+                &mut builder,
+                receipt_label(lang, "Check-out"),
+                &format_datetime_human(&doc.check_out),
+                width,
+            );
+            emit_pair(
+                &mut builder,
                 receipt_label(lang, "Orders"),
                 &doc.orders_count.to_string(),
                 width,
@@ -6977,26 +7105,28 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
             );
 
             // Driver-specific delivery breakdown
-            if doc.role_type == "driver" && !doc.driver_deliveries.is_empty() {
-                builder.lf();
-                builder
-                    .center()
-                    .bold(true)
-                    .text(receipt_label(lang, "DELIVERIES"))
-                    .lf()
-                    .bold(false)
-                    .left();
-                emit_rule(&mut builder, width, '-');
-                for d in &doc.driver_deliveries {
-                    let label = format!("#{} {}", d.order_number, d.payment_method);
-                    emit_pair(
-                        &mut builder,
-                        &label,
-                        &money_locale(d.total_amount, comma),
-                        width,
-                    );
+            if should_render_shift_checkout_driver_summary(doc) {
+                if !doc.driver_deliveries.is_empty() {
+                    builder.lf();
+                    builder
+                        .center()
+                        .bold(true)
+                        .text(receipt_label(lang, "DELIVERIES"))
+                        .lf()
+                        .bold(false)
+                        .left();
+                    emit_rule(&mut builder, width, '-');
+                    for d in &doc.driver_deliveries {
+                        let label = format!("#{} {}", d.order_number, d.payment_method);
+                        emit_pair(
+                            &mut builder,
+                            &label,
+                            &money_locale(d.total_amount, comma),
+                            width,
+                        );
+                    }
+                    emit_rule(&mut builder, width, '-');
                 }
-                emit_rule(&mut builder, width, '-');
 
                 builder.lf();
                 builder
@@ -7483,6 +7613,48 @@ mod tests {
 
     fn count_text(text: &str, needle: &str) -> usize {
         text.match_indices(needle).count()
+    }
+
+    fn sample_driver_shift_checkout_doc() -> ShiftCheckoutDoc {
+        ShiftCheckoutDoc {
+            shift_id: "SHIFT-DRIVER-001".to_string(),
+            role_type: "driver".to_string(),
+            staff_name: "Driver One".to_string(),
+            terminal_name: "Front".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 4,
+            sales_amount: 42.5,
+            total_expenses: 3.0,
+            cash_refunds: 0.0,
+            opening_amount: 25.0,
+            expected_amount: Some(40.0),
+            closing_amount: Some(38.0),
+            variance_amount: Some(-2.0),
+            total_cash_collected: 18.0,
+            total_card_collected: 12.5,
+            total_delivery_fees: 4.0,
+            total_tips: 2.0,
+            amount_to_return: 40.0,
+            ..ShiftCheckoutDoc::default()
+        }
+    }
+
+    #[test]
+    fn format_datetime_human_converts_rfc3339_timestamps_to_local_time() {
+        let iso = "2026-03-05T16:00:00Z";
+        let actual = format_datetime_human(iso);
+        let parsed = chrono::DateTime::parse_from_rfc3339(iso).expect("parse rfc3339");
+        let expected_local = parsed
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y %H:%M")
+            .to_string();
+        let raw_utc = parsed.format("%d/%m/%Y %H:%M").to_string();
+
+        assert_eq!(actual, expected_local);
+        if expected_local != raw_utc {
+            assert_ne!(actual, raw_utc);
+        }
     }
 
     #[test]
@@ -8234,6 +8406,37 @@ mod tests {
     }
 
     #[test]
+    fn classic_shift_checkout_raster_exact_expands_for_driver_summary_without_delivery_rows() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+        let driver_doc = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
+        let cashier_doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            role_type: "cashier".to_string(),
+            total_cash_collected: 0.0,
+            total_card_collected: 0.0,
+            total_delivery_fees: 0.0,
+            total_tips: 0.0,
+            amount_to_return: 0.0,
+            ..sample_driver_shift_checkout_doc()
+        });
+
+        let driver_out = render_escpos(&driver_doc, &cfg);
+        let driver_image = render_classic_non_customer_raster_exact_ttf(&driver_doc, &cfg)
+            .expect("render driver raster image");
+        let cashier_image = render_classic_non_customer_raster_exact_ttf(&cashier_doc, &cfg)
+            .expect("render cashier raster image");
+
+        assert_eq!(driver_out.body_mode, EscPosBodyMode::RasterExact);
+        assert!(
+            driver_image.height() > cashier_image.height(),
+            "driver raster receipt should grow when the summary block is rendered"
+        );
+    }
+
+    #[test]
     fn classic_z_report_raster_exact_returns_raster_body_mode() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
@@ -8651,6 +8854,62 @@ mod tests {
         assert!(z_text.contains("3"));
         assert!(z_text.contains("Front"));
         assert!(!z_text.contains("snapshot"));
+    }
+
+    #[test]
+    fn classic_text_driver_shift_checkout_renders_summary_without_delivery_rows() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+        let expected_checkout = chrono::DateTime::parse_from_rfc3339("2026-03-05T16:00:00Z")
+            .expect("parse check-out")
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y %H:%M")
+            .to_string();
+
+        assert!(text.contains("Check-out"));
+        assert!(text.contains(&expected_checkout));
+        assert!(text.contains("DRIVER SUMMARY"));
+        assert!(text.contains("Starting"));
+        assert!(text.contains("= To Return"));
+        assert!(text.contains("Closing"));
+        assert!(text.contains("Variance"));
+        assert!(!text.contains("DRIVER DELIVERIES"));
+    }
+
+    #[test]
+    fn html_driver_shift_checkout_renders_check_times_and_summary_without_delivery_rows() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ShiftCheckout(sample_driver_shift_checkout_doc());
+        let html = render_html(&doc, &cfg);
+        let expected_check_in = chrono::DateTime::parse_from_rfc3339("2026-03-05T08:00:00Z")
+            .expect("parse check-in")
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y %H:%M")
+            .to_string();
+        let expected_check_out = chrono::DateTime::parse_from_rfc3339("2026-03-05T16:00:00Z")
+            .expect("parse check-out")
+            .with_timezone(&chrono::Local)
+            .format("%d/%m/%Y %H:%M")
+            .to_string();
+
+        assert!(html.contains("Check-in"));
+        assert!(html.contains("Check-out"));
+        assert!(html.contains(&expected_check_in));
+        assert!(html.contains(&expected_check_out));
+        assert!(html.contains("DRIVER SUMMARY"));
+        assert!(html.contains("Starting"));
+        assert!(html.contains("= To Return"));
+        assert!(!html.contains("DRIVER DELIVERIES"));
     }
 
     #[test]

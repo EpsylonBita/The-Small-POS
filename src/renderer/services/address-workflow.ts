@@ -1,7 +1,20 @@
 import { getBridge, onEvent } from '../../lib';
 import { posApiPost } from '../utils/api-helpers';
 import { resolveAddressLanguage } from '../utils/address-language';
+import {
+  extractStreetNumber,
+  selectResolvedStreetNumber,
+} from './address-house-number';
 import { getResolvedTerminalCredentials } from './terminal-credentials';
+
+export {
+  extractStreetNumber,
+  houseNumbersMatch,
+  normalizeHouseNumber,
+  parseHouseNumberParts,
+  selectResolvedStreetNumber,
+  type HouseNumberParts,
+} from './address-house-number';
 
 export type ValidationStatus =
   | 'in_zone'
@@ -99,11 +112,6 @@ function sanitizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function parseStreetNumberFromText(text: string): string | undefined {
-  const match = text.match(/\b\d+[A-Za-zΑ-Ωα-ω]?\b/u);
-  return match?.[0];
-}
-
 function isAddressLikeSuggestion(candidate: AddressSuggestion): boolean {
   const types = Array.isArray(candidate.types) ? candidate.types.map((t) => String(t).toLowerCase()) : [];
   const formatted = `${candidate.name} ${candidate.formatted_address}`.toLowerCase();
@@ -133,11 +141,6 @@ function scoreSuggestion(query: string, candidate: AddressSuggestion): number {
   if (isAddressLikeSuggestion(candidate)) score += 40;
   if (candidate.source === 'offline_cache') score += 10;
   return score;
-}
-
-export function extractStreetNumber(address: string | null | undefined): string | undefined {
-  if (!address) return undefined;
-  return parseStreetNumberFromText(address);
 }
 
 export function buildAddressFingerprint(
@@ -410,7 +413,11 @@ export async function resolveAddressSuggestion(
       coordinates: coords,
       placeId: suggestion.place_id,
       formattedAddress: suggestion.formatted_address,
-      resolvedStreetNumber: suggestion.resolved_street_number || extractStreetNumber(street),
+      resolvedStreetNumber: selectResolvedStreetNumber(
+        suggestion.resolved_street_number,
+        street,
+        suggestion.formatted_address
+      ),
       addressFingerprint: fingerprint,
       validationSource: 'offline_cache',
     };
@@ -440,11 +447,16 @@ export async function resolveAddressSuggestion(
           ? { lat: Number(geometry.lat), lng: Number(geometry.lng) }
           : suggestion.location;
 
+      const formattedAddress = sanitizeString(result?.formatted_address || suggestion.formatted_address);
+      const resolvedStreetNumber = selectResolvedStreetNumber(
+        extracted.streetNumber,
+        fallbackStreet,
+        formattedAddress
+      );
       const streetAddress =
-        extracted.route && extracted.streetNumber
-          ? `${extracted.route} ${extracted.streetNumber}`
+        extracted.route && resolvedStreetNumber
+          ? `${extracted.route} ${resolvedStreetNumber}`
           : extracted.route || fallbackStreet;
-      const resolvedStreetNumber = extracted.streetNumber || extractStreetNumber(streetAddress);
       const fingerprint = buildAddressFingerprint(streetAddress, coordinates);
 
       return {
@@ -453,7 +465,7 @@ export async function resolveAddressSuggestion(
         postalCode: extracted.postalCode,
         coordinates,
         placeId: suggestion.place_id,
-        formattedAddress: sanitizeString(result?.formatted_address || suggestion.formatted_address),
+        formattedAddress,
         resolvedStreetNumber,
         addressFingerprint: fingerprint,
         validationSource: 'online',

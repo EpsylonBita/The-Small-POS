@@ -122,7 +122,7 @@ pub(crate) fn value_i64(v: &serde_json::Value, keys: &[&str]) -> Option<i64> {
 }
 
 pub(crate) use core_helpers::{
-    build_admin_query, clear_operational_data_inner, fetch_supabase_rows,
+    build_admin_query, can_transition_locally, clear_operational_data_inner, fetch_supabase_rows,
     normalize_status_for_storage, payload_arg0_as_string, read_module_cache, read_update_state,
     stats_for_modules, update_info_from_release, validate_admin_api_path, write_module_cache,
     write_update_state,

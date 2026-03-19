@@ -66,7 +66,9 @@ use zeroize::Zeroizing;
 use serde::Deserialize;
 
 use crate::api;
+use crate::can_transition_locally;
 use crate::db::DbState;
+use crate::normalize_status_for_storage;
 use crate::order_ownership;
 use crate::print;
 use crate::storage;
@@ -1357,6 +1359,7 @@ pub fn remove_invalid_orders(db: &DbState, order_ids: Vec<String>) -> Result<Val
 /// Get sync queue statistics.
 pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    cleanup_order_update_queue_rows(&conn, None)?;
 
     let pending: i64 = conn
         .query_row(
@@ -1913,6 +1916,178 @@ fn classify_queue_failure(entity_type: &str, last_error: &str) -> &'static str {
     }
 
     "unknown"
+}
+
+#[derive(Debug)]
+struct OrderUpdateQueueRow {
+    queue_id: i64,
+    entity_id: String,
+    status: String,
+    synced_at: Option<String>,
+    payload: String,
+    local_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrderUpdateLocalResolution {
+    RestoreSyncedHistory,
+    ResolveSupersededStatus,
+}
+
+fn extract_explicit_order_update_status(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_status_for_storage(&value))
+}
+
+fn classify_order_update_local_resolution(
+    row: &OrderUpdateQueueRow,
+) -> Option<OrderUpdateLocalResolution> {
+    if row.synced_at.is_some() {
+        return Some(OrderUpdateLocalResolution::RestoreSyncedHistory);
+    }
+
+    let queued_status = extract_explicit_order_update_status(&row.payload)?;
+    let local_status = row
+        .local_status
+        .as_deref()
+        .map(normalize_status_for_storage)
+        .filter(|value| !value.is_empty())?;
+
+    if local_status == queued_status {
+        return None;
+    }
+
+    if can_transition_locally(&queued_status, &local_status) {
+        Some(OrderUpdateLocalResolution::ResolveSupersededStatus)
+    } else {
+        None
+    }
+}
+
+fn refresh_order_sync_status_for_queue_cleanup(
+    conn: &Connection,
+    order_ids: &HashSet<String>,
+    now: &str,
+) -> Result<(), String> {
+    for order_id in order_ids {
+        let has_remaining_rows: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM sync_queue
+                    WHERE entity_type = 'order'
+                      AND entity_id = ?1
+                      AND status IN ('pending', 'in_progress', 'queued_remote', 'failed')
+                )",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("inspect remaining order queue rows: {e}"))?;
+
+        if has_remaining_rows {
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE orders
+             SET sync_status = 'synced',
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, order_id],
+        )
+        .map_err(|e| format!("refresh order sync status: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_order_update_queue_rows(
+    conn: &Connection,
+    order_id: Option<&str>,
+) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT sq.id, sq.entity_id, sq.status, sq.synced_at, sq.payload, o.status
+             FROM sync_queue sq
+             LEFT JOIN orders o ON o.id = sq.entity_id
+             WHERE sq.entity_type = 'order'
+               AND sq.operation = 'update'
+               AND (?1 IS NULL OR sq.entity_id = ?1)
+               AND (
+                    (sq.synced_at IS NOT NULL AND sq.status != 'synced')
+                    OR sq.status IN ('failed', 'pending', 'in_progress')
+               )
+             ORDER BY sq.id ASC",
+        )
+        .map_err(|e| format!("prepare order queue cleanup query: {e}"))?;
+
+    let rows: Vec<OrderUpdateQueueRow> = stmt
+        .query_map(params![order_id], |row| {
+            Ok(OrderUpdateQueueRow {
+                queue_id: row.get(0)?,
+                entity_id: row.get(1)?,
+                status: row.get(2)?,
+                synced_at: row.get(3)?,
+                payload: row.get(4)?,
+                local_status: row.get(5)?,
+            })
+        })
+        .map_err(|e| format!("load order queue cleanup candidates: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut affected_order_ids = HashSet::new();
+    let mut resolved_rows = 0usize;
+
+    for row in rows {
+        if classify_order_update_local_resolution(&row).is_none() {
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE sync_queue
+             SET status = 'synced',
+                 synced_at = COALESCE(synced_at, ?1),
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, row.queue_id],
+        )
+        .map_err(|e| {
+            format!(
+                "resolve obsolete order queue row {} ({}): {e}",
+                row.queue_id, row.status
+            )
+        })?;
+        affected_order_ids.insert(row.entity_id);
+        resolved_rows += 1;
+    }
+
+    refresh_order_sync_status_for_queue_cleanup(conn, &affected_order_ids, &now)?;
+    Ok(resolved_rows)
+}
+
+pub(crate) fn cleanup_order_update_queue_rows_for_order(
+    db: &DbState,
+    order_id: Option<&str>,
+) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    cleanup_order_update_queue_rows(&conn, order_id)
 }
 
 fn extract_last_queue_failure_snapshot(
@@ -3606,6 +3781,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
     total_progress += reconciled_orders;
 
+    cleanup_order_update_queue_rows_for_order(db, None)?;
+
     // Read pending items (limit 10)
     let pending_items: Vec<SyncItem> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -4730,6 +4907,23 @@ async fn sync_order_batch_via_direct_api(
             continue;
         }
 
+        cleanup_order_update_queue_rows_for_order(db, Some(entity_id))?;
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let queue_status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM sync_queue WHERE id = ?1",
+                    params![queue_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("reload order update queue row: {e}"))?;
+            if matches!(queue_status.as_deref(), Some("synced")) {
+                outcome.record_synced(*queue_id);
+                continue;
+            }
+        }
+
         // Check if this order has a supabase_id (remote ID) — needed for PATCH
         let remote_id: Option<String> = {
             let local_order = get_order_by_id(db, entity_id).unwrap_or(Value::Null);
@@ -4856,11 +5050,10 @@ async fn sync_order_batch_via_direct_api(
                      WHERE id = ?2",
                     params![now, queue_id],
                 );
-                // Also update the local order's sync_status
-                let _ = conn.execute(
-                    "UPDATE orders SET sync_status = 'synced', updated_at = ?1 WHERE id = ?2",
-                    params![now, entity_id],
-                );
+                let mut affected_order_ids = HashSet::new();
+                affected_order_ids.insert(entity_id.to_string());
+                let _ =
+                    refresh_order_sync_status_for_queue_cleanup(&conn, &affected_order_ids, &now);
                 outcome.record_synced(*queue_id);
                 info!(
                     queue_id = *queue_id,
@@ -6098,6 +6291,7 @@ fn get_sync_status_for_event(
         last_queue_failure,
     ) = match db.conn.lock() {
         Ok(conn) => {
+            let _ = cleanup_order_update_queue_rows(&conn, None);
             let p: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending', 'in_progress')",
@@ -6823,6 +7017,58 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    fn insert_order_update_queue_row(
+        db: &DbState,
+        entity_id: &str,
+        queue_status: &str,
+        payload_status: Option<&str>,
+        synced_at: Option<&str>,
+        last_error: Option<&str>,
+    ) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        let payload = match payload_status {
+            Some(status) => serde_json::json!({
+                "orderId": entity_id,
+                "status": status
+            }),
+            None => serde_json::json!({
+                "orderId": entity_id
+            }),
+        };
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, synced_at, last_error, updated_at
+             ) VALUES (
+                 'order', ?1, 'update', ?2, ?3,
+                 ?4, 1, 5, ?5, ?6, datetime('now')
+             )",
+            params![
+                entity_id,
+                payload.to_string(),
+                format!("order:{entity_id}:update:{}", Uuid::new_v4()),
+                queue_status,
+                synced_at,
+                last_error,
+            ],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn update_order_status(db: &DbState, order_id: &str, status: &str, sync_status: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders
+             SET status = ?1,
+                 sync_status = ?2,
+                 updated_at = datetime('now')
+             WHERE id = ?3",
+            params![status, sync_status, order_id],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_categorize_sync_item_routes_financial_rows_out_of_order_path() {
         assert_eq!(categorize_sync_item("order"), SyncItemCategory::Order);
@@ -7111,6 +7357,185 @@ mod tests {
         assert_eq!(
             failure.get("classification").and_then(Value::as_str),
             Some("transient")
+        );
+    }
+
+    #[test]
+    fn test_cleanup_restores_revived_synced_order_update_rows() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-history", "pending");
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-history",
+            "failed",
+            Some("confirmed"),
+            Some("2026-03-19T00:53:28Z"),
+            Some("Permanent status update failure: Invalid status transition"),
+        );
+
+        let cleaned = cleanup_order_update_queue_rows_for_order(&db, Some("ord-history"))
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, synced_at, last_error): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, synced_at, last_error FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "synced");
+        assert!(synced_at.is_some());
+        assert_eq!(last_error, None);
+    }
+
+    #[test]
+    fn test_cleanup_resolves_confirmed_row_when_local_order_is_delivered() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-delivered", "pending");
+        update_order_status(&db, "ord-delivered", "delivered", "pending");
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-delivered",
+            "failed",
+            Some("confirmed"),
+            None,
+            Some("Permanent status update failure: Invalid status transition"),
+        );
+
+        let cleaned = cleanup_order_update_queue_rows_for_order(&db, Some("ord-delivered"))
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "synced");
+    }
+
+    #[test]
+    fn test_cleanup_resolves_ready_row_when_local_order_is_completed() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-completed", "pending");
+        update_order_status(&db, "ord-completed", "completed", "pending");
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-completed",
+            "failed",
+            Some("ready"),
+            None,
+            Some("Permanent status update failure: Invalid status transition"),
+        );
+
+        let cleaned = cleanup_order_update_queue_rows_for_order(&db, Some("ord-completed"))
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "synced");
+    }
+
+    #[test]
+    fn test_cleanup_keeps_latest_invalid_cancelled_row_failed() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-invalid", "pending");
+        update_order_status(&db, "ord-invalid", "cancelled", "pending");
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-invalid",
+            "failed",
+            Some("cancelled"),
+            None,
+            Some("Permanent status update failure: Invalid status transition"),
+        );
+
+        let cleaned = cleanup_order_update_queue_rows_for_order(&db, Some("ord-invalid"))
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[test]
+    fn test_cleanup_keeps_missing_status_payload_rows_unless_synced_at_exists() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-generic", "pending");
+        update_order_status(&db, "ord-generic", "completed", "pending");
+        let queue_id = insert_order_update_queue_row(
+            &db,
+            "ord-generic",
+            "failed",
+            None,
+            None,
+            Some("failure"),
+        );
+
+        let cleaned = cleanup_order_update_queue_rows_for_order(&db, Some("ord-generic"))
+            .expect("cleanup should succeed");
+        assert_eq!(cleaned, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[test]
+    fn test_sync_status_snapshot_ignores_obsolete_order_update_failure() {
+        let db = test_db();
+        insert_minimal_order(&db, "ord-obsolete", "pending");
+        update_order_status(&db, "ord-obsolete", "delivered", "pending");
+        insert_order_update_queue_row(
+            &db,
+            "ord-obsolete",
+            "failed",
+            Some("confirmed"),
+            None,
+            Some("Permanent status update failure: Invalid status transition"),
+        );
+        insert_queue_failure_row(
+            &db,
+            "ord-current",
+            "pending",
+            "Admin dashboard server error (HTTP 503)",
+            None,
+        );
+
+        let sync_state = SyncState::new();
+        let status = get_sync_status(&db, &sync_state).expect("status");
+        let failure = status
+            .get("lastQueueFailure")
+            .and_then(Value::as_object)
+            .expect("lastQueueFailure object");
+        assert_eq!(
+            failure.get("entityId").and_then(Value::as_str),
+            Some("ord-current")
         );
     }
 

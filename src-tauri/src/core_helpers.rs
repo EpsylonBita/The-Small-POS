@@ -139,6 +139,49 @@ pub(crate) fn normalize_status_for_storage(status: &str) -> String {
     }
 }
 
+pub(crate) fn can_transition_locally(from_status: &str, to_status: &str) -> bool {
+    let from = normalize_status_for_storage(from_status);
+    let to = normalize_status_for_storage(to_status);
+
+    if from.is_empty() || to.is_empty() {
+        return false;
+    }
+
+    if from == to {
+        return true;
+    }
+
+    match from.as_str() {
+        "pending" => matches!(
+            to.as_str(),
+            "confirmed"
+                | "preparing"
+                | "ready"
+                | "out_for_delivery"
+                | "delivered"
+                | "completed"
+                | "cancelled"
+        ),
+        "confirmed" => matches!(
+            to.as_str(),
+            "preparing" | "ready" | "out_for_delivery" | "delivered" | "completed" | "cancelled"
+        ),
+        "preparing" => matches!(
+            to.as_str(),
+            "ready" | "out_for_delivery" | "delivered" | "completed" | "cancelled"
+        ),
+        "ready" => matches!(
+            to.as_str(),
+            "out_for_delivery" | "delivered" | "completed" | "cancelled"
+        ),
+        "out_for_delivery" => matches!(to.as_str(), "delivered" | "completed" | "cancelled"),
+        "delivered" => matches!(to.as_str(), "completed" | "refunded"),
+        "completed" => to == "refunded",
+        "cancelled" => to == "pending",
+        _ => false,
+    }
+}
+
 fn module_cache_path(db: &db::DbState) -> PathBuf {
     db.db_path
         .parent()

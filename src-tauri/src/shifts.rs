@@ -247,7 +247,8 @@ fn build_shift_open_sync_payload(
         payload["responsibleCashierDrawerId"] = responsible_cashier_drawer_id
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null);
-        payload["startingAmountSourceCashierShiftId"] = payload["responsibleCashierShiftId"].clone();
+        payload["startingAmountSourceCashierShiftId"] =
+            payload["responsibleCashierShiftId"].clone();
         payload["borrowedStartingAmount"] = serde_json::json!(opening_cash);
     }
 
@@ -2300,11 +2301,7 @@ mod tests {
         }
     }
 
-    fn load_latest_shift_sync_payload(
-        db: &DbState,
-        operation: &str,
-        shift_id: &str,
-    ) -> Value {
+    fn load_latest_shift_sync_payload(db: &DbState, operation: &str, shift_id: &str) -> Value {
         let conn = db.conn.lock().unwrap();
         let payload: String = conn
             .query_row(
@@ -2522,7 +2519,10 @@ mod tests {
         assert_eq!(payload["calculationVersion"], 2);
         assert_eq!(payload["responsibleCashierShiftId"], "cashier-sync-open");
         assert_eq!(payload["responsibleCashierDrawerId"], "drawer-sync-open");
-        assert_eq!(payload["startingAmountSourceCashierShiftId"], "cashier-sync-open");
+        assert_eq!(
+            payload["startingAmountSourceCashierShiftId"],
+            "cashier-sync-open"
+        );
         assert_eq!(payload["borrowedStartingAmount"], 40.0);
     }
 
@@ -2890,7 +2890,10 @@ mod tests {
         let payload = load_latest_shift_sync_payload(&db, "update", "driver-sync-target");
         assert_eq!(payload["staffId"], "driver-1");
         assert_eq!(payload["staffName"], "Driver One");
-        assert_eq!(payload["returnedCashTargetCashierShiftId"], "cashier-sync-target");
+        assert_eq!(
+            payload["returnedCashTargetCashierShiftId"],
+            "cashier-sync-target"
+        );
         assert_eq!(payload["returnedCashTargetDrawerId"], "drawer-sync-target");
         assert_eq!(payload["returnedCashAmount"], 80.0);
         assert_eq!(payload["resolvedCashierShiftId"], "cashier-sync-target");

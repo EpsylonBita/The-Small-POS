@@ -8,35 +8,69 @@ const DELIVERY_ZONES_CACHE_KEY: &str = "delivery_zones_cache_v1";
 const ADDRESS_CANDIDATES_CACHE_KEY: &str = "address_candidates_cache_v1";
 const MAX_CANDIDATES_PER_BRANCH: usize = 1000;
 
-fn extract_number_token(input: &str) -> Option<String> {
-    let mut token = String::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HouseNumberParts {
+    raw: String,
+    digits: String,
+    suffix: Option<char>,
+}
+
+fn canonicalize_suffix(ch: char) -> char {
+    match ch {
+        'a' | 'A' | 'α' | 'Α' => 'a',
+        _ => ch.to_lowercase().next().unwrap_or(ch),
+    }
+}
+
+fn parse_number_parts(input: &str) -> Option<HouseNumberParts> {
+    let mut digits = String::new();
+    let mut raw_suffix: Option<char> = None;
+    let mut canonical_suffix: Option<char> = None;
     let mut saw_digit = false;
+
     for ch in input.chars() {
         if ch.is_ascii_digit() {
-            token.push(ch);
+            digits.push(ch);
             saw_digit = true;
             continue;
         }
-        if saw_digit && ch.is_alphabetic() {
-            token.push(ch);
+        if saw_digit && raw_suffix.is_none() && ch.is_alphabetic() {
+            raw_suffix = Some(ch);
+            canonical_suffix = Some(canonicalize_suffix(ch));
             break;
         }
         if saw_digit {
             break;
         }
     }
-    let normalized = token.trim().to_lowercase();
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized)
+
+    if digits.is_empty() {
+        return None;
     }
+
+    let raw = match raw_suffix {
+        Some(suffix) => format!("{digits}{suffix}"),
+        None => digits.clone(),
+    };
+
+    Some(HouseNumberParts {
+        raw,
+        digits,
+        suffix: canonical_suffix,
+    })
+}
+
+fn extract_number_token(input: &str) -> Option<String> {
+    parse_number_parts(input).map(|parts| parts.raw)
 }
 
 fn normalize_number(value: Option<String>) -> Option<String> {
-    value
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| !v.is_empty())
+    value.and_then(|v| {
+        parse_number_parts(&v).map(|parts| match parts.suffix {
+            Some(suffix) => format!("{}{}", parts.digits, suffix),
+            None => parts.digits,
+        })
+    })
 }
 
 fn parse_lat_lng(value: Option<&Value>) -> Option<(f64, f64)> {
@@ -535,4 +569,45 @@ pub async fn address_upsert_local_candidate(
         "count": trimmed.len(),
         "candidate": candidate,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_number_token, normalize_number};
+
+    fn numbers_match(left: &str, right: &str) -> bool {
+        normalize_number(Some(left.to_string())) == normalize_number(Some(right.to_string()))
+    }
+
+    #[test]
+    fn matches_identical_alphanumeric_house_numbers() {
+        assert!(numbers_match("29A", "29A"));
+    }
+
+    #[test]
+    fn matches_latin_and_greek_alpha_suffixes() {
+        assert!(numbers_match("29A", "29Α"));
+        assert_eq!(
+            normalize_number(Some("29Α".to_string())),
+            Some("29a".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_different_suffixes() {
+        assert!(!numbers_match("29A", "29B"));
+    }
+
+    #[test]
+    fn rejects_different_digits() {
+        assert!(!numbers_match("29", "31"));
+    }
+
+    #[test]
+    fn extracts_alphanumeric_token_from_greek_text() {
+        assert_eq!(
+            extract_number_token("Μάρκου Μπότσαρη 29Α, Θεσσαλονίκη"),
+            Some("29Α".to_string())
+        );
+    }
 }

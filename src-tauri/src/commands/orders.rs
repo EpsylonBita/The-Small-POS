@@ -3,9 +3,9 @@ use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
-    db, fetch_supabase_rows, normalize_status_for_storage, order_ownership, payload_arg0_as_string,
-    print, read_local_json_array, resolve_order_id, storage, sync, value_f64, value_i64, value_str,
-    write_local_json,
+    can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
+    payload_arg0_as_string, print, read_local_json_array, resolve_order_id, storage, sync,
+    value_f64, value_i64, value_str, write_local_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +111,123 @@ fn parse_order_update_status_payload(
         return Err("Missing status".into());
     }
     Ok(parsed)
+}
+
+fn load_canonical_order_status(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<String, String> {
+    conn.query_row(
+        "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+        rusqlite::params![order_id],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|status| normalize_status_for_storage(&status))
+    .map_err(|e| format!("load order status: {e}"))
+}
+
+fn ensure_order_status_transition_allowed(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    next_status: &str,
+) -> Result<String, String> {
+    let previous_status = load_canonical_order_status(conn, order_id)?;
+    let next_status = normalize_status_for_storage(next_status);
+
+    if can_transition_locally(&previous_status, &next_status) {
+        Ok(previous_status)
+    } else {
+        Err(format!(
+            "Invalid status transition: {previous_status} -> {next_status}"
+        ))
+    }
+}
+
+fn is_invalid_status_transition_failure_message(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("invalid status transition")
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ForceOrderSyncRetryResult {
+    updated: usize,
+    inserted_fallback: bool,
+    blocked_by_invalid_transition: bool,
+}
+
+fn force_order_sync_retry_inner(
+    db: &db::DbState,
+    order_id: &str,
+) -> Result<ForceOrderSyncRetryResult, String> {
+    sync::cleanup_order_update_queue_rows_for_order(db, Some(order_id))?;
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let blocked_by_invalid_transition: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM sync_queue
+                WHERE entity_type = 'order'
+                  AND entity_id = ?1
+                  AND operation = 'update'
+                  AND status = 'failed'
+                  AND COALESCE(synced_at, '') = ''
+                  AND lower(COALESCE(last_error, '')) LIKE '%invalid status transition%'
+            )",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("inspect order retry blockers: {e}"))?;
+
+    let updated = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = datetime('now')
+             WHERE entity_type = 'order'
+               AND entity_id = ?1
+               AND status IN ('pending', 'in_progress', 'queued_remote', 'failed')
+               AND COALESCE(synced_at, '') = ''
+               AND NOT (
+                    status = 'failed'
+                    AND lower(COALESCE(last_error, '')) LIKE '%invalid status transition%'
+               )",
+            rusqlite::params![order_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut inserted_fallback = false;
+    if updated == 0 && !blocked_by_invalid_transition {
+        let current_status = load_canonical_order_status(&conn, order_id)?;
+        if !can_transition_locally(&current_status, &current_status) {
+            return Err(format!(
+                "Current order status is not eligible for retry: {current_status}"
+            ));
+        }
+
+        let fallback_payload = serde_json::json!({
+            "orderId": order_id,
+            "status": current_status
+        });
+        let idem = format!("order:force-retry:{}:{}", order_id, uuid::Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+             VALUES ('order', ?1, 'update', ?2, ?3)",
+            rusqlite::params![order_id, fallback_payload.to_string(), idem],
+        )
+        .map_err(|e| format!("insert fallback order retry: {e}"))?;
+        inserted_fallback = true;
+    }
+
+    Ok(ForceOrderSyncRetryResult {
+        updated,
+        inserted_fallback,
+        blocked_by_invalid_transition,
+    })
 }
 
 fn merge_order_update_items_payload(
@@ -335,21 +452,10 @@ pub async fn order_update_status(
 
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let previous_status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM orders WHERE id = ?1",
-                rusqlite::params![actual_order_id],
-                |row| row.get(0),
-            )
-            .ok();
-
-        let previous_status = previous_status.unwrap_or_default();
-        let was_cancelled = matches!(previous_status.as_str(), "cancelled" | "canceled");
-        let next_is_cancelled = matches!(status.as_str(), "cancelled" | "canceled");
-
-        if was_cancelled && !next_is_cancelled {
-            return Err(format!("Cancelled order cannot transition to {status}"));
-        }
+        let previous_status =
+            ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
+        let was_cancelled = previous_status == "cancelled";
+        let next_is_cancelled = status == "cancelled";
 
         if !was_cancelled && next_is_cancelled {
             order_ownership::reverse_order_drawer_attribution(&conn, &actual_order_id, &now)?;
@@ -1110,6 +1216,7 @@ pub async fn order_approve(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    ensure_order_status_transition_allowed(&conn, &order_id, "confirmed")?;
     conn.execute(
         "UPDATE orders
          SET status = 'confirmed',
@@ -1153,14 +1260,8 @@ pub async fn order_decline(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-    let previous_status: String = conn
-        .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| "pending".to_string());
-    if !matches!(previous_status.as_str(), "cancelled" | "canceled") {
+    let previous_status = ensure_order_status_transition_allowed(&conn, &order_id, "cancelled")?;
+    if previous_status != "cancelled" {
         order_ownership::reverse_order_drawer_attribution(&conn, &order_id, &now)?;
     }
     conn.execute(
@@ -1370,6 +1471,7 @@ pub async fn order_notify_platform_ready(
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
     let now = Utc::now().to_rfc3339();
+    ensure_order_status_transition_allowed(&conn, &order_id, "ready")?;
     conn.execute(
         "UPDATE orders SET status = 'ready', sync_status = 'pending', updated_at = ?1 WHERE id = ?2",
         rusqlite::params![now, order_id],
@@ -1641,39 +1743,16 @@ pub async fn orders_force_sync_retry(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let order_id_raw = arg0.ok_or("Missing orderId")?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
-    let updated = conn
-        .execute(
-            "UPDATE sync_queue
-             SET status = 'pending', retry_count = 0, last_error = NULL, updated_at = datetime('now')
-             WHERE entity_type = 'order' AND entity_id = ?1",
-            rusqlite::params![order_id],
-        )
-        .map_err(|e| e.to_string())?;
-    if updated == 0 {
-        // Include current status so sync doesn't fail with "missing status field"
-        let current_status: String = conn
-            .query_row(
-                "SELECT status FROM orders WHERE id = ?1",
-                rusqlite::params![order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "pending".to_string());
-        let fallback_payload =
-            serde_json::json!({ "orderId": order_id_raw, "status": current_status });
-        let idem = format!(
-            "order:force-retry:{}:{}",
-            order_id_raw,
-            uuid::Uuid::new_v4()
-        );
-        let _ = conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('order', ?1, 'update', ?2, ?3)",
-            rusqlite::params![order_id_raw, fallback_payload.to_string(), idem],
-        );
-    }
-    Ok(serde_json::json!({ "success": true, "orderId": order_id_raw, "updated": updated }))
+    let order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?
+    };
+    let retry_result = force_order_sync_retry_inner(&db, &order_id)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": order_id_raw,
+        "updated": retry_result.updated
+    }))
 }
 
 #[tauri::command]
@@ -1779,5 +1858,195 @@ mod dto_tests {
             parse_order_delete_payload(Some(serde_json::json!({})), Some("order-5".into()))
                 .expect("delete payload should parse");
         assert_eq!(parsed.order_id, "order-5");
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+    use crate::db;
+    use rusqlite::{params, Connection};
+
+    fn test_db() -> db::DbState {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
+    }
+
+    fn insert_order(db: &db::DbState, order_id: &str, status: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES (?1, '[]', 10.0, ?2, 'pending', datetime('now'), datetime('now'))",
+            params![order_id, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn local_transition_validation_rejects_completed_to_cancelled() {
+        let db = test_db();
+        insert_order(&db, "order-completed", "completed");
+        let conn = db.conn.lock().unwrap();
+
+        let err = ensure_order_status_transition_allowed(&conn, "order-completed", "cancelled")
+            .expect_err("completed -> cancelled should fail");
+        assert!(is_invalid_status_transition_failure_message(&err));
+    }
+
+    #[test]
+    fn local_transition_validation_rejects_delivered_to_cancelled() {
+        let db = test_db();
+        insert_order(&db, "order-delivered", "delivered");
+        let conn = db.conn.lock().unwrap();
+
+        let err = ensure_order_status_transition_allowed(&conn, "order-delivered", "cancelled")
+            .expect_err("delivered -> cancelled should fail");
+        assert!(is_invalid_status_transition_failure_message(&err));
+    }
+
+    #[test]
+    fn local_transition_validation_allows_same_status_and_aliases() {
+        let db = test_db();
+        insert_order(&db, "order-same", "confirmed");
+        insert_order(&db, "order-alias", "canceled");
+        let conn = db.conn.lock().unwrap();
+
+        let same = ensure_order_status_transition_allowed(&conn, "order-same", "confirmed")
+            .expect("same status should be idempotent");
+        assert_eq!(same, "confirmed");
+
+        let alias = ensure_order_status_transition_allowed(&conn, "order-alias", "pending")
+            .expect("cancelled alias should normalize");
+        assert_eq!(alias, "cancelled");
+        assert!(can_transition_locally("approved", "ready"));
+    }
+
+    #[test]
+    fn force_retry_does_not_revive_synced_history() {
+        let db = test_db();
+        insert_order(&db, "order-history", "completed");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key,
+                     status, synced_at, last_error, retry_count
+                 ) VALUES (
+                     'order', 'order-history', 'update',
+                     '{\"orderId\":\"order-history\",\"status\":\"confirmed\"}',
+                     'order-history:synced-history',
+                     'failed', datetime('now'), 'Invalid status transition', 2
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = force_order_sync_retry_inner(&db, "order-history").expect("force retry");
+        assert_eq!(
+            result,
+            ForceOrderSyncRetryResult {
+                updated: 0,
+                inserted_fallback: true,
+                blocked_by_invalid_transition: false,
+            }
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let rows: Vec<(String, Option<String>, Option<String>)> = conn
+            .prepare(
+                "SELECT status, synced_at, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'order' AND entity_id = 'order-history'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "synced");
+        assert!(rows[0].1.is_some());
+        assert_eq!(rows[0].2, None);
+        assert_eq!(rows[1].0, "pending");
+    }
+
+    #[test]
+    fn force_retry_does_not_insert_fallback_for_invalid_transition_blocker() {
+        let db = test_db();
+        insert_order(&db, "order-blocked", "cancelled");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key,
+                     status, last_error, retry_count
+                 ) VALUES (
+                     'order', 'order-blocked', 'update',
+                     '{\"orderId\":\"order-blocked\",\"status\":\"cancelled\"}',
+                     'order-blocked:invalid-transition',
+                     'failed', 'Permanent status update failure: Invalid status transition', 3
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (
+                     entity_type, entity_id, operation, payload, idempotency_key, status, synced_at
+                 ) VALUES (
+                     'order', 'order-blocked', 'update',
+                     '{\"orderId\":\"order-blocked\",\"status\":\"completed\"}',
+                     'order-blocked:historical',
+                     'failed', datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = force_order_sync_retry_inner(&db, "order-blocked").expect("force retry");
+        assert_eq!(
+            result,
+            ForceOrderSyncRetryResult {
+                updated: 0,
+                inserted_fallback: false,
+                blocked_by_invalid_transition: true,
+            }
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'order' AND entity_id = 'order-blocked'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let failed_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'order'
+                   AND entity_id = 'order-blocked'
+                   AND status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(queue_count, 2);
+        assert_eq!(failed_count, 1);
     }
 }

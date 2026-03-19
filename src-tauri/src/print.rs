@@ -2800,23 +2800,17 @@ fn build_shift_checkout_doc(
             .get("cashRefunds")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
-        opening_amount: cash_drawer
-            .get("opening_amount")
-            .or_else(|| cash_drawer.get("openingAmount"))
-            .and_then(Value::as_f64)
+        opening_amount: number_from_paths(&cash_drawer, &["/opening_amount", "/openingAmount"])
+            .or_else(|| number_from_paths(&shift, &["/opening_cash_amount", "/openingCashAmount"]))
             .unwrap_or(0.0),
-        expected_amount: cash_drawer
-            .get("expected_amount")
-            .or_else(|| cash_drawer.get("expectedAmount"))
-            .and_then(Value::as_f64),
-        closing_amount: cash_drawer
-            .get("closing_amount")
-            .or_else(|| cash_drawer.get("closingAmount"))
-            .and_then(Value::as_f64),
-        variance_amount: cash_drawer
-            .get("variance_amount")
-            .or_else(|| cash_drawer.get("varianceAmount"))
-            .and_then(Value::as_f64),
+        expected_amount: number_from_paths(&cash_drawer, &["/expected_amount", "/expectedAmount"])
+            .or_else(|| {
+                number_from_paths(&shift, &["/expected_cash_amount", "/expectedCashAmount"])
+            }),
+        closing_amount: number_from_paths(&cash_drawer, &["/closing_amount", "/closingAmount"])
+            .or_else(|| number_from_paths(&shift, &["/closing_cash_amount", "/closingCashAmount"])),
+        variance_amount: number_from_paths(&cash_drawer, &["/variance_amount", "/varianceAmount"])
+            .or_else(|| number_from_paths(&shift, &["/cash_variance", "/cashVariance"])),
         driver_deliveries: Vec::new(),
         total_cash_collected: 0.0,
         total_card_collected: 0.0,
@@ -2828,12 +2822,29 @@ fn build_shift_checkout_doc(
     // Populate driver-specific fields
     let role = doc.as_ref().map(|d| d.role_type.as_str()).unwrap_or("");
     if role == "driver" {
+        let mut cash_total = number_from_paths(
+            &summary,
+            &[
+                "/breakdown/delivery/cashTotal",
+                "/breakdown/overall/cashTotal",
+            ],
+        )
+        .unwrap_or(0.0);
+        let mut card_total = number_from_paths(
+            &summary,
+            &[
+                "/breakdown/delivery/cardTotal",
+                "/breakdown/overall/cardTotal",
+            ],
+        )
+        .unwrap_or(0.0);
+        let mut lines = Vec::new();
+        let mut fees_total = 0.0_f64;
+        let mut tips_total = 0.0_f64;
+
         if let Some(deliveries) = summary.get("driverDeliveries").and_then(Value::as_array) {
-            let mut lines = Vec::new();
-            let mut cash_total = 0.0_f64;
-            let mut card_total = 0.0_f64;
-            let mut fees_total = 0.0_f64;
-            let mut tips_total = 0.0_f64;
+            let mut delivery_cash_total = 0.0_f64;
+            let mut delivery_card_total = 0.0_f64;
 
             for d in deliveries {
                 let cash = d
@@ -2845,8 +2856,8 @@ fn build_shift_checkout_doc(
                 let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
                 let total = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
 
-                cash_total += cash;
-                card_total += card;
+                delivery_cash_total += cash;
+                delivery_card_total += card;
                 fees_total += fee;
                 tips_total += tip;
 
@@ -2872,17 +2883,23 @@ fn build_shift_checkout_doc(
                         .to_string(),
                 });
             }
-
-            if let Ok(ref mut doc) = doc {
-                let opening = doc.opening_amount;
-                let expenses = doc.total_expenses;
-                doc.driver_deliveries = lines;
-                doc.total_cash_collected = cash_total;
-                doc.total_card_collected = card_total;
-                doc.total_delivery_fees = fees_total;
-                doc.total_tips = tips_total;
-                doc.amount_to_return = opening + cash_total - expenses;
+            if !lines.is_empty() {
+                cash_total = delivery_cash_total;
+                card_total = delivery_card_total;
             }
+        }
+
+        if let Ok(ref mut doc) = doc {
+            let opening = doc.opening_amount;
+            let expenses = doc.total_expenses;
+            doc.driver_deliveries = lines;
+            doc.total_cash_collected = cash_total;
+            doc.total_card_collected = card_total;
+            doc.total_delivery_fees = fees_total;
+            doc.total_tips = tips_total;
+            doc.amount_to_return = doc
+                .expected_amount
+                .unwrap_or(opening + cash_total - expenses);
         }
     }
 
@@ -3591,226 +3608,12 @@ fn generate_shift_checkout_file(
     shift_id: &str,
     data_dir: &Path,
 ) -> Result<String, String> {
-    let summary = crate::shifts::get_shift_summary(db, shift_id)?;
-    let shift = summary
-        .get("shift")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-    let cash_drawer = summary
-        .get("cashDrawer")
-        .cloned()
-        .unwrap_or(serde_json::json!({}));
-
-    let role_type = shift
-        .get("role_type")
-        .or_else(|| shift.get("roleType"))
-        .and_then(Value::as_str)
-        .unwrap_or("staff");
-    let role_display = receipt_renderer::receipt_role_text("en", role_type);
-    let staff_name = shift
-        .get("staff_name")
-        .or_else(|| shift.get("staffName"))
-        .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or("Unknown");
-    let terminal_name = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_printed_terminal_name_with_conn(&conn, None).unwrap_or_default()
-    };
-    let check_in = shift
-        .get("check_in_time")
-        .or_else(|| shift.get("checkInTime"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let check_out = shift
-        .get("check_out_time")
-        .or_else(|| shift.get("checkOutTime"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    let orders_count = summary
-        .get("ordersCount")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let sales_amount = summary
-        .get("salesAmount")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let total_expenses = summary
-        .get("totalExpenses")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let cash_refunds = summary
-        .get("cashRefunds")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-
-    let opening = cash_drawer
-        .get("opening_amount")
-        .or_else(|| cash_drawer.get("openingAmount"))
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    let expected = cash_drawer
-        .get("expected_amount")
-        .or_else(|| cash_drawer.get("expectedAmount"))
-        .and_then(Value::as_f64);
-    let closing = cash_drawer
-        .get("closing_amount")
-        .or_else(|| cash_drawer.get("closingAmount"))
-        .and_then(Value::as_f64);
-    let variance = cash_drawer
-        .get("variance_amount")
-        .or_else(|| cash_drawer.get("varianceAmount"))
-        .and_then(Value::as_f64);
-    let terminal_line = if terminal_name.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "<div class=\"line\"><span>Terminal</span><span>{}</span></div>",
-            escape_html(&terminal_name)
-        )
-    };
-
-    // Build driver section HTML if applicable
-    let driver_section = if role_type == "driver" {
-        let deliveries = summary.get("driverDeliveries").and_then(Value::as_array);
-        if let Some(dels) = deliveries {
-            let mut html =
-                String::from("<h2 style=\"font-size:14px;margin:8px 0 4px\">DELIVERIES</h2><hr/>");
-            let mut cash_total = 0.0_f64;
-            let mut card_total = 0.0_f64;
-            let mut fees_total = 0.0_f64;
-            let mut tips_total = 0.0_f64;
-            for d in dels {
-                let order_num = d
-                    .get("order_number")
-                    .and_then(Value::as_str)
-                    .unwrap_or("N/A");
-                let pm = d
-                    .get("payment_method")
-                    .and_then(Value::as_str)
-                    .unwrap_or("cash");
-                let amount = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
-                let cash = d
-                    .get("cash_collected")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                let card = d.get("card_amount").and_then(Value::as_f64).unwrap_or(0.0);
-                let fee = d.get("delivery_fee").and_then(Value::as_f64).unwrap_or(0.0);
-                let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
-                cash_total += cash;
-                card_total += card;
-                fees_total += fee;
-                tips_total += tip;
-                html.push_str(&format!(
-                    "<div class=\"line\"><span>#{} {}</span><span>{:.2}</span></div>",
-                    escape_html(order_num),
-                    escape_html(pm),
-                    amount
-                ));
-            }
-            html.push_str("<hr/>");
-            html.push_str("<h2 style=\"font-size:14px;margin:8px 0 4px\">DRIVER SUMMARY</h2><hr/>");
-            html.push_str(&format!(
-                "<div class=\"line\"><span>Cash Collected</span><span>{cash_total:.2}</span></div>"
-            ));
-            html.push_str(&format!(
-                "<div class=\"line\"><span>Card Collected</span><span>{card_total:.2}</span></div>"
-            ));
-            html.push_str(&format!(
-                "<div class=\"line\"><span>Delivery Fees</span><span>{fees_total:.2}</span></div>"
-            ));
-            html.push_str(&format!(
-                "<div class=\"line\"><span>Tips</span><span>{tips_total:.2}</span></div>"
-            ));
-            html.push_str("<hr/>");
-            let to_return = opening + cash_total - total_expenses;
-            html.push_str(&format!(
-                "<div class=\"line\"><span>Starting</span><span>{opening:.2}</span></div>"
-            ));
-            html.push_str(&format!(
-                "<div class=\"line\"><span>+ Cash</span><span>{cash_total:.2}</span></div>"
-            ));
-            if total_expenses > 0.0 {
-                html.push_str(&format!("<div class=\"line\"><span>- Expenses</span><span>{total_expenses:.2}</span></div>"));
-            }
-            html.push_str(&format!(
-                "<div class=\"line\"><b>= To Return</b><b>{to_return:.2}</b></div>"
-            ));
-            html.push_str("<hr/>");
-            html
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-
-    let receipt_html = format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Shift Checkout - {shift_id}</title>
-<style>
-  body {{ margin: 0; padding: 16px; background: #fff; font-family: monospace; }}
-  h1 {{ margin: 0 0 10px 0; font-size: 18px; }}
-  .line {{ display: flex; justify-content: space-between; }}
-  hr {{ border: none; border-top: 1px dashed #000; margin: 8px 0; }}
-</style>
-</head>
-<body>
-<h1>SHIFT CHECKOUT</h1>
-<div class="line"><span>Role</span><span>{role_type}</span></div>
-<div class="line"><span>Staff</span><span>{staff_name}</span></div>
-{terminal_line}
-<div class="line"><span>Check-in</span><span>{check_in}</span></div>
-<div class="line"><span>Check-out</span><span>{check_out}</span></div>
-<hr/>
-<div class="line"><span>Orders</span><span>{orders_count}</span></div>
-<div class="line"><span>Sales</span><span>{sales_amount:.2}</span></div>
-<div class="line"><span>Expenses</span><span>{total_expenses:.2}</span></div>
-<div class="line"><span>Refunds</span><span>{cash_refunds:.2}</span></div>
-<hr/>
-<div class="line"><span>Opening</span><span>{opening:.2}</span></div>
-<div class="line"><span>Expected</span><span>{expected}</span></div>
-<div class="line"><span>Closing</span><span>{closing}</span></div>
-<div class="line"><span>Variance</span><span>{variance}</span></div>
-<hr/>
-{driver_section}
-<div>End of Checkout</div>
-</body>
-</html>"#,
-        shift_id = escape_html(shift_id),
-        role_type = escape_html(&role_display),
-        staff_name = escape_html(staff_name),
-        terminal_line = terminal_line,
-        check_in = escape_html(check_in),
-        check_out = escape_html(check_out),
-        orders_count = orders_count,
-        sales_amount = sales_amount,
-        total_expenses = total_expenses,
-        cash_refunds = cash_refunds,
-        opening = opening,
-        expected = expected
-            .map(|value| format!("{value:.2}"))
-            .unwrap_or_else(|| "N/A".to_string()),
-        closing = closing
-            .map(|value| format!("{value:.2}"))
-            .unwrap_or_else(|| "N/A".to_string()),
-        variance = variance
-            .map(|value| format!("{value:.2}"))
-            .unwrap_or_else(|| "N/A".to_string()),
-    );
-
-    let receipts_dir = data_dir.join(RECEIPTS_DIR);
-    fs::create_dir_all(&receipts_dir).map_err(|e| format!("create receipts dir: {e}"))?;
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("shift_checkout_{shift_id}_{timestamp}.html");
-    let file_path = receipts_dir.join(filename);
-    fs::write(&file_path, receipt_html).map_err(|e| format!("write shift checkout file: {e}"))?;
-    Ok(file_path.to_string_lossy().to_string())
+    let layout = resolve_layout_config(db, &serde_json::json!({}), "shift_checkout")?;
+    let document = ReceiptDocument::ShiftCheckout(build_shift_checkout_doc(db, shift_id, None)?);
+    let html = receipt_renderer::render_html(&document, &layout);
+    let path_str = write_print_html_file(data_dir, "shift_checkout", shift_id, &html)?;
+    info!(shift_id = %shift_id, path = %path_str, "Shift checkout file generated");
+    Ok(path_str)
 }
 
 // ---------------------------------------------------------------------------
@@ -4353,6 +4156,33 @@ mod tests {
         .expect("insert shift checkout fixture");
     }
 
+    fn insert_active_cashier_fixture(conn: &Connection, shift_id: &str, drawer_id: &str) {
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                ?1, 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                '2026-03-18T08:00:00Z', 200.0, 'active', 2,
+                'pending', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+             )",
+            params![shift_id],
+        )
+        .expect("insert active cashier fixture");
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                opening_amount, driver_cash_given, opened_at, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, 'cashier-1', 'branch-1', 'term-1',
+                200.0, 0.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+             )",
+            params![drawer_id, shift_id],
+        )
+        .expect("insert active cashier drawer fixture");
+    }
+
     #[test]
     fn test_parse_item_customizations_from_array() {
         let item = serde_json::json!({
@@ -4685,6 +4515,60 @@ mod tests {
             ReceiptDocument::ShiftCheckout(doc) => {
                 assert_eq!(doc.terminal_name, "Front Counter");
                 assert_eq!(doc.role_type, "cashier");
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_driver_shift_checkout_keeps_amount_to_return_without_delivery_rows(
+    ) {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cashier-shift-1", "drawer-shift-1");
+            db::set_setting(&conn, "terminal", "name", "Front Counter")
+                .expect("set terminal display name");
+        }
+
+        let open_result = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "driver-1",
+                "staffName": "Driver One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "driver",
+                "openingCash": 25.0,
+            }),
+        )
+        .expect("open driver shift");
+        let driver_shift_id = open_result["shiftId"]
+            .as_str()
+            .expect("driver shift id")
+            .to_string();
+
+        crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": driver_shift_id.as_str(),
+                "closingCash": 20.0,
+            }),
+        )
+        .expect("close driver shift");
+
+        let doc = build_document_for_job(&db, "shift_checkout", &driver_shift_id, None).unwrap();
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.role_type, "driver");
+                assert_eq!(doc.terminal_name, "Front Counter");
+                assert!(doc.driver_deliveries.is_empty());
+                assert_eq!(doc.opening_amount, 25.0);
+                assert_eq!(doc.total_cash_collected, 0.0);
+                assert_eq!(doc.expected_amount, Some(25.0));
+                assert_eq!(doc.amount_to_return, 25.0);
+                assert_eq!(doc.closing_amount, Some(20.0));
+                assert_eq!(doc.variance_amount, Some(-5.0));
             }
             _ => panic!("expected shift checkout document"),
         }

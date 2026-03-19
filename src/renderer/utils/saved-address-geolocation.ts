@@ -1,5 +1,6 @@
 import {
   extractStreetNumber,
+  houseNumbersMatch,
   resolveAddressSuggestion,
   searchAddressSuggestions,
 } from '../services/address-workflow';
@@ -120,7 +121,7 @@ function scoreSuggestion(
   const street = normalizeText(address.street_address || address.street || '');
   const city = normalizeText(address.city || '');
   const postalCode = normalizeText(address.postal_code || address.postalCode || '').replace(/\s+/g, '');
-  const streetNumber = normalizeText(extractStreetNumber(address.street_address || address.street || '') || '');
+  const streetNumber = extractStreetNumber(address.street_address || address.street || '') || '';
 
   const haystack = normalizeText(
     [suggestion.main_text, suggestion.name, suggestion.formatted_address].filter(Boolean).join(' ')
@@ -143,10 +144,11 @@ function scoreSuggestion(
     }
   }
   if (streetNumber) {
-    const candidateStreetNumber = normalizeText(
-      suggestion.resolved_street_number || extractStreetNumber(suggestion.main_text || suggestion.name || suggestion.formatted_address || '') || ''
-    );
-    if (candidateStreetNumber && candidateStreetNumber === streetNumber) {
+    const candidateStreetNumber =
+      suggestion.resolved_street_number
+      || extractStreetNumber(suggestion.main_text || suggestion.name || suggestion.formatted_address || '')
+      || '';
+    if (candidateStreetNumber && houseNumbersMatch(streetNumber, candidateStreetNumber)) {
       score += 4;
     }
   }
@@ -194,11 +196,13 @@ export async function resolveSavedAddressCoordinates(
     return null;
   }
 
-  const expectedStreetNumber = normalizeText(
-    extractStreetNumber(address.street_address || address.street || '') || ''
-  );
-  const resolvedStreetNumber = normalizeText(resolved.resolvedStreetNumber || '');
-  if (expectedStreetNumber && resolvedStreetNumber && expectedStreetNumber !== resolvedStreetNumber) {
+  const expectedStreetNumber = extractStreetNumber(address.street_address || address.street || '') || '';
+  const resolvedStreetNumber = resolved.resolvedStreetNumber || '';
+  if (
+    expectedStreetNumber
+    && resolvedStreetNumber
+    && !houseNumbersMatch(expectedStreetNumber, resolvedStreetNumber)
+  ) {
     return null;
   }
 
