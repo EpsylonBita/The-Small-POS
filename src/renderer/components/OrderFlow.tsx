@@ -442,12 +442,6 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     resetFlow();
   }, [resetFlow]);
 
-  const extractPaymentId = useCallback((result: any): string | undefined => {
-    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
-    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
-    return directId || dataId;
-  }, []);
-
   const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
     // Ghost orders: print receipt directly (Rust auto-print skips ghosts)
     if (isGhostOrder) {
@@ -636,6 +630,18 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
       const subtotalAfterDiscount = orderData.total; // Already includes discount
       const tax = Math.round(subtotalAfterDiscount * (taxRatePercentage / 100) * 100) / 100;
       const total_amount = subtotalAfterDiscount + deliveryFee;
+      const initialPayment =
+        !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
+          ? {
+              method: orderData.paymentData.method,
+              amount: total_amount,
+              cashReceived: orderData.paymentData.method === 'cash' ? orderData.paymentData.cashReceived : undefined,
+              changeGiven: orderData.paymentData.method === 'cash' ? orderData.paymentData.change : undefined,
+              transactionRef: orderData.paymentData.transactionId,
+              staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
+              staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
+            }
+          : undefined;
 
       // Warn if no active shift
       if (!isShiftActive) {
@@ -709,6 +715,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
 
         status: 'pending' as const,
         payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        initialPayment,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
@@ -811,30 +818,8 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
           return;
         }
 
-        // Record payment before printing so checkout-created orders do not remain pending.
-        if (!isGhostOrder && orderData.paymentData && result.orderId) {
-          try {
-            const paymentResult: any = await bridge.payments.recordPayment({
-              orderId: result.orderId,
-              method: orderData.paymentData.method || 'cash',
-              amount: total_amount,
-              cashReceived: orderData.paymentData.cashReceived,
-              changeGiven: orderData.paymentData.change,
-              transactionRef: orderData.paymentData.transactionId,
-              staffId: selectedOrderType === 'delivery' ? undefined : staff?.staffId,
-              staffShiftId: selectedOrderType === 'delivery' ? undefined : activeShift?.id,
-            });
-
-            if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
-              throw new Error(paymentResult?.error || 'Missing paymentId after recording payment');
-            }
-
-            await silentRefresh().catch(() => {});
-          } catch (payErr) {
-            console.error('Failed to record payment:', payErr);
-            toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
-            return;
-          }
+        if (initialPayment) {
+          await silentRefresh().catch(() => {});
         }
 
         // Cash register / fiscal print (fire-and-forget, non-blocking)
@@ -873,7 +858,7 @@ const OrderFlow = memo<OrderFlowProps>(({ className = '', forceRetailMode = fals
     } finally {
       setIsProcessingOrder(false);
     }
-  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, t, silentRefresh, extractPaymentId, finalizeCreatedOrderPayment]);
+  }, [selectedCustomer, selectedOrderType, selectedAddress, deliveryZoneInfo, createOrder, resetFlow, activeShift, isShiftActive, staff, taxRatePercentage, effectiveBranchId, organizationId, t, silentRefresh, finalizeCreatedOrderPayment]);
 
   return (
     <div className={`order-flow ${className}`}>

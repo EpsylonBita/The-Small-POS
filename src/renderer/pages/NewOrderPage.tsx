@@ -371,12 +371,6 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     setShowMenuModal(true);
   };
 
-  const extractPaymentId = useCallback((result: any): string | undefined => {
-    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
-    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
-    return directId || dataId;
-  }, []);
-
   const finalizeCreatedOrderPayment = useCallback(async (orderId: string, isGhostOrder: boolean) => {
     // Ghost orders: print receipt directly (Rust auto-print skips ghosts)
     if (isGhostOrder) {
@@ -454,6 +448,18 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
       const subtotalAfterDiscount = Number(orderData.total || 0);
       const tax = Math.round(subtotalAfterDiscount * (taxRatePercentage / 100) * 100) / 100;
       const totalAmount = subtotalAfterDiscount + deliveryFee;
+      const initialPayment =
+        !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
+          ? {
+              method: orderData.paymentData.method,
+              amount: totalAmount,
+              cashReceived: orderData.paymentData.method === 'cash' ? orderData.paymentData.cashReceived : undefined,
+              changeGiven: orderData.paymentData.method === 'cash' ? orderData.paymentData.change : undefined,
+              transactionRef: orderData.paymentData.transactionId,
+              staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
+              staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
+            }
+          : undefined;
 
       if (!isShiftActive) {
         toast(t('orderFlow.noActiveShift', 'No active shift'), {
@@ -531,6 +537,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         discount_amount: discountAmount,
         status: 'pending' as const,
         payment_method: isGhostOrder ? null : (orderData.paymentData?.method || null),
+        initialPayment,
         is_ghost: isGhostOrder,
         ghost_source: ghostSource,
         ghost_metadata: ghostMetadata,
@@ -606,23 +613,7 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
         return true;
       }
 
-      if (!isGhostOrder && orderData.paymentData) {
-        const paymentResult: any = await bridge.payments.recordPayment({
-          orderId: result.orderId,
-          method: orderData.paymentData.method || 'cash',
-          amount: totalAmount,
-          cashReceived: orderData.paymentData.cashReceived,
-          changeGiven: orderData.paymentData.change,
-          transactionRef: orderData.paymentData.transactionId,
-          staffId: currentOrderType === 'delivery' ? undefined : staff?.staffId,
-          staffShiftId: currentOrderType === 'delivery' ? undefined : activeShift?.id,
-        });
-
-        if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
-          toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
-          return false;
-        }
-
+      if (initialPayment) {
         await silentRefresh().catch(() => {});
       }
 
@@ -651,7 +642,6 @@ const NewOrderPage: React.FC<NewOrderPageProps> = () => {
     branchId,
     bridge,
     createOrder,
-    extractPaymentId,
     finalizeCreatedOrderPayment,
     isShiftActive,
     organizationId,

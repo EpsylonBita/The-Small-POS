@@ -5,7 +5,7 @@
 //! and enqueued for sync to the admin dashboard via `/api/pos/payments`.
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -49,31 +49,177 @@ fn load_payment_items_for_payment(
     Ok(items)
 }
 
-// ---------------------------------------------------------------------------
-// Record payment
-// ---------------------------------------------------------------------------
+#[derive(Clone, Debug)]
+struct PaymentItemInput {
+    item_index: i32,
+    item_name: String,
+    item_quantity: i32,
+    item_amount: f64,
+}
 
-/// Record a payment for an order.
-///
-/// Inserts into `order_payments`, updates the order's `payment_status`
-/// and `payment_method`, and enqueues a sync entry.
-#[allow(clippy::type_complexity)]
-pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+#[derive(Clone, Debug)]
+pub(crate) struct PaymentRecordInput {
+    pub order_id: String,
+    pub method: String,
+    pub amount: f64,
+    pub currency: String,
+    pub cash_received: Option<f64>,
+    pub change_given: Option<f64>,
+    pub transaction_ref: Option<String>,
+    pub discount_amount: f64,
+    pub payment_origin: String,
+    pub terminal_device_id: Option<String>,
+    pub requested_staff_id: Option<String>,
+    pub requested_staff_shift_id: Option<String>,
+    items: Vec<PaymentItemInput>,
+}
 
+#[derive(Clone, Debug)]
+pub(crate) struct PaymentInsertOptions {
+    pub payment_id: Option<String>,
+    pub remote_payment_id: Option<String>,
+    pub sync_status: String,
+    pub sync_state: Option<String>,
+    pub enqueue_sync: bool,
+    pub update_cash_drawer: bool,
+    pub mark_order_sync_pending_on_owner_change: bool,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl PaymentInsertOptions {
+    pub(crate) fn local() -> Self {
+        Self {
+            payment_id: None,
+            remote_payment_id: None,
+            sync_status: "pending".to_string(),
+            sync_state: None,
+            enqueue_sync: true,
+            update_cash_drawer: true,
+            mark_order_sync_pending_on_owner_change: true,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    pub(crate) fn applied(remote_payment_id: Option<String>) -> Self {
+        Self {
+            payment_id: None,
+            remote_payment_id,
+            sync_status: "synced".to_string(),
+            sync_state: Some("applied".to_string()),
+            enqueue_sync: false,
+            update_cash_drawer: false,
+            mark_order_sync_pending_on_owner_change: false,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedPayment {
+    pub payment_id: String,
+    pub payment_origin: String,
+    pub sync_status: String,
+    pub sync_state: String,
+}
+
+fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
+    payload
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter()
+                .map(|item_val| PaymentItemInput {
+                    item_index: item_val
+                        .get("itemIndex")
+                        .or_else(|| item_val.get("item_index"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0) as i32,
+                    item_name: item_val
+                        .get("itemName")
+                        .or_else(|| item_val.get("item_name"))
+                        .or_else(|| item_val.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Item")
+                        .to_string(),
+                    item_quantity: item_val
+                        .get("itemQuantity")
+                        .or_else(|| item_val.get("item_quantity"))
+                        .or_else(|| item_val.get("quantity"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(1) as i32,
+                    item_amount: item_val
+                        .get("itemAmount")
+                        .or_else(|| item_val.get("item_amount"))
+                        .or_else(|| item_val.get("amount"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_payment_items_json(items: &[PaymentItemInput]) -> Option<Value> {
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(Value::Array(
+        items.iter()
+            .map(|item| {
+                serde_json::json!({
+                    "itemIndex": item.item_index,
+                    "itemName": item.item_name,
+                    "itemQuantity": item.item_quantity,
+                    "itemAmount": item.item_amount,
+                })
+            })
+            .collect(),
+    ))
+}
+
+fn normalize_local_payment_origin(requested: &str, method: &str) -> String {
+    match requested.trim().to_ascii_lowercase().as_str() {
+        "terminal" if method == "card" => "terminal".to_string(),
+        "manual_recovery" => "manual_recovery".to_string(),
+        "sync_reconstructed" => "sync_reconstructed".to_string(),
+        _ => "manual".to_string(),
+    }
+}
+
+pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> {
+    match method.trim().to_ascii_lowercase().as_str() {
+        "cash" => Some("cash".to_string()),
+        "card" => Some("card".to_string()),
+        "other" | "online" | "digital_wallet" | "digital-wallet" | "wallet" | "split"
+        | "mixed" | "pending" => Some("other".to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecordInput, String> {
     let order_id = str_field(payload, "orderId")
         .or_else(|| str_field(payload, "order_id"))
         .ok_or("Missing orderId")?;
-    let method = str_field(payload, "method").ok_or("Missing method")?;
-    if method != "cash" && method != "card" && method != "other" {
-        return Err(format!(
-            "Invalid method: {method}. Must be cash, card, or other"
-        ));
-    }
+    let raw_method = str_field(payload, "method").ok_or("Missing method")?;
+    let method = match raw_method.trim().to_ascii_lowercase().as_str() {
+        "cash" => "cash".to_string(),
+        "card" => "card".to_string(),
+        "other" => "other".to_string(),
+        _ => {
+            return Err(format!(
+                "Invalid method: {raw_method}. Must be cash, card, or other"
+            ));
+        }
+    };
     let amount = num_field(payload, "amount").ok_or("Missing amount")?;
     if amount <= 0.0 {
         return Err("Amount must be positive".into());
     }
+
     let cash_received =
         num_field(payload, "cashReceived").or_else(|| num_field(payload, "cash_received"));
     let change_given = num_field(payload, "changeGiven")
@@ -101,12 +247,7 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 "manual".to_string()
             }
         });
-    let payment_origin =
-        if method == "card" && requested_payment_origin.eq_ignore_ascii_case("terminal") {
-            "terminal".to_string()
-        } else {
-            "manual".to_string()
-        };
+    let payment_origin = normalize_local_payment_origin(&requested_payment_origin, &method);
     let terminal_device_id = if payment_origin == "terminal" {
         str_field(payload, "terminalDeviceId")
             .or_else(|| str_field(payload, "terminal_device_id"))
@@ -115,12 +256,100 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     } else {
         None
     };
-    let requested_staff_id =
-        str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
-    let requested_staff_shift_id =
-        str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
 
-    // Verify order exists and load ownership context
+    Ok(PaymentRecordInput {
+        order_id,
+        method,
+        amount,
+        currency: str_field(payload, "currency").unwrap_or_else(|| "EUR".to_string()),
+        cash_received,
+        change_given,
+        transaction_ref,
+        discount_amount,
+        payment_origin,
+        terminal_device_id,
+        requested_staff_id: str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id")),
+        requested_staff_shift_id: str_field(payload, "staffShiftId")
+            .or_else(|| str_field(payload, "staff_shift_id")),
+        items: parse_payment_items(payload),
+    })
+}
+
+pub(crate) fn recompute_order_payment_state(
+    conn: &Connection,
+    order_id: &str,
+    method: &str,
+    has_item_assignments: bool,
+    now: &str,
+    payment_id: &str,
+) -> Result<(), String> {
+    let total_paid: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0) FROM order_payments
+             WHERE order_id = ?1 AND status = 'completed'",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let (order_total, current_order_payment_method): (f64, Option<String>) = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0), payment_method FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load order payment context: {e}"))?;
+
+    let completed_payment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1 AND status = 'completed'",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let new_payment_status = if total_paid >= order_total - 0.01 {
+        "paid"
+    } else {
+        "partially_paid"
+    };
+
+    let current_order_payment_method = current_order_payment_method
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let effective_method = if new_payment_status == "partially_paid"
+        || has_item_assignments
+        || completed_payment_count > 1
+        || current_order_payment_method == "pending"
+        || current_order_payment_method == "split"
+        || current_order_payment_method == "mixed"
+    {
+        "split"
+    } else {
+        method
+    };
+
+    conn.execute(
+        "UPDATE orders SET
+            payment_status = ?1,
+            payment_method = ?2,
+            payment_transaction_id = ?3,
+            updated_at = ?4
+         WHERE id = ?5",
+        params![new_payment_status, effective_method, payment_id, now, order_id],
+    )
+    .map_err(|e| format!("update order payment: {e}"))?;
+
+    Ok(())
+}
+
+pub(crate) fn record_payment_in_connection(
+    conn: &Connection,
+    input: &PaymentRecordInput,
+    options: &PaymentInsertOptions,
+) -> Result<RecordedPayment, String> {
     let (
         supabase_id,
         order_type,
@@ -129,14 +358,12 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         driver_id,
         order_staff_shift_id,
         order_staff_id,
-        order_payment_method,
         is_ghost,
     ): (
         Option<String>,
         String,
         String,
         String,
-        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -151,11 +378,10 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                 driver_id,
                 staff_shift_id,
                 staff_id,
-                payment_method,
                 COALESCE(is_ghost, 0)
              FROM orders
              WHERE id = ?1",
-            params![order_id],
+            params![input.order_id],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -165,253 +391,190 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
-                    row.get(7)?,
-                    row.get::<_, i64>(8)? != 0,
+                    row.get::<_, i64>(7)? != 0,
                 ))
             },
         )
-        .map_err(|_| format!("Order not found: {order_id}"))?;
+        .map_err(|_| format!("Order not found: {}", input.order_id))?;
 
     if is_ghost {
-        return Err(format!("Cannot record payment for ghost order: {order_id}"));
+        return Err(format!(
+            "Cannot record payment for ghost order: {}",
+            input.order_id
+        ));
     }
 
-    // If the order hasn't synced yet (no supabase_id), the payment starts
-    // in waiting_parent; the reconciliation loop will promote it to pending
-    // once the order syncs.
-    let initial_sync_state = if supabase_id.as_deref().unwrap_or("").is_empty() {
-        "waiting_parent"
+    let sync_state = options.sync_state.clone().unwrap_or_else(|| {
+        if supabase_id.as_deref().unwrap_or("").trim().is_empty() {
+            "waiting_parent".to_string()
+        } else {
+            "pending".to_string()
+        }
+    });
+    let payment_id = options
+        .payment_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let created_at = options
+        .created_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let updated_at = options
+        .updated_at
+        .clone()
+        .unwrap_or_else(|| created_at.clone());
+
+    let keep_delivery_unassigned = order_type.eq_ignore_ascii_case("delivery")
+        && driver_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none();
+
+    let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
+        (None, None)
     } else {
-        "pending"
+        order_ownership::resolve_order_owner(
+            conn,
+            &order_type,
+            &branch_id,
+            &terminal_id,
+            driver_id.as_deref(),
+            input
+                .requested_staff_shift_id
+                .as_deref()
+                .or(order_staff_shift_id.as_deref()),
+            input
+                .requested_staff_id
+                .as_deref()
+                .or(order_staff_id.as_deref()),
+        )?
     };
 
-    let payment_id = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin transaction: {e}"))?;
-
-    let result = (|| -> Result<(), String> {
-        let keep_delivery_unassigned = order_type.eq_ignore_ascii_case("delivery")
-            && driver_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none();
-
-        let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
-            (None, None)
+    if resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id {
+        let update_sql = if options.mark_order_sync_pending_on_owner_change {
+            "UPDATE orders
+             SET staff_shift_id = ?1,
+                 staff_id = ?2,
+                 sync_status = 'pending',
+                 updated_at = ?3
+             WHERE id = ?4"
         } else {
-            order_ownership::resolve_order_owner(
-                &conn,
-                &order_type,
-                &branch_id,
-                &terminal_id,
-                driver_id.as_deref(),
-                requested_staff_shift_id
-                    .as_deref()
-                    .or(order_staff_shift_id.as_deref()),
-                requested_staff_id.as_deref().or(order_staff_id.as_deref()),
-            )?
+            "UPDATE orders
+             SET staff_shift_id = ?1,
+                 staff_id = ?2,
+                 updated_at = ?3
+             WHERE id = ?4"
         };
-
-        if resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id {
-            conn.execute(
-                "UPDATE orders
-                 SET staff_shift_id = ?1,
-                     staff_id = ?2,
-                     sync_status = 'pending',
-                     updated_at = ?3
-                 WHERE id = ?4",
-                params![resolved_shift_id, resolved_staff_id, now, order_id],
-            )
-            .map_err(|e| format!("update order ownership for payment: {e}"))?;
-        }
-
-        // Insert payment with sync_state
         conn.execute(
-            "INSERT INTO order_payments (
-                id, order_id, method, amount, currency, status,
-                cash_received, change_given, transaction_ref,
-                discount_amount, payment_origin, terminal_device_id,
-                staff_id, staff_shift_id, sync_status,
-                sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, 'EUR', 'completed', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'pending',
-                      ?13, ?14, ?14)",
+            update_sql,
+            params![resolved_shift_id, resolved_staff_id, updated_at, input.order_id],
+        )
+        .map_err(|e| format!("update order ownership for payment: {e}"))?;
+    }
+
+    conn.execute(
+        "INSERT INTO order_payments (
+            id, order_id, method, amount, currency, status,
+            cash_received, change_given, transaction_ref,
+            discount_amount, payment_origin, terminal_device_id,
+            remote_payment_id, staff_id, staff_shift_id, sync_status,
+            sync_state, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'completed', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            payment_id,
+            input.order_id,
+            input.method,
+            input.amount,
+            input.currency,
+            input.cash_received,
+            input.change_given,
+            input.transaction_ref,
+            input.discount_amount,
+            input.payment_origin,
+            input.terminal_device_id,
+            options.remote_payment_id,
+            resolved_staff_id,
+            resolved_shift_id,
+            options.sync_status,
+            sync_state,
+            created_at,
+            updated_at,
+        ],
+    )
+    .map_err(|e| format!("insert payment: {e}"))?;
+
+    for item in &input.items {
+        let item_id = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
+                item_id,
                 payment_id,
-                order_id,
-                method,
-                amount,
-                cash_received,
-                change_given,
-                transaction_ref,
-                discount_amount,
-                payment_origin,
-                terminal_device_id,
-                resolved_staff_id,
-                resolved_shift_id,
-                initial_sync_state,
-                now,
+                input.order_id,
+                item.item_index,
+                item.item_name,
+                item.item_quantity,
+                item.item_amount
             ],
         )
-        .map_err(|e| format!("insert payment: {e}"))?;
+        .map_err(|e| format!("insert payment item: {e}"))?;
+    }
 
-        // Insert payment items if provided (split-by-items mode)
-        if let Some(items_array) = payload.get("items").and_then(Value::as_array) {
-            for item_val in items_array {
-                let item_id = Uuid::new_v4().to_string();
-                let item_index = item_val
-                    .get("itemIndex")
-                    .or_else(|| item_val.get("item_index"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32;
-                let item_name = item_val
-                    .get("itemName")
-                    .or_else(|| item_val.get("item_name"))
-                    .or_else(|| item_val.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("Item");
-                let item_quantity = item_val
-                    .get("itemQuantity")
-                    .or_else(|| item_val.get("item_quantity"))
-                    .or_else(|| item_val.get("quantity"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(1) as i32;
-                let item_amount = item_val
-                    .get("itemAmount")
-                    .or_else(|| item_val.get("item_amount"))
-                    .or_else(|| item_val.get("amount"))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
+    recompute_order_payment_state(
+        conn,
+        &input.order_id,
+        &input.method,
+        !input.items.is_empty(),
+        &updated_at,
+        &payment_id,
+    )?;
 
-                conn.execute(
-                    "INSERT INTO payment_items (id, payment_id, order_id, item_index, item_name, item_quantity, item_amount)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![item_id, payment_id, order_id, item_index, item_name, item_quantity, item_amount],
-                )
-                .map_err(|e| format!("insert payment item: {e}"))?;
-            }
-        }
-
-        // Compute payment status based on total paid vs order total
-        let total_paid: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount), 0) FROM order_payments
-                 WHERE order_id = ?1 AND status = 'completed'",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        let order_total: f64 = conn
-            .query_row(
-                "SELECT COALESCE(total_amount, 0) FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        let completed_payment_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1 AND status = 'completed'",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let has_item_assignments = payload
-            .get("items")
-            .and_then(Value::as_array)
-            .map(|items| !items.is_empty())
-            .unwrap_or(false);
-
-        let new_payment_status = if total_paid >= order_total - 0.01 {
-            "paid"
-        } else {
-            "partially_paid"
-        };
-
-        let current_order_payment_method = order_payment_method
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_lowercase();
-        let effective_method = if new_payment_status == "partially_paid"
-            || has_item_assignments
-            || completed_payment_count > 1
-            || current_order_payment_method == "pending"
-            || current_order_payment_method == "split"
-            || current_order_payment_method == "mixed"
-        {
-            "split"
-        } else {
-            &method
-        };
-
-        conn.execute(
-            "UPDATE orders SET
-                payment_status = ?1,
-                payment_method = ?2,
-                payment_transaction_id = ?3,
-                updated_at = ?4
-             WHERE id = ?5",
-            params![
-                new_payment_status,
-                effective_method,
-                payment_id,
-                now,
-                order_id
-            ],
-        )
-        .map_err(|e| format!("update order payment: {e}"))?;
-
-        // Update cash drawer running totals.
+    if options.update_cash_drawer {
         if let Some(ref sid) = resolved_shift_id {
-            if method == "cash" {
+            if input.method == "cash" {
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
                         total_cash_sales = COALESCE(total_cash_sales, 0) + ?1,
                         updated_at = ?2
                      WHERE staff_shift_id = ?3",
-                    params![amount, now, sid],
+                    params![input.amount, updated_at, sid],
                 )
                 .map_err(|e| format!("update drawer cash_sales: {e}"))?;
-            } else if method == "card" {
+            } else if input.method == "card" {
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
                         total_card_sales = COALESCE(total_card_sales, 0) + ?1,
                         updated_at = ?2
                      WHERE staff_shift_id = ?3",
-                    params![amount, now, sid],
+                    params![input.amount, updated_at, sid],
                 )
                 .map_err(|e| format!("update drawer card_sales: {e}"))?;
             }
-            // No-op for "other" method, and no-op if no drawer session exists (driver shifts)
         }
+    }
 
-        // Enqueue for sync — stable idempotency key based on payment_id
-        // so retries reuse the same key and the server deduplicates.
+    if options.enqueue_sync {
         let idempotency_key = format!("payment:{payment_id}");
         let sync_payload = serde_json::json!({
             "paymentId": payment_id,
-            "orderId": order_id,
-            "method": method,
-            "amount": amount,
-            "cashReceived": cash_received,
-            "changeGiven": change_given,
-            "transactionRef": transaction_ref,
-            "discountAmount": discount_amount,
-            "paymentOrigin": payment_origin,
-            "terminalDeviceId": terminal_device_id,
+            "orderId": input.order_id,
+            "method": input.method,
+            "amount": input.amount,
+            "currency": input.currency,
+            "cashReceived": input.cash_received,
+            "changeGiven": input.change_given,
+            "transactionRef": input.transaction_ref,
+            "discountAmount": input.discount_amount,
+            "paymentOrigin": input.payment_origin,
+            "terminalDeviceId": input.terminal_device_id,
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
-            "items": payload.get("items"),
+            "items": build_payment_items_json(&input.items),
         })
         .to_string();
-
-        // If waiting_parent, enqueue as deferred so the sync loop won't
-        // pick it up until the reconciliation promotes it.
-        let queue_status = if initial_sync_state == "waiting_parent" {
+        let queue_status = if sync_state == "waiting_parent" {
             "deferred"
         } else {
             "pending"
@@ -422,28 +585,58 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
             params![payment_id, sync_payload, idempotency_key, queue_status],
         )
         .map_err(|e| format!("enqueue payment sync: {e}"))?;
+    }
 
-        Ok(())
-    })();
+    Ok(RecordedPayment {
+        payment_id,
+        payment_origin: input.payment_origin.clone(),
+        sync_status: options.sync_status.clone(),
+        sync_state,
+    })
+}
 
-    match result {
-        Ok(()) => {
+// ---------------------------------------------------------------------------
+// Record payment
+// ---------------------------------------------------------------------------
+
+/// Record a payment for an order.
+///
+/// Inserts into `order_payments`, updates the order's `payment_status`
+/// and `payment_method`, and enqueues a sync entry.
+#[allow(clippy::type_complexity)]
+pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let input = build_payment_record_input(payload)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let recorded = match record_payment_in_connection(&conn, &input, &PaymentInsertOptions::local())
+    {
+        Ok(recorded) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
+            recorded
         }
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(e);
         }
-    }
-
-    info!(payment_id = %payment_id, order_id = %order_id, method = %method, amount = %amount, "Payment recorded");
+    };
+    info!(
+        payment_id = %recorded.payment_id,
+        order_id = %input.order_id,
+        method = %input.method,
+        amount = %input.amount,
+        "Payment recorded"
+    );
 
     Ok(serde_json::json!({
         "success": true,
-        "paymentId": payment_id,
-        "paymentOrigin": payment_origin,
-        "message": format!("Payment of {:.2} recorded", amount),
+        "paymentId": recorded.payment_id,
+        "paymentOrigin": recorded.payment_origin,
+        "syncStatus": recorded.sync_status,
+        "syncState": recorded.sync_state,
+        "message": format!("Payment of {:.2} recorded", input.amount),
     }))
 }
 

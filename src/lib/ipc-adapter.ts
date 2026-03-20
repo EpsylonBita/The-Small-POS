@@ -479,6 +479,7 @@ export interface CreateOrderPayload {
   items: OrderItem[];
   order_type: string;
   payment_method?: string;
+  initialPayment?: CreateOrderInitialPayment;
   customer_id?: string;
   customer_name?: string;
   customer_phone?: string;
@@ -487,6 +488,21 @@ export interface CreateOrderPayload {
   discount?: number;
   staff_id?: string;
   driver_id?: string;
+}
+
+export interface CreateOrderInitialPayment {
+  method: 'cash' | 'card' | 'other';
+  amount: number;
+  currency?: string;
+  discountAmount?: number;
+  cashReceived?: number;
+  changeGiven?: number;
+  transactionRef?: string;
+  paymentOrigin?: 'manual' | 'terminal' | 'manual_recovery' | 'sync_reconstructed';
+  terminalApproved?: boolean;
+  terminalDeviceId?: string;
+  staffId?: string;
+  staffShiftId?: string;
 }
 
 export interface OrderFinancialsUpdateParams {
@@ -778,6 +794,7 @@ export interface PlatformBridge {
     getById(orderId: string): Promise<Order | null>;
     getByCustomerPhone(phone: string): Promise<any>;
     create(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
+    createWithInitialPayment(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
     updateStatus(orderId: string, status: string): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
     updateCustomerInfo(payload: OrderCustomerInfoUpdateParams): Promise<IpcResult>;
@@ -1283,6 +1300,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'order:get-all': 'orders.getAll',
   'order:get-by-id': 'orders.getById',
   'order:create': 'orders.create',
+  'order:create-with-initial-payment': 'orders.createWithInitialPayment',
   'order:update-status': 'orders.updateStatus',
   'order:update-items': 'orders.updateItems',
   'order:update-customer-info': 'orders.updateCustomerInfo',
@@ -1737,6 +1755,8 @@ export class TauriBridge implements PlatformBridge {
     getById: (id: string) => this.inv('order:get-by-id', id),
     getByCustomerPhone: (phone: string) => this.inv('order:get-by-customer-phone', phone),
     create: (p: CreateOrderPayload) => this.inv('order:create', p),
+    createWithInitialPayment: (p: CreateOrderPayload) =>
+      this.inv('order:create-with-initial-payment', p),
     updateStatus: (id: string, s: string) => this.inv('order:update-status', id, s),
     updateItems: (id: string, items: OrderItem[]) => this.inv('order:update-items', id, items),
     updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>

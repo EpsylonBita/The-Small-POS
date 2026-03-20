@@ -1122,13 +1122,33 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
 
      processPayment: async (orderId: string, paymentData: { method: Order['paymentMethod']; amount: number; [key: string]: any }) => {
        try {
-         // Simulate payment processing for now
-         const transactionId = `txn_${Date.now()}`;
-         await get().updatePaymentStatus(orderId, 'completed', paymentData.method, transactionId);
+         const normalizedMethod = paymentData.method === 'cash' || paymentData.method === 'card'
+           ? paymentData.method
+           : 'other';
+         const transactionId = paymentData.transactionId || paymentData.transactionRef || `txn_${Date.now()}`;
+         const response = await invokeElectronIpc('payment:record', {
+           orderId,
+           method: normalizedMethod,
+           amount: paymentData.amount,
+           currency: paymentData.currency || 'EUR',
+           cashReceived: paymentData.cashReceived,
+           changeGiven: paymentData.changeGiven,
+           transactionRef: transactionId,
+           discountAmount: paymentData.discountAmount,
+           terminalApproved: paymentData.terminalApproved,
+           terminalDeviceId: paymentData.terminalDeviceId,
+           items: paymentData.items,
+         });
+
+         if (!response?.success) {
+           throw new Error(response?.error || 'Payment processing failed');
+         }
+
+         await get().silentRefresh();
          return { success: true, transactionId };
        } catch (error) {
          console.error('Failed to process payment:', error);
-         return { success: false, error: 'Payment processing failed' };
+         return { success: false, error: error instanceof Error ? error.message : 'Payment processing failed' };
        }
      },
 

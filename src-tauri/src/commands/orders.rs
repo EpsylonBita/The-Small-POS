@@ -1306,6 +1306,38 @@ pub async fn order_create(
 }
 
 #[tauri::command]
+pub async fn order_create_with_initial_payment(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    _app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.ok_or("Missing order payload")?;
+    let normalized = payload.get("orderData").cloned().unwrap_or(payload);
+    let mut resp = sync::create_order(&db, &normalized)?;
+    let order_id = resp
+        .get("orderId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            resp.get("order")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    if let Some(order_id) = order_id.clone() {
+        if let Some(obj) = resp.as_object_mut() {
+            obj.entry("orderId".to_string())
+                .or_insert_with(|| serde_json::Value::String(order_id.clone()));
+            obj.entry("data".to_string())
+                .or_insert_with(|| serde_json::json!({ "orderId": order_id.clone() }));
+        }
+    }
+
+    Ok(resp)
+}
+
+#[tauri::command]
 pub async fn orders_clear_all(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,

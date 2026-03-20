@@ -3018,32 +3018,64 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
             .lower_bound_mode
             .sql_predicate(&unpaid_financial_expr, "?1");
         let unpaid_sql = format!(
-            "SELECT COUNT(*) FROM orders o
-             WHERE {unpaid_lower_bound}
-               AND (?2 IS NULL OR {unpaid_financial_expr} <= ?2)
-               AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-               AND COALESCE(o.is_ghost, 0) = 0
-               AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-               AND COALESCE((
-                    SELECT SUM(op_settled.amount)
-                    FROM order_payments op_settled
-                    WHERE op_settled.order_id = o.id
-                      AND op_settled.status = 'completed'
-               ), 0) + 0.009 < COALESCE(o.total_amount, 0)"
+            "WITH blocking_orders AS (
+                SELECT
+                    COALESCE((
+                        SELECT SUM(op_settled.amount)
+                        FROM order_payments op_settled
+                        WHERE op_settled.order_id = o.id
+                          AND op_settled.status = 'completed'
+                    ), 0) AS settled_amount,
+                    LOWER(COALESCE(o.payment_status, '')) AS payment_status,
+                    LOWER(COALESCE(o.payment_method, '')) AS payment_method,
+                    COALESCE(o.total_amount, 0) AS total_amount
+                FROM orders o
+                WHERE {unpaid_lower_bound}
+                  AND (?2 IS NULL OR {unpaid_financial_expr} <= ?2)
+                  AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
+                  AND COALESCE(o.is_ghost, 0) = 0
+                  AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
+                  AND COALESCE((
+                        SELECT SUM(op_settled.amount)
+                        FROM order_payments op_settled
+                        WHERE op_settled.order_id = o.id
+                          AND op_settled.status = 'completed'
+                  ), 0) + 0.009 < COALESCE(o.total_amount, 0)
+            )
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE
+                    WHEN settled_amount = 0
+                     AND payment_status = 'paid'
+                     AND payment_method IN ('cash', 'card')
+                    THEN 1 ELSE 0
+                END), 0)
+            FROM blocking_orders"
         );
-        let unpaid_count: i64 = conn
+        let (unpaid_count, missing_local_payment_rows): (i64, i64) = conn
             .query_row(
                 &unpaid_sql,
                 params![window.period_start_at, cutoff_param, branch_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .unwrap_or(0);
+            .unwrap_or((0, 0));
 
         if unpaid_count > 0 {
-            return Err(format!(
-                "Cannot generate Z-report: {} order(s) have unsettled payments",
-                unpaid_count
-            ));
+            let genuinely_unsettled = unpaid_count.saturating_sub(missing_local_payment_rows);
+            let message = if missing_local_payment_rows > 0 && genuinely_unsettled > 0 {
+                format!(
+                    "Cannot generate Z-report: {unpaid_count} order(s) are blocked ({missing_local_payment_rows} missing local payment row(s), {genuinely_unsettled} genuinely unpaid/partial)"
+                )
+            } else if missing_local_payment_rows > 0 {
+                format!(
+                    "Cannot generate Z-report: {unpaid_count} order(s) are marked paid but missing local payment rows"
+                )
+            } else {
+                format!(
+                    "Cannot generate Z-report: {unpaid_count} order(s) have genuinely unsettled payments"
+                )
+            };
+            return Err(message);
         }
     }
 

@@ -1253,12 +1253,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     return null;
   };
 
-  const extractPaymentId = (result: any): string | undefined => {
-    const directId = typeof result?.paymentId === 'string' ? result.paymentId : undefined;
-    const dataId = typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined;
-    return directId || dataId;
-  };
-
   const finalizeCreatedOrderPayment = async (orderId: string, isGhostOrder: boolean) => {
     if (isGhostOrder) {
       const printResult: any = await bridge.payments.printReceipt(orderId);
@@ -1503,6 +1497,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         : 0;
 
       const total = subtotal - totalDiscountAmount + deliveryFee;
+      const initialPayment =
+        !isGhostOrder && !isSplitPayment && (orderData.paymentData?.method === 'cash' || orderData.paymentData?.method === 'card')
+          ? {
+              method: orderData.paymentData.method,
+              amount: total,
+              cashReceived: orderData.paymentData.method === 'cash' ? orderData.paymentData?.cashReceived : undefined,
+              changeGiven: orderData.paymentData.method === 'cash' ? orderData.paymentData?.change : undefined,
+              transactionRef: orderData.paymentData?.transactionId,
+            }
+          : undefined;
       const isTableOrder = orderType === 'dine-in' || Boolean(tableNumber?.trim());
       const persistedCustomerName = isTableOrder
         ? pickMeaningfulOrderCustomerName(
@@ -1586,6 +1590,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         status: 'pending' as const,
         order_type: selectedOrderType || 'pickup',
         payment_method: isGhostOrder ? null : (orderData.paymentData?.method || 'cash'),
+        initialPayment,
         // Full delivery address fields for proper sync to Supabase
         delivery_address: deliveryAddress,
         delivery_city: deliveryCity,
@@ -1646,32 +1651,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         }
 
         if (result.orderId && !isSplitPayment) {
-          const paymentMethod = orderData.paymentData?.method;
-          if (!isGhostOrder && (paymentMethod === 'cash' || paymentMethod === 'card')) {
-            try {
-              const paymentResult: any = await bridge.payments.recordPayment({
-                orderId: result.orderId,
-                method: paymentMethod,
-                amount: total,
-                cashReceived: paymentMethod === 'cash' ? orderData.paymentData?.cashReceived : undefined,
-                changeGiven: paymentMethod === 'cash' ? orderData.paymentData?.change : undefined,
-                transactionRef: orderData.paymentData?.transactionId,
-              });
-
-              if (paymentResult?.success === false || !extractPaymentId(paymentResult)) {
-                throw new Error(paymentResult?.error || 'Missing paymentId after recording payment');
-              }
-
-              await silentRefresh().catch((err) => {
-                console.debug('[OrderDashboard] Silent refresh after payment record failed:', err);
-              });
-            } catch (paymentError) {
-              console.error('[OrderDashboard] Failed to record payment:', paymentError);
-              toast.error(t('modals.payment.paymentFailed', { defaultValue: 'Payment failed' }));
-              return;
-            }
+          if (initialPayment) {
+            await silentRefresh().catch((err) => {
+              console.debug('[OrderDashboard] Silent refresh after inline payment create failed:', err);
+            });
           }
-
           finalizeCreatedOrderPayment(result.orderId, isGhostOrder)
             .catch((printError: any) => {
               if (isGhostOrder) {

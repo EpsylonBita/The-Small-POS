@@ -70,6 +70,7 @@ use crate::can_transition_locally;
 use crate::db::DbState;
 use crate::normalize_status_for_storage;
 use crate::order_ownership;
+use crate::payments;
 use crate::print;
 use crate::storage;
 
@@ -147,6 +148,24 @@ pub(crate) struct PaymentSyncResponse {
     pub success: Option<bool>,
     #[serde(default, alias = "id")]
     pub payment_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Response from `GET /api/pos/payments` (canonical payment sync-down).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct PaymentIncrementalSyncResponse {
+    #[serde(default)]
+    pub payments: Vec<Value>,
+    #[serde(default)]
+    pub sync_timestamp: Option<String>,
+    #[serde(default)]
+    pub total_count: Option<usize>,
+    #[serde(default)]
+    pub has_more: Option<bool>,
+    #[serde(default)]
+    pub success: Option<bool>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -687,11 +706,20 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         .get("estimatedTime")
         .or_else(|| payload.get("estimated_time"))
         .and_then(Value::as_i64);
+    let initial_payment_payload = payload
+        .get("initialPayment")
+        .or_else(|| payload.get("initial_payment"))
+        .cloned();
     let payment_status = str_field(payload, "paymentStatus")
         .or_else(|| str_field(payload, "payment_status"))
         .unwrap_or_else(|| "pending".to_string());
     let payment_method =
         str_field(payload, "paymentMethod").or_else(|| str_field(payload, "payment_method"));
+    let persisted_payment_status = if initial_payment_payload.is_some() {
+        "pending".to_string()
+    } else {
+        payment_status.clone()
+    };
     let requested_staff_id =
         str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
     let requested_driver_id =
@@ -829,7 +857,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &now,
             &now,
             &estimated_time,
-            &payment_status,
+            &persisted_payment_status,
             &payment_method,
             &resolved_staff_shift_id,
             &resolved_staff_id,
@@ -854,10 +882,47 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         format!("insert order: {e}")
     })?;
 
+    if let Some(initial_payment_payload) = initial_payment_payload.clone() {
+        let mut enriched_initial_payment = initial_payment_payload;
+        if let Value::Object(obj) = &mut enriched_initial_payment {
+            obj.insert("orderId".to_string(), Value::String(order_id.clone()));
+            obj.entry("staffShiftId".to_string()).or_insert_with(|| {
+                resolved_staff_shift_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
+            });
+            obj.entry("staffId".to_string()).or_insert_with(|| {
+                resolved_staff_id
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
+            });
+        }
+
+        let payment_input = crate::payments::build_payment_record_input(&enriched_initial_payment)
+            .map_err(|e| {
+                let _ = conn.execute_batch("ROLLBACK");
+                format!("prepare initial payment: {e}")
+            })?;
+
+        crate::payments::record_payment_in_connection(
+            &conn,
+            &payment_input,
+            &crate::payments::PaymentInsertOptions::local(),
+        )
+        .map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            format!("record initial payment: {e}")
+        })?;
+    }
+
     // Enqueue for sync
     let idempotency_key = format!("{terminal_id}:{order_id}:{}", Uuid::new_v4());
     let mut sync_data = payload.clone();
     if let Value::Object(obj) = &mut sync_data {
+        obj.remove("initialPayment");
+        obj.remove("initial_payment");
         obj.entry("orderId".to_string())
             .or_insert_with(|| Value::String(order_id.clone()));
         if !terminal_id.trim().is_empty() {
@@ -2376,6 +2441,10 @@ fn sanitize_orders_since_cursor(raw: Option<String>) -> String {
     }
 }
 
+fn sanitize_payments_since_cursor(raw: Option<String>) -> String {
+    sanitize_orders_since_cursor(raw)
+}
+
 #[allow(dead_code)]
 fn mark_order_queue_as_queued_remote(
     db: &DbState,
@@ -3244,6 +3313,411 @@ fn materialize_remote_order(
     Ok(Some(local_id))
 }
 
+fn remote_payment_changed_at(remote_payment: &Value) -> String {
+    remote_payment
+        .get("updated_at")
+        .or_else(|| remote_payment.get("updatedAt"))
+        .or_else(|| remote_payment.get("created_at"))
+        .or_else(|| remote_payment.get("createdAt"))
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+        .unwrap_or_default()
+}
+
+fn replace_local_payment_items(
+    conn: &Connection,
+    local_payment_id: &str,
+    order_id: &str,
+    items: Option<&Value>,
+    created_at: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM payment_items WHERE payment_id = ?1",
+        params![local_payment_id],
+    )
+    .map_err(|e| format!("clear local payment items: {e}"))?;
+
+    let Some(item_rows) = items.and_then(Value::as_array) else {
+        return Ok(());
+    };
+
+    for (fallback_index, item) in item_rows.iter().enumerate() {
+        let item_index = item
+            .get("item_index")
+            .or_else(|| item.get("itemIndex"))
+            .and_then(Value::as_i64)
+            .unwrap_or(fallback_index as i64) as i32;
+        let item_name = item
+            .get("item_name")
+            .or_else(|| item.get("itemName"))
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("Item");
+        let item_quantity = item
+            .get("item_quantity")
+            .or_else(|| item.get("itemQuantity"))
+            .or_else(|| item.get("quantity"))
+            .and_then(Value::as_i64)
+            .unwrap_or(1) as i32;
+        let item_amount = item
+            .get("item_amount")
+            .or_else(|| item.get("itemAmount"))
+            .or_else(|| item.get("amount"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+
+        conn.execute(
+            "INSERT INTO payment_items (
+                id, payment_id, order_id, item_index, item_name,
+                item_quantity, item_amount, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                Uuid::new_v4().to_string(),
+                local_payment_id,
+                order_id,
+                item_index,
+                item_name,
+                item_quantity,
+                item_amount,
+                created_at,
+            ],
+        )
+        .map_err(|e| format!("insert local payment item: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> Result<usize, String> {
+    let Some(remote_payment_id) = str_any(remote_payment, &["id", "payment_id", "paymentId"]) else {
+        return Ok(0);
+    };
+    let Some(remote_order_id) = str_any(remote_payment, &["order_id", "orderId"]) else {
+        return Ok(0);
+    };
+
+    let local_order_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+            params![remote_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("resolve local order for remote payment: {e}"))?;
+    let Some(local_order_id) = local_order_id else {
+        return Ok(0);
+    };
+
+    let raw_method = str_any(remote_payment, &["payment_method", "paymentMethod", "method"])
+        .unwrap_or_else(|| "other".to_string());
+    let Some(method) = payments::normalize_external_payment_method(&raw_method) else {
+        return Ok(0);
+    };
+
+    let amount = num_any(remote_payment, &["amount"]).unwrap_or(0.0);
+    if amount <= 0.0 {
+        return Ok(0);
+    }
+
+    let created_at = str_any(remote_payment, &["created_at", "createdAt"])
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let updated_at = str_any(remote_payment, &["updated_at", "updatedAt"])
+        .unwrap_or_else(|| created_at.clone());
+    let currency =
+        str_any(remote_payment, &["currency"]).unwrap_or_else(|| "EUR".to_string());
+    let transaction_ref = str_any(
+        remote_payment,
+        &[
+            "external_transaction_id",
+            "externalTransactionId",
+            "transaction_ref",
+            "transactionRef",
+        ],
+    );
+    let items = remote_payment.get("items");
+
+    let existing_local_payment_id: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM order_payments
+             WHERE remote_payment_id = ?1
+             LIMIT 1",
+            params![remote_payment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("resolve local payment by remote_payment_id: {e}"))?;
+
+    if let Some(local_payment_id) = existing_local_payment_id {
+        conn.execute(
+            "UPDATE order_payments
+             SET method = ?1,
+                 amount = ?2,
+                 currency = ?3,
+                 transaction_ref = COALESCE(?4, transaction_ref),
+                 sync_status = 'synced',
+                 sync_state = 'applied',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 updated_at = ?5
+             WHERE id = ?6",
+            params![
+                method,
+                amount,
+                currency,
+                transaction_ref,
+                updated_at,
+                local_payment_id,
+            ],
+        )
+        .map_err(|e| format!("update remote payment mirror: {e}"))?;
+        replace_local_payment_items(conn, &local_payment_id, &local_order_id, items, &created_at)?;
+        payments::recompute_order_payment_state(
+            conn,
+            &local_order_id,
+            &method,
+            items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
+            &updated_at,
+            &local_payment_id,
+        )?;
+        return Ok(1);
+    }
+
+    let placeholder_payment_id: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM order_payments
+             WHERE order_id = ?1
+               AND payment_origin = 'sync_reconstructed'
+               AND remote_payment_id IS NULL
+               AND status = 'completed'
+               AND method = ?2
+               AND ABS(amount - ?3) < 0.01
+             ORDER BY created_at ASC
+             LIMIT 1",
+            params![local_order_id, method, amount],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("resolve reconstructed payment placeholder: {e}"))?;
+
+    if let Some(local_payment_id) = placeholder_payment_id {
+        conn.execute(
+            "UPDATE order_payments
+             SET remote_payment_id = ?1,
+                 method = ?2,
+                 amount = ?3,
+                 currency = ?4,
+                 transaction_ref = COALESCE(?5, transaction_ref),
+                 sync_status = 'synced',
+                 sync_state = 'applied',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 updated_at = ?6
+             WHERE id = ?7",
+            params![
+                remote_payment_id,
+                method,
+                amount,
+                currency,
+                transaction_ref,
+                updated_at,
+                local_payment_id,
+            ],
+        )
+        .map_err(|e| format!("hydrate reconstructed payment placeholder: {e}"))?;
+        replace_local_payment_items(conn, &local_payment_id, &local_order_id, items, &created_at)?;
+        payments::recompute_order_payment_state(
+            conn,
+            &local_order_id,
+            &method,
+            items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
+            &updated_at,
+            &local_payment_id,
+        )?;
+        return Ok(1);
+    }
+
+    if let Some(transaction_ref) = transaction_ref.as_deref() {
+        let orphan_local_payment_id: Option<String> = conn
+            .query_row(
+                "SELECT id
+                 FROM order_payments
+                 WHERE order_id = ?1
+                   AND remote_payment_id IS NULL
+                   AND status = 'completed'
+                   AND method = ?2
+                   AND ABS(amount - ?3) < 0.01
+                   AND COALESCE(transaction_ref, '') = ?4
+                 ORDER BY created_at ASC
+                 LIMIT 1",
+                params![local_order_id, method, amount, transaction_ref],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("resolve orphan local payment mirror: {e}"))?;
+
+        if let Some(local_payment_id) = orphan_local_payment_id {
+            conn.execute(
+                "UPDATE order_payments
+                 SET remote_payment_id = ?1,
+                     sync_status = 'synced',
+                     sync_state = 'applied',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![remote_payment_id, updated_at, local_payment_id],
+            )
+            .map_err(|e| format!("attach remote_payment_id to local payment: {e}"))?;
+            replace_local_payment_items(
+                conn,
+                &local_payment_id,
+                &local_order_id,
+                items,
+                &created_at,
+            )?;
+            payments::recompute_order_payment_state(
+                conn,
+                &local_order_id,
+                &method,
+                items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
+                &updated_at,
+                &local_payment_id,
+            )?;
+            return Ok(1);
+        }
+    }
+
+    let payload = serde_json::json!({
+        "orderId": local_order_id,
+        "method": method,
+        "amount": amount,
+        "currency": currency,
+        "transactionRef": transaction_ref,
+        "paymentOrigin": "sync_reconstructed",
+        "items": items.cloned().unwrap_or(Value::Array(Vec::new())),
+    });
+    let input = payments::build_payment_record_input(&payload)
+        .map_err(|e| format!("prepare remote payment mirror: {e}"))?;
+    let mut options = payments::PaymentInsertOptions::applied(Some(remote_payment_id));
+    options.created_at = Some(created_at);
+    options.updated_at = Some(updated_at);
+    payments::record_payment_in_connection(conn, &input, &options)
+        .map_err(|e| format!("insert remote payment mirror: {e}"))?;
+
+    Ok(1)
+}
+
+fn maybe_reconstruct_paid_remote_order_payment(
+    conn: &Connection,
+    remote_order: &Value,
+) -> Result<usize, String> {
+    let Some(remote_order_id) = remote_order
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+    else {
+        return Ok(0);
+    };
+
+    let payment_status = normalize_payment_status_for_sync(
+        remote_order.get("payment_status").and_then(Value::as_str),
+    );
+    if payment_status != "paid" {
+        return Ok(0);
+    }
+
+    let order_status = normalize_order_status_for_sync(
+        remote_order
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending"),
+    );
+    if matches!(order_status.as_str(), "cancelled" | "canceled" | "refunded") {
+        return Ok(0);
+    }
+
+    let raw_method = str_any(remote_order, &["payment_method", "paymentMethod"])
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if raw_method != "cash" && raw_method != "card" {
+        return Ok(0);
+    }
+
+    let local_order_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM orders WHERE supabase_id = ?1 OR id = ?1 LIMIT 1",
+            params![remote_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("resolve local order for reconstruction: {e}"))?;
+    let Some(local_order_id) = local_order_id else {
+        return Ok(0);
+    };
+
+    let (order_total, local_status, is_ghost): (f64, String, i64) = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0), COALESCE(status, 'pending'), COALESCE(is_ghost, 0)
+             FROM orders
+             WHERE id = ?1",
+            params![local_order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("load local reconstruction context: {e}"))?;
+
+    if is_ghost != 0
+        || order_total <= 0.0
+        || matches!(local_status.as_str(), "cancelled" | "canceled" | "refunded")
+    {
+        return Ok(0);
+    }
+
+    let completed_payments: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'",
+            params![local_order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if completed_payments > 0 {
+        return Ok(0);
+    }
+
+    let effective_business_timestamp =
+        crate::business_day::resolve_order_financial_effective_at(conn, &local_order_id)
+            .unwrap_or_else(|_| {
+                str_any(remote_order, &["updated_at", "updatedAt", "created_at", "createdAt"])
+                    .unwrap_or_else(|| Utc::now().to_rfc3339())
+            });
+    let payload = serde_json::json!({
+        "orderId": local_order_id,
+        "method": raw_method,
+        "amount": order_total,
+        "currency": "EUR",
+        "transactionRef": str_any(
+            remote_order,
+            &["payment_transaction_id", "paymentTransactionId"],
+        ),
+        "paymentOrigin": "sync_reconstructed",
+    });
+    let input = payments::build_payment_record_input(&payload)
+        .map_err(|e| format!("prepare sync reconstruction: {e}"))?;
+    let mut options = payments::PaymentInsertOptions::applied(None);
+    options.created_at = Some(effective_business_timestamp.clone());
+    options.updated_at = Some(effective_business_timestamp);
+    payments::record_payment_in_connection(conn, &input, &options)
+        .map_err(|e| format!("record sync reconstruction: {e}"))?;
+
+    Ok(1)
+}
+
 fn remote_order_changed_at(remote_order: &Value) -> String {
     remote_order
         .get("updated_at")
@@ -3442,6 +3916,13 @@ async fn reconcile_remote_orders(
                     .get("payment_status")
                     .and_then(Value::as_str)
                     .unwrap_or("pending");
+                let payment_method = normalize_payment_method_for_sync(
+                    str_any(&remote_order, &["payment_method", "paymentMethod"]).as_deref(),
+                );
+                let payment_transaction_id = str_any(
+                    &remote_order,
+                    &["payment_transaction_id", "paymentTransactionId"],
+                );
                 let cancellation_reason = str_any(
                     &remote_order,
                     &["cancellation_reason", "cancellationReason"],
@@ -3509,23 +3990,29 @@ async fn reconcile_remote_orders(
                                  SET supabase_id = ?1,
                                      status = ?2,
                                      payment_status = ?3,
+                                     payment_method = COALESCE(?4, payment_method),
+                                     payment_transaction_id = COALESCE(?5, payment_transaction_id),
                                      sync_status = 'synced',
                                      last_synced_at = datetime('now'),
-                                     updated_at = ?4,
-                                     cancellation_reason = COALESCE(?6, cancellation_reason)
-                                 WHERE id = ?5
+                                     updated_at = ?6,
+                                     cancellation_reason = COALESCE(?8, cancellation_reason)
+                                 WHERE id = ?7
                                    AND (
                                      COALESCE(supabase_id, '') != COALESCE(?1, '')
                                      OR COALESCE(status, '') != COALESCE(?2, '')
                                      OR COALESCE(payment_status, '') != COALESCE(?3, '')
+                                     OR COALESCE(payment_method, '') != COALESCE(?4, '')
+                                     OR COALESCE(payment_transaction_id, '') != COALESCE(?5, '')
                                      OR COALESCE(sync_status, '') != 'synced'
-                                     OR COALESCE(updated_at, '') != COALESCE(?4, '')
-                                     OR COALESCE(cancellation_reason, '') != COALESCE(?6, '')
+                                     OR COALESCE(updated_at, '') != COALESCE(?6, '')
+                                     OR COALESCE(cancellation_reason, '') != COALESCE(?8, '')
                                    )",
                                 params![
                                     remote_id,
                                     status,
                                     payment_status,
+                                    payment_method,
+                                    payment_transaction_id,
                                     updated_at,
                                     local_id,
                                     cancellation_reason.as_deref()
@@ -3552,6 +4039,18 @@ async fn reconcile_remote_orders(
                         let _ = conn.execute(
                             "UPDATE orders SET supabase_id = ?1 WHERE id = ?2 AND supabase_id IS NULL",
                             params![remote_id, local_id],
+                        );
+                    }
+                }
+
+                if !has_pending_queue {
+                    if let Err(error) = maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
+                    {
+                        warn!(
+                            order_id = %local_id,
+                            remote_id = %remote_id,
+                            error = %error,
+                            "Failed to reconstruct missing local payment row from remote order"
                         );
                     }
                 }
@@ -3697,6 +4196,109 @@ async fn reconcile_remote_orders(
     Ok(reconciled)
 }
 
+async fn reconcile_remote_payments(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<usize, String> {
+    let mut since_cursor =
+        sanitize_payments_since_cursor(local_setting_get(db, "sync", "payments_since"));
+    let _ = local_setting_set(db, "sync", "payments_since", &since_cursor);
+    let mut reconciled = 0usize;
+
+    for _page in 0..4 {
+        let mut path = "/api/pos/payments?limit=200&since=".to_string();
+        path.push_str(&percent_encode(&since_cursor));
+
+        let resp = match api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await {
+            Ok(v) => v,
+            Err(e) => {
+                if is_backpressure_error(&e) {
+                    warn!(error = %e, "Remote payment reconciliation deferred due to backpressure");
+                    return Ok(reconciled);
+                }
+                return Err(format!("reconcile remote payments: {e}"));
+            }
+        };
+
+        let typed: Option<PaymentIncrementalSyncResponse> =
+            serde_json::from_value(resp.clone()).ok();
+        let payments = typed
+            .as_ref()
+            .map(|value| value.payments.clone())
+            .unwrap_or_else(|| {
+                resp.get("payments")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        let has_more = typed
+            .as_ref()
+            .and_then(|value| value.has_more)
+            .or_else(|| resp.get("has_more").and_then(Value::as_bool))
+            .unwrap_or(false);
+        let sync_timestamp = typed
+            .as_ref()
+            .and_then(|value| value.sync_timestamp.clone())
+            .or_else(|| {
+                resp.get("sync_timestamp")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string())
+            })
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        let mut newest_updated_at: Option<String> = None;
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            for remote_payment in payments {
+                let updated_at = remote_payment_changed_at(&remote_payment);
+                if newest_updated_at
+                    .as_ref()
+                    .map(|current| updated_at > *current)
+                    .unwrap_or(true)
+                {
+                    newest_updated_at = Some(updated_at);
+                }
+
+                match sync_remote_payment_into_local(&conn, &remote_payment) {
+                    Ok(changed) => {
+                        reconciled += changed;
+                    }
+                    Err(error) => {
+                        let remote_payment_id =
+                            str_any(&remote_payment, &["id", "payment_id", "paymentId"])
+                                .unwrap_or_else(|| "<unknown>".to_string());
+                        warn!(
+                            remote_payment_id = %remote_payment_id,
+                            error = %error,
+                            "Failed to mirror canonical remote payment into local cache"
+                        );
+                    }
+                }
+            }
+        }
+
+        let next_cursor = sanitize_payments_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let current_stored =
+                sanitize_payments_since_cursor(crate::db::get_setting(&conn, "sync", "payments_since"));
+            if next_cursor > current_stored {
+                since_cursor = next_cursor.clone();
+                crate::db::set_setting(&conn, "sync", "payments_since", &next_cursor)?;
+            } else if since_cursor != current_stored {
+                since_cursor = current_stored;
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+
+    Ok(reconciled)
+}
+
 /// Execute one sync cycle: read pending queue items and POST to admin.
 ///
 /// Orders and shifts are synced to separate endpoints so a failure in one
@@ -3782,6 +4384,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
     total_progress += reconciled_orders;
+    let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
+    total_progress += reconciled_payments;
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
@@ -5687,6 +6291,11 @@ async fn sync_payment_items(
             .or_else(|| data.get("transaction_ref"))
             .and_then(Value::as_str);
         let tip_amount = data.get("tipAmount").and_then(Value::as_f64);
+        let currency = data.get("currency").and_then(Value::as_str);
+        let payment_origin = data
+            .get("paymentOrigin")
+            .or_else(|| data.get("payment_origin"))
+            .and_then(Value::as_str);
 
         // Build the POST body for /api/pos/payments
         let mut body = serde_json::json!({
@@ -5701,8 +6310,15 @@ async fn sync_payment_items(
         if let Some(tip) = tip_amount {
             body["tip_amount"] = serde_json::json!(tip);
         }
+        if let Some(currency) = currency {
+            body["currency"] = Value::String(currency.to_string());
+        }
         // Include terminal_id as metadata for traceability
-        body["metadata"] = serde_json::json!({ "terminal_id": terminal_id });
+        body["metadata"] = serde_json::json!({
+            "terminal_id": terminal_id,
+            "local_payment_id": entity_id,
+            "payment_origin": payment_origin,
+        });
 
         // Include payment_items if present in the sync payload (split-by-items)
         if let Some(items_arr) = data.get("items") {
@@ -5722,7 +6338,17 @@ async fn sync_payment_items(
         match api::fetch_from_admin(admin_url, api_key, "/api/pos/payments", "POST", Some(body))
             .await
         {
-            Ok(_resp) => {
+            Ok(resp) => {
+                let typed: Option<PaymentSyncResponse> = serde_json::from_value(resp.clone()).ok();
+                let remote_payment_id = typed
+                    .as_ref()
+                    .and_then(|value| value.payment_id.clone())
+                    .or_else(|| {
+                        resp.get("payment_id")
+                            .or_else(|| resp.get("id"))
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string())
+                    });
                 let now = Utc::now().to_rfc3339();
                 if let Ok(conn) = db.conn.lock() {
                     let _ = conn.execute(
@@ -5730,8 +6356,15 @@ async fn sync_payment_items(
                         params![now, id],
                     );
                     let _ = conn.execute(
-                        "UPDATE order_payments SET sync_status = 'synced', sync_state = 'applied', sync_retry_count = 0, sync_last_error = NULL, updated_at = ?1 WHERE id = ?2",
-                        params![now, entity_id],
+                        "UPDATE order_payments
+                         SET sync_status = 'synced',
+                             sync_state = 'applied',
+                             remote_payment_id = COALESCE(?1, remote_payment_id),
+                             sync_retry_count = 0,
+                             sync_last_error = NULL,
+                             updated_at = ?2
+                         WHERE id = ?3",
+                        params![remote_payment_id, now, entity_id],
                     );
                 }
                 synced += 1;
@@ -7229,6 +7862,142 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn test_paid_remote_order_hotfix_reconstructs_missing_local_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-paid-order-1",
+            "order_number": "ORD-REMOTE-PAID-1",
+            "items": [{ "name": "Espresso", "quantity": 1, "price": 4.5 }],
+            "total_amount": 4.5,
+            "status": "completed",
+            "payment_status": "paid",
+            "payment_method": "cash",
+            "updated_at": "2026-03-20T09:15:00Z",
+            "payment_transaction_id": "cash-slip-1"
+        });
+
+        let local_id = materialize_remote_order(&conn, &remote_order)
+            .expect("materialize remote order")
+            .expect("local id");
+        let inserted = maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
+            .expect("reconstruct payment");
+        assert_eq!(inserted, 1);
+
+        let (payment_origin, sync_status, sync_state, amount, method, created_at): (
+            String,
+            String,
+            String,
+            f64,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT payment_origin, sync_status, sync_state, amount, method, created_at
+                 FROM order_payments
+                 WHERE order_id = ?1",
+                params![local_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(payment_origin, "sync_reconstructed");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+        assert_eq!(amount, 4.5);
+        assert_eq!(method, "cash");
+        assert_eq!(created_at, "2026-03-20T09:15:00Z");
+    }
+
+    #[test]
+    fn test_remote_payment_sync_hydrates_reconstructed_placeholder_without_duplicate() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-paid-order-2",
+            "order_number": "ORD-REMOTE-PAID-2",
+            "items": [{ "name": "Cappuccino", "quantity": 1, "price": 5.5 }],
+            "total_amount": 5.5,
+            "status": "completed",
+            "payment_status": "paid",
+            "payment_method": "card",
+            "updated_at": "2026-03-20T10:00:00Z"
+        });
+
+        let local_id = materialize_remote_order(&conn, &remote_order)
+            .expect("materialize remote order")
+            .expect("local id");
+        let inserted = maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
+            .expect("reconstruct payment");
+        assert_eq!(inserted, 1);
+
+        let remote_payment = serde_json::json!({
+            "id": "payment-remote-2",
+            "order_id": "remote-paid-order-2",
+            "amount": 5.5,
+            "payment_method": "card",
+            "external_transaction_id": "txn-remote-2",
+            "currency": "EUR",
+            "created_at": "2026-03-20T10:00:05Z",
+            "updated_at": "2026-03-20T10:00:05Z",
+            "items": [
+                {
+                    "item_index": 0,
+                    "item_name": "Cappuccino",
+                    "item_quantity": 1,
+                    "item_amount": 5.5
+                }
+            ]
+        });
+
+        let changed =
+            sync_remote_payment_into_local(&conn, &remote_payment).expect("sync remote payment");
+        assert_eq!(changed, 1);
+
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = ?1",
+                params![local_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_count, 1);
+
+        let (remote_payment_id, transaction_ref): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT remote_payment_id, transaction_ref
+                 FROM order_payments
+                 WHERE order_id = ?1",
+                params![local_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(remote_payment_id.as_deref(), Some("payment-remote-2"));
+        assert_eq!(transaction_ref.as_deref(), Some("txn-remote-2"));
+
+        let item_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM payment_items
+                 WHERE order_id = ?1",
+                params![local_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_count, 1);
     }
 
     #[test]

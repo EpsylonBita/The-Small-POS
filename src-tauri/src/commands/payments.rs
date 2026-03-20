@@ -64,6 +64,19 @@ fn parse_payment_update_status_payload(
         .filter(|s| !s.is_empty())
         .or_else(|| arg1.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
         .ok_or("Missing payment status")?;
+    let payment_status = match payment_status.to_ascii_lowercase().as_str() {
+        "pending" => "pending".to_string(),
+        "paid" => "paid".to_string(),
+        "partially_paid" => "partially_paid".to_string(),
+        "refunded" => "refunded".to_string(),
+        "failed" => "failed".to_string(),
+        _ => {
+            return Err(
+                "payment_update_payment_status only supports reconciliation states; use payment_record to capture funds"
+                    .into(),
+            )
+        }
+    };
     let payment_method = payload
         .get("paymentMethod")
         .or_else(|| payload.get("payment_method"))
@@ -143,6 +156,30 @@ pub async fn payment_update_payment_status(
     let now = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
+    let (current_payment_status, completed_payment_rows): (String, i64) = conn
+        .query_row(
+            "SELECT COALESCE(payment_status, 'pending'),
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM order_payments
+                        WHERE order_id = orders.id
+                          AND status = 'completed'
+                    ), 0)
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load payment reconciliation context: {e}"))?;
+    if completed_payment_rows == 0
+        && current_payment_status != payment_status
+        && matches!(payment_status.as_str(), "paid" | "partially_paid" | "refunded")
+    {
+        return Err(
+            "Cannot promote payment status without completed payment rows; use payment_record instead"
+                .into(),
+        );
+    }
     conn.execute(
         "UPDATE orders
          SET payment_status = ?1,

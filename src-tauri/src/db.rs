@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 35;
+const CURRENT_SCHEMA_VERSION: i32 = 36;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -242,6 +242,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 35 {
         migrate_v35(conn)?;
+    }
+    if current < 36 {
+        migrate_v36(conn)?;
     }
 
     Ok(())
@@ -2385,6 +2388,90 @@ fn migrate_v35(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v35 mark schema version: {e}"))?;
 
     info!("Applied migration v35 (backfilled closed cash drawers as reconciled)");
+    Ok(())
+}
+
+fn migrate_v36(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        BEGIN;
+
+        CREATE TABLE order_payments_v36 (
+            id TEXT PRIMARY KEY,
+            order_id TEXT NOT NULL,
+            method TEXT NOT NULL CHECK (method IN ('cash', 'card', 'other')),
+            amount REAL NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'EUR',
+            status TEXT NOT NULL DEFAULT 'completed'
+                CHECK (status IN ('completed', 'voided', 'refunded')),
+            cash_received REAL,
+            change_given REAL,
+            transaction_ref TEXT,
+            staff_id TEXT,
+            staff_shift_id TEXT,
+            voided_at TEXT,
+            voided_by TEXT,
+            void_reason TEXT,
+            sync_status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            sync_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK (sync_state IN ('pending', 'waiting_parent', 'syncing', 'applied', 'failed')),
+            sync_last_error TEXT,
+            sync_retry_count INTEGER NOT NULL DEFAULT 0,
+            sync_next_retry_at TEXT,
+            discount_amount REAL NOT NULL DEFAULT 0,
+            payment_origin TEXT NOT NULL DEFAULT 'manual'
+                CHECK (payment_origin IN ('manual', 'terminal', 'manual_recovery', 'sync_reconstructed')),
+            terminal_device_id TEXT,
+            remote_payment_id TEXT,
+            FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO order_payments_v36 (
+            id, order_id, method, amount, currency, status,
+            cash_received, change_given, transaction_ref,
+            staff_id, staff_shift_id, voided_at, voided_by, void_reason,
+            sync_status, created_at, updated_at, sync_state, sync_last_error,
+            sync_retry_count, sync_next_retry_at, discount_amount, payment_origin,
+            terminal_device_id, remote_payment_id
+        )
+        SELECT
+            id, order_id, method, amount, currency, status,
+            cash_received, change_given, transaction_ref,
+            staff_id, staff_shift_id, voided_at, voided_by, void_reason,
+            sync_status, created_at, updated_at, sync_state, sync_last_error,
+            sync_retry_count, sync_next_retry_at, COALESCE(discount_amount, 0),
+            CASE
+                WHEN COALESCE(payment_origin, 'manual') IN ('manual', 'terminal', 'manual_recovery', 'sync_reconstructed')
+                    THEN COALESCE(payment_origin, 'manual')
+                ELSE 'manual'
+            END,
+            terminal_device_id,
+            NULL
+        FROM order_payments;
+
+        DROP TABLE order_payments;
+        ALTER TABLE order_payments_v36 RENAME TO order_payments;
+
+        CREATE INDEX IF NOT EXISTS idx_order_payments_order_id ON order_payments(order_id);
+        CREATE INDEX IF NOT EXISTS idx_order_payments_created_at ON order_payments(created_at);
+        CREATE INDEX IF NOT EXISTS idx_order_payments_sync_status ON order_payments(sync_status);
+        CREATE INDEX IF NOT EXISTS idx_order_payments_sync_state ON order_payments(sync_state);
+        CREATE INDEX IF NOT EXISTS idx_order_payments_waiting_order ON order_payments(order_id, sync_state);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_order_payments_remote_payment_id
+            ON order_payments(remote_payment_id)
+            WHERE remote_payment_id IS NOT NULL;
+
+        COMMIT;
+        ",
+    )
+    .map_err(|e| format!("migration v36 rebuild order_payments: {e}"))?;
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (36)", [])
+        .map_err(|e| format!("migration v36 mark schema version: {e}"))?;
+
+    info!("Applied migration v36 (remote payment ids + expanded payment origins)");
     Ok(())
 }
 

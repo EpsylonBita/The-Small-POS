@@ -594,7 +594,9 @@ export class OrderService {
       const bridge = this.getBridge();
       if (bridge) {
         try {
-          const resp: any = await bridge.orders.create(normalized as any);
+          const resp: any = normalized.initialPayment
+            ? await bridge.orders.createWithInitialPayment(normalized as any)
+            : await bridge.orders.create(normalized as any);
           const ipcPayload = resp?.data ?? resp;
           const orderId =
             ipcPayload?.orderId ||
