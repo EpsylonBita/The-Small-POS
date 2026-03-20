@@ -828,6 +828,7 @@ pub fn run() {
             commands::payments::payment_record,
             commands::payments::payment_void,
             commands::payments::payment_update_payment_status,
+            commands::payments::payment_update_payment_method,
             commands::payments::payment_get_order_payments,
             commands::payments::payment_get_receipt_preview,
             commands::payments::payment_get_paid_items,

@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{order_ownership, print, printers, receipt_renderer};
+use crate::{order_ownership, print, printers, receipt_renderer, resolve_order_id};
 
 fn load_payment_items_for_payment(
     conn: &rusqlite::Connection,
@@ -640,6 +640,296 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     }))
 }
 
+fn build_payment_sync_payload_for_payment(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<String, String> {
+    type PaymentSyncRow = (
+        String,
+        String,
+        f64,
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+        f64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+
+    let (
+        order_id,
+        method,
+        amount,
+        currency,
+        cash_received,
+        change_given,
+        transaction_ref,
+        discount_amount,
+        payment_origin,
+        terminal_device_id,
+        staff_id,
+        staff_shift_id,
+    ): PaymentSyncRow = conn
+        .query_row(
+            "SELECT order_id, method, amount, currency, cash_received, change_given,
+                    transaction_ref, COALESCE(discount_amount, 0),
+                    COALESCE(payment_origin, 'manual'), terminal_device_id,
+                    staff_id, staff_shift_id
+             FROM order_payments
+             WHERE id = ?1",
+            params![payment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load payment sync payload context: {e}"))?;
+
+    let items = load_payment_items_for_payment(conn, payment_id)?;
+    Ok(serde_json::json!({
+        "paymentId": payment_id,
+        "orderId": order_id,
+        "method": method,
+        "amount": amount,
+        "currency": currency,
+        "cashReceived": cash_received,
+        "changeGiven": change_given,
+        "transactionRef": transaction_ref,
+        "discountAmount": discount_amount,
+        "paymentOrigin": payment_origin,
+        "terminalDeviceId": terminal_device_id,
+        "staffId": staff_id,
+        "staffShiftId": staff_shift_id,
+        "items": if items.is_empty() { Value::Null } else { Value::Array(items) },
+    })
+    .to_string())
+}
+
+fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Result<(), String> {
+    let (order_id, has_supabase_id): (String, i64) = conn
+        .query_row(
+            "SELECT op.order_id,
+                    CASE WHEN COALESCE(o.supabase_id, '') != '' THEN 1 ELSE 0 END
+             FROM order_payments op
+             JOIN orders o ON o.id = op.order_id
+             WHERE op.id = ?1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load payment queue context: {e}"))?;
+    let sync_payload = build_payment_sync_payload_for_payment(conn, payment_id)?;
+    let idempotency_key = format!("payment:{payment_id}");
+    let now = Utc::now().to_rfc3339();
+    let queue_status = if has_supabase_id == 1 {
+        "pending"
+    } else {
+        "deferred"
+    };
+    let sync_state = if has_supabase_id == 1 {
+        "pending"
+    } else {
+        "waiting_parent"
+    };
+
+    let updated = conn
+        .execute(
+            "UPDATE sync_queue
+             SET operation = 'insert',
+                 payload = ?1,
+                 idempotency_key = COALESCE(idempotency_key, ?2),
+                 status = ?3,
+                 retry_count = 0,
+                 next_retry_at = NULL,
+                 last_error = NULL,
+                 synced_at = NULL,
+                 updated_at = ?4
+             WHERE entity_type = 'payment'
+               AND entity_id = ?5",
+            params![sync_payload, idempotency_key, queue_status, now, payment_id],
+        )
+        .map_err(|e| format!("refresh payment queue row: {e}"))?;
+
+    if updated == 0 {
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('payment', ?1, 'insert', ?2, ?3, ?4)",
+            params![payment_id, sync_payload, idempotency_key, queue_status],
+        )
+        .map_err(|e| format!("insert refreshed payment queue row: {e}"))?;
+    }
+
+    conn.execute(
+        "UPDATE order_payments
+         SET sync_status = 'pending',
+             sync_state = ?1,
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?2
+         WHERE id = ?3",
+        params![sync_state, now, payment_id],
+    )
+    .map_err(|e| format!("mark payment pending sync: {e}"))?;
+
+    conn.execute(
+        "UPDATE orders
+         SET sync_status = 'pending',
+             updated_at = ?1
+         WHERE id = ?2",
+        params![now, order_id],
+    )
+    .map_err(|e| format!("mark order pending sync after payment method edit: {e}"))?;
+
+    Ok(())
+}
+
+pub fn update_payment_method(
+    db: &DbState,
+    order_id_raw: &str,
+    next_method: &str,
+) -> Result<Value, String> {
+    let next_method = match next_method.trim().to_ascii_lowercase().as_str() {
+        "cash" => "cash".to_string(),
+        "card" => "card".to_string(),
+        _ => return Err("Payment method edits only support cash or card".into()),
+    };
+
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_id = resolve_order_id(&conn, order_id_raw).ok_or("Order not found")?;
+    let order_status: String = conn
+        .query_row(
+            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load order status for payment method edit: {e}"))?;
+    let normalized_status = order_status.trim().to_ascii_lowercase();
+    if normalized_status == "cancelled" || normalized_status == "canceled" {
+        return Err("Cannot edit payment method for cancelled orders".into());
+    }
+
+    type CompletedPaymentRow = (String, String, i64);
+    let completed_payments = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT op.id,
+                        op.method,
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM payment_items pi
+                            WHERE pi.payment_id = op.id
+                        ), 0) AS item_assignment_count
+                 FROM order_payments op
+                 WHERE op.order_id = ?1
+                   AND op.status = 'completed'
+                 ORDER BY op.created_at ASC",
+            )
+            .map_err(|e| format!("prepare payment edit lookup: {e}"))?;
+        let rows = stmt
+            .query_map(params![order_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("query payment edit lookup: {e}"))?;
+
+        let mut payments = Vec::new();
+        for row in rows {
+            payments.push(row.map_err(|e| format!("read payment edit lookup row: {e}"))?);
+        }
+        payments
+    };
+
+    if completed_payments.len() != 1 {
+        return Err(
+            "Payment method can only be edited for orders with exactly one completed payment"
+                .into(),
+        );
+    }
+
+    let (payment_id, current_method, item_assignment_count): CompletedPaymentRow =
+        completed_payments[0].clone();
+    if current_method == next_method {
+        let current_status: String = conn
+            .query_row(
+                "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
+                params![order_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("load current payment status: {e}"))?;
+        return Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "orderId": order_id,
+                "paymentId": payment_id,
+                "paymentMethod": current_method,
+                "paymentStatus": current_status,
+            }
+        }));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin payment method update transaction: {e}"))?;
+    tx.execute(
+        "UPDATE order_payments
+         SET method = ?1,
+             updated_at = ?2
+         WHERE id = ?3",
+        params![next_method, now, payment_id],
+    )
+    .map_err(|e| format!("update local payment method: {e}"))?;
+    recompute_order_payment_state(
+        &tx,
+        &order_id,
+        &next_method,
+        item_assignment_count > 0,
+        &now,
+        &payment_id,
+    )?;
+    refresh_payment_sync_queue_entry(&tx, &payment_id)?;
+    let payment_status: String = tx
+        .query_row(
+            "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("reload payment status after method edit: {e}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit payment method update: {e}"))?;
+
+    info!(
+        order_id = %order_id,
+        payment_id = %payment_id,
+        method = %next_method,
+        "Payment method updated"
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "data": {
+            "orderId": order_id,
+            "paymentId": payment_id,
+            "paymentMethod": next_method,
+            "paymentStatus": payment_status,
+        }
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Void payment
 // ---------------------------------------------------------------------------
@@ -1095,6 +1385,119 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn test_update_payment_method_requeues_payment_sync_and_updates_snapshot() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, payment_status,
+                payment_method, supabase_id, created_at, updated_at
+             ) VALUES (
+                'ord-method-edit',
+                '[]',
+                12.0,
+                'completed',
+                'synced',
+                'pending',
+                'cash',
+                'remote-order-1',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert order for payment method edit");
+        drop(conn);
+
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-edit",
+                "method": "cash",
+                "amount": 12.0,
+                "cashReceived": 12.0,
+                "changeGiven": 0.0,
+                "transactionRef": "CASH-METHOD-EDIT-1",
+            }),
+        )
+        .expect("record initial payment");
+        let payment_id = recorded["paymentId"]
+            .as_str()
+            .expect("payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_queue
+             SET status = 'synced',
+                 synced_at = datetime('now')
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark payment sync row synced");
+        conn.execute(
+            "UPDATE order_payments
+             SET sync_status = 'synced',
+                 sync_state = 'applied',
+                 remote_payment_id = 'remote-payment-1'
+             WHERE id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark local payment as mirrored");
+        drop(conn);
+
+        update_payment_method(&db, "ord-method-edit", "card")
+            .expect("update payment method");
+
+        let conn = db.conn.lock().unwrap();
+        let (order_method, order_status, order_sync_status): (String, String, String) = conn
+            .query_row(
+                "SELECT payment_method, payment_status, sync_status
+                 FROM orders
+                 WHERE id = 'ord-method-edit'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query updated order snapshot");
+        assert_eq!(order_method, "card");
+        assert_eq!(order_status, "paid");
+        assert_eq!(order_sync_status, "pending");
+
+        let (payment_method, payment_sync_status, payment_sync_state, remote_payment_id): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT method, sync_status, sync_state, remote_payment_id
+                 FROM order_payments
+                 WHERE id = ?1",
+                params![payment_id.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("query updated payment row");
+        assert_eq!(payment_method, "card");
+        assert_eq!(payment_sync_status, "pending");
+        assert_eq!(payment_sync_state, "pending");
+        assert_eq!(remote_payment_id.as_deref(), Some("remote-payment-1"));
+
+        let (queue_status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query refreshed payment queue row");
+        assert_eq!(queue_status, "pending");
+        assert!(payload.contains("\"method\":\"card\""));
     }
 
     #[test]

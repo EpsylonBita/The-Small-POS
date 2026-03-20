@@ -821,6 +821,7 @@ export interface PlatformBridge {
   // -- Payments --------------------------------------------------------------
   payments: {
     updatePaymentStatus(orderId: string, status: string, method?: string): Promise<IpcResult>;
+    updatePaymentMethod(orderId: string, method: 'cash' | 'card'): Promise<IpcResult>;
     printReceipt(receiptData: any, type?: string): Promise<IpcResult>;
     printKitchenTicket(ticketData: any): Promise<IpcResult>;
     recordPayment(params: RecordPaymentParams): Promise<IpcResult>;
@@ -1326,6 +1327,7 @@ export const CHANNEL_MAP: Record<string, string> = {
 
   // Payments
   'payment:update-payment-status': 'payments.updatePaymentStatus',
+  'payment:update-payment-method': 'payments.updatePaymentMethod',
   'payment:print-receipt': 'payments.printReceipt',
   'kitchen:print-ticket': 'payments.printKitchenTicket',
   'payment:record': 'payments.recordPayment',
@@ -1783,6 +1785,7 @@ export class TauriBridge implements PlatformBridge {
 
   payments = {
     updatePaymentStatus: (id: string, s: string, m?: string) => this.inv('payment:update-payment-status', id, s, m),
+    updatePaymentMethod: (id: string, method: 'cash' | 'card') => this.inv('payment:update-payment-method', id, method),
     printReceipt: (data: any, type?: string) => this.inv('payment:print-receipt', data, type),
     printKitchenTicket: (data: any) => this.inv('kitchen:print-ticket', data),
     recordPayment: (p: RecordPaymentParams) => this.inv('payment:record', p),

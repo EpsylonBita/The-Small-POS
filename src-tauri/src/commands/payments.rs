@@ -11,6 +11,12 @@ struct PaymentUpdateStatusPayload {
     payment_method: Option<String>,
 }
 
+#[derive(Debug)]
+struct PaymentMethodUpdatePayload {
+    order_id: String,
+    payment_method: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PaymentVoidPayload {
@@ -88,6 +94,53 @@ fn parse_payment_update_status_payload(
     Ok(PaymentUpdateStatusPayload {
         order_id: order_id.trim().to_string(),
         payment_status,
+        payment_method,
+    })
+}
+
+fn parse_payment_method_update_payload(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<String>,
+) -> Result<PaymentMethodUpdatePayload, String> {
+    let payload = match arg0 {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        Some(serde_json::Value::String(order_id)) => serde_json::json!({
+            "orderId": order_id,
+            "paymentMethod": arg1,
+        }),
+        Some(v) => v,
+        None => serde_json::json!({
+            "paymentMethod": arg1,
+        }),
+    };
+
+    let order_id = payload_arg0_as_string(
+        Some(payload.clone()),
+        &["orderId", "order_id", "id", "supabaseId", "supabase_id"],
+    )
+    .ok_or("Missing orderId")?;
+    let payment_method = payload
+        .get("paymentMethod")
+        .or_else(|| payload.get("payment_method"))
+        .or_else(|| payload.get("method"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            arg1.as_ref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or("Missing payment method")?;
+
+    let payment_method = match payment_method.as_str() {
+        "cash" => "cash".to_string(),
+        "card" => "card".to_string(),
+        _ => return Err("Payment method edits only support cash or card".into()),
+    };
+
+    Ok(PaymentMethodUpdatePayload {
+        order_id: order_id.trim().to_string(),
         payment_method,
     })
 }
@@ -209,6 +262,21 @@ pub async fn payment_update_payment_status(
     drop(conn);
     let _ = app.emit("order_payment_updated", event_payload.clone());
     Ok(serde_json::json!({ "success": true, "data": event_payload }))
+}
+
+#[tauri::command]
+pub async fn payment_update_payment_method(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<String>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_payment_method_update_payload(arg0, arg1)?;
+    let result = payments::update_payment_method(&db, &payload.order_id, &payload.payment_method)?;
+    if let Some(event_payload) = result.get("data").cloned() {
+        let _ = app.emit("order_payment_updated", event_payload);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -341,6 +409,17 @@ mod dto_tests {
         assert_eq!(parsed.order_id, "order-1");
         assert_eq!(parsed.payment_status, "paid");
         assert_eq!(parsed.payment_method.as_deref(), Some("card"));
+    }
+
+    #[test]
+    fn parse_payment_method_update_supports_legacy_args() {
+        let parsed = parse_payment_method_update_payload(
+            Some(serde_json::json!("order-2")),
+            Some("cash".to_string()),
+        )
+        .expect("legacy method edit args should parse");
+        assert_eq!(parsed.order_id, "order-2");
+        assert_eq!(parsed.payment_method, "cash");
     }
 
     #[test]

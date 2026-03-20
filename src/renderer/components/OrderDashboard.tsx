@@ -2076,9 +2076,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
     setIsUpdatingPaymentMethod(true);
     try {
-      const result: any = await bridge.payments.updatePaymentStatus(
+      const result: any = await bridge.payments.updatePaymentMethod(
         editPaymentTarget.orderId,
-        editPaymentTarget.paymentStatus,
         nextMethod
       );
       if (!result?.success) {
