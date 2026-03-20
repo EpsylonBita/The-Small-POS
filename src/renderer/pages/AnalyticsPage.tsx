@@ -9,15 +9,17 @@ import {
   Users,
   Clock,
   RefreshCw,
-  Calendar,
   BarChart3,
   PieChart,
-  Activity
+  Activity,
+  MapPinned,
+  Route,
+  AlertTriangle,
 } from 'lucide-react';
 import { useTheme } from '../contexts/theme-context';
-import { useShift } from '../contexts/shift-context';
 import { toast } from 'react-hot-toast';
 import { formatCurrency } from '../utils/format';
+import { posApiGet } from '../utils/api-helpers';
 
 interface AnalyticsData {
   totalRevenue: number;
@@ -31,12 +33,24 @@ interface AnalyticsData {
   dailyRevenue: { date: string; revenue: number }[];
   categoryBreakdown: { category: string; revenue: number; percentage: number }[];
   hourlyDistribution: { hour: number; orders: number }[];
+  deliveryValidations: number;
+  deliverySuccessRate: number;
+  outOfZoneAttempts: number;
+  avgDeliveryTime: number;
+  hotspotCount: number;
+  topZones: Array<{
+    zoneId: string;
+    zoneName: string;
+    totalOrders: number;
+    totalRevenue: number;
+    successRate: number;
+    averageDeliveryTime: number;
+  }>;
 }
 
 const AnalyticsPage: React.FC = () => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
-  const { staff } = useShift();
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<'today' | 'week' | 'month'>('today');
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -45,18 +59,17 @@ const AnalyticsPage: React.FC = () => {
   const formatMoney = (amount: number) => formatCurrency(amount);
 
   const fetchAnalytics = useCallback(async () => {
-    if (!staff?.branchId) return;
     setLoading(true);
     try {
-      const { posApiGet } = await import('../utils/api-helpers');
       const timeRange = period === 'today' ? 'today' : period === 'week' ? 'week' : 'month';
-      const result = await posApiGet<{ analytics: AnalyticsData }>(
-        `pos/analytics?branch_id=${staff.branchId}&time_range=${timeRange}`
+      const result = await posApiGet<{ success: boolean; analytics: AnalyticsData }>(
+        `pos/analytics?time_range=${timeRange}`
       );
 
       if (!result.success || !result.data?.analytics) {
         throw new Error(result.error || 'Analytics API returned no data');
       }
+
       setAnalytics(result.data.analytics);
     } catch (error) {
       console.error('Failed to fetch analytics:', error);
@@ -64,10 +77,10 @@ const AnalyticsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [staff?.branchId, period, t]);
+  }, [period, t]);
 
   useEffect(() => {
-    fetchAnalytics();
+    void fetchAnalytics();
   }, [fetchAnalytics]);
 
   const StatCard = ({ icon: Icon, label, value, change, color }: {
@@ -106,9 +119,12 @@ const AnalyticsPage: React.FC = () => {
     );
   }
 
+  const topZones = analytics?.topZones || [];
+  const hourlyDistribution = analytics?.hourlyDistribution || [];
+  const maxOrders = Math.max(...hourlyDistribution.map((entry) => entry.orders), 1);
+
   return (
     <div className={`h-full overflow-auto p-4 ${isDark ? 'bg-gray-900' : 'bg-gray-50'}`}>
-      {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-xl bg-cyan-500/20">
@@ -136,7 +152,7 @@ const AnalyticsPage: React.FC = () => {
             </button>
           ))}
           <button
-            onClick={fetchAnalytics}
+            onClick={() => void fetchAnalytics()}
             className={`p-2 rounded-lg ${isDark ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-100'}`}
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -144,7 +160,6 @@ const AnalyticsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard
           icon={Euro}
@@ -174,9 +189,34 @@ const AnalyticsPage: React.FC = () => {
         />
       </div>
 
-      {/* Charts Row */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <StatCard
+          icon={Route}
+          label={t('analytics.deliveryValidations', 'Delivery Validations')}
+          value={String(analytics?.deliveryValidations || 0)}
+          color="bg-cyan-500"
+        />
+        <StatCard
+          icon={MapPinned}
+          label={t('analytics.successRate', 'Delivery Success Rate')}
+          value={`${(analytics?.deliverySuccessRate || 0).toFixed(1)}%`}
+          color="bg-emerald-500"
+        />
+        <StatCard
+          icon={Clock}
+          label={t('analytics.avgDeliveryTime', 'Avg Delivery Time')}
+          value={`${analytics?.avgDeliveryTime || 0} min`}
+          color="bg-amber-500"
+        />
+        <StatCard
+          icon={AlertTriangle}
+          label={t('analytics.hotspots', 'Hotspots / Out of Zone')}
+          value={`${analytics?.hotspotCount || 0} / ${analytics?.outOfZoneAttempts || 0}`}
+          color="bg-rose-500"
+        />
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        {/* Category Breakdown */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -187,8 +227,8 @@ const AnalyticsPage: React.FC = () => {
             <h3 className="font-semibold">{t('analytics.categoryBreakdown', 'Sales by Category')}</h3>
           </div>
           <div className="space-y-3">
-            {analytics?.categoryBreakdown?.map((cat, idx) => (
-              <div key={idx}>
+            {(analytics?.categoryBreakdown || []).slice(0, 6).map((cat, idx) => (
+              <div key={`${cat.category}-${idx}`}>
                 <div className="flex justify-between text-sm mb-1">
                   <span>{cat.category}</span>
                   <span className="font-medium">{formatMoney(cat.revenue)} ({cat.percentage}%)</span>
@@ -196,7 +236,7 @@ const AnalyticsPage: React.FC = () => {
                 <div className={`h-2 rounded-full ${isDark ? 'bg-gray-700' : 'bg-gray-200'}`}>
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500"
-                    style={{ width: `${cat.percentage}%` }}
+                    style={{ width: `${Math.min(cat.percentage, 100)}%` }}
                   />
                 </div>
               </div>
@@ -204,7 +244,6 @@ const AnalyticsPage: React.FC = () => {
           </div>
         </motion.div>
 
-        {/* Hourly Distribution */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -215,17 +254,16 @@ const AnalyticsPage: React.FC = () => {
             <h3 className="font-semibold">{t('analytics.hourlyOrders', 'Orders by Hour')}</h3>
           </div>
           <div className="flex items-end justify-between h-32 gap-1">
-            {analytics?.hourlyDistribution?.map((h, idx) => {
-              const maxOrders = Math.max(...(analytics?.hourlyDistribution?.map(x => x.orders) || [1]));
-              const height = (h.orders / maxOrders) * 100;
+            {hourlyDistribution.map((entry) => {
+              const height = (entry.orders / maxOrders) * 100;
               return (
-                <div key={idx} className="flex-1 flex flex-col items-center">
+                <div key={entry.hour} className="flex-1 flex flex-col items-center">
                   <div
                     className="w-full bg-gradient-to-t from-cyan-500 to-blue-500 rounded-t"
                     style={{ height: `${height}%`, minHeight: '4px' }}
                   />
                   <span className={`text-xs mt-1 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                    {h.hour}
+                    {entry.hour}
                   </span>
                 </div>
               );
@@ -234,41 +272,76 @@ const AnalyticsPage: React.FC = () => {
         </motion.div>
       </div>
 
-      {/* Quick Stats */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
         >
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-amber-500/20">
-              <Clock className="w-5 h-5 text-amber-500" />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-amber-500/20">
+                <Clock className="w-5 h-5 text-amber-500" />
+              </div>
+              <div>
+                <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                  {t('analytics.peakHour', 'Peak Hour')}
+                </p>
+                <p className="text-lg font-bold">{analytics?.peakHour || '-'}</p>
+              </div>
             </div>
-            <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {t('analytics.peakHour', 'Peak Hour')}
-              </p>
-              <p className="text-lg font-bold">{analytics?.peakHour || '-'}</p>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-pink-500/20">
+                <BarChart3 className="w-5 h-5 text-pink-500" />
+              </div>
+              <div>
+                <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+                  {t('analytics.topCategory', 'Top Category')}
+                </p>
+                <p className="text-lg font-bold">{analytics?.topCategory || '-'}</p>
+              </div>
             </div>
           </div>
         </motion.div>
+
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className={`p-4 rounded-xl ${isDark ? 'bg-gray-800/50' : 'bg-white/80'} backdrop-blur-sm border ${isDark ? 'border-gray-700' : 'border-gray-200'} shadow-lg`}
         >
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-pink-500/20">
-              <BarChart3 className="w-5 h-5 text-pink-500" />
-            </div>
-            <div>
-              <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                {t('analytics.topCategory', 'Top Category')}
-              </p>
-              <p className="text-lg font-bold">{analytics?.topCategory || '-'}</p>
-            </div>
+          <div className="flex items-center gap-2 mb-4">
+            <Route className="w-5 h-5 text-cyan-500" />
+            <h3 className="font-semibold">{t('analytics.topZones', 'Top Delivery Zones')}</h3>
           </div>
+          {topZones.length === 0 ? (
+            <p className={`text-sm ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
+              {t('analytics.noZoneData', 'No delivery zone analytics available for this period.')}
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {topZones.map((zone) => (
+                <div
+                  key={zone.zoneId}
+                  className={`rounded-lg border px-3 py-3 ${isDark ? 'border-gray-700 bg-black/20' : 'border-gray-200 bg-gray-50'}`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">{zone.zoneName}</p>
+                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                        {zone.totalOrders} {t('analytics.orders', 'orders')} • {zone.averageDeliveryTime} min
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-semibold">{formatMoney(zone.totalRevenue)}</p>
+                      <p className={`text-xs ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                        {zone.successRate.toFixed(1)}% {t('analytics.successRate', 'success')}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </motion.div>
       </div>
     </div>
@@ -276,4 +349,3 @@ const AnalyticsPage: React.FC = () => {
 };
 
 export default AnalyticsPage;
-

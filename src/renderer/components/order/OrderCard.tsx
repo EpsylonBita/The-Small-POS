@@ -14,6 +14,11 @@ import {
   resolveOrderDisplayTitle,
 } from '../../utils/orderDisplay';
 import { openExternalUrl } from '../../utils/electron-api';
+import {
+  buildGoogleMapsDirectionsUrl,
+  buildSingleDeliveryRouteStop,
+  type StoreMapOrigin,
+} from '../../utils/delivery-routing';
 import { getBridge } from '../../../lib';
 
 interface OrderCardProps {
@@ -26,6 +31,7 @@ interface OrderCardProps {
   onConvertToPickup?: (orderId: string) => void;
   showQuickActions?: boolean;
   orderIndex?: number; // Deprecated - order number now comes from order.order_number
+  storeMapOrigin?: StoreMapOrigin | null;
 }
 
 export const OrderCard = memo<OrderCardProps>(({
@@ -37,6 +43,7 @@ export const OrderCard = memo<OrderCardProps>(({
   onDriverAssign,
   onConvertToPickup,
   showQuickActions = false,
+  storeMapOrigin = null,
   // orderIndex is deprecated, using order.order_number instead
 }) => {
   const bridge = getBridge();
@@ -473,8 +480,19 @@ export const OrderCard = memo<OrderCardProps>(({
 
       {/* Map Icon - Centered on Right Edge (always for delivery) */}
       {orderTypeNormalized === 'delivery' && (() => {
-        const addr = deliveryAddressNormalized || resolvedAddress;
-        const hasAddress = !!addr;
+        const routeStop = buildSingleDeliveryRouteStop({
+          ...order,
+          deliveryAddress: deliveryAddressNormalized || resolvedAddress,
+        });
+        const hasAddress = Boolean(routeStop);
+        const hasOrigin = Boolean(storeMapOrigin);
+        const mapsUrl = storeMapOrigin && routeStop
+          ? buildGoogleMapsDirectionsUrl(storeMapOrigin, routeStop)
+          : null;
+        const isEnabled = Boolean(mapsUrl);
+        const disabledReason = !hasAddress
+          ? (t('orderCard.missingAddress') || 'No address available')
+          : (t('orderCard.missingStoreLocation') || 'Store location not configured');
         return (
           <div
             onClick={(e) => {
@@ -483,17 +501,21 @@ export const OrderCard = memo<OrderCardProps>(({
                 toast.error(t('orderCard.missingAddress') || 'Delivery address not available');
                 return;
               }
-              void openExternalUrl(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}`);
+              if (!hasOrigin || !mapsUrl) {
+                toast.error(t('orderCard.missingStoreLocation') || 'Store location not configured');
+                return;
+              }
+              void openExternalUrl(mapsUrl);
             }}
-            className={`absolute right-0 top-1/2 -translate-y-1/2 p-4 flex items-center justify-center ${hasAddress ? 'cursor-pointer active:scale-95 active:bg-white/10 rounded-full transition-all' : 'cursor-not-allowed opacity-40'}`}
-            title={hasAddress ? (t('orderCard.getDirections') || 'Get Directions') + ': ' + addr : (t('orderCard.missingAddress') || 'No address available')}
+            className={`absolute right-0 top-1/2 -translate-y-1/2 p-4 flex items-center justify-center ${isEnabled ? 'cursor-pointer active:scale-95 active:bg-white/10 rounded-full transition-all' : 'cursor-not-allowed opacity-40'}`}
+            title={isEnabled ? (t('orderCard.getDirections') || 'Get Directions') : disabledReason}
           >
             <svg
               width="32"
               height="32"
               viewBox="0 0 24 24"
               fill="none"
-              stroke={hasAddress ? '#22c55e' : '#9ca3af'}
+              stroke={isEnabled ? '#22c55e' : '#9ca3af'}
               strokeWidth="2.5"
               strokeLinecap="round"
               strokeLinejoin="round"

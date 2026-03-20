@@ -1,6 +1,7 @@
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use serde_json::Value;
 use tauri::Emitter;
 
 use crate::{
@@ -351,6 +352,37 @@ fn force_order_sync_retry_inner(
         inserted_fallback,
         blocked_by_invalid_transition,
     })
+}
+
+fn enqueue_or_refresh_driver_earning_sync_row(
+    conn: &rusqlite::Connection,
+    earning_id: &str,
+    payload: &Value,
+    now: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type IN ('driver_earning', 'driver_earnings')
+           AND entity_id = ?1
+           AND status IN ('pending', 'deferred', 'failed', 'queued_remote')
+           AND COALESCE(synced_at, '') = ''",
+        rusqlite::params![earning_id],
+    )
+    .map_err(|e| format!("clear stale driver earning sync rows: {e}"))?;
+
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, last_error, updated_at)
+         VALUES ('driver_earning', ?1, 'create', ?2, ?3, 'pending', 0, NULL, ?4)",
+        rusqlite::params![
+            earning_id,
+            payload.to_string(),
+            format!("driver_earning:{}:{}", earning_id, uuid::Uuid::new_v4()),
+            now
+        ],
+    )
+    .map_err(|e| format!("enqueue driver earning sync row: {e}"))?;
+
+    Ok(())
 }
 
 fn merge_order_update_items_payload(
@@ -2225,31 +2257,28 @@ pub async fn order_assign_driver(
         rusqlite::params![notes, now, order_id],
     );
 
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('driver_earning', ?1, 'create', ?2, ?3)",
-        rusqlite::params![
-            earning_id,
-            serde_json::json!({
-                "id": earning_id,
-                "driver_id": driver_id,
-                "staff_shift_id": shift_id,
-                "order_id": order_id,
-                "branch_id": assignment.branch_id,
-                "delivery_fee": assignment.delivery_fee,
-                "tip_amount": assignment.tip_amount,
-                "total_earning": assignment.delivery_fee + assignment.tip_amount,
-                "payment_method": assignment.payment_method,
-                "cash_collected": assignment.cash_collected,
-                "card_amount": assignment.card_amount,
-                "cash_to_return": assignment.cash_collected,
-                "createdAt": now,
-                "updatedAt": now,
-            })
-            .to_string(),
-            format!("driver_earning:{earning_id}")
-        ],
-    );
+    let driver_earning_sync_payload = serde_json::json!({
+        "id": earning_id,
+        "driver_id": driver_id,
+        "staff_shift_id": shift_id,
+        "order_id": order_id,
+        "branch_id": assignment.branch_id,
+        "delivery_fee": assignment.delivery_fee,
+        "tip_amount": assignment.tip_amount,
+        "total_earning": assignment.delivery_fee + assignment.tip_amount,
+        "payment_method": assignment.payment_method,
+        "cash_collected": assignment.cash_collected,
+        "card_amount": assignment.card_amount,
+        "cash_to_return": assignment.cash_collected,
+        "createdAt": now,
+        "updatedAt": now,
+    });
+    enqueue_or_refresh_driver_earning_sync_row(
+        &conn,
+        &earning_id,
+        &driver_earning_sync_payload,
+        &now,
+    )?;
 
     let order_sync_payload = serde_json::json!({
         "orderId": order_id,
@@ -2951,6 +2980,75 @@ mod transition_tests {
 
         assert_eq!(queue_count, 2);
         assert_eq!(failed_count, 1);
+    }
+
+    #[test]
+    fn enqueue_or_refresh_driver_earning_sync_row_replaces_stale_unsynced_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, last_error
+             ) VALUES (
+                 'driver_earning', 'earning-1', 'create',
+                 '{\"order_id\":\"order-old\"}', 'driver_earning:earning-1:stale',
+                 'failed', 3, 'Parent shift not yet synced'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let payload = serde_json::json!({
+            "id": "earning-1",
+            "driver_id": "driver-1",
+            "staff_shift_id": "shift-new",
+            "order_id": "order-new"
+        });
+
+        enqueue_or_refresh_driver_earning_sync_row(
+            &conn,
+            "earning-1",
+            &payload,
+            "2026-03-20T18:00:00Z",
+        )
+        .expect("refresh driver earning queue row");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE entity_type = 'driver_earning'
+                   AND entity_id = 'earning-1'
+                   AND COALESCE(synced_at, '') = ''",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let (status, retry_count, last_error, payload_text): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'driver_earning'
+                   AND entity_id = 'earning-1'
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(status, "pending");
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+        assert!(payload_text.contains("\"order_id\":\"order-new\""));
+        assert!(payload_text.contains("\"staff_shift_id\":\"shift-new\""));
     }
 
     #[test]

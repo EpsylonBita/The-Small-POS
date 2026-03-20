@@ -44,7 +44,13 @@ import type { RestaurantTable, TableStatus } from '../types/tables';
 import type { DeliveryBoundaryValidationResponse } from '../../shared/types/delivery-validation';
 import { useDeliveryValidation } from '../hooks/useDeliveryValidation';
 import { useResolvedPosIdentity } from '../hooks/useResolvedPosIdentity';
+import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { openExternalUrl } from '../utils/electron-api';
+import {
+  buildSingleDeliveryRouteStop,
+  requestOptimizedDeliveryRoute,
+  resolveStoreMapOrigin,
+} from '../utils/delivery-routing';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
 import { pickMeaningfulOrderCustomerName } from '../utils/orderDisplay';
 import {
@@ -99,6 +105,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const bridge = getBridge();
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
+  const { getSetting } = useTerminalSettings();
   const {
     orders,
     pendingExternalOrders,
@@ -334,6 +341,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const selectedDeliveryOrders = React.useMemo(() => (
     selectedOrderObjects.filter(order => order.orderType === 'delivery')
   ), [selectedOrderObjects]);
+
+  const storeMapOrigin = React.useMemo(
+    () => resolveStoreMapOrigin(getSetting),
+    [getSetting]
+  );
 
   const deliverySelectionCanBeCompleted = React.useMemo(() => (
     selectedDeliveryOrders.length > 0 && selectedDeliveryOrders.every(order => {
@@ -2077,26 +2089,78 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           await loadOrders();
         }
       } else if (action === 'map') {
-        // Open selected delivery addresses in Google Maps (browser)
-        const addresses = selectedOrderObjects
-          .filter(order => order.orderType === 'delivery')
-          .map(order => order.delivery_address || order.address)
-          .filter(addr => !!addr)
-          .map(addr => String(addr));
+        const deliveryOrders = selectedOrderObjects.filter(order => {
+          const orderType = String(order.orderType || (order as any).order_type || '').toLowerCase();
+          return orderType === 'delivery';
+        });
+        const skippedNonDelivery = selectedOrderObjects.length - deliveryOrders.length;
+        const routeStops = deliveryOrders
+          .map(order => buildSingleDeliveryRouteStop(order))
+          .filter((stop): stop is NonNullable<typeof stop> => Boolean(stop));
+        const skippedMissingAddress = deliveryOrders.length - routeStops.length;
 
-        if (addresses.length === 0) {
-          toast.error(t('orderDashboard.noAddressesForMap'));
+        if (!storeMapOrigin) {
+          toast.error(
+            t('orderDashboard.storeLocationMissing', {
+              defaultValue: 'Store location is not configured for this terminal.',
+            })
+          );
+        } else if (routeStops.length === 0) {
+          toast.error(
+            t('orderDashboard.noAddressesForMap', {
+              defaultValue: 'Select at least one delivery order with a valid address.',
+            })
+          );
         } else {
-          try {
-            for (const addr of addresses) {
-              const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`;
-              const opened = await openExternalUrl(url);
-              if (!opened) throw new Error('Failed to open external map URL');
+          const optimizationResult = await requestOptimizedDeliveryRoute(routeStops);
+
+          if (!optimizationResult.success) {
+            toast.error(optimizationResult.error || t('orderDashboard.mapOpenFailed'));
+          } else {
+            try {
+              for (const launch of optimizationResult.route.launches) {
+                const opened = await openExternalUrl(launch.url);
+                if (!opened) {
+                  throw new Error('Failed to open external map URL');
+                }
+              }
+
+              const skippedMessages: string[] = [];
+              if (skippedNonDelivery > 0) {
+                skippedMessages.push(`${skippedNonDelivery} non-delivery`);
+              }
+              if (skippedMissingAddress > 0) {
+                skippedMessages.push(`${skippedMissingAddress} missing address`);
+              }
+
+              toast.success(
+                optimizationResult.route.chunked
+                  ? t('orderDashboard.openedOptimizedMapsChunked', {
+                    defaultValue: 'Opened {{count}} optimized route launch(es).',
+                    count: optimizationResult.route.launches.length,
+                  })
+                  : t('orderDashboard.openedInMaps', {
+                    defaultValue: 'Opened Google Maps for {{count}} delivery stop(s).',
+                    count: routeStops.length,
+                  })
+              );
+
+              if (skippedMessages.length > 0) {
+                toast(
+                  t('orderDashboard.mapSkippedOrders', {
+                    defaultValue: 'Skipped {{details}}.',
+                    details: skippedMessages.join(', '),
+                  })
+                );
+              }
+
+              optimizationResult.route.warnings.forEach((warning) => {
+                toast(warning);
+              });
+            } catch (e) {
+              console.error('Failed to open Google Maps:', e);
+              toast.error(t('orderDashboard.mapOpenFailed'));
             }
-            toast.success(t('orderDashboard.openedInMaps', { count: addresses.length }));
-          } catch (e) {
-            console.error('Failed to open Google Maps:', e);
-            toast.error(t('orderDashboard.mapOpenFailed'));
           }
         }
       } else if (action === 'cancel') {
@@ -2621,6 +2685,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
             onToggleOrderSelection={handleToggleOrderSelection}
             onOrderDoubleClick={handleOrderDoubleClick}
             activeTab={activeTab as 'orders' | 'delivered' | 'canceled'}
+            storeMapOrigin={storeMapOrigin}
           />
         </div>
       )}

@@ -17,6 +17,13 @@ import { toast } from 'react-hot-toast';
 import { useTheme } from '../contexts/theme-context';
 import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { posApiGet, posApiPost, posApiPatch } from '../utils/api-helpers';
+import {
+  buildGoogleMapsDirectionsUrl,
+  buildSingleDeliveryRouteStop,
+  resolveStoreMapOrigin,
+  type StoreMapOrigin,
+} from '../utils/delivery-routing';
+import { openExternalUrl } from '../utils/electron-api';
 import { offEvent, onEvent } from '../../lib';
 import {
   Truck,
@@ -28,10 +35,8 @@ import {
   CheckCircle,
   XCircle,
   RefreshCw,
-  Filter,
   ChevronRight,
   AlertTriangle,
-  Play,
   Navigation,
   Users,
   Search,
@@ -147,10 +152,19 @@ interface DeliveryCardProps {
   delivery: Delivery;
   onStatusUpdate: (deliveryId: string, status: DeliveryStatus) => void;
   onAssignDriver: (delivery: Delivery) => void;
+  onOpenMap: (delivery: Delivery) => void;
+  canOpenMap: boolean;
   isDark: boolean;
 }
 
-const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssignDriver, isDark }) => {
+const DeliveryCard = memo<DeliveryCardProps>(({
+  delivery,
+  onStatusUpdate,
+  onAssignDriver,
+  onOpenMap,
+  canOpenMap,
+  isDark,
+}) => {
   const { t } = useTranslation();
   const statusConfig = STATUS_CONFIG[delivery.status];
   const StatusIcon = statusConfig.icon;
@@ -208,7 +222,12 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
         </div>
 
         {/* Address */}
-        <div className={`flex items-start gap-2 mb-3 ${isDark ? 'text-white' : 'text-gray-900'}`}>
+        <button
+          type="button"
+          onClick={() => onOpenMap(delivery)}
+          disabled={!canOpenMap}
+          className={`w-full flex items-start gap-2 mb-3 text-left ${isDark ? 'text-white' : 'text-gray-900'} ${canOpenMap ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}
+        >
           <MapPin className={`w-4 h-4 mt-0.5 flex-shrink-0 ${isDark ? 'text-zinc-400' : 'text-gray-500'}`} />
           <div className="flex-1 min-w-0">
             <p className="font-medium truncate">{delivery.address.street}</p>
@@ -216,8 +235,9 @@ const DeliveryCard = memo<DeliveryCardProps>(({ delivery, onStatusUpdate, onAssi
               {[delivery.address.city, delivery.address.postalCode].filter(Boolean).join(', ')}
             </p>
           </div>
+          <Navigation className={`w-4 h-4 mt-0.5 ${canOpenMap ? (isDark ? 'text-zinc-300' : 'text-gray-600') : (isDark ? 'text-zinc-600' : 'text-gray-300')}`} />
           <ChevronRight className={`w-5 h-5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`} />
-        </div>
+        </button>
 
         {/* Order Info */}
         {delivery.orderTotal && (
@@ -410,6 +430,10 @@ const DeliveryPage: React.FC = () => {
   const { resolvedTheme } = useTheme();
   const { getSetting } = useTerminalSettings();
   const isDark = resolvedTheme === 'dark';
+  const storeMapOrigin = useMemo<StoreMapOrigin | null>(
+    () => resolveStoreMapOrigin(getSetting),
+    [getSetting]
+  );
 
   // State
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
@@ -421,8 +445,6 @@ const DeliveryPage: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
-
-  const branchId = getSetting<string>('terminal', 'branch_id', '');
 
   // Fetch deliveries
   const fetchDeliveries = useCallback(async () => {
@@ -600,6 +622,36 @@ const DeliveryPage: React.FC = () => {
     setShowAssignModal(true);
   }, []);
 
+  const handleOpenMap = useCallback(async (delivery: Delivery) => {
+    if (!storeMapOrigin) {
+      toast.error(t('delivery.storeLocationMissing', 'Store location is not configured'));
+      return;
+    }
+
+    const routeStop = buildSingleDeliveryRouteStop({
+      id: delivery.id,
+      orderNumber: delivery.orderNumber,
+      customerName: delivery.customerName,
+      deliveryAddress: delivery.address,
+    });
+
+    if (!routeStop) {
+      toast.error(t('delivery.missingAddress', 'Delivery address not available'));
+      return;
+    }
+
+    const mapsUrl = buildGoogleMapsDirectionsUrl(storeMapOrigin, routeStop);
+    if (!mapsUrl) {
+      toast.error(t('delivery.mapOpenFailed', 'Failed to build Google Maps route'));
+      return;
+    }
+
+    const opened = await openExternalUrl(mapsUrl);
+    if (!opened) {
+      toast.error(t('delivery.mapOpenFailed', 'Failed to open Google Maps'));
+    }
+  }, [storeMapOrigin, t]);
+
   // Filtered deliveries
   const filteredDeliveries = useMemo(() => {
     let result = deliveries;
@@ -767,6 +819,8 @@ const DeliveryPage: React.FC = () => {
                 delivery={delivery}
                 onStatusUpdate={handleStatusUpdate}
                 onAssignDriver={openAssignModal}
+                onOpenMap={handleOpenMap}
+                canOpenMap={Boolean(storeMapOrigin && delivery.address.street)}
                 isDark={isDark}
               />
             ))}

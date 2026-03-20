@@ -6,6 +6,7 @@ import type { Order } from '../types/orders';
 import OrderCard from './order/OrderCard';
 import SkeletonLoader from './ui/SkeletonLoader';
 import LoadingSpinner from './ui/LoadingSpinner';
+import type { StoreMapOrigin } from '../utils/delivery-routing';
 
 interface OrderGridProps {
   orders?: Order[];
@@ -14,6 +15,7 @@ interface OrderGridProps {
   onOrderDoubleClick?: (orderId: string) => void;
   activeTab: 'orders' | 'delivered' | 'canceled';
   className?: string;
+  storeMapOrigin?: StoreMapOrigin | null;
 }
 
 const OrderGrid = memo<OrderGridProps>(({
@@ -22,7 +24,8 @@ const OrderGrid = memo<OrderGridProps>(({
   onToggleOrderSelection,
   onOrderDoubleClick,
   activeTab,
-  className = ''
+  className = '',
+  storeMapOrigin = null,
 }) => {
   const { t } = useTranslation();
   const { orders: storeOrders, filter, isLoading } = useOrderStore();
@@ -94,9 +97,10 @@ const OrderGrid = memo<OrderGridProps>(({
         isSelected={selectedOrders.includes(order.id)}
         onSelect={onToggleOrderSelection}
         onDoubleClick={onOrderDoubleClick}
+        storeMapOrigin={storeMapOrigin}
       />
     )), 
-    [filteredOrders, selectedOrders, onToggleOrderSelection, onOrderDoubleClick]
+    [filteredOrders, selectedOrders, onToggleOrderSelection, onOrderDoubleClick, storeMapOrigin]
   );
 
   if (isLoading) {

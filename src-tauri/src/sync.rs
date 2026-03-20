@@ -4344,8 +4344,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         }
     }
 
-    // One-time requeue: recover financial items that failed with "shift not found"
-    // before the parent-shift deferral logic was added.
+    // One-time recovery: requeue stale financial rows created by older dependency
+    // logic so the current shift/order gating can reevaluate them.
     if FAILED_FINANCIAL_REQUEUE_DONE
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
         .is_ok()
@@ -4355,6 +4355,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 info!(
                     requeued,
                     "Requeued failed financial sync rows (shift not found)"
+                );
+            }
+        }
+        if let Ok(requeued) = requeue_deferred_driver_earning_parent_shift_rows(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Requeued deferred driver earnings blocked by legacy parent-shift gating"
                 );
             }
         }
@@ -4371,6 +4379,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 info!(
                     requeued,
                     "Re-enqueued falsely-synced shifts for server verification"
+                );
+            }
+        }
+        if let Ok(requeued) = requeue_failed_shift_cashier_reference_rows(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Requeued failed shifts blocked by missing cashier-shift references"
                 );
             }
         }
@@ -5970,6 +5986,42 @@ fn extract_shift_id_from_financial_payload(payload: &str) -> Option<String> {
     None
 }
 
+fn extract_order_id_from_financial_payload(payload: &str) -> Option<String> {
+    let data: Value = serde_json::from_str(payload).ok()?;
+    for key in &["orderId", "order_id"] {
+        if let Some(val) = data.get(*key).and_then(Value::as_str) {
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn is_driver_earning_entity(entity_type: &str) -> bool {
+    matches!(entity_type, "driver_earning" | "driver_earnings")
+}
+
+fn is_strict_shift_bound_financial_entity(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "shift_expense" | "shift_expenses" | "staff_payment" | "staff_payments"
+    )
+}
+
+fn local_order_has_remote_identity(conn: &rusqlite::Connection, order_ref: &str) -> Option<bool> {
+    conn.query_row(
+        "SELECT COALESCE(supabase_id, '')
+         FROM orders
+         WHERE id = ?1 OR supabase_id = ?1
+         LIMIT 1",
+        params![order_ref],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .map(|remote_id| !remote_id.trim().is_empty())
+}
+
 /// Check whether a parent shift has been synced locally.
 /// Returns: Some("synced") | Some("pending") | Some("failed") | None (not found).
 fn get_shift_sync_status(conn: &rusqlite::Connection, shift_id: &str) -> Option<String> {
@@ -6003,7 +6055,9 @@ async fn sync_financial_batch(
     db: &DbState,
     items: &[&SyncItem],
 ) -> Result<FinancialBatchOutcome, String> {
-    // Pre-check: defer financial items whose parent shift hasn't synced yet.
+    // Pre-check financial items:
+    // - driver_earnings are gated by parent order sync readiness only
+    // - staff payments / shift expenses remain strictly gated by shift sync
     let ready_items: Vec<&SyncItem> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let now = Utc::now().to_rfc3339();
@@ -6011,6 +6065,40 @@ async fn sync_financial_batch(
 
         for item in items {
             let (queue_id, entity_type, entity_id, _, payload, _, _, _, _, _, _) = item;
+
+            if is_driver_earning_entity(entity_type) {
+                let order_id = extract_order_id_from_financial_payload(payload);
+                let order_has_remote_identity = order_id
+                    .as_deref()
+                    .and_then(|order_ref| local_order_has_remote_identity(&conn, order_ref));
+
+                if matches!(order_has_remote_identity, Some(false)) {
+                    let _ = conn.execute(
+                        "UPDATE sync_queue
+                         SET status = 'deferred',
+                             last_error = 'Order not yet synced',
+                             updated_at = ?1
+                         WHERE id = ?2",
+                        params![now, queue_id],
+                    );
+                    info!(
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        order_id = ?order_id,
+                        "Driver earning deferred — order not yet synced"
+                    );
+                    continue;
+                }
+
+                ready.push(*item);
+                continue;
+            }
+
+            if !is_strict_shift_bound_financial_entity(entity_type) {
+                ready.push(*item);
+                continue;
+            }
+
             let shift_id = extract_shift_id_from_financial_payload(payload);
 
             if let Some(ref sid) = shift_id {
@@ -7089,7 +7177,7 @@ fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
     Ok(promoted)
 }
 
-/// Reconcile deferred financial items whose parent shift has now been synced.
+/// Reconcile deferred financial items whose dependency is now ready.
 ///
 /// Called once per sync loop iteration, before `run_sync_cycle`, mirroring the
 /// pattern used by `reconcile_deferred_payments` for order→payment dependencies.
@@ -7121,6 +7209,29 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
     let mut promoted = 0;
 
     for (queue_id, entity_type, entity_id, payload) in &rows {
+        if is_driver_earning_entity(entity_type) {
+            let should_promote = extract_order_id_from_financial_payload(payload)
+                .as_deref()
+                .and_then(|order_ref| local_order_has_remote_identity(&conn, order_ref))
+                .unwrap_or(true);
+
+            if should_promote {
+                let _ = conn.execute(
+                    "UPDATE sync_queue SET status = 'pending', updated_at = ?1
+                     WHERE id = ?2 AND status = 'deferred'",
+                    params![now, queue_id],
+                );
+                info!(
+                    entity_type = %entity_type,
+                    entity_id = %entity_id,
+                    "Reconciled deferred driver earning -> pending (order synced)"
+                );
+                promoted += 1;
+            }
+
+            continue;
+        }
+
         let shift_id = match extract_shift_id_from_financial_payload(payload) {
             Some(sid) => sid,
             None => {
@@ -7179,15 +7290,14 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
 }
 
 /// Inline promotion: after a shift syncs successfully, immediately promote any
-/// deferred financial items that reference that shift. This provides low-latency
-/// sync for the common case (shift + financial item in the same sync cycle).
+/// deferred strict shift-bound financial items that reference that shift.
 fn promote_financials_for_shift(conn: &rusqlite::Connection, shift_id: &str) {
     let now = Utc::now().to_rfc3339();
     let updated = conn
         .execute(
             "UPDATE sync_queue
              SET status = 'pending', updated_at = ?1
-             WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
+             WHERE entity_type IN ('shift_expense', 'shift_expenses', 'staff_payment', 'staff_payments')
                AND status = 'deferred'
                AND payload LIKE '%' || ?2 || '%'",
             params![now, shift_id],
@@ -7220,6 +7330,27 @@ fn requeue_failed_financial_shift_rows(db: &DbState) -> Result<usize, String> {
              WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
                AND status = 'failed'
                AND last_error LIKE '%was not found on the backend%'",
+            params![now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(requeued)
+}
+
+fn requeue_deferred_driver_earning_parent_shift_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let requeued = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE entity_type IN ('driver_earning', 'driver_earnings')
+               AND status = 'deferred'
+               AND last_error = 'Parent shift not yet synced'",
             params![now],
         )
         .map_err(|e| e.to_string())?;
@@ -7427,6 +7558,47 @@ fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
             );
             requeued += 1;
         }
+    }
+
+    Ok(requeued)
+}
+
+fn requeue_failed_shift_cashier_reference_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let requeued = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE entity_type = 'shift'
+               AND status = 'failed'
+               AND (
+                    lower(COALESCE(last_error, '')) LIKE '%transferred_to_cashier_shift_id_fkey%'
+                    OR lower(COALESCE(last_error, '')) LIKE '%transfer target cashier shift not found on backend yet%'
+               )",
+            params![now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if requeued > 0 {
+        let _ = conn.execute(
+            "UPDATE staff_shifts
+             SET sync_status = 'pending',
+                 updated_at = ?1
+             WHERE id IN (
+                 SELECT entity_id
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND status = 'pending'
+                   AND updated_at = ?1
+             )",
+            params![now],
+        );
     }
 
     Ok(requeued)
@@ -8630,6 +8802,204 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "waiting_parent");
+    }
+
+    #[test]
+    fn test_requeue_deferred_driver_earnings_blocked_by_legacy_shift_gating() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, last_error
+             ) VALUES (
+                 'driver_earning', 'earning-stuck', 'create', '{}', 'driver:stuck',
+                 'deferred', 2, 'Parent shift not yet synced'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_deferred_driver_earning_parent_shift_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, retry_count, last_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_id = 'earning-stuck'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+    }
+
+    #[test]
+    fn test_requeue_failed_shifts_blocked_by_cashier_reference_fk() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-fk', 'staff-driver', 'driver', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, last_error
+             ) VALUES (
+                 'shift', 'shift-fk', 'insert', '{}', 'shift:fk',
+                 'failed', 5, 'Insert shift failed: insert or update on table \"staff_shifts\" violates foreign key constraint \"staff_shifts_transferred_to_cashier_shift_id_fkey\"'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_failed_shift_cashier_reference_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count, last_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-fk'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let shift_sync_status: String = conn
+            .query_row(
+                "SELECT sync_status FROM staff_shifts WHERE id = 'shift-fk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+        assert_eq!(shift_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_reconcile_promotes_driver_earnings_when_order_syncs_even_if_shift_is_pending() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-driver', '[]', 6.4, 'delivered', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES (
+                 'driver_earning', 'earning-driver', 'create',
+                 '{\"id\":\"earning-driver\",\"order_id\":\"ord-driver\",\"staff_shift_id\":\"shift-pending\"}',
+                 'driver:earning-driver',
+                 'deferred',
+                 'Order not yet synced'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders
+             SET supabase_id = 'remote-order-driver',
+                 sync_status = 'synced'
+             WHERE id = 'ord-driver'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'earning-driver'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn test_reconcile_financials_keeps_shift_bound_items_waiting_for_shift_sync() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, last_error)
+             VALUES (
+                 'shift_expense', 'expense-driver', 'create',
+                 '{\"shiftId\":\"shift-waiting\",\"staffShiftId\":\"shift-waiting\"}',
+                 'expense:shift-waiting',
+                 'deferred',
+                 'Parent shift not yet synced'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-waiting', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE staff_shifts
+             SET sync_status = 'synced'
+             WHERE id = 'shift-waiting'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'expense-driver'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]

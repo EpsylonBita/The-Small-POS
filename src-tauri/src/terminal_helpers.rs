@@ -57,6 +57,25 @@ fn nested_object_value(v: &serde_json::Value, pointers: &[&str]) -> Option<serde
     None
 }
 
+fn nested_value_number_string(v: &serde_json::Value, pointers: &[&str]) -> Option<String> {
+    for pointer in pointers {
+        if let Some(value) = v.pointer(pointer) {
+            if let Some(number) = value.as_f64() {
+                if number.is_finite() {
+                    return Some(number.to_string());
+                }
+            }
+            if let Some(text) = value.as_str() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn extract_org_id_from_terminal_settings_response(
     resp: &serde_json::Value,
 ) -> Option<String> {
@@ -447,6 +466,30 @@ pub(crate) fn cache_terminal_settings_snapshot(
         db::set_setting(&conn, "terminal", "store_phone", &store_phone)?;
         updated.push("restaurant.phone".to_string());
     }
+    if let Some(latitude) = nested_value_number_string(
+        resp,
+        &[
+            "/settings/restaurant/latitude",
+            "/settings/terminal/store_latitude",
+            "/branch_info/latitude",
+        ],
+    ) {
+        db::set_setting(&conn, "restaurant", "latitude", &latitude)?;
+        db::set_setting(&conn, "terminal", "store_latitude", &latitude)?;
+        updated.push("restaurant.latitude".to_string());
+    }
+    if let Some(longitude) = nested_value_number_string(
+        resp,
+        &[
+            "/settings/restaurant/longitude",
+            "/settings/terminal/store_longitude",
+            "/branch_info/longitude",
+        ],
+    ) {
+        db::set_setting(&conn, "restaurant", "longitude", &longitude)?;
+        db::set_setting(&conn, "terminal", "store_longitude", &longitude)?;
+        updated.push("restaurant.longitude".to_string());
+    }
 
     // Branch tax_id → organization.vat_number (for receipt header).
     // Falls back to organization_branding.vat_number when branch lacks tax_id.
@@ -717,6 +760,8 @@ mod tests {
                 "address": "Main St 42",
                 "city": "Athens",
                 "phone": "2101234567",
+                "latitude": 38.0742,
+                "longitude": 23.8113,
                 "tax_id": "123456789",
                 "tax_office": "DOY ATHENS"
             },
@@ -757,6 +802,22 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "restaurant", "phone").as_deref(),
             Some("2101234567")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "latitude").as_deref(),
+            Some("38.0742")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "store_latitude").as_deref(),
+            Some("38.0742")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "restaurant", "longitude").as_deref(),
+            Some("23.8113")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "store_longitude").as_deref(),
+            Some("23.8113")
         );
         assert_eq!(
             db::get_setting(&conn, "organization", "vat_number").as_deref(),
