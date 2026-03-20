@@ -173,6 +173,8 @@ fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("terminal identity mismatch")
         || lower.contains("api key is invalid or expired")
         || lower.contains("terminal not authorized")
+        || lower.contains("terminal not found or inactive")
+        || lower.contains("terminal not found")
 }
 
 fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {

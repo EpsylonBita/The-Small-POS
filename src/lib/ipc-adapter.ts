@@ -628,10 +628,7 @@ export interface RecordExpenseParams {
 
 export interface RecordStaffPaymentParams {
   cashierShiftId: string;
-  recipientShiftId: string;
-  recipientStaffId: string;
-  recipientStaffName: string;
-  recipientRole: string;
+  paidToStaffId: string;
   amount: number;
   paymentType: string;
   notes?: string;
@@ -958,9 +955,11 @@ export interface PlatformBridge {
     close(params: CloseShiftParams): Promise<IpcResult>;
     printCheckout(params: { shiftId: string; roleType?: string; terminalName?: string }): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
+    getById(shiftId: string): Promise<any>;
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
     getActiveByTerminalLoose(terminalId: string): Promise<any>;
     getActiveCashierByTerminal(branchId: string, terminalId: string): Promise<any>;
+    getActiveCashierByTerminalLoose(terminalId: string): Promise<any>;
     getSummary(shiftId: string, options?: { skipBackfill?: boolean }): Promise<any>;
     recordExpense(params: RecordExpenseParams): Promise<IpcResult>;
     getExpenses(shiftId: string): Promise<any[]>;
@@ -1398,9 +1397,11 @@ export const CHANNEL_MAP: Record<string, string> = {
   'shift:open': 'shifts.open',
   'shift:close': 'shifts.close',
   'shift:get-active': 'shifts.getActive',
+  'shift:get-by-id': 'shifts.getById',
   'shift:get-active-by-terminal': 'shifts.getActiveByTerminal',
   'shift:get-active-by-terminal-loose': 'shifts.getActiveByTerminalLoose',
   'shift:get-active-cashier-by-terminal': 'shifts.getActiveCashierByTerminal',
+  'shift:get-active-cashier-by-terminal-loose': 'shifts.getActiveCashierByTerminalLoose',
   'shift:get-summary': 'shifts.getSummary',
   'shift:record-expense': 'shifts.recordExpense',
   'shift:get-expenses': 'shifts.getExpenses',
@@ -1933,9 +1934,12 @@ export class TauriBridge implements PlatformBridge {
     close: (p: CloseShiftParams) => this.inv('shift:close', p),
     printCheckout: (p: { shiftId: string; roleType?: string; terminalName?: string }) => this.inv('shift:print-checkout', p),
     getActive: (staffId: string) => this.inv('shift:get-active', staffId),
+    getById: (shiftId: string) => this.inv('shift:get-by-id', shiftId),
     getActiveByTerminal: (b: string, t: string) => this.inv('shift:get-active-by-terminal', b, t),
     getActiveByTerminalLoose: (t: string) => this.inv('shift:get-active-by-terminal-loose', t),
     getActiveCashierByTerminal: (b: string, t: string) => this.inv('shift:get-active-cashier-by-terminal', b, t),
+    getActiveCashierByTerminalLoose: (t: string) =>
+      this.inv('shift:get-active-cashier-by-terminal-loose', t),
     getSummary: (id: string, opts?: { skipBackfill?: boolean }) => this.inv('shift:get-summary', id, opts),
     recordExpense: (p: RecordExpenseParams) => this.inv('shift:record-expense', p),
     getExpenses: (id: string) => this.inv('shift:get-expenses', id),

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
@@ -16,8 +16,12 @@ import {
 } from 'lucide-react';
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
+import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
 import { useFeatures } from '../hooks/useFeatures';
+import { useShift } from '../contexts/shift-context';
+import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { formatDate } from '../utils/format';
+import { buildHealthSupportContext } from '../support';
 import {
   getBridge,
   offEvent,
@@ -344,6 +348,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
+  const { staff } = useShift();
 
   // --- Sync state ---
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() => ({
@@ -379,6 +384,9 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [exportPath, setExportPath] = useState<string | null>(null);
 
   const { isMobileWaiter, parentTerminalId } = useFeatures();
+  const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(
+    staff?.branchId || null,
+  );
 
   useEffect(() => {
     setShowDetailPanel(showDetails);
@@ -725,6 +733,41 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const totalPending =
     syncStatus.pendingItems + syncStatus.pendingPaymentItems;
 
+  const healthSupportContext = useMemo(
+    () =>
+      buildHealthSupportContext({
+        syncStatus,
+        systemHealth,
+        financialStats,
+        totalBacklog,
+        isTelemetryStale,
+        hasBlockedQueue,
+        hasScheduledRetry: hasScheduledRetryableQueueFailure,
+        pendingReportDate: isPendingLocalSubmit
+          ? endOfDayStatus.pendingReportDate
+          : null,
+      }),
+    [
+      syncStatus,
+      systemHealth,
+      financialStats,
+      totalBacklog,
+      isTelemetryStale,
+      hasBlockedQueue,
+      hasScheduledRetryableQueueFailure,
+      isPendingLocalSubmit,
+      endOfDayStatus.pendingReportDate,
+    ],
+  );
+
+  const handleRefreshSupport = useCallback(async () => {
+    await Promise.all([
+      loadSyncStatus(),
+      loadFinancialStats(),
+      systemLoaded.current ? loadSystemHealth() : Promise.resolve(),
+    ]);
+  }, [loadFinancialStats, loadSyncStatus, loadSystemHealth]);
+
   const healthColor =
     syncStatus.terminalHealth >= 80
       ? 'text-green-600 dark:text-green-400'
@@ -907,6 +950,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
                   </div>
                 </div>
               )}
+
+              <HealthSupportEntryPoint
+                context={healthSupportContext}
+                onExportDiagnostics={handleExport}
+                onRefreshStatus={handleRefreshSupport}
+                onOpenFinancialPanel={() => setShowFinancialPanel(true)}
+                showWhenFallback
+              />
 
               {/* Sync queue + payments compact card */}
               <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">

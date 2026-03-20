@@ -154,6 +154,8 @@ export interface StaffPayment {
   created_at: string;
   // Additional fields from queries
   cashier_name?: string;
+  staff_name?: string;
+  role_type?: string;
   check_in_time?: string;
   check_out_time?: string;
 }

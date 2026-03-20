@@ -9,6 +9,8 @@ import { getBridge, offEvent, onEvent } from '../../../lib'
 import type { ReceiptSamplePreviewRequest, ReceiptSamplePreviewResponse } from '../../../lib'
 import PrinterSetupWizard from './PrinterSetupWizard'
 import { ReceiptScaleSlider } from '../ui/ReceiptScaleSlider'
+import { PrinterSupportEntryPoint } from '../support/PrinterSupportEntryPoint'
+import { buildPrinterSupportContext } from '../../support'
 
 // Types matching the printer module types
 type PrinterType = 'network' | 'bluetooth' | 'usb' | 'wifi' | 'system'
@@ -1125,6 +1127,41 @@ const PrinterSettingsModal: React.FC<Props> = ({
     setViewMode('edit')
   }
 
+  const handleOpenQuickSetup = () => {
+    setSetupMode('quick')
+    setViewMode('wizard')
+  }
+
+  const handleEditDefaultCandidate = () => {
+    const defaultCandidate =
+      printers.find((printer) => printer.role === 'receipt') || printers[0]
+    if (defaultCandidate) {
+      handleEdit(defaultCandidate)
+    }
+  }
+
+  const listSupportContext = useMemo(
+    () =>
+      buildPrinterSupportContext({
+        view: 'list',
+        printers,
+        statuses,
+      }),
+    [printers, statuses],
+  )
+
+  const diagnosticsSupportContext = useMemo(
+    () =>
+      buildPrinterSupportContext({
+        view: 'diagnostics',
+        printers,
+        statuses,
+        diagnostics,
+        selectedPrinterId: diagnostics?.printerId || selectedPrinter?.id || null,
+      }),
+    [diagnostics, printers, selectedPrinter?.id, statuses],
+  )
+
   // Reset form
   const resetForm = () => {
     setFormData({
@@ -1334,6 +1371,13 @@ const PrinterSettingsModal: React.FC<Props> = ({
           'Use Quick Setup first. It verifies a working transport and encoding path before you rely on a printer in live service.',
         )}
       </div>
+
+      <PrinterSupportEntryPoint
+        context={listSupportContext}
+        onOpenQuickSetup={handleOpenQuickSetup}
+        onEditPrinter={handleEditDefaultCandidate}
+        showWhenFallback={false}
+      />
 
       {/* Action buttons */}
       <div className="flex gap-2 flex-wrap">
@@ -2389,6 +2433,16 @@ const PrinterSettingsModal: React.FC<Props> = ({
             </button>
           )}
         </div>
+
+        <PrinterSupportEntryPoint
+          context={diagnosticsSupportContext}
+          onRefreshDiagnostics={
+            diagnostics ? () => handleGetDiagnostics(diagnostics.printerId) : undefined
+          }
+          onOpenQuickSetup={handleOpenQuickSetup}
+          onEditPrinter={printer ? () => handleEdit(printer) : undefined}
+          onBackToPrinters={() => setViewMode('list')}
+        />
 
         {diagnostics ? (
           <div className="space-y-3">

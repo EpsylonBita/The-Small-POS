@@ -1,0 +1,337 @@
+{
+  "actions": {
+    "explain": "Spiega",
+    "troubleshoot": "Risolvi problema",
+    "running": "In corso...",
+    "refreshStatus": "Aggiorna stato",
+    "exportDiagnostics": "Esporta diagnostica",
+    "openFinancialPanel": "Apri pannello finanziario",
+    "refreshPrinterDiagnostics": "Aggiorna diagnostica stampante",
+    "openQuickSetup": "Apri configurazione rapida",
+    "editPrinter": "Modifica stampante",
+    "backToPrinters": "Torna alle stampanti"
+  },
+  "panel": {
+    "why": "Perché",
+    "evidence": "Elementi",
+    "nextSteps": "Prossimi passi",
+    "whenToEscalate": "Quando escalare",
+    "englishFallback": "È in uso la guida di fallback in inglese"
+  },
+  "severity": {
+    "info": "Info",
+    "warning": "Avviso",
+    "high": "Alto",
+    "critical": "Critico"
+  },
+  "evidence": {
+    "connectivity": "Connettività",
+    "pendingQueue": "Coda in attesa",
+    "syncError": "Errore di sincronizzazione",
+    "failedPayments": "Pagamenti non riusciti",
+    "lastSync": "Ultima sincronizzazione",
+    "telemetryLastSync": "Ultima sincronizzazione telemetria",
+    "blockedEntity": "Entità bloccata",
+    "queueFailure": "Errore coda",
+    "retryProgress": "Avanzamento tentativi",
+    "failedFinancialItems": "Voci finanziarie non riuscite",
+    "pendingFinancialItems": "Voci finanziarie in attesa",
+    "invalidOrders": "Ordini non validi",
+    "invalidOrderIds": "Ordini interessati",
+    "pendingReportDate": "Data report in attesa",
+    "configuredPrinters": "Stampanti configurate",
+    "defaultPrinter": "Stampante predefinita",
+    "printerName": "Stampante",
+    "printerState": "Stato stampante",
+    "printerError": "Errore stampante",
+    "resolvedTransport": "Trasporto risolto",
+    "resolvedAddress": "Indirizzo risolto",
+    "verificationStatus": "Stato verifica",
+    "recentJobsFailed": "Lavori recenti non riusciti",
+    "printerQueueLength": "Coda stampante"
+  },
+  "fallbacks": {
+    "health": {
+      "title": "Il sistema sembra pronto",
+      "summary": "Al momento non viene rilevato alcun problema di sistema bloccante.",
+      "why": "Il terminale è online, la coda di sincronizzazione non segnala blocchi critici e non esiste una regola diagnostica attiva che richieda un'azione dell'operatore.",
+      "steps": [
+        "Aggiorna lo stato se gli indicatori a schermo sembrano vecchi.",
+        "Esporta la diagnostica prima di escalare se il personale continua a segnalare una discrepanza."
+      ],
+      "whenToEscalate": [
+        "Escala se ordini, pagamenti o chiusura turno si comportano in modo diverso da quanto mostrato qui."
+      ],
+      "ctaLabels": {}
+    },
+    "printer": {
+      "title": "La configurazione stampante sembra stabile",
+      "summary": "Per questa vista non viene rilevato alcun problema stampante bloccante.",
+      "why": "La stampante selezionata non corrisponde a nessuna regola di troubleshooting ad alta priorità in questo momento.",
+      "steps": [
+        "Aggiorna la diagnostica se l'output di stampa non corrisponde a questo stato.",
+        "Apri le impostazioni stampante se devi ricontrollare trasporto assegnato o profilo predefinito."
+      ],
+      "whenToEscalate": [
+        "Escala se ricevute o ticket continuano a fallire, bloccarsi o stampare con formattazione incompleta."
+      ],
+      "ctaLabels": {}
+    }
+  },
+  "issues": {
+    "health": {
+      "offline": {
+        "title": "Il terminale è offline",
+        "summary": "Questo terminale non è connesso, quindi il lavoro locale resterà in coda finché la connettività non torna.",
+        "why": "Il monitor di sincronizzazione non segnala una connessione attiva. Gli ordini possono restare locali, ma upload, riconciliazioni e parte dello stato di filiale resteranno indietro.",
+        "steps": [
+          "Controlla la connessione di rete del terminale e il router o hotspot locale.",
+          "Continua a prendere ordini in locale, ma non dare per aggiornati i dashboard centrali.",
+          "Aggiorna lo stato dopo il ripristino della connettività."
+        ],
+        "whenToEscalate": [
+          "Escala se il terminale resta offline anche se la rete è confermata funzionante.",
+          "Escala subito se pagamenti o chiusura turno risultano bloccati."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "sync_error_active": {
+        "title": "La sincronizzazione ha un errore attivo",
+        "summary": "Il livello di sincronizzazione sta segnalando un errore attivo che richiede revisione da parte dell'operatore.",
+        "why": "La coda o la sincronizzazione pagamenti ha segnalato un errore, oppure ci sono voci di pagamento fallite in attesa. Finché il problema non viene risolto, dati finanziari e ordini possono divergere dal server.",
+        "steps": [
+          "Aggiorna lo stato per confermare che l'errore sia ancora attuale.",
+          "Controlla nei diagnostici gli ultimi dettagli del fallimento di coda o pagamento.",
+          "Esporta la diagnostica prima di avviare azioni di recupero più ampie se il problema continua."
+        ],
+        "whenToEscalate": [
+          "Escala se le voci di pagamento fallite restano presenti dopo l’aggiornamento.",
+          "Escala prima di una pulizia manuale se l'errore riguarda l'integrità dei pagamenti."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "sync_stale": {
+        "title": "La telemetria di sincronizzazione è obsoleta",
+        "summary": "Il terminale è online, ma lo snapshot di telemetria non si aggiorna da un po’.",
+        "why": "I timestamp di ultima sincronizzazione sembrano più vecchi del previsto. Questo può indicare un worker di sincronizzazione in ritardo o uno snapshot di stato non aggiornato.",
+        "steps": [
+          "Aggiorna lo stato per richiedere uno snapshot più recente.",
+          "Conferma che la coda stia ancora avanzando e che i nuovi ordini si sincronizzino.",
+          "Esporta la diagnostica se i timestamp restano obsoleti dopo l’aggiornamento."
+        ],
+        "whenToEscalate": [
+          "Escala se i timestamp non avanzano dopo più aggiornamenti.",
+          "Escala se il personale vede nello stesso momento discrepanze tra terminali."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "backlog_blocked": {
+        "title": "Un elemento in coda sta bloccando il flusso",
+        "summary": "Il backlog di sincronizzazione contiene un elemento bloccato da retry o da un errore definitivo.",
+        "why": "Il monitor della coda segnala un’entità bloccata con storico dei tentativi. Il lavoro più recente può accumularsi dietro questo elemento finché non viene risolto.",
+        "steps": [
+          "Aggiorna lo stato per confermare l’elemento bloccato e lo stato dei retry.",
+          "Usa l'id dell'entità nei diagnostici per identificare ordine o record in errore.",
+          "Esporta la diagnostica prima di tentare qualsiasi riparazione manuale della coda."
+        ],
+        "whenToEscalate": [
+          "Escala se la stessa entità resta bloccata dopo più aggiornamenti.",
+          "Escala subito se l’elemento bloccato riguarda pagamenti o dati di fine giornata."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "financial_queue_failed": {
+        "title": "Elementi finanziari di sincronizzazione falliti",
+        "summary": "Uno o più record finanziari non sono riusciti a sincronizzarsi.",
+        "why": "Compensi rider, pagamenti staff o spese turno includono elementi di sincronizzazione falliti. I dati finanziari devono essere considerati incompleti finché questi errori non vengono verificati.",
+        "steps": [
+          "Apri il pannello finanziario per vedere quale coda finanziaria è coinvolta.",
+          "Verifica se le voci fallite stanno aumentando o sono già risolte.",
+          "Esporta la diagnostica se i fallimenti non spariscono dopo l’aggiornamento."
+        ],
+        "whenToEscalate": [
+          "Escala prima di modificare manualmente i totali.",
+          "Escala se buste paga, spese o riconciliazione dipendono dai dati mancanti."
+        ],
+        "ctaLabels": {
+          "open_financial_panel": "Apri pannello finanziario",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "invalid_orders_present": {
+        "title": "Sono stati rilevati ordini in attesa non validi",
+        "summary": "Il livello diagnostico ha trovato ordini in attesa che non superano la validazione.",
+        "why": "Uno o più ordini locali in coda contengono dati non validi. Questi ordini possono bloccare la sincronizzazione o creare discrepanze finché non vengono corretti.",
+        "steps": [
+          "Usa gli id ordine coinvolti per trovare i ticket problematici.",
+          "Aggiorna lo stato dopo ogni correzione per confermare che l'insieme si riduca.",
+          "Esporta la diagnostica se gli stessi ordini riappaiono o non possono essere riparati."
+        ],
+        "whenToEscalate": [
+          "Escala se gli ordini non validi bloccano il checkout normale o il flusso cucina.",
+          "Escala se gli ordini non validi ricompaiono dopo un riavvio pulito dell'app."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      },
+      "pending_zreport_submit": {
+        "title": "Un report Z locale deve ancora essere inviato",
+        "summary": "Questo terminale mostra un invio locale di fine giornata ancora in attesa.",
+        "why": "Il contesto congelato di fine giornata non ha ancora completato l’invio locale. I dati di chiusura giornata della filiale possono restare incompleti finché questo invio non viene chiuso.",
+        "steps": [
+          "Aggiorna lo stato per verificare se il report in attesa si è sbloccato.",
+          "Evita di iniziare una riconciliazione manuale da un altro terminale finché non è risolto.",
+          "Esporta la diagnostica se la data del report in attesa resta bloccata."
+        ],
+        "whenToEscalate": [
+          "Escala se il report in attesa sopravvive a una riconnessione o a un riavvio dell'app.",
+          "Escala prima di aprire un nuovo flusso di giornata lavorativa se i dati di chiusura sembrano incoerenti."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Aggiorna stato",
+          "export_diagnostics": "Esporta diagnostica"
+        }
+      }
+    },
+    "printer": {
+      "not_configured": {
+        "title": "Nessuna stampante configurata",
+        "summary": "Questo terminale non ha un profilo stampante pronto per ricevute o ticket.",
+        "why": "L’elenco delle impostazioni stampante è vuoto, quindi il POS non ha una destinazione locale per instradare i lavori di stampa.",
+        "steps": [
+          "Apri la configurazione rapida e aggiungi la stampante usata su questo terminale.",
+          "Conferma ruolo corretto e trasporto corretto mentre crei il profilo.",
+          "Esegui la diagnostica dopo la configurazione prima di affidarti alla stampa in servizio."
+        ],
+        "whenToEscalate": [
+          "Escala se la stampante dovrebbe essere già predisposta per questo terminale.",
+          "Escala se la configurazione non riesce a rilevare o salvare il dispositivo."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Apri configurazione rapida"
+        }
+      },
+      "no_default_profile": {
+        "title": "Nessuna stampante predefinita assegnata",
+        "summary": "Esistono stampanti, ma nessuna è marcata come destinazione predefinita.",
+        "why": "Senza un profilo predefinito, i lavori di ricevuta possono essere instradati in modo incoerente o richiedere selezione manuale.",
+        "steps": [
+          "Modifica la stampante che deve gestire le ricevute principali.",
+          "Impostala come profilo predefinito per questo terminale.",
+          "Aggiorna la diagnostica dopo il salvataggio per confermare che il predefinito sia attivo."
+        ],
+        "whenToEscalate": [
+          "Escala se il flag predefinito non viene mantenuto.",
+          "Escala se i ticket vanno al dispositivo sbagliato dopo l’assegnazione del predefinito."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Modifica stampante"
+        }
+      },
+      "offline_or_error": {
+        "title": "La stampante è offline o segnala un errore",
+        "summary": "La stampante selezionata non è sufficientemente sana per un output affidabile.",
+        "why": "Lo stato live della stampante riporta offline o error e il dispositivo può rifiutare o bloccare i lavori finché problemi di connettività o hardware non sono risolti.",
+        "steps": [
+          "Controlla alimentazione, cavo, raggiungibilità di rete e indicatori di errore della stampante.",
+          "Aggiorna la diagnostica stampante quando il dispositivo torna raggiungibile.",
+          "Controlla le impostazioni stampante se sono assegnati trasporto o indirizzo errati."
+        ],
+        "whenToEscalate": [
+          "Escala se il dispositivo resta offline dopo i controlli di alimentazione e rete.",
+          "Escala subito se servono ricevute e non è disponibile una stampante di fallback."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Aggiorna diagnostica stampante",
+          "edit_printer": "Modifica stampante"
+        }
+      },
+      "transport_unresolved": {
+        "title": "Il trasporto della stampante non è stato risolto",
+        "summary": "Il POS non riesce a confermare il trasporto reale o l’indirizzo della stampante selezionata.",
+        "why": "La diagnostica non ha risolto un trasporto o indirizzo raggiungibile, quindi la pipeline di stampa non può dimostrare dove debbano essere inviati i lavori.",
+        "steps": [
+          "Modifica le impostazioni stampante e verifica IP, USB o altri dettagli di trasporto.",
+          "Esegui nuovamente la diagnostica dopo avere salvato il trasporto previsto.",
+          "Usa la configurazione rapida se il profilo attuale è vecchio o incompleto."
+        ],
+        "whenToEscalate": [
+          "Escala se il trasporto continua a risultare vuoto o irraggiungibile.",
+          "Escala se la stampante funziona manualmente ma il POS non riesce a risolverla."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Modifica stampante",
+          "refresh_printer_diagnostics": "Aggiorna diagnostica stampante"
+        }
+      },
+      "unverified": {
+        "title": "La configurazione stampante non è verificata",
+        "summary": "Il profilo stampante esiste, ma non ha ancora superato la verifica.",
+        "why": "Uno stato unverified o unresolved significa che il profilo salvato non ha ancora completato un controllo diagnostico pulito con il dispositivo.",
+        "steps": [
+          "Apri configurazione rapida o modifica stampante per confermare i valori di trasporto salvati.",
+          "Esegui la diagnostica dopo ogni modifica per verificare il dispositivo.",
+          "Usa la stampante con cautela finché la verifica non riesce."
+        ],
+        "whenToEscalate": [
+          "Escala se la verifica continua a fallire su un dispositivo noto come funzionante.",
+          "Escala se la stampa in produzione dipende da questa stampante e non esiste fallback."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Apri configurazione rapida",
+          "edit_printer": "Modifica stampante"
+        }
+      },
+      "recent_job_failures": {
+        "title": "I lavori di stampa recenti sono falliti",
+        "summary": "La stampante ha accettato lavoro di recente, ma i lavori più recenti stanno fallendo.",
+        "why": "La diagnostica segnala lavori recenti falliti o una coda che non si svuota. Questo di solito indica un problema intermittente di dispositivo, trasporto o profilo.",
+        "steps": [
+          "Aggiorna la diagnostica per confermare se i fallimenti stanno ancora aumentando.",
+          "Controlla la coda stampante e lo stato del dispositivo per lavori bloccati o sospesi.",
+          "Modifica il profilo stampante se trasporto o indirizzo potrebbero essere obsoleti."
+        ],
+        "whenToEscalate": [
+          "Escala se i fallimenti continuano dopo l’aggiornamento diagnostico.",
+          "Escala se l’output cucina o ricevute viene ritardato durante il servizio."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Aggiorna diagnostica stampante",
+          "edit_printer": "Modifica stampante"
+        }
+      },
+      "degraded": {
+        "title": "La stampante è degradata",
+        "summary": "La stampante è raggiungibile, ma lo stato salute non è completamente pulito.",
+        "why": "La stampante non è completamente offline, ma la diagnostica segnala ancora stato degradato o fiducia ridotta nella configurazione.",
+        "steps": [
+          "Aggiorna la diagnostica per verificare se lo stato degradato si risolve.",
+          "Controlla impostazioni stampante e stato di verifica per una configurazione incompleta.",
+          "Tieni pronta una stampante di fallback finché lo stato non torna normale."
+        ],
+        "whenToEscalate": [
+          "Escala se lo stato degradato persiste in più controlli.",
+          "Escala se qualità di stampa o tempi di consegna risultano influenzati."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Aggiorna diagnostica stampante",
+          "edit_printer": "Modifica stampante"
+        }
+      }
+    }
+  }
+}

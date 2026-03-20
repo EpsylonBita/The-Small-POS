@@ -1,0 +1,337 @@
+{
+  "actions": {
+    "explain": "Explain",
+    "troubleshoot": "Troubleshoot",
+    "running": "Working...",
+    "refreshStatus": "Refresh status",
+    "exportDiagnostics": "Export diagnostics",
+    "openFinancialPanel": "Open financial panel",
+    "refreshPrinterDiagnostics": "Refresh printer diagnostics",
+    "openQuickSetup": "Open quick setup",
+    "editPrinter": "Edit printer",
+    "backToPrinters": "Back to printers"
+  },
+  "panel": {
+    "why": "Why",
+    "evidence": "Evidence",
+    "nextSteps": "Next steps",
+    "whenToEscalate": "When to escalate",
+    "englishFallback": "Showing English fallback guidance"
+  },
+  "severity": {
+    "info": "Info",
+    "warning": "Warning",
+    "high": "High",
+    "critical": "Critical"
+  },
+  "evidence": {
+    "connectivity": "Connectivity",
+    "pendingQueue": "Pending queue",
+    "syncError": "Sync error",
+    "failedPayments": "Failed payments",
+    "lastSync": "Last sync",
+    "telemetryLastSync": "Telemetry last sync",
+    "blockedEntity": "Blocked entity",
+    "queueFailure": "Queue failure",
+    "retryProgress": "Retry progress",
+    "failedFinancialItems": "Failed financial items",
+    "pendingFinancialItems": "Pending financial items",
+    "invalidOrders": "Invalid orders",
+    "invalidOrderIds": "Affected orders",
+    "pendingReportDate": "Pending report date",
+    "configuredPrinters": "Configured printers",
+    "defaultPrinter": "Default printer",
+    "printerName": "Printer",
+    "printerState": "Printer state",
+    "printerError": "Printer error",
+    "resolvedTransport": "Resolved transport",
+    "resolvedAddress": "Resolved address",
+    "verificationStatus": "Verification status",
+    "recentJobsFailed": "Failed recent jobs",
+    "printerQueueLength": "Printer queue"
+  },
+  "fallbacks": {
+    "health": {
+      "title": "System looks ready",
+      "summary": "No blocking system issue is currently detected.",
+      "why": "The terminal is online, the sync queue is not reporting a critical blocker, and there is no active diagnostic rule that needs operator action.",
+      "steps": [
+        "Refresh status if the indicators on screen look stale.",
+        "Export diagnostics before escalating if staff still report a mismatch."
+      ],
+      "whenToEscalate": [
+        "Escalate if orders, payments, or shift close behave differently from the status shown here."
+      ],
+      "ctaLabels": {}
+    },
+    "printer": {
+      "title": "Printer setup looks stable",
+      "summary": "No blocking printer issue is currently detected for this view.",
+      "why": "The selected printer does not match any high-priority troubleshooting rule right now.",
+      "steps": [
+        "Refresh diagnostics if print output does not match this status.",
+        "Open printer settings if you need to re-check the assigned transport or default profile."
+      ],
+      "whenToEscalate": [
+        "Escalate if receipts still fail, stall, or print with missing formatting."
+      ],
+      "ctaLabels": {}
+    }
+  },
+  "issues": {
+    "health": {
+      "offline": {
+        "title": "Terminal is offline",
+        "summary": "This terminal is not connected, so local work will stay queued until connectivity returns.",
+        "why": "The sync monitor reports no online connection. Orders can remain local, but uploads, reconciliations, and some branch state will lag.",
+        "steps": [
+          "Check the terminal network connection and any local router or hotspot.",
+          "Keep taking orders locally, but do not assume central dashboards are current.",
+          "Refresh status after connectivity is restored."
+        ],
+        "whenToEscalate": [
+          "Escalate if the terminal stays offline after the network is confirmed working.",
+          "Escalate immediately if payments or shift close are blocked."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "sync_error_active": {
+        "title": "Sync has an active error",
+        "summary": "The sync layer is reporting an active failure that needs operator review.",
+        "why": "The queue or payment sync reported an error, or failed payment items are waiting. Until that clears, financial and order data can drift from the server.",
+        "steps": [
+          "Refresh status to confirm the failure is still current.",
+          "Review the latest queue or payment failure details in diagnostics.",
+          "Export diagnostics before broad recovery steps if the issue continues."
+        ],
+        "whenToEscalate": [
+          "Escalate if failed payment items remain after refresh.",
+          "Escalate before manual cleanup if the error involves payment integrity."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "sync_stale": {
+        "title": "Sync telemetry is stale",
+        "summary": "The terminal is online, but the telemetry snapshot has not updated recently.",
+        "why": "The last sync timestamps look older than expected, which can mean the sync worker is delayed or the status snapshot is stale.",
+        "steps": [
+          "Refresh status to request a fresh snapshot.",
+          "Confirm that the queue is still moving and new orders are syncing.",
+          "Export diagnostics if the timestamps remain stale after refresh."
+        ],
+        "whenToEscalate": [
+          "Escalate if the timestamps do not advance after repeated refreshes.",
+          "Escalate if staff see cross-terminal mismatches at the same time."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "backlog_blocked": {
+        "title": "A queued item is blocking progress",
+        "summary": "The sync backlog contains an item that is stuck behind retries or a hard failure.",
+        "why": "The queue monitor reports a blocked entity with retry history. Newer work can pile up behind the failing item until it is resolved.",
+        "steps": [
+          "Refresh status to confirm the blocked item and retry state.",
+          "Use the entity id in diagnostics to identify the failing order or record.",
+          "Export diagnostics before attempting any manual queue repair."
+        ],
+        "whenToEscalate": [
+          "Escalate if the same entity stays blocked across refreshes.",
+          "Escalate immediately if the blocked item involves payments or end-of-day data."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "financial_queue_failed": {
+        "title": "Financial sync items failed",
+        "summary": "One or more financial records failed to sync.",
+        "why": "Driver earnings, staff payments, or shift expenses include failed sync items. Financial data should be treated as incomplete until those failures are reviewed.",
+        "steps": [
+          "Open the financial panel to see which financial queue is affected.",
+          "Confirm whether the failed items are growing or already resolved.",
+          "Export diagnostics if the failures do not clear after refresh."
+        ],
+        "whenToEscalate": [
+          "Escalate before editing totals manually.",
+          "Escalate if payroll, expenses, or reconciliation depend on the missing data."
+        ],
+        "ctaLabels": {
+          "open_financial_panel": "Open financial panel",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "invalid_orders_present": {
+        "title": "Invalid pending orders were detected",
+        "summary": "The diagnostics layer found pending orders that do not pass validation.",
+        "why": "One or more locally queued orders contain invalid data. Those orders can block sync or create mismatches until corrected.",
+        "steps": [
+          "Use the affected order ids to identify the problematic tickets.",
+          "Refresh status after any correction to confirm that the invalid set shrinks.",
+          "Export diagnostics if the same orders reappear or cannot be repaired."
+        ],
+        "whenToEscalate": [
+          "Escalate if invalid orders block normal checkout or kitchen flow.",
+          "Escalate if the invalid orders appear again after a fresh app restart."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      },
+      "pending_zreport_submit": {
+        "title": "A local Z report still needs submission",
+        "summary": "This terminal shows a pending local end-of-day submission.",
+        "why": "The frozen end-of-day context has not finished local submission yet. Branch day-close data may remain incomplete until that submit clears.",
+        "steps": [
+          "Refresh status to confirm whether the pending report cleared.",
+          "Avoid starting manual reconciliation from another terminal until this is resolved.",
+          "Export diagnostics if the pending report date remains stuck."
+        ],
+        "whenToEscalate": [
+          "Escalate if the pending report survives reconnects or an app restart.",
+          "Escalate before opening a new business-day flow if closeout data looks inconsistent."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Refresh status",
+          "export_diagnostics": "Export diagnostics"
+        }
+      }
+    },
+    "printer": {
+      "not_configured": {
+        "title": "No printer is configured",
+        "summary": "This terminal has no printer profile ready for receipts or tickets.",
+        "why": "The printer settings list is empty, so the POS has nothing local to route print jobs to.",
+        "steps": [
+          "Open quick setup and add the printer used at this terminal.",
+          "Confirm the correct role and transport while creating the profile.",
+          "Run diagnostics after setup before relying on live printing."
+        ],
+        "whenToEscalate": [
+          "Escalate if the printer should already be provisioned for this terminal.",
+          "Escalate if setup cannot detect or save the device."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Open quick setup"
+        }
+      },
+      "no_default_profile": {
+        "title": "No default printer is assigned",
+        "summary": "Printers exist, but none is marked as the default target.",
+        "why": "Without a default profile, receipt jobs can route inconsistently or require manual selection.",
+        "steps": [
+          "Edit the printer that should handle primary receipts.",
+          "Assign it as the default profile for this terminal.",
+          "Refresh diagnostics after saving to confirm the default is active."
+        ],
+        "whenToEscalate": [
+          "Escalate if the default flag will not persist.",
+          "Escalate if tickets route to the wrong device after assigning a default."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Edit printer"
+        }
+      },
+      "offline_or_error": {
+        "title": "The printer is offline or reporting an error",
+        "summary": "The selected printer is not currently healthy enough for reliable output.",
+        "why": "Live printer state reports offline or error status, and the device may reject or stall print jobs until connectivity or hardware issues are resolved.",
+        "steps": [
+          "Check power, cable, network reachability, and the printer error indicators.",
+          "Refresh printer diagnostics after the device is reachable again.",
+          "Review printer settings if the wrong transport or address is assigned."
+        ],
+        "whenToEscalate": [
+          "Escalate if the device stays offline after power and network checks.",
+          "Escalate immediately if receipts are required and no fallback printer is available."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Refresh printer diagnostics",
+          "edit_printer": "Edit printer"
+        }
+      },
+      "transport_unresolved": {
+        "title": "Printer transport could not be resolved",
+        "summary": "The POS cannot confirm the actual transport or address for the selected printer.",
+        "why": "Diagnostics could not resolve a reachable transport or address, so the print pipeline cannot prove where jobs should be delivered.",
+        "steps": [
+          "Edit the printer settings and verify the IP, USB, or other transport details.",
+          "Run diagnostics again after saving the expected transport.",
+          "Use quick setup if the current profile is outdated or incomplete."
+        ],
+        "whenToEscalate": [
+          "Escalate if the transport keeps resolving to empty or unreachable values.",
+          "Escalate if the printer works manually but the POS cannot resolve it."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Edit printer",
+          "refresh_printer_diagnostics": "Refresh printer diagnostics"
+        }
+      },
+      "unverified": {
+        "title": "Printer setup is not verified",
+        "summary": "The printer profile exists, but it has not passed verification yet.",
+        "why": "Unverified or unresolved printer state means the saved profile has not completed a clean diagnostic check with the device.",
+        "steps": [
+          "Open quick setup or printer edit to confirm the stored transport values.",
+          "Run diagnostics after any change to verify the device.",
+          "Use the printer with caution until verification succeeds."
+        ],
+        "whenToEscalate": [
+          "Escalate if verification keeps failing on a known-good device.",
+          "Escalate if production printing depends on this printer and there is no fallback."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Open quick setup",
+          "edit_printer": "Edit printer"
+        }
+      },
+      "recent_job_failures": {
+        "title": "Recent print jobs failed",
+        "summary": "The printer accepted some work recently, but recent jobs are failing.",
+        "why": "Diagnostics report failed recent jobs or a queue that is not clearing. That usually points to an intermittent device, transport, or profile problem.",
+        "steps": [
+          "Refresh diagnostics to confirm whether failures are still increasing.",
+          "Inspect the printer queue and device status for jammed or stalled jobs.",
+          "Edit the printer profile if the transport or address may be outdated."
+        ],
+        "whenToEscalate": [
+          "Escalate if failures continue after diagnostics refresh.",
+          "Escalate if kitchen or receipt output is delayed during service."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Refresh printer diagnostics",
+          "edit_printer": "Edit printer"
+        }
+      },
+      "degraded": {
+        "title": "Printer is degraded",
+        "summary": "The printer is reachable, but the current health state is not fully clean.",
+        "why": "The printer is not fully offline, yet diagnostics still report degraded state or reduced confidence in the setup.",
+        "steps": [
+          "Refresh diagnostics to confirm whether the degraded state clears.",
+          "Review the printer settings and verification state for incomplete setup.",
+          "Keep a fallback printer ready until the status returns to normal."
+        ],
+        "whenToEscalate": [
+          "Escalate if degraded state persists across multiple checks.",
+          "Escalate if print quality or delivery timing is affected."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Refresh printer diagnostics",
+          "edit_printer": "Edit printer"
+        }
+      }
+    }
+  }
+}

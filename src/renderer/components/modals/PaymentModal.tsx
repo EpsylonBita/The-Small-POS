@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { CreditCard, Banknote, AlertTriangle, Split } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useFeatures } from '../../hooks/useFeatures';
+import { formatMoneyInputWithCents, parseMoneyInputValue } from '../../utils/moneyInput';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import toast from 'react-hot-toast';
 import { ActivityTracker } from '../../services/ActivityTracker';
@@ -62,7 +63,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const subtotalBeforeDiscount = Math.max(0, orderTotal + discountAmount - (showDeliveryFee ? deliveryFee : 0));
 
   // Calculate change
-  const cashAmount = parseFloat(cashReceived) || 0;
+  const cashAmount = parseMoneyInputValue(cashReceived);
   const changeAmount = cashAmount - orderTotal;
   const hasEnoughCash = cashAmount >= orderTotal;
 
@@ -379,15 +380,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 {t('modals.payment.enterCashReceived', 'Cash Received')}
               </p>
               <input
-                type="number"
+                type="text"
                 inputMode="decimal"
                 value={cashReceived}
-                onChange={(e) => setCashReceived(e.target.value)}
-                placeholder="0.00"
+                onChange={(e) => setCashReceived(formatMoneyInputWithCents(e.target.value))}
+                placeholder="0,00"
                 autoFocus
                 className="w-full text-center text-3xl font-bold p-4 rounded-xl bg-white/10 border-2 border-white/20 focus:border-green-400/50 focus:outline-none liquid-glass-modal-text transition-colors"
-                step="0.01"
-                min="0"
               />
             </div>
 

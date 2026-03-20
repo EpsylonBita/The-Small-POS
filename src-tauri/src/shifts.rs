@@ -5,7 +5,8 @@
 //! manager, driver, kitchen, and server roles.
 //!
 //! Phase 4B scope: open, close, get_active, get_active_by_terminal,
-//! get_active_by_terminal_loose, get_active_cashier_by_terminal.
+//! get_active_by_terminal_loose, get_active_cashier_by_terminal,
+//! get_active_cashier_by_terminal_loose.
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -303,12 +304,11 @@ fn load_cash_drawer_snapshot_for_shift(
 /// Close an active shift. Calculates expected cash and variance.
 ///
 /// For cashier/manager: expected = opening + cash_sales - refunds - expenses
-///   - drops - driver_cash_given + driver_cash_returned - cashier_payout
+///   - deducted_staff_payments - drops - driver_cash_given + driver_cash_returned
 ///     For driver/server: expected = opening + cash_collected - expenses
 ///
-/// Uses calculation_version to decide whether staff_payments are deducted (V1)
-/// or informational only (V2). Cashier checkout payout is always handled separately
-/// via payment_amount on close.
+/// Uses calculation_version to decide whether all staff_payments are deducted (V1)
+/// or only cashier self-payments are deducted (V2).
 pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -371,6 +371,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     let now = Utc::now().to_rfc3339();
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+    let persisted_payment_amount = if role_type == "cashier" || role_type == "manager" {
+        None
+    } else {
+        payment_amount
+    };
 
     // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
     // that no order/payment can be inserted between the aggregate SELECTs and the
@@ -479,6 +484,15 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     |row| row.get(0),
                 )
                 .unwrap_or(0.0);
+            let reconciled_staff_payments: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(amount), 0)
+                 FROM staff_payments
+                 WHERE cashier_shift_id = ?1",
+                    params![shift_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0);
 
             // Write reconciled values to cash_drawer_sessions
             conn.execute(
@@ -487,13 +501,15 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 total_card_sales = ?2,
                 total_refunds = ?3,
                 total_expenses = ?4,
-                updated_at = ?5
-             WHERE staff_shift_id = ?6",
+                total_staff_payments = ?5,
+                updated_at = ?6
+             WHERE staff_shift_id = ?7",
                 params![
                     reconciled_cash_sales,
                     reconciled_card_sales,
                     reconciled_refunds,
                     reconciled_expenses,
+                    reconciled_staff_payments,
                     now,
                     shift_id,
                 ],
@@ -531,9 +547,16 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 driver_returned,
                 staff_payments,
             ) = drawer;
-            let cashier_payout = payment_amount.unwrap_or(0.0);
             let deducted_staff_payments = if calc_version >= 2 {
-                0.0
+                conn.query_row(
+                    "SELECT COALESCE(SUM(amount), 0)
+                 FROM staff_payments
+                 WHERE cashier_shift_id = ?1
+                   AND paid_to_staff_id = ?2",
+                    params![shift_id, staff_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0.0)
             } else {
                 staff_payments
             };
@@ -561,8 +584,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 - drops
                 - driver_given
                 + driver_returned
-                + inherited_driver_expected_returns
-                - cashier_payout;
+                + inherited_driver_expected_returns;
         } else {
             // Driver / server / kitchen: expected = opening + cash collected - expenses
             let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
@@ -682,7 +704,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 closing_cash,
                 expected,
                 variance,
-                payment_amount,
+                persisted_payment_amount,
                 closed_by,
                 shift_id,
                 order_count,
@@ -715,7 +737,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             "expectedCash": expected,
             "variance": variance,
             "closedBy": closed_by,
-            "paymentAmount": payment_amount,
+            "paymentAmount": persisted_payment_amount,
         });
         if let Some(drawer_snapshot) = cash_drawer_snapshot {
             sync_payload["cashDrawer"] = drawer_snapshot;
@@ -835,6 +857,36 @@ pub fn get_active_cashier_by_terminal(
            AND status = 'active' AND role_type = 'cashier'
          ORDER BY check_in_time DESC LIMIT 1",
         params![branch_id, terminal_id],
+    )
+}
+
+/// Get the active drawer-owner shift for a terminal without relying on branch context.
+///
+/// This is used when the local branch cache is stale but the terminal ID is still
+/// correct. It intentionally prefers cashier/manager rows over newer non-cash roles.
+pub fn get_active_cashier_by_terminal_loose(
+    db: &DbState,
+    terminal_id: &str,
+) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    query_shift(
+        &conn,
+        "SELECT * FROM staff_shifts
+         WHERE terminal_id = ?1
+           AND status = 'active'
+           AND role_type IN ('cashier', 'manager')
+         ORDER BY check_in_time DESC LIMIT 1",
+        params![terminal_id],
+    )
+}
+
+/// Get a specific shift by its ID.
+pub fn get_shift_by_id(db: &DbState, shift_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    query_shift(
+        &conn,
+        "SELECT * FROM staff_shifts WHERE id = ?1 LIMIT 1",
+        params![shift_id],
     )
 }
 
@@ -2591,6 +2643,102 @@ mod tests {
             reconciled_at, closed_at,
             "drawer reconciliation timestamp should match close timestamp"
         );
+    }
+
+    #[test]
+    fn test_cashier_close_v2_deducts_only_self_staff_payments() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-self-pay', 'cashier-1', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-18T08:00:00Z', 100.0, 'active', 2, 'pending',
+                    '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, total_staff_payments, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-self-pay', 'cashier-self-pay', 'cashier-1', 'branch-1', 'term-1',
+                    100.0, 23.0, '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z', '2026-03-18T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS staff_payments (
+                    id TEXT PRIMARY KEY,
+                    cashier_shift_id TEXT NOT NULL,
+                    paid_to_staff_id TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    payment_type TEXT NOT NULL DEFAULT 'wage',
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, created_at
+                 ) VALUES (
+                    'self-payment-1', 'cashier-self-pay', 'cashier-1', 15.0, 'wage', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, created_at
+                 ) VALUES (
+                    'other-payment-1', 'cashier-self-pay', 'kitchen-1', 8.0, 'wage', '2026-03-18T09:15:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-self-pay",
+                "closingCash": 85.0,
+                "closedBy": TEST_MANAGER_UUID,
+            }),
+        )
+        .expect("cashier close should deduct only cashier self-payments");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (expected_cash_amount, cash_variance, payment_amount, total_staff_payments): (
+            f64,
+            f64,
+            Option<f64>,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT ss.expected_cash_amount, ss.cash_variance, ss.payment_amount, cds.total_staff_payments
+                 FROM staff_shifts ss
+                 LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                 WHERE ss.id = 'cashier-self-pay'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert!((expected_cash_amount - 85.0).abs() < f64::EPSILON);
+        assert!(cash_variance.abs() < f64::EPSILON);
+        assert_eq!(payment_amount, None, "cashier close should no longer persist a standalone cashier payout");
+        assert!((total_staff_payments - 23.0).abs() < f64::EPSILON);
     }
 
     #[test]

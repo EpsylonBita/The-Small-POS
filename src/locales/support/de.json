@@ -1,0 +1,337 @@
+{
+  "actions": {
+    "explain": "Erklären",
+    "troubleshoot": "Fehlerbehebung",
+    "running": "Wird ausgeführt...",
+    "refreshStatus": "Status aktualisieren",
+    "exportDiagnostics": "Diagnose exportieren",
+    "openFinancialPanel": "Finanzbereich öffnen",
+    "refreshPrinterDiagnostics": "Druckerdiagnose aktualisieren",
+    "openQuickSetup": "Schnellsetup öffnen",
+    "editPrinter": "Drucker bearbeiten",
+    "backToPrinters": "Zurück zu den Druckern"
+  },
+  "panel": {
+    "why": "Warum",
+    "evidence": "Hinweise",
+    "nextSteps": "Nächste Schritte",
+    "whenToEscalate": "Wann eskalieren",
+    "englishFallback": "Englische Fallback-Hinweise werden angezeigt"
+  },
+  "severity": {
+    "info": "Info",
+    "warning": "Warnung",
+    "high": "Hoch",
+    "critical": "Kritisch"
+  },
+  "evidence": {
+    "connectivity": "Konnektivität",
+    "pendingQueue": "Ausstehende Warteschlange",
+    "syncError": "Sync-Fehler",
+    "failedPayments": "Fehlgeschlagene Zahlungen",
+    "lastSync": "Letzte Synchronisierung",
+    "telemetryLastSync": "Letzte Telemetrie-Synchronisierung",
+    "blockedEntity": "Blockiertes Element",
+    "queueFailure": "Warteschlangenfehler",
+    "retryProgress": "Wiederholungsfortschritt",
+    "failedFinancialItems": "Fehlgeschlagene Finanzposten",
+    "pendingFinancialItems": "Ausstehende Finanzposten",
+    "invalidOrders": "Ungültige Bestellungen",
+    "invalidOrderIds": "Betroffene Bestellungen",
+    "pendingReportDate": "Ausstehendes Berichtsdatum",
+    "configuredPrinters": "Konfigurierte Drucker",
+    "defaultPrinter": "Standarddrucker",
+    "printerName": "Drucker",
+    "printerState": "Druckerstatus",
+    "printerError": "Druckerfehler",
+    "resolvedTransport": "Aufgelöster Transport",
+    "resolvedAddress": "Aufgelöste Adresse",
+    "verificationStatus": "Verifizierungsstatus",
+    "recentJobsFailed": "Fehlgeschlagene aktuelle Jobs",
+    "printerQueueLength": "Druckerwarteschlange"
+  },
+  "fallbacks": {
+    "health": {
+      "title": "Das System wirkt bereit",
+      "summary": "Derzeit wird kein blockierendes Systemproblem erkannt.",
+      "why": "Das Terminal ist online, die Sync-Warteschlange meldet keinen kritischen Blocker und es gibt keine aktive Diagnose-Regel, die Bedienereingriffe erfordert.",
+      "steps": [
+        "Aktualisiere den Status, wenn die Anzeigen veraltet wirken.",
+        "Exportiere Diagnosen vor einer Eskalation, wenn das Team weiterhin eine Abweichung meldet."
+      ],
+      "whenToEscalate": [
+        "Eskaliere, wenn sich Bestellungen, Zahlungen oder Schichtabschluss anders verhalten als hier angezeigt."
+      ],
+      "ctaLabels": {}
+    },
+    "printer": {
+      "title": "Die Druckereinrichtung wirkt stabil",
+      "summary": "Für diese Ansicht wird derzeit kein blockierendes Druckerproblem erkannt.",
+      "why": "Der ausgewählte Drucker passt aktuell zu keiner Troubleshooting-Regel mit hoher Priorität.",
+      "steps": [
+        "Aktualisiere die Diagnose, wenn das Druckergebnis nicht zu diesem Status passt.",
+        "Öffne die Druckereinstellungen, wenn Transport oder Standardprofil erneut geprüft werden müssen."
+      ],
+      "whenToEscalate": [
+        "Eskaliere, wenn Belege weiterhin fehlschlagen, hängen bleiben oder mit fehlender Formatierung gedruckt werden."
+      ],
+      "ctaLabels": {}
+    }
+  },
+  "issues": {
+    "health": {
+      "offline": {
+        "title": "Terminal ist offline",
+        "summary": "Dieses Terminal ist nicht verbunden, daher bleibt lokale Arbeit in der Warteschlange, bis die Verbindung zurückkehrt.",
+        "why": "Die Sync-Überwachung meldet keine aktive Verbindung. Bestellungen können lokal bleiben, aber Uploads, Abstimmungen und Teile des Filialstatus hinken hinterher.",
+        "steps": [
+          "Prüfe die Netzwerkverbindung des Terminals und den lokalen Router oder Hotspot.",
+          "Nimm Bestellungen lokal weiter auf, gehe aber nicht davon aus, dass zentrale Dashboards aktuell sind.",
+          "Aktualisiere den Status, sobald die Verbindung wiederhergestellt ist."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn das Terminal offline bleibt, obwohl das Netzwerk funktioniert.",
+          "Eskaliere sofort, wenn Zahlungen oder der Schichtabschluss blockiert sind."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "sync_error_active": {
+        "title": "Sync hat einen aktiven Fehler",
+        "summary": "Die Sync-Ebene meldet einen aktiven Fehler, der geprüft werden muss.",
+        "why": "Die Warteschlange oder der Zahlungssync hat einen Fehler gemeldet, oder fehlgeschlagene Zahlungseinträge warten noch. Bis das geklärt ist, können Finanz- und Bestelldaten vom Server abweichen.",
+        "steps": [
+          "Aktualisiere den Status, um zu bestätigen, dass der Fehler noch aktuell ist.",
+          "Prüfe die letzten Warteschlangen- oder Zahlungsfehler in der Diagnose.",
+          "Exportiere Diagnosen, bevor du umfassendere Wiederherstellungsschritte startest, wenn das Problem bleibt."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn fehlgeschlagene Zahlungseinträge nach der Aktualisierung weiter bestehen.",
+          "Eskaliere vor manueller Bereinigung, wenn der Fehler die Zahlungsintegrität betrifft."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "sync_stale": {
+        "title": "Sync-Telemetrie ist veraltet",
+        "summary": "Das Terminal ist online, aber der Telemetrie-Schnappschuss wurde seit einiger Zeit nicht aktualisiert.",
+        "why": "Die Zeitstempel der letzten Synchronisierung sind älter als erwartet. Das kann auf einen verzögerten Sync-Worker oder einen veralteten Status-Schnappschuss hinweisen.",
+        "steps": [
+          "Aktualisiere den Status, um einen frischen Schnappschuss anzufordern.",
+          "Bestätige, dass sich die Warteschlange weiter bewegt und neue Bestellungen synchronisiert werden.",
+          "Exportiere Diagnosen, wenn die Zeitstempel nach der Aktualisierung veraltet bleiben."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn sich die Zeitstempel nach mehreren Aktualisierungen nicht bewegen.",
+          "Eskaliere, wenn das Team gleichzeitig Abweichungen zwischen Terminals sieht."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "backlog_blocked": {
+        "title": "Ein Warteschlangen-Eintrag blockiert den Fortschritt",
+        "summary": "Im Sync-Backlog steckt ein Eintrag hinter Wiederholungen oder einem harten Fehler fest.",
+        "why": "Die Warteschlangenüberwachung meldet ein blockiertes Element mit Wiederholungsverlauf. Neuere Arbeit kann sich dahinter aufstauen, bis der Fehler gelöst ist.",
+        "steps": [
+          "Aktualisiere den Status, um das blockierte Element und den Wiederholungszustand zu bestätigen.",
+          "Verwende die Element-ID in der Diagnose, um die fehlerhafte Bestellung oder den Datensatz zu identifizieren.",
+          "Exportiere Diagnosen, bevor du eine manuelle Reparatur der Warteschlange versuchst."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn dasselbe Element nach mehreren Aktualisierungen blockiert bleibt.",
+          "Eskaliere sofort, wenn das blockierte Element Zahlungen oder Tagesabschlussdaten betrifft."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "financial_queue_failed": {
+        "title": "Finanzielle Sync-Einträge sind fehlgeschlagen",
+        "summary": "Ein oder mehrere Finanzdatensätze konnten nicht synchronisiert werden.",
+        "why": "Fahrereinnahmen, Mitarbeiterzahlungen oder Schichtausgaben enthalten fehlgeschlagene Sync-Einträge. Finanzdaten sollten als unvollständig gelten, bis diese Fehler geprüft wurden.",
+        "steps": [
+          "Öffne den Finanzbereich, um zu sehen, welche Finanzwarteschlange betroffen ist.",
+          "Prüfe, ob die fehlgeschlagenen Einträge zunehmen oder bereits gelöst sind.",
+          "Exportiere Diagnosen, wenn die Fehler nach der Aktualisierung nicht verschwinden."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, bevor Summen manuell bearbeitet werden.",
+          "Eskaliere, wenn Lohnabrechnung, Ausgaben oder Abstimmung von den fehlenden Daten abhängen."
+        ],
+        "ctaLabels": {
+          "open_financial_panel": "Finanzbereich öffnen",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "invalid_orders_present": {
+        "title": "Ungültige ausstehende Bestellungen erkannt",
+        "summary": "Die Diagnose hat ausstehende Bestellungen gefunden, die die Validierung nicht bestehen.",
+        "why": "Eine oder mehrere lokal wartende Bestellungen enthalten ungültige Daten. Diese Bestellungen können den Sync blockieren oder Abweichungen erzeugen, bis sie korrigiert werden.",
+        "steps": [
+          "Nutze die betroffenen Bestell-IDs, um die problematischen Tickets zu finden.",
+          "Aktualisiere den Status nach jeder Korrektur, um zu bestätigen, dass die Menge kleiner wird.",
+          "Exportiere Diagnosen, wenn dieselben Bestellungen wieder auftauchen oder nicht repariert werden können."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn ungültige Bestellungen normalen Checkout oder Küchenablauf blockieren.",
+          "Eskaliere, wenn die ungültigen Bestellungen nach einem Neustart der App erneut erscheinen."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      },
+      "pending_zreport_submit": {
+        "title": "Ein lokaler Z-Bericht wartet noch auf die Übermittlung",
+        "summary": "Dieses Terminal zeigt eine ausstehende lokale Tagesabschluss-Übermittlung.",
+        "why": "Der eingefrorene Tagesabschluss-Kontext hat die lokale Übermittlung noch nicht abgeschlossen. Filialdaten zum Tagesende können unvollständig bleiben, bis diese Übermittlung geklärt ist.",
+        "steps": [
+          "Aktualisiere den Status, um zu prüfen, ob der ausstehende Bericht verschwunden ist.",
+          "Starte keine manuelle Abstimmung von einem anderen Terminal aus, bis das Problem gelöst ist.",
+          "Exportiere Diagnosen, wenn das Datum des ausstehenden Berichts hängen bleibt."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn der ausstehende Bericht nach Reconnect oder App-Neustart bestehen bleibt.",
+          "Eskaliere vor dem Start eines neuen Geschäftstags, wenn Abschlussdaten inkonsistent wirken."
+        ],
+        "ctaLabels": {
+          "refresh_status": "Status aktualisieren",
+          "export_diagnostics": "Diagnose exportieren"
+        }
+      }
+    },
+    "printer": {
+      "not_configured": {
+        "title": "Kein Drucker ist konfiguriert",
+        "summary": "Dieses Terminal hat kein Druckerprofil für Belege oder Tickets.",
+        "why": "Die Liste der Druckereinstellungen ist leer, daher hat das POS kein lokales Ziel für Druckaufträge.",
+        "steps": [
+          "Öffne das Schnellsetup und füge den Drucker hinzu, der an diesem Terminal verwendet wird.",
+          "Bestätige beim Anlegen des Profils die richtige Rolle und den passenden Transport.",
+          "Führe nach dem Setup eine Diagnose aus, bevor du dich auf den Live-Druck verlässt."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn der Drucker für dieses Terminal bereits bereitgestellt sein sollte.",
+          "Eskaliere, wenn das Setup das Gerät nicht erkennt oder nicht speichern kann."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Schnellsetup öffnen"
+        }
+      },
+      "no_default_profile": {
+        "title": "Kein Standarddrucker ist zugewiesen",
+        "summary": "Es sind Drucker vorhanden, aber keiner ist als Standardziel markiert.",
+        "why": "Ohne Standardprofil können Belegaufträge uneinheitlich geroutet werden oder eine manuelle Auswahl erfordern.",
+        "steps": [
+          "Bearbeite den Drucker, der die Hauptbelege übernehmen soll.",
+          "Setze ihn als Standardprofil für dieses Terminal.",
+          "Aktualisiere nach dem Speichern die Diagnose, um den aktiven Standard zu bestätigen."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn die Standardmarkierung nicht gespeichert bleibt.",
+          "Eskaliere, wenn Tickets nach der Standardzuweisung an das falsche Gerät gehen."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Drucker bearbeiten"
+        }
+      },
+      "offline_or_error": {
+        "title": "Der Drucker ist offline oder meldet einen Fehler",
+        "summary": "Der ausgewählte Drucker ist derzeit nicht gesund genug für eine zuverlässige Ausgabe.",
+        "why": "Der Live-Druckerstatus meldet offline oder Fehler, und das Gerät kann Druckaufträge ablehnen oder anhalten, bis Verbindungs- oder Hardwareprobleme gelöst sind.",
+        "steps": [
+          "Prüfe Stromversorgung, Kabel, Netzwerkerreichbarkeit und die Fehleranzeigen des Druckers.",
+          "Aktualisiere die Druckerdiagnose, sobald das Gerät wieder erreichbar ist.",
+          "Prüfe die Druckereinstellungen, wenn der falsche Transport oder die falsche Adresse hinterlegt ist."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn das Gerät nach Strom- und Netzwerkprüfung offline bleibt.",
+          "Eskaliere sofort, wenn Belege benötigt werden und kein Ersatzdrucker verfügbar ist."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Druckerdiagnose aktualisieren",
+          "edit_printer": "Drucker bearbeiten"
+        }
+      },
+      "transport_unresolved": {
+        "title": "Der Druckertransport konnte nicht aufgelöst werden",
+        "summary": "Das POS kann den tatsächlichen Transport oder die Adresse des ausgewählten Druckers nicht bestätigen.",
+        "why": "Die Diagnose konnte keinen erreichbaren Transport oder keine erreichbare Adresse auflösen. Dadurch kann die Druckpipeline nicht sicher bestimmen, wohin Aufträge zugestellt werden sollen.",
+        "steps": [
+          "Bearbeite die Druckereinstellungen und prüfe IP, USB oder andere Transportdaten.",
+          "Führe nach dem Speichern des erwarteten Transports erneut eine Diagnose aus.",
+          "Nutze das Schnellsetup, wenn das aktuelle Profil veraltet oder unvollständig ist."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn der Transport weiter als leer oder unerreichbar aufgelöst wird.",
+          "Eskaliere, wenn der Drucker manuell funktioniert, das POS ihn aber nicht auflösen kann."
+        ],
+        "ctaLabels": {
+          "edit_printer": "Drucker bearbeiten",
+          "refresh_printer_diagnostics": "Druckerdiagnose aktualisieren"
+        }
+      },
+      "unverified": {
+        "title": "Die Druckereinrichtung ist nicht verifiziert",
+        "summary": "Das Druckerprofil existiert, hat die Verifizierung aber noch nicht bestanden.",
+        "why": "Unverified oder unresolved bedeutet, dass das gespeicherte Profil noch keinen sauberen Diagnoselauf mit dem Gerät abgeschlossen hat.",
+        "steps": [
+          "Öffne Schnellsetup oder Druckerbearbeitung, um die gespeicherten Transportwerte zu prüfen.",
+          "Führe nach jeder Änderung eine Diagnose aus, um das Gerät zu verifizieren.",
+          "Nutze den Drucker vorsichtig, bis die Verifizierung erfolgreich ist."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn die Verifizierung bei einem bekannten funktionierenden Gerät weiter fehlschlägt.",
+          "Eskaliere, wenn der Produktivdruck von diesem Drucker abhängt und kein Ersatz vorhanden ist."
+        ],
+        "ctaLabels": {
+          "open_quick_setup": "Schnellsetup öffnen",
+          "edit_printer": "Drucker bearbeiten"
+        }
+      },
+      "recent_job_failures": {
+        "title": "Aktuelle Druckaufträge sind fehlgeschlagen",
+        "summary": "Der Drucker hat zuletzt Arbeit angenommen, aber aktuelle Aufträge schlagen fehl.",
+        "why": "Die Diagnose meldet fehlgeschlagene aktuelle Jobs oder eine Warteschlange, die nicht abgebaut wird. Das deutet meist auf ein intermittierendes Geräte-, Transport- oder Profilproblem hin.",
+        "steps": [
+          "Aktualisiere die Diagnose, um zu prüfen, ob die Fehler weiter zunehmen.",
+          "Prüfe Druckerwarteschlange und Gerätestatus auf hängende oder blockierte Jobs.",
+          "Bearbeite das Druckerprofil, wenn Transport oder Adresse veraltet sein könnten."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn die Fehler nach einer Diagnose-Aktualisierung weiter auftreten.",
+          "Eskaliere, wenn Küchen- oder Belegdruck während des Services verzögert ist."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Druckerdiagnose aktualisieren",
+          "edit_printer": "Drucker bearbeiten"
+        }
+      },
+      "degraded": {
+        "title": "Drucker ist beeinträchtigt",
+        "summary": "Der Drucker ist erreichbar, aber der aktuelle Gesundheitszustand ist nicht vollständig sauber.",
+        "why": "Der Drucker ist nicht vollständig offline, dennoch meldet die Diagnose einen beeinträchtigten Zustand oder eine reduzierte Sicherheit in der Einrichtung.",
+        "steps": [
+          "Aktualisiere die Diagnose, um zu prüfen, ob sich der beeinträchtigte Zustand klärt.",
+          "Prüfe Druckereinstellungen und Verifizierungsstatus auf unvollständiges Setup.",
+          "Halte einen Ersatzdrucker bereit, bis der Status wieder normal ist."
+        ],
+        "whenToEscalate": [
+          "Eskaliere, wenn der beeinträchtigte Zustand über mehrere Prüfungen bestehen bleibt.",
+          "Eskaliere, wenn Druckqualität oder Lieferzeit beeinflusst werden."
+        ],
+        "ctaLabels": {
+          "refresh_printer_diagnostics": "Druckerdiagnose aktualisieren",
+          "edit_printer": "Drucker bearbeiten"
+        }
+      }
+    }
+  }
+}

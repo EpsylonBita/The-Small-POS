@@ -485,6 +485,15 @@ pub async fn shift_get_active(
 }
 
 #[tauri::command]
+pub async fn shift_get_by_id(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_cashier_shift_payload(arg0)?;
+    shift_service::get_shift_by_id(&db, &payload.cashier_shift_id)
+}
+
+#[tauri::command]
 pub async fn shift_get_active_by_terminal(
     arg0: Option<serde_json::Value>,
     arg1: Option<serde_json::Value>,
@@ -511,6 +520,15 @@ pub async fn shift_get_active_cashier_by_terminal(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
     shift_service::get_active_cashier_by_terminal(&db, &payload.branch_id, &payload.terminal_id)
+}
+
+#[tauri::command]
+pub async fn shift_get_active_cashier_by_terminal_loose(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_shift_terminal_payload(arg0)?;
+    shift_service::get_active_cashier_by_terminal_loose(&db, &payload.terminal_id)
 }
 
 #[tauri::command]
@@ -710,10 +728,20 @@ pub async fn shift_get_staff_payments(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at
-             FROM staff_payments
-             WHERE cashier_shift_id = ?1
-             ORDER BY created_at DESC",
+            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+                    (SELECT ss.staff_name
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS staff_name,
+                    (SELECT ss.role_type
+                     FROM staff_shifts ss
+                     WHERE ss.staff_id = sp.paid_to_staff_id
+                     ORDER BY ss.check_in_time DESC
+                     LIMIT 1) AS role_type
+             FROM staff_payments sp
+             WHERE sp.cashier_shift_id = ?1
+             ORDER BY sp.created_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -726,6 +754,8 @@ pub async fn shift_get_staff_payments(
                 "payment_type": row.get::<_, String>(4)?,
                 "notes": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
+                "staff_name": row.get::<_, Option<String>>(7)?,
+                "role_type": row.get::<_, Option<String>>(8)?,
             }))
         })
         .map_err(|e| e.to_string())?;

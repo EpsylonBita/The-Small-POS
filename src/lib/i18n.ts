@@ -1,27 +1,23 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
-import enTranslations from '../locales/en.json';
-import elTranslations from '../locales/el.json';
-import deTranslations from '../locales/de.json';
-import frTranslations from '../locales/fr.json';
-import itTranslations from '../locales/it.json';
+import { localeBundles } from '../locales/bundles';
 
 const resources = {
   en: {
-    translation: enTranslations,
+    translation: localeBundles.en,
   },
   el: {
-    translation: elTranslations,
+    translation: localeBundles.el,
   },
   de: {
-    translation: deTranslations,
+    translation: localeBundles.de,
   },
   fr: {
-    translation: frTranslations,
+    translation: localeBundles.fr,
   },
   it: {
-    translation: itTranslations,
+    translation: localeBundles.it,
   },
 };
 
@@ -63,11 +59,11 @@ if (!i18n.isInitialized) {
 
 // Always refresh resource bundles so new/changed translations are picked up
 // (handles Vite HMR where the module re-evaluates but isInitialized is already true)
-i18n.addResourceBundle('en', 'translation', enTranslations, true, true);
-i18n.addResourceBundle('el', 'translation', elTranslations, true, true);
-i18n.addResourceBundle('de', 'translation', deTranslations, true, true);
-i18n.addResourceBundle('fr', 'translation', frTranslations, true, true);
-i18n.addResourceBundle('it', 'translation', itTranslations, true, true);
+i18n.addResourceBundle('en', 'translation', localeBundles.en, true, true);
+i18n.addResourceBundle('el', 'translation', localeBundles.el, true, true);
+i18n.addResourceBundle('de', 'translation', localeBundles.de, true, true);
+i18n.addResourceBundle('fr', 'translation', localeBundles.fr, true, true);
+i18n.addResourceBundle('it', 'translation', localeBundles.it, true, true);
 
 /**
  * Update i18n language from database
