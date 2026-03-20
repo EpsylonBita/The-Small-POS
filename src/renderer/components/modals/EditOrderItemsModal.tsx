@@ -23,7 +23,7 @@ interface EditOrderItemsModalProps {
   orderId?: string; // Added orderId prop to fetch items if initialItems is empty
   orderNumber?: string; // Order number for display in modal header (Requirements: 7.7)
   initialItems: OrderItem[];
-  onSave: (items: OrderItem[], orderNotes?: string) => void;
+  onSave: (items: OrderItem[], orderNotes?: string) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -128,9 +128,7 @@ export const EditOrderItemsModal: React.FC<EditOrderItemsModalProps> = ({
     setIsSaving(true);
 
     try {
-      // Simulate save delay
-      await new Promise(resolve => setTimeout(resolve, 500));
-      onSave(validItems, orderNotes);
+      await onSave(validItems, orderNotes);
       setIsSaving(false);
     } catch (error) {
       setIsSaving(false);

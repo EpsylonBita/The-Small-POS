@@ -3,6 +3,7 @@ import { X, RotateCcw, XCircle, Banknote, CreditCard, Clock, AlertTriangle, Chev
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
+import { RefundAttributionFields } from './RefundAttributionFields';
 import toast from 'react-hot-toast';
 import { formatCurrency } from '../../utils/format';
 import { getBridge } from '../../../lib';
@@ -38,6 +39,8 @@ interface Adjustment {
   amount: number;
   reason: string;
   staff_id?: string;
+  refundMethod?: 'cash' | 'card' | null;
+  cashHandler?: 'cashier_drawer' | 'driver_shift' | null;
   created_at: string;
 }
 
@@ -50,7 +53,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
-  const { staff } = useShift();
+  const { staff, activeShift } = useShift();
 
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [balances, setBalances] = useState<Record<string, PaymentBalance>>({});
@@ -62,6 +65,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   const [activeRefundId, setActiveRefundId] = useState<string | null>(null);
   const [refundAmount, setRefundAmount] = useState('');
   const [refundReason, setRefundReason] = useState('');
+  const [refundMethod, setRefundMethod] = useState<'cash' | 'card'>('cash');
+  const [cashHandler, setCashHandler] = useState<'cashier_drawer' | 'driver_shift'>('cashier_drawer');
+  const [allowDriverCashHandler, setAllowDriverCashHandler] = useState(false);
 
   // Void confirm state
   const [activeVoidId, setActiveVoidId] = useState<string | null>(null);
@@ -78,6 +84,14 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       const orderPayments = await bridge.payments.getOrderPayments(orderId);
       const paymentList: PaymentRecord[] = Array.isArray(orderPayments) ? orderPayments : [];
       setPayments(paymentList);
+      try {
+        const order = await bridge.orders.getById(orderId);
+        const isDelivery = String((order as any)?.orderType || (order as any)?.order_type || '').toLowerCase() === 'delivery';
+        const hasDriver = Boolean((order as any)?.driverId || (order as any)?.driver_id);
+        setAllowDriverCashHandler(isDelivery && hasDriver);
+      } catch {
+        setAllowDriverCashHandler(false);
+      }
 
       // Load balance for each completed payment
       const balanceMap: Record<string, PaymentBalance> = {};
@@ -122,6 +136,8 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       setActiveVoidId(null);
       setRefundAmount('');
       setRefundReason('');
+      setRefundMethod('cash');
+      setCashHandler('cashier_drawer');
       setVoidReason('');
       setShowHistory(false);
     }
@@ -155,7 +171,11 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         amount,
         reason: refundReason.trim(),
         staffId: staff?.staffId,
+        staffShiftId: activeShift?.id,
         orderId,
+        refundMethod,
+        cashHandler: refundMethod === 'cash' ? cashHandler : undefined,
+        adjustmentContext: 'manual',
       });
 
       if (result?.success !== false && !result?.error) {
@@ -445,6 +465,14 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                               className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
                             />
                           </div>
+                          <RefundAttributionFields
+                            refundMethod={refundMethod}
+                            onRefundMethodChange={setRefundMethod}
+                            cashHandler={cashHandler}
+                            onCashHandlerChange={setCashHandler}
+                            allowDriverCashHandler={allowDriverCashHandler}
+                            disabled={processing}
+                          />
                           <div className="flex gap-2">
                             <button
                               onClick={() => handleRefund(payment.id)}
@@ -457,7 +485,13 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 : t('modals.refund.confirmRefund', { defaultValue: 'Confirm Refund' })}
                             </button>
                             <button
-                              onClick={() => { setActiveRefundId(null); setRefundAmount(''); setRefundReason(''); }}
+                              onClick={() => {
+                                setActiveRefundId(null);
+                                setRefundAmount('');
+                                setRefundReason('');
+                                setRefundMethod('cash');
+                                setCashHandler('cashier_drawer');
+                              }}
                               disabled={processing}
                               className="liquid-glass-modal-button"
                             >
@@ -555,6 +589,15 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                         <div className="mt-1 text-xs liquid-glass-modal-text-muted">
                           {adj.reason}
                         </div>
+                        {adj.adjustment_type === 'refund' && (
+                          <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
+                            {adj.refundMethod === 'card'
+                              ? t('modals.refund.cardRefund', { defaultValue: 'Card Refund' })
+                              : adj.cashHandler === 'driver_shift'
+                                ? t('modals.refund.driverCash', { defaultValue: 'Driver Cash' })
+                                : t('modals.refund.cashierCash', { defaultValue: 'Cashier Cash' })}
+                          </div>
+                        )}
                         <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-60">
                           {new Date(adj.created_at).toLocaleString()}
                         </div>

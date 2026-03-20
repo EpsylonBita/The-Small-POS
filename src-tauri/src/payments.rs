@@ -71,6 +71,7 @@ pub(crate) struct PaymentRecordInput {
     pub terminal_device_id: Option<String>,
     pub requested_staff_id: Option<String>,
     pub requested_staff_shift_id: Option<String>,
+    pub collected_by: Option<String>,
     items: Vec<PaymentItemInput>,
 }
 
@@ -83,6 +84,7 @@ pub(crate) struct PaymentInsertOptions {
     pub enqueue_sync: bool,
     pub update_cash_drawer: bool,
     pub mark_order_sync_pending_on_owner_change: bool,
+    pub sync_order_owner_with_payment: bool,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -97,6 +99,7 @@ impl PaymentInsertOptions {
             enqueue_sync: true,
             update_cash_drawer: true,
             mark_order_sync_pending_on_owner_change: true,
+            sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
         }
@@ -111,6 +114,7 @@ impl PaymentInsertOptions {
             enqueue_sync: false,
             update_cash_drawer: false,
             mark_order_sync_pending_on_owner_change: false,
+            sync_order_owner_with_payment: true,
             created_at: None,
             updated_at: None,
         }
@@ -190,6 +194,20 @@ fn normalize_local_payment_origin(requested: &str, method: &str) -> String {
     }
 }
 
+fn normalize_collected_by(value: Option<String>) -> Option<String> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cashier_drawer") => Some("cashier_drawer".to_string()),
+        Some("driver_shift") => Some("driver_shift".to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> {
     match method.trim().to_ascii_lowercase().as_str() {
         "cash" => Some("cash".to_string()),
@@ -256,6 +274,12 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
     } else {
         None
     };
+    let collected_by = normalize_collected_by(
+        str_field(payload, "collectedBy")
+            .or_else(|| str_field(payload, "collected_by"))
+            .or_else(|| str_field(payload, "cashHandler"))
+            .or_else(|| str_field(payload, "cash_handler")),
+    );
 
     Ok(PaymentRecordInput {
         order_id,
@@ -271,6 +295,7 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         requested_staff_id: str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id")),
         requested_staff_shift_id: str_field(payload, "staffShiftId")
             .or_else(|| str_field(payload, "staff_shift_id")),
+        collected_by,
         items: parse_payment_items(payload),
     })
 }
@@ -431,8 +456,29 @@ pub(crate) fn record_payment_in_connection(
             .filter(|value| !value.is_empty())
             .is_none();
 
+    let cashier_collected_delivery_cash = order_type.eq_ignore_ascii_case("delivery")
+        && input.method == "cash"
+        && matches!(input.collected_by.as_deref(), Some("cashier_drawer"));
+
     let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
         (None, None)
+    } else if cashier_collected_delivery_cash {
+        let shift_id = input
+            .requested_staff_shift_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string())
+            .ok_or(
+                "Cashier-collected delivery payments require an active cashier shift context",
+            )?;
+        let staff_id = input
+            .requested_staff_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string());
+        (Some(shift_id), staff_id)
     } else {
         order_ownership::resolve_order_owner(
             conn,
@@ -451,7 +497,9 @@ pub(crate) fn record_payment_in_connection(
         )?
     };
 
-    if resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id {
+    if options.sync_order_owner_with_payment
+        && (resolved_shift_id != order_staff_shift_id || resolved_staff_id != order_staff_id)
+    {
         let update_sql = if options.mark_order_sync_pending_on_owner_change {
             "UPDATE orders
              SET staff_shift_id = ?1,
@@ -531,6 +579,45 @@ pub(crate) fn record_payment_in_connection(
         &payment_id,
     )?;
 
+    if order_type.eq_ignore_ascii_case("delivery")
+        && matches!(input.collected_by.as_deref(), Some("driver_shift"))
+    {
+        match input.method.as_str() {
+            "cash" => {
+                let _ = conn.execute(
+                    "UPDATE driver_earnings
+                     SET cash_collected = COALESCE(cash_collected, 0) + ?1,
+                         cash_to_return = COALESCE(cash_to_return, 0) + ?1,
+                         payment_method = CASE
+                            WHEN COALESCE(card_amount, 0) > 0 THEN 'mixed'
+                            ELSE 'cash'
+                         END,
+                         updated_at = ?2
+                     WHERE order_id = ?3
+                       AND COALESCE(settled, 0) = 0
+                       AND COALESCE(is_transferred, 0) = 0",
+                    params![input.amount, updated_at, input.order_id],
+                );
+            }
+            "card" => {
+                let _ = conn.execute(
+                    "UPDATE driver_earnings
+                     SET card_amount = COALESCE(card_amount, 0) + ?1,
+                         payment_method = CASE
+                            WHEN COALESCE(cash_collected, 0) > 0 THEN 'mixed'
+                            ELSE 'card'
+                         END,
+                         updated_at = ?2
+                     WHERE order_id = ?3
+                       AND COALESCE(settled, 0) = 0
+                       AND COALESCE(is_transferred, 0) = 0",
+                    params![input.amount, updated_at, input.order_id],
+                );
+            }
+            _ => {}
+        }
+    }
+
     if options.update_cash_drawer {
         if let Some(ref sid) = resolved_shift_id {
             if input.method == "cash" {
@@ -569,6 +656,7 @@ pub(crate) fn record_payment_in_connection(
             "discountAmount": input.discount_amount,
             "paymentOrigin": input.payment_origin,
             "terminalDeviceId": input.terminal_device_id,
+            "collectedBy": input.collected_by,
             "staffId": resolved_staff_id,
             "staffShiftId": resolved_shift_id,
             "items": build_payment_items_json(&input.items),
@@ -606,11 +694,15 @@ pub(crate) fn record_payment_in_connection(
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let input = build_payment_record_input(payload)?;
+    let mut options = PaymentInsertOptions::local();
+    if matches!(input.collected_by.as_deref(), Some("cashier_drawer")) {
+        options.sync_order_owner_with_payment = false;
+    }
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
-    let recorded = match record_payment_in_connection(&conn, &input, &PaymentInsertOptions::local())
+    let recorded = match record_payment_in_connection(&conn, &input, &options)
     {
         Ok(recorded) => {
             conn.execute_batch("COMMIT")
@@ -798,6 +890,48 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
     Ok(())
 }
 
+fn payment_sync_queue_needs_retry(
+    conn: &Connection,
+    payment_id: &str,
+) -> Result<bool, String> {
+    let queue_row: Option<(String, i64, Option<String>, Option<String>)> = match conn.query_row(
+        "SELECT status,
+                COALESCE(retry_count, 0),
+                next_retry_at,
+                last_error
+         FROM sync_queue
+         WHERE entity_type = 'payment'
+           AND entity_id = ?1
+         ORDER BY id DESC
+         LIMIT 1",
+        params![payment_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ) {
+        Ok(row) => Some(row),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(format!("load payment queue retry state: {e}")),
+    };
+
+    let Some((status, retry_count, next_retry_at, last_error)) = queue_row else {
+        return Ok(false);
+    };
+
+    let normalized_status = status.trim().to_ascii_lowercase();
+    if normalized_status == "failed" || normalized_status == "queued_remote" {
+        return Ok(true);
+    }
+
+    if normalized_status == "pending" {
+        let has_last_error = last_error
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        return Ok(retry_count > 0 || next_retry_at.is_some() || has_last_error);
+    }
+
+    Ok(false)
+}
+
 pub fn update_payment_method(
     db: &DbState,
     order_id_raw: &str,
@@ -863,6 +997,40 @@ pub fn update_payment_method(
     let (payment_id, current_method, item_assignment_count): CompletedPaymentRow =
         completed_payments[0].clone();
     if current_method == next_method {
+        if payment_sync_queue_needs_retry(&conn, &payment_id)? {
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("begin payment sync retry transaction: {e}"))?;
+            refresh_payment_sync_queue_entry(&tx, &payment_id)?;
+            let payment_status: String = tx
+                .query_row(
+                    "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
+                    params![order_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("reload payment status after sync retry: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("commit payment sync retry: {e}"))?;
+
+            info!(
+                order_id = %order_id,
+                payment_id = %payment_id,
+                method = %current_method,
+                "Payment sync requeued without changing payment method"
+            );
+
+            return Ok(serde_json::json!({
+                "success": true,
+                "data": {
+                    "orderId": order_id,
+                    "paymentId": payment_id,
+                    "paymentMethod": current_method,
+                    "paymentStatus": payment_status,
+                    "retriedSync": true,
+                }
+            }));
+        }
+
         let current_status: String = conn
             .query_row(
                 "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
@@ -877,6 +1045,7 @@ pub fn update_payment_method(
                 "paymentId": payment_id,
                 "paymentMethod": current_method,
                 "paymentStatus": current_status,
+                "retriedSync": false,
             }
         }));
     }
@@ -926,6 +1095,7 @@ pub fn update_payment_method(
             "paymentId": payment_id,
             "paymentMethod": next_method,
             "paymentStatus": payment_status,
+            "retriedSync": false,
         }
     }))
 }
@@ -1498,6 +1668,193 @@ mod tests {
             .expect("query refreshed payment queue row");
         assert_eq!(queue_status, "pending");
         assert!(payload.contains("\"method\":\"card\""));
+    }
+
+    #[test]
+    fn test_update_payment_method_same_method_requeues_failed_payment_sync() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, payment_status,
+                payment_method, supabase_id, created_at, updated_at
+             ) VALUES (
+                'ord-method-retry',
+                '[]',
+                9.5,
+                'completed',
+                'synced',
+                'paid',
+                'cash',
+                'remote-order-retry',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert order for same-method retry");
+        drop(conn);
+
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-retry",
+                "method": "cash",
+                "amount": 9.5,
+                "cashReceived": 10.0,
+                "changeGiven": 0.5,
+                "transactionRef": "CASH-RETRY-1",
+            }),
+        )
+        .expect("record payment for same-method retry");
+        let payment_id = recorded["paymentId"]
+            .as_str()
+            .expect("payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_queue
+             SET status = 'failed',
+                 retry_count = 5,
+                 last_error = 'Internal server error',
+                 synced_at = NULL
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark queue row failed");
+        conn.execute(
+            "UPDATE order_payments
+             SET sync_status = 'failed',
+                 sync_state = 'failed',
+                 sync_retry_count = 5,
+                 sync_last_error = 'Internal server error',
+                 sync_next_retry_at = datetime('now', '+10 minutes')
+             WHERE id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark payment sync metadata failed");
+        drop(conn);
+
+        let result = update_payment_method(&db, "ord-method-retry", "cash")
+            .expect("retry failed payment sync with same method");
+        assert_eq!(result["data"]["retriedSync"], true);
+        assert_eq!(result["data"]["paymentMethod"], "cash");
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count, last_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
+                params![payment_id.clone()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query refreshed queue row");
+        assert_eq!(queue_status, "pending");
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+
+        let (payment_sync_status, payment_sync_state): (String, String) = conn
+            .query_row(
+                "SELECT sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query refreshed payment sync metadata");
+        assert_eq!(payment_sync_status, "pending");
+        assert_eq!(payment_sync_state, "pending");
+    }
+
+    #[test]
+    fn test_update_payment_method_same_method_noop_when_sync_is_healthy() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, payment_status,
+                payment_method, supabase_id, created_at, updated_at
+             ) VALUES (
+                'ord-method-noop',
+                '[]',
+                6.25,
+                'completed',
+                'synced',
+                'paid',
+                'cash',
+                'remote-order-noop',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert order for same-method noop");
+        drop(conn);
+
+        let recorded = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-method-noop",
+                "method": "cash",
+                "amount": 6.25,
+                "cashReceived": 6.5,
+                "changeGiven": 0.25,
+                "transactionRef": "CASH-NOOP-1",
+            }),
+        )
+        .expect("record payment for same-method noop");
+        let payment_id = recorded["paymentId"]
+            .as_str()
+            .expect("payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_queue
+             SET status = 'synced',
+                 retry_count = 0,
+                 last_error = NULL,
+                 synced_at = datetime('now')
+             WHERE entity_type = 'payment'
+               AND entity_id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark queue row synced");
+        conn.execute(
+            "UPDATE order_payments
+             SET sync_status = 'synced',
+                 sync_state = 'applied',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL
+             WHERE id = ?1",
+            params![payment_id.clone()],
+        )
+        .expect("mark payment sync metadata synced");
+        drop(conn);
+
+        let result = update_payment_method(&db, "ord-method-noop", "cash")
+            .expect("same-method no-op");
+        assert_eq!(result["data"]["retriedSync"], false);
+        assert_eq!(result["data"]["paymentMethod"], "cash");
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM sync_queue
+                 WHERE entity_type = 'payment'
+                   AND entity_id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query unchanged queue row");
+        assert_eq!(queue_status, "synced");
+        assert_eq!(retry_count, 0);
     }
 
     #[test]

@@ -607,6 +607,7 @@ export interface RecordPaymentParams {
   terminalDeviceId?: string;
   staffId?: string;
   staffShiftId?: string;
+  collectedBy?: 'cashier_drawer' | 'driver_shift';
   items?: Array<{
     itemIndex: number;
     itemName?: string;
@@ -614,6 +615,76 @@ export interface RecordPaymentParams {
     itemAmount: number;
   }>;
 }
+
+export interface UpdatePaymentMethodResult {
+  orderId: string;
+  paymentId: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  retriedSync?: boolean;
+}
+
+export interface EditSettlementCompletedPayment {
+  id: string;
+  method: 'cash' | 'card' | 'other' | string;
+  amount: number;
+  createdAt: string;
+  transactionRef?: string | null;
+  staffShiftId?: string | null;
+  refundedAmount: number;
+  remainingRefundable: number;
+}
+
+export interface OrderEditSettlementPreview {
+  success: boolean;
+  orderId: string;
+  branchId?: string;
+  terminalId?: string;
+  orderType: string;
+  driverId?: string | null;
+  isGhostOrder: boolean;
+  originalTotal: number;
+  nextTotal: number;
+  paidTotal: number;
+  delta: number;
+  paymentStatus: string;
+  paymentMethod: string;
+  requiredAction: 'none' | 'collect' | 'refund';
+  completedPayments: EditSettlementCompletedPayment[];
+  deliverySettlement?: {
+    driverCashOwned: boolean;
+    driverEarning?: {
+      id: string;
+      driverId: string;
+      staffShiftId?: string | null;
+      cashCollected: number;
+      cardAmount: number;
+      cashToReturn: number;
+    } | null;
+  };
+}
+
+export interface OrderEditSettlementRefund {
+  paymentId: string;
+  amount: number;
+  reason: string;
+  refundMethod?: 'cash' | 'card';
+  cashHandler?: 'cashier_drawer' | 'driver_shift';
+  staffId?: string;
+  staffShiftId?: string;
+}
+
+export type OrderEditSettlementAction =
+  | { type: 'none' }
+  | { type: 'mark_partial' }
+  | {
+      type: 'collect';
+      payments: Array<RecordPaymentParams>;
+    }
+  | {
+      type: 'refund';
+      refunds: OrderEditSettlementRefund[];
+    };
 
 // -- Shifts ------------------------------------------------------------------
 
@@ -797,6 +868,17 @@ export interface PlatformBridge {
     createWithInitialPayment(payload: CreateOrderPayload): Promise<IpcResult<Order>>;
     updateStatus(orderId: string, status: string): Promise<IpcResult>;
     updateItems(orderId: string, items: OrderItem[]): Promise<IpcResult>;
+    previewEditSettlement(payload: {
+      orderId: string;
+      items: OrderItem[];
+      orderNotes?: string;
+    }): Promise<OrderEditSettlementPreview>;
+    applyEditSettlement(payload: {
+      orderId: string;
+      items: OrderItem[];
+      orderNotes?: string;
+      action: OrderEditSettlementAction;
+    }): Promise<IpcResult>;
     updateCustomerInfo(payload: OrderCustomerInfoUpdateParams): Promise<IpcResult>;
     updateFinancials(payload: OrderFinancialsUpdateParams): Promise<IpcResult>;
     delete(orderId: string): Promise<IpcResult>;
@@ -821,7 +903,7 @@ export interface PlatformBridge {
   // -- Payments --------------------------------------------------------------
   payments: {
     updatePaymentStatus(orderId: string, status: string, method?: string): Promise<IpcResult>;
-    updatePaymentMethod(orderId: string, method: 'cash' | 'card'): Promise<IpcResult>;
+    updatePaymentMethod(orderId: string, method: 'cash' | 'card'): Promise<IpcResult<UpdatePaymentMethodResult>>;
     printReceipt(receiptData: any, type?: string): Promise<IpcResult>;
     printKitchenTicket(ticketData: any): Promise<IpcResult>;
     recordPayment(params: RecordPaymentParams): Promise<IpcResult>;
@@ -1231,7 +1313,11 @@ export interface PlatformBridge {
       amount: number;
       reason: string;
       staffId?: string;
+      staffShiftId?: string;
       orderId?: string;
+      refundMethod?: 'cash' | 'card';
+      cashHandler?: 'cashier_drawer' | 'driver_shift';
+      adjustmentContext?: 'manual' | 'edit_settlement';
     }): Promise<IpcResult>;
     listOrderAdjustments(orderId: string): Promise<any[]>;
     getPaymentBalance(paymentId: string): Promise<{
@@ -1761,6 +1847,17 @@ export class TauriBridge implements PlatformBridge {
       this.inv('order:create-with-initial-payment', p),
     updateStatus: (id: string, s: string) => this.inv('order:update-status', id, s),
     updateItems: (id: string, items: OrderItem[]) => this.inv('order:update-items', id, items),
+    previewEditSettlement: (payload: {
+      orderId: string;
+      items: OrderItem[];
+      orderNotes?: string;
+    }) => this.inv('orders:preview-edit-settlement', payload),
+    applyEditSettlement: (payload: {
+      orderId: string;
+      items: OrderItem[];
+      orderNotes?: string;
+      action: OrderEditSettlementAction;
+    }) => this.inv('orders:apply-edit-settlement', payload),
     updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>
       this.inv('order:update-customer-info', payload),
     updateFinancials: (payload: OrderFinancialsUpdateParams) => this.inv('order:update-financials', payload),
@@ -2210,7 +2307,17 @@ export class TauriBridge implements PlatformBridge {
   };
 
   refunds = {
-    refundPayment: (params: { paymentId: string; amount: number; reason: string; staffId?: string; orderId?: string }) =>
+    refundPayment: (params: {
+      paymentId: string;
+      amount: number;
+      reason: string;
+      staffId?: string;
+      staffShiftId?: string;
+      orderId?: string;
+      refundMethod?: 'cash' | 'card';
+      cashHandler?: 'cashier_drawer' | 'driver_shift';
+      adjustmentContext?: 'manual' | 'edit_settlement';
+    }) =>
       this.inv('refund:payment', params),
     listOrderAdjustments: (orderId: string) => this.inv('refund:list-order-adjustments', orderId),
     getPaymentBalance: (paymentId: string) => this.inv('refund:get-payment-balance', paymentId),

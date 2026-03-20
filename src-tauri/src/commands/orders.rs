@@ -1,11 +1,12 @@
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::{
     can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
-    payload_arg0_as_string, print, read_local_json_array, resolve_order_id, storage, sync,
-    value_f64, value_i64, value_str, write_local_json,
+    payload_arg0_as_string, payments, print, read_local_json_array, refunds, resolve_order_id,
+    storage, sync, value_f64, value_i64, value_str, write_local_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +106,101 @@ struct OrderDeletePayload {
     #[serde(alias = "supabaseId")]
     #[serde(alias = "supabase_id")]
     order_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderEditSettlementRawPayload {
+    #[serde(alias = "order_id")]
+    #[serde(alias = "id")]
+    #[serde(alias = "supabaseId")]
+    #[serde(alias = "supabase_id")]
+    order_id: String,
+    #[serde(default)]
+    items: Vec<serde_json::Value>,
+    #[serde(
+        default,
+        alias = "order_notes",
+        alias = "notes",
+        alias = "special_instructions"
+    )]
+    order_notes: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditSettlementPaymentPayload {
+    method: String,
+    amount: f64,
+    #[serde(default, alias = "discount_amount")]
+    discount_amount: Option<f64>,
+    #[serde(default, alias = "cash_received")]
+    cash_received: Option<f64>,
+    #[serde(default, alias = "change_given")]
+    change_given: Option<f64>,
+    #[serde(default, alias = "transaction_ref")]
+    transaction_ref: Option<String>,
+    #[serde(default, alias = "payment_origin")]
+    payment_origin: Option<String>,
+    #[serde(default, alias = "terminal_device_id")]
+    terminal_device_id: Option<String>,
+    #[serde(default, alias = "terminal_approved")]
+    terminal_approved: Option<bool>,
+    #[serde(default, alias = "staff_id")]
+    staff_id: Option<String>,
+    #[serde(default, alias = "staff_shift_id")]
+    staff_shift_id: Option<String>,
+    #[serde(default, alias = "collected_by")]
+    collected_by: Option<String>,
+    #[serde(default)]
+    items: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditSettlementRefundPayload {
+    #[serde(alias = "payment_id")]
+    payment_id: String,
+    amount: f64,
+    reason: String,
+    #[serde(default, alias = "refund_method")]
+    refund_method: Option<String>,
+    #[serde(default, alias = "cash_handler")]
+    cash_handler: Option<String>,
+    #[serde(default, alias = "staff_id")]
+    staff_id: Option<String>,
+    #[serde(default, alias = "staff_shift_id")]
+    staff_shift_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum EditSettlementActionPayload {
+    None,
+    MarkPartial,
+    Collect {
+        #[serde(default)]
+        payments: Vec<EditSettlementPaymentPayload>,
+    },
+    Refund {
+        #[serde(default)]
+        refunds: Vec<EditSettlementRefundPayload>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrderEditSettlementApplyRawPayload {
+    #[serde(flatten)]
+    _order: OrderEditSettlementRawPayload,
+    action: EditSettlementActionPayload,
+}
+
+#[derive(Debug)]
+struct OrderEditSettlementPayload {
+    order_id: String,
+    items: Vec<serde_json::Value>,
+    order_notes: Option<String>,
 }
 
 fn parse_order_update_status_payload(
@@ -318,6 +414,47 @@ fn parse_order_update_items_payload(
     })
 }
 
+fn parse_order_edit_settlement_payload_value(
+    payload: serde_json::Value,
+) -> Result<OrderEditSettlementPayload, String> {
+    if let Some(items) = payload.get("items") {
+        if !items.is_array() {
+            return Err("items must be an array".into());
+        }
+    }
+    let raw: OrderEditSettlementRawPayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid edit settlement payload: {e}"))?;
+    let order_id = raw.order_id.trim().to_string();
+    if order_id.is_empty() {
+        return Err("Missing orderId".into());
+    }
+    let order_notes = raw
+        .order_notes
+        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+        .filter(|value| !value.is_empty());
+    Ok(OrderEditSettlementPayload {
+        order_id,
+        items: raw.items,
+        order_notes,
+    })
+}
+
+fn parse_order_edit_settlement_preview_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<OrderEditSettlementPayload, String> {
+    parse_order_edit_settlement_payload_value(arg0.unwrap_or_else(|| serde_json::json!({})))
+}
+
+fn parse_order_edit_settlement_apply_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<(OrderEditSettlementPayload, EditSettlementActionPayload), String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let raw: OrderEditSettlementApplyRawPayload = serde_json::from_value(payload.clone())
+        .map_err(|e| format!("Invalid edit settlement apply payload: {e}"))?;
+    let parsed = parse_order_edit_settlement_payload_value(payload)?;
+    Ok((parsed, raw.action))
+}
+
 fn parse_order_delete_payload(
     arg0: Option<serde_json::Value>,
     arg1: Option<String>,
@@ -359,6 +496,301 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
+}
+
+fn compute_order_items_total(items: &[serde_json::Value]) -> f64 {
+    items.iter()
+        .map(|item| {
+            let qty = value_f64(item, &["quantity"]).unwrap_or(1.0);
+            if let Some(tp) = value_f64(item, &["total_price", "totalPrice"]) {
+                tp
+            } else {
+                value_f64(item, &["unit_price", "unitPrice", "price"]).unwrap_or(0.0) * qty
+            }
+        })
+        .sum::<f64>()
+}
+
+fn derive_next_order_totals(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    next_items: &[serde_json::Value],
+) -> Result<(f64, f64), String> {
+    let (current_total, current_subtotal, current_items_json): (f64, f64, String) = conn
+        .query_row(
+            "SELECT
+                COALESCE(total_amount, 0),
+                COALESCE(subtotal, COALESCE(total_amount, 0)),
+                COALESCE(items, '[]')
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("load order edit totals: {e}"))?;
+
+    let current_items: Vec<serde_json::Value> =
+        serde_json::from_str(&current_items_json).unwrap_or_default();
+    let current_items_total = compute_order_items_total(&current_items);
+    let next_items_total = compute_order_items_total(next_items);
+
+    let total_offset = current_total - current_items_total;
+    let subtotal_offset = current_subtotal - current_items_total;
+
+    Ok((
+        (next_items_total + total_offset).max(0.0),
+        (next_items_total + subtotal_offset).max(0.0),
+    ))
+}
+
+fn update_order_items_in_connection(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    items: &[serde_json::Value],
+    order_notes: Option<&str>,
+    total_amount: f64,
+    subtotal_amount: f64,
+    now: &str,
+) -> Result<(), String> {
+    let items_json =
+        serde_json::to_string(items).map_err(|e| format!("serialize items: {e}"))?;
+    if let Some(notes) = order_notes {
+        conn.execute(
+            "UPDATE orders
+             SET items = ?1,
+                 total_amount = ?2,
+                 subtotal = ?3,
+                 special_instructions = ?4,
+                 sync_status = 'pending',
+                 updated_at = ?5
+             WHERE id = ?6",
+            rusqlite::params![
+                items_json,
+                total_amount,
+                subtotal_amount,
+                notes,
+                now,
+                order_id
+            ],
+        )
+        .map_err(|e| format!("update order items: {e}"))?;
+    } else {
+        conn.execute(
+            "UPDATE orders
+             SET items = ?1,
+                 total_amount = ?2,
+                 subtotal = ?3,
+                 sync_status = 'pending',
+                 updated_at = ?4
+             WHERE id = ?5",
+            rusqlite::params![items_json, total_amount, subtotal_amount, now, order_id],
+        )
+        .map_err(|e| format!("update order items: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn refresh_order_payment_snapshot(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<(String, String, f64), String> {
+    let (order_total, current_payment_method): (f64, String) = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0), COALESCE(payment_method, 'pending')
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load order payment snapshot: {e}"))?;
+
+    let total_paid: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let completed_payment_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'",
+            rusqlite::params![order_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let has_item_assignments = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM payment_items pi
+                INNER JOIN order_payments op ON op.id = pi.payment_id
+                WHERE op.order_id = ?1
+                  AND op.status = 'completed'
+            )",
+            rusqlite::params![order_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        == 1;
+
+    let last_completed_method = conn
+        .query_row(
+            "SELECT method
+             FROM order_payments
+             WHERE order_id = ?1
+               AND status = 'completed'
+             ORDER BY created_at DESC, updated_at DESC
+             LIMIT 1",
+            rusqlite::params![order_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .unwrap_or_else(|| current_payment_method.clone());
+
+    let next_payment_status = if total_paid >= order_total - 0.01 {
+        if total_paid > 0.009 {
+            "paid".to_string()
+        } else {
+            "pending".to_string()
+        }
+    } else if total_paid > 0.009 {
+        "partially_paid".to_string()
+    } else {
+        "pending".to_string()
+    };
+
+    let normalized_current_method = current_payment_method.trim().to_ascii_lowercase();
+    let next_payment_method = if next_payment_status == "partially_paid"
+        || has_item_assignments
+        || completed_payment_count > 1
+        || matches!(normalized_current_method.as_str(), "pending" | "split" | "mixed")
+    {
+        "split".to_string()
+    } else {
+        last_completed_method
+    };
+
+    conn.execute(
+        "UPDATE orders
+         SET payment_status = ?1,
+             payment_method = ?2,
+             updated_at = ?3
+         WHERE id = ?4",
+        rusqlite::params![next_payment_status, next_payment_method, now, order_id],
+    )
+    .map_err(|e| format!("refresh order payment snapshot: {e}"))?;
+
+    Ok((next_payment_status, next_payment_method, total_paid))
+}
+
+fn enqueue_order_edit_sync(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    items: &[serde_json::Value],
+    order_notes: Option<&str>,
+    total_amount: f64,
+    payment_status: &str,
+    payment_method: &str,
+) -> Result<(), String> {
+    let sync_payload = serde_json::json!({
+        "orderId": order_id,
+        "items": items,
+        "orderNotes": order_notes,
+        "totalAmount": total_amount,
+        "paymentStatus": payment_status,
+        "paymentMethod": payment_method,
+    });
+    let idem = format!("order:edit-settlement:{}:{}", order_id, uuid::Uuid::new_v4());
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('order', ?1, 'update', ?2, ?3)",
+        rusqlite::params![order_id, sync_payload.to_string(), idem],
+    )
+    .map_err(|e| format!("enqueue order edit sync: {e}"))?;
+    Ok(())
+}
+
+fn list_completed_payments_for_edit(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                op.id,
+                op.method,
+                op.amount,
+                op.created_at,
+                op.transaction_ref,
+                op.staff_shift_id,
+                COALESCE((
+                    SELECT SUM(pa.amount)
+                    FROM payment_adjustments pa
+                    WHERE pa.payment_id = op.id
+                      AND pa.adjustment_type = 'refund'
+                ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND op.status = 'completed'
+             ORDER BY op.created_at ASC, op.updated_at ASC",
+        )
+        .map_err(|e| format!("prepare edit settlement payments: {e}"))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![order_id], |row| {
+            let amount = row.get::<_, f64>(2)?;
+            let refunded = row.get::<_, f64>(6)?;
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "method": row.get::<_, String>(1)?,
+                "amount": amount,
+                "createdAt": row.get::<_, String>(3)?,
+                "transactionRef": row.get::<_, Option<String>>(4)?,
+                "staffShiftId": row.get::<_, Option<String>>(5)?,
+                "refundedAmount": refunded,
+                "remainingRefundable": (amount - refunded).max(0.0),
+            }))
+        })
+        .map_err(|e| format!("query edit settlement payments: {e}"))?;
+
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+fn load_active_driver_settlement(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    conn.query_row(
+        "SELECT id, driver_id, staff_shift_id, cash_collected, card_amount, cash_to_return
+         FROM driver_earnings
+         WHERE order_id = ?1
+           AND COALESCE(settled, 0) = 0
+           AND COALESCE(is_transferred, 0) = 0
+         LIMIT 1",
+        rusqlite::params![order_id],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "driverId": row.get::<_, String>(1)?,
+                "staffShiftId": row.get::<_, Option<String>>(2)?,
+                "cashCollected": row.get::<_, f64>(3)?,
+                "cardAmount": row.get::<_, f64>(4)?,
+                "cashToReturn": row.get::<_, f64>(5)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load active driver settlement: {e}"))
 }
 
 fn parse_order_update_customer_info_payload(
@@ -730,6 +1162,249 @@ pub async fn order_update_items(
         "success": true,
         "orderId": actual_order_id
     }))
+}
+
+#[tauri::command]
+pub async fn orders_preview_edit_settlement(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_order_edit_settlement_preview_payload(arg0)?;
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actual_order_id = resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?;
+    let (next_total, _) = derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
+
+    let (
+        current_total,
+        payment_status,
+        payment_method,
+        order_type,
+        is_ghost,
+        branch_id,
+        terminal_id,
+        driver_id,
+    ): (
+        f64,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        String,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT
+                COALESCE(total_amount, 0),
+                COALESCE(payment_status, 'pending'),
+                COALESCE(payment_method, 'pending'),
+                COALESCE(order_type, 'dine-in'),
+                COALESCE(is_ghost, 0),
+                COALESCE(branch_id, ''),
+                COALESCE(terminal_id, ''),
+                driver_id
+             FROM orders
+             WHERE id = ?1",
+            rusqlite::params![actual_order_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, i64>(4)? != 0,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load edit settlement order context: {e}"))?;
+
+    let completed_payments = list_completed_payments_for_edit(&conn, &actual_order_id)?;
+    let paid_total = completed_payments
+        .iter()
+        .map(|payment| payment.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(0.0))
+        .sum::<f64>();
+    let delta = next_total - current_total;
+    let required_action = if paid_total + 0.01 < next_total {
+        "collect"
+    } else if paid_total > next_total + 0.01 {
+        "refund"
+    } else {
+        "none"
+    };
+    let driver_settlement = load_active_driver_settlement(&conn, &actual_order_id)?;
+    let driver_cash_owned = order_type.eq_ignore_ascii_case("delivery") && driver_settlement.is_some();
+
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": actual_order_id,
+        "branchId": branch_id,
+        "terminalId": terminal_id,
+        "orderType": order_type,
+        "driverId": driver_id,
+        "isGhostOrder": is_ghost,
+        "originalTotal": current_total,
+        "nextTotal": next_total,
+        "paidTotal": paid_total,
+        "delta": delta,
+        "paymentStatus": payment_status,
+        "paymentMethod": payment_method,
+        "requiredAction": required_action,
+        "completedPayments": completed_payments,
+        "deliverySettlement": {
+            "driverCashOwned": driver_cash_owned,
+            "driverEarning": driver_settlement,
+        },
+    }))
+}
+
+#[tauri::command]
+pub async fn orders_apply_edit_settlement(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let (payload, action) = parse_order_edit_settlement_apply_payload(arg0)?;
+    let now = Utc::now().to_rfc3339();
+
+    let actual_order_id = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        resolve_order_id(&conn, &payload.order_id).ok_or("Order not found")?
+    };
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let (next_total, next_subtotal) = derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<serde_json::Value, String> {
+        let paid_total_before: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(amount), 0)
+                 FROM order_payments
+                 WHERE order_id = ?1
+                   AND status = 'completed'",
+                rusqlite::params![actual_order_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0.0);
+
+        update_order_items_in_connection(
+            &conn,
+            &actual_order_id,
+            &payload.items,
+            payload.order_notes.as_deref(),
+            next_total,
+            next_subtotal,
+            &now,
+        )?;
+
+        match action {
+            EditSettlementActionPayload::None | EditSettlementActionPayload::MarkPartial => {}
+            EditSettlementActionPayload::Collect { payments: payment_rows } => {
+                if payment_rows.is_empty() {
+                    return Err("Collect action requires at least one payment".into());
+                }
+                let recorded_total: f64 = payment_rows.iter().map(|payment| payment.amount).sum();
+                let outstanding = (next_total - paid_total_before).max(0.0);
+                if recorded_total > outstanding + 0.01 {
+                    return Err(format!(
+                        "Collected amount {recorded_total:.2} exceeds outstanding balance {outstanding:.2}"
+                    ));
+                }
+
+                for payment in payment_rows {
+                    let record_payload = serde_json::json!({
+                        "orderId": actual_order_id.clone(),
+                        "method": payment.method,
+                        "amount": payment.amount,
+                        "discountAmount": payment.discount_amount.unwrap_or(0.0),
+                        "cashReceived": payment.cash_received,
+                        "changeGiven": payment.change_given,
+                        "transactionRef": payment.transaction_ref,
+                        "paymentOrigin": payment.payment_origin.unwrap_or_else(|| "manual".to_string()),
+                        "terminalDeviceId": payment.terminal_device_id,
+                        "terminalApproved": payment.terminal_approved.unwrap_or(false),
+                        "staffId": payment.staff_id,
+                        "staffShiftId": payment.staff_shift_id,
+                        "collectedBy": payment.collected_by,
+                        "items": payment.items,
+                    });
+                    let input = payments::build_payment_record_input(&record_payload)?;
+                    let mut options = payments::PaymentInsertOptions::local();
+                    if matches!(input.collected_by.as_deref(), Some("cashier_drawer")) {
+                        options.sync_order_owner_with_payment = false;
+                    }
+                    options.mark_order_sync_pending_on_owner_change = false;
+                    payments::record_payment_in_connection(&conn, &input, &options)?;
+                }
+            }
+            EditSettlementActionPayload::Refund { refunds: refund_rows } => {
+                if refund_rows.is_empty() {
+                    return Err("Refund action requires at least one payment allocation".into());
+                }
+                let refund_total: f64 = refund_rows.iter().map(|refund| refund.amount).sum();
+                let required_refund = (paid_total_before - next_total).max(0.0);
+                if (refund_total - required_refund).abs() > 0.01 {
+                    return Err(format!(
+                        "Refund allocation {refund_total:.2} must match the overpaid amount {required_refund:.2}"
+                    ));
+                }
+
+                for refund in refund_rows {
+                    let refund_payload = serde_json::json!({
+                        "paymentId": refund.payment_id,
+                        "amount": refund.amount,
+                        "reason": refund.reason,
+                        "refundMethod": refund.refund_method,
+                        "cashHandler": refund.cash_handler,
+                        "staffId": refund.staff_id,
+                        "staffShiftId": refund.staff_shift_id,
+                        "adjustmentContext": "edit_settlement",
+                    });
+                    refunds::refund_payment_in_connection(&conn, &refund_payload)?;
+                }
+            }
+        }
+
+        let (payment_status, payment_method, paid_total_after) =
+            refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
+        enqueue_order_edit_sync(
+            &conn,
+            &actual_order_id,
+            &payload.items,
+            payload.order_notes.as_deref(),
+            next_total,
+            &payment_status,
+            &payment_method,
+        )?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id.clone(),
+            "nextTotal": next_total,
+            "paidTotal": paid_total_after,
+            "paymentStatus": payment_status,
+            "paymentMethod": payment_method,
+        }))
+    })();
+
+    match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+                let _ = app.emit("order_realtime_update", order_json);
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -2091,6 +2766,35 @@ mod transition_tests {
         .unwrap();
     }
 
+    fn insert_order_with_financials(
+        db: &db::DbState,
+        order_id: &str,
+        items_json: &str,
+        subtotal: f64,
+        total_amount: f64,
+        payment_method: &str,
+        payment_status: &str,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, subtotal, total_amount, status, payment_method, payment_status,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, 'completed', ?5, ?6, 'pending', datetime('now'), datetime('now')
+             )",
+            params![
+                order_id,
+                items_json,
+                subtotal,
+                total_amount,
+                payment_method,
+                payment_status
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn local_transition_validation_rejects_completed_to_cancelled() {
         let db = test_db();
@@ -2247,5 +2951,81 @@ mod transition_tests {
 
         assert_eq!(queue_count, 2);
         assert_eq!(failed_count, 1);
+    }
+
+    #[test]
+    fn derive_next_order_totals_preserves_non_item_offsets() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-edit-offsets",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
+            10.0,
+            12.5,
+            "cash",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let (next_total, next_subtotal) = derive_next_order_totals(
+            &conn,
+            "order-edit-offsets",
+            &[serde_json::json!({
+                "name": "Crepe",
+                "quantity": 1,
+                "unit_price": 8.0,
+                "total_price": 8.0
+            })],
+        )
+        .expect("next totals");
+
+        assert!((next_total - 10.5).abs() < 0.001);
+        assert!((next_subtotal - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn refresh_order_payment_snapshot_marks_edit_increase_as_partial() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-edit-partial",
+            r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
+            10.0,
+            10.0,
+            "cash",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-edit-partial', 'order-edit-partial', 'cash', 10.0, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE orders
+             SET total_amount = 12.0,
+                 subtotal = 12.0,
+                 updated_at = datetime('now')
+             WHERE id = 'order-edit-partial'",
+            [],
+        )
+        .unwrap();
+
+        let (payment_status, payment_method, total_paid) = refresh_order_payment_snapshot(
+            &conn,
+            "order-edit-partial",
+            "2026-03-20T12:00:00Z",
+        )
+        .expect("refresh payment snapshot");
+
+        assert_eq!(payment_status, "partially_paid");
+        assert_eq!(payment_method, "split");
+        assert!((total_paid - 10.0).abs() < 0.001);
     }
 }

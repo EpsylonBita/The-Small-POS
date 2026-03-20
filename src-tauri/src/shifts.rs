@@ -587,13 +587,18 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 + inherited_driver_expected_returns;
         } else {
             // Driver / server / kitchen: expected = opening + cash collected - expenses
-            let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
-                &conn,
-                &shift_id,
-                &role_type,
-                Some(shift_check_in_time.as_str()),
-                Some(now.as_str()),
-            )?;
+            let cash_collected = if role_type == "driver" {
+                compute_shift_cash_collected(&conn, &shift_id, &role_type)?
+            } else {
+                let (_, cash_collected, _, _) = compute_shift_payment_totals_in_window(
+                    &conn,
+                    &shift_id,
+                    &role_type,
+                    Some(shift_check_in_time.as_str()),
+                    Some(now.as_str()),
+                )?;
+                cash_collected
+            };
 
             // Sum expenses for this shift
             let expenses = compute_shift_expenses_total_in_window(
@@ -1098,7 +1103,11 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
              JOIN orders o ON o.id = op.order_id
              WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
                AND pa.adjustment_type = 'refund'
-               AND op.method = 'cash'
+               AND (
+                    (COALESCE(pa.refund_method, '') = 'cash'
+                     AND COALESCE(pa.cash_handler, 'cashier_drawer') = 'cashier_drawer')
+                    OR (COALESCE(pa.refund_method, '') = '' AND op.method = 'cash')
+               )
                AND COALESCE(o.is_ghost, 0) = 0
                AND {order_financial_expr} >= ?2
                AND (?3 IS NULL OR {order_financial_expr} <= ?3)"
@@ -1576,6 +1585,26 @@ fn compute_shift_payment_totals(
     compute_shift_payment_totals_in_window(conn, shift_id, role_type, None, None)
 }
 
+fn compute_driver_shift_earning_totals(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+) -> Result<(i64, f64, f64, f64), String> {
+    conn.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(cash_collected), 0),
+            COALESCE(SUM(card_amount), 0),
+            COALESCE(SUM(cash_collected + card_amount), 0)
+         FROM driver_earnings
+         WHERE staff_shift_id = ?1
+           AND COALESCE(settled, 0) = 0
+           AND COALESCE(is_transferred, 0) = 0",
+        params![shift_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .map_err(|e| format!("query driver earning totals: {e}"))
+}
+
 fn compute_shift_payment_totals_for_order(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -1613,22 +1642,16 @@ fn compute_shift_cash_collected(
     shift_id: &str,
     role_type: &str,
 ) -> Result<f64, String> {
-    let (_, cash_collected, _, _) = compute_shift_payment_totals(conn, shift_id, role_type)?;
-    if cash_collected > 0.0 || role_type != "driver" {
-        return Ok(cash_collected);
+    if role_type == "driver" {
+        let (earning_count, driver_cash_collected, _, _) =
+            compute_driver_shift_earning_totals(conn, shift_id)?;
+        if earning_count > 0 {
+            return Ok(driver_cash_collected);
+        }
     }
 
-    conn.query_row(
-        "SELECT COALESCE(SUM(de.cash_collected), 0)
-         FROM driver_earnings de
-         LEFT JOIN orders o ON o.id = de.order_id
-         WHERE de.staff_shift_id = ?1
-           AND (o.id IS NULL OR COALESCE(o.is_ghost, 0) = 0)
-           AND (o.id IS NULL OR o.status NOT IN ('cancelled', 'canceled', 'refunded'))",
-        params![shift_id],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("query driver cash collected: {e}"))
+    let (_, cash_collected, _, _) = compute_shift_payment_totals(conn, shift_id, role_type)?;
+    Ok(cash_collected)
 }
 
 fn resolve_cashier_drawer_for_staff_return(
@@ -1954,14 +1977,17 @@ pub(crate) fn build_cashier_staff_checkout_rows(
         check_out_time,
     ) in rows
     {
-        let (order_count, cash_collected, card_amount, total_amount) =
+        let (order_count, cash_collected, card_amount, total_amount) = if role_type == "driver" {
+            compute_driver_shift_earning_totals(conn, &staff_shift_id)?
+        } else {
             compute_shift_payment_totals_in_window(
                 conn,
                 &staff_shift_id,
                 &role_type,
                 Some(check_in_time.as_str()),
                 check_out_time.as_deref(),
-            )?;
+            )?
+        };
         let expenses = compute_shift_expenses_total_in_window(
             conn,
             &staff_shift_id,
@@ -2032,14 +2058,17 @@ fn build_inherited_cash_staff_rows(
 
     let mut result = Vec::new();
     for (staff_shift_id, staff_id, staff_name, opening_amount, check_in_time) in rows {
-        let (_, cash_collected, card_amount, total_amount) =
+        let (_, cash_collected, card_amount, total_amount) = if role_type == "driver" {
+            compute_driver_shift_earning_totals(conn, &staff_shift_id)?
+        } else {
             compute_shift_payment_totals_in_window(
                 conn,
                 &staff_shift_id,
                 role_type,
                 Some(check_in_time.as_str()),
                 None,
-            )?;
+            )?
+        };
         let expenses = compute_shift_expenses_total_in_window(
             conn,
             &staff_shift_id,

@@ -744,6 +744,8 @@ pub fn run() {
             commands::orders::order_update_status,
             commands::orders::order_update_customer_info,
             commands::orders::order_update_items,
+            commands::orders::orders_preview_edit_settlement,
+            commands::orders::orders_apply_edit_settlement,
             commands::orders::order_update_financials,
             commands::orders::order_approve,
             commands::orders::order_decline,

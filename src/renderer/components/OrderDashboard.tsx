@@ -16,8 +16,12 @@ import { CustomerSearchModal } from './modals/CustomerSearchModal';
 import { CustomerInfoModal } from './modals/CustomerInfoModal';
 import { AddCustomerModal } from './modals/AddCustomerModal';
 import { MenuModal } from './modals/MenuModal';
+import { EditOrderRefundSettlementModal } from './modals/EditOrderRefundSettlementModal';
 import { SplitPaymentModal } from './modals/SplitPaymentModal';
-import type { SplitPaymentResult } from './modals/SplitPaymentModal';
+import type {
+  SplitPaymentCollectionMode,
+  SplitPaymentResult,
+} from './modals/SplitPaymentModal';
 import { OrderApprovalPanel } from './order/OrderApprovalPanel';
 import { OrderConflictBanner } from './OrderConflictBanner';
 import { LiquidGlassModal } from './ui/pos-glass-components';
@@ -49,6 +53,10 @@ import {
 } from '../services/terminal-credentials';
 import { couponRedemptionService } from '../services/CouponRedemptionService';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import type {
+  OrderEditSettlementPreview,
+  OrderEditSettlementRefund,
+} from '../../lib/ipc-adapter';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
 
 interface OrderDashboardProps {
@@ -74,6 +82,18 @@ const extractOrderDashboardErrorMessage = (error: unknown): string | null => {
   }
   return null;
 };
+
+interface EditSettlementRequest {
+  orderId: string;
+  orderNumber?: string;
+  items: OrderItem[];
+  orderNotes?: string;
+}
+
+interface PendingEditRefundSettlement {
+  preview: OrderEditSettlementPreview;
+  request: EditSettlementRequest;
+}
 
 export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', orderFilter }) => {
   const bridge = getBridge();
@@ -231,11 +251,16 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
 
   // State for split payment flow (rendered independently of MenuModal)
   const [splitPaymentData, setSplitPaymentData] = useState<{
+    kind: 'new-order' | 'edit-settlement';
     orderId: string;
     orderTotal: number;
     items: Array<{ name: string; quantity: number; price: number; totalPrice: number; itemIndex: number }>;
     isGhostOrder: boolean;
+    initialMode?: 'by-amount' | 'by-items';
+    collectionMode?: SplitPaymentCollectionMode;
   } | null>(null);
+  const [pendingEditRefundSettlement, setPendingEditRefundSettlement] =
+    useState<PendingEditRefundSettlement | null>(null);
 
   // State for delivery flow
   const [showPhoneLookupModal, setShowPhoneLookupModal] = useState(false);
@@ -268,6 +293,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const alertTimeoutRef = useRef<number | null>(null);
   const alertingOrderIdRef = useRef<string | null>(null);
   const shiftRefreshArmedRef = useRef(false);
+  const splitPaymentCompletedRef = useRef(false);
 
   // Ref to track if menu modals are open (used in interval callback to avoid re-creating interval)
   const isMenuModalOpenRef = React.useRef(false);
@@ -391,7 +417,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Shift activation refresh (event-driven steady state)
   // We avoid continuous polling and perform a single silent refresh when a
   // shift becomes active (or when blocked modals close after activation).
-  const { isShiftActive } = useShift();
+  const { isShiftActive, staff, activeShift } = useShift();
   useEffect(() => {
     if (!isShiftActive) {
       shiftRefreshArmedRef.current = false;
@@ -1612,6 +1638,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         // This must happen before the finally block closes MenuModal.
         if (isSplitPayment && createdOrderId) {
           setSplitPaymentData({
+            kind: 'new-order',
             orderId: createdOrderId,
             orderTotal: total,
             items: buildSplitPaymentItems({
@@ -1630,6 +1657,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
               adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
             }),
             isGhostOrder,
+            initialMode: 'by-items',
           });
         }
 
@@ -1701,10 +1729,213 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   };
 
   // Handle split payment completion — dismiss the modal and refresh orders
+  const resetEditOrderState = useCallback(() => {
+    setShowEditOrderModal(false);
+    setShowEditMenuModal(false);
+    setPendingEditOrders([]);
+    setEditingSingleOrder(null);
+    setCurrentEditOrderId(undefined);
+    setCurrentEditOrderNumber(undefined);
+    setCurrentEditSupabaseId(undefined);
+  }, []);
+
+  const normalizeEditOrderItems = useCallback((items: any[]): OrderItem[] => (
+    items.map((item: any, index: number) => {
+      const quantity = Math.max(0, Number(item.quantity || 0));
+      const unitPrice = Number(item.unit_price ?? item.unitPrice ?? item.price ?? 0);
+      const originalUnitPrice = Number(item.original_unit_price ?? item.originalUnitPrice ?? unitPrice);
+      const totalPrice = Number(
+        item.total_price
+        ?? item.totalPrice
+        ?? (unitPrice * quantity),
+      );
+
+      return {
+        id: String(item.id || item.menu_item_id || item.menuItemId || `item-${index}`),
+        menu_item_id: item.menu_item_id || item.menuItemId || item.id,
+        name: item.name || 'Item',
+        quantity,
+        price: unitPrice,
+        unit_price: unitPrice,
+        total_price: totalPrice,
+        original_unit_price: originalUnitPrice,
+        is_price_overridden:
+          item.is_price_overridden === true
+          || item.isPriceOverridden === true
+          || Math.abs(unitPrice - originalUnitPrice) > 0.0001,
+        notes: item.notes || '',
+        customizations: item.customizations || null,
+        categoryName: item.categoryName || null,
+      } as OrderItem;
+    })
+  ), []);
+
+  const openEditSettlementCollectionPrompt = useCallback((
+    preview: OrderEditSettlementPreview,
+    request: EditSettlementRequest,
+  ) => {
+    const collectionMode: SplitPaymentCollectionMode | undefined =
+      preview.deliverySettlement?.driverCashOwned
+        ? {
+            enabled: true,
+            allowDriverShift: true,
+            defaultCollectedBy: 'driver_shift',
+            label: t('splitPayment.collectedBy', { defaultValue: 'Collected By' }),
+            description: t('orderDashboard.deliveryDriverSettlement', {
+              defaultValue: 'Choose whether the extra amount was settled by the driver or by the cashier.',
+            }),
+          }
+        : undefined;
+
+    setSplitPaymentData({
+      kind: 'edit-settlement',
+      orderId: preview.orderId,
+      orderTotal: preview.nextTotal,
+      items: buildSplitPaymentItems({
+        items: request.items.map((item: any, index: number) => ({
+          name: item.name || 'Item',
+          quantity: Number(item.quantity || 1),
+          price: Number(item.unit_price ?? item.unitPrice ?? item.price ?? 0),
+          totalPrice: Number(item.total_price ?? item.totalPrice ?? ((item.unit_price ?? item.unitPrice ?? item.price ?? 0) * (item.quantity || 1))),
+          itemIndex: Number(item.itemIndex ?? index),
+        })),
+        orderTotal: preview.nextTotal,
+        adjustmentLabel: t('splitPayment.adjustment', { defaultValue: 'Adjustment' }),
+      }),
+      isGhostOrder: preview.isGhostOrder,
+      initialMode: 'by-amount',
+      collectionMode,
+    });
+  }, [t]);
+
+  const applySettlementAwareOrderEdit = useCallback(async (
+    requests: EditSettlementRequest[],
+  ): Promise<void> => {
+    const normalizedRequests = requests.map((request) => ({
+      ...request,
+      items: normalizeEditOrderItems(request.items),
+    }));
+
+    const previews = await Promise.all(
+      normalizedRequests.map((request) => bridge.orders.previewEditSettlement({
+        orderId: request.orderId,
+        items: request.items,
+        orderNotes: request.orderNotes,
+      })),
+    );
+
+    if (normalizedRequests.length > 1 && previews.some((preview) => preview.requiredAction !== 'none')) {
+      throw new Error(
+        t('orderDashboard.bulkPaidEditUnsupported', {
+          defaultValue: 'Paid or partially paid orders with settlement changes must be edited one at a time.',
+        }),
+      );
+    }
+
+    if (normalizedRequests.length === 1 && previews[0]?.requiredAction === 'collect') {
+      const request = normalizedRequests[0];
+      const preview = previews[0];
+      await bridge.orders.applyEditSettlement({
+        orderId: request.orderId,
+        items: request.items,
+        orderNotes: request.orderNotes,
+        action: { type: 'mark_partial' },
+      });
+      resetEditOrderState();
+      clearBulkSelection();
+      setPendingEditRefundSettlement(null);
+      openEditSettlementCollectionPrompt(preview, request);
+      toast.success(
+        t('orderDashboard.orderEditAwaitingPayment', {
+          defaultValue: 'Order changes saved. Collect the remaining balance to finish settlement.',
+        }),
+      );
+      await silentRefresh().catch(() => {});
+      return;
+    }
+
+    if (normalizedRequests.length === 1 && previews[0]?.requiredAction === 'refund') {
+      resetEditOrderState();
+      clearBulkSelection();
+      setPendingEditRefundSettlement({
+        preview: previews[0],
+        request: normalizedRequests[0],
+      });
+      return;
+    }
+
+    for (const request of normalizedRequests) {
+      await bridge.orders.applyEditSettlement({
+        orderId: request.orderId,
+        items: request.items,
+        orderNotes: request.orderNotes,
+        action: { type: 'none' },
+      });
+    }
+
+    toast.success(t('orderDashboard.orderItemsUpdated', { count: normalizedRequests.length }));
+    setPendingEditRefundSettlement(null);
+    resetEditOrderState();
+    clearBulkSelection();
+    await loadOrders();
+  }, [
+    bridge.orders,
+    clearBulkSelection,
+    loadOrders,
+    normalizeEditOrderItems,
+    openEditSettlementCollectionPrompt,
+    resetEditOrderState,
+    silentRefresh,
+    t,
+  ]);
+
+  const handleEditRefundSettlementConfirm = useCallback(async (
+    refunds: OrderEditSettlementRefund[],
+  ) => {
+    if (!pendingEditRefundSettlement) {
+      return;
+    }
+
+    const request = pendingEditRefundSettlement.request;
+    await bridge.orders.applyEditSettlement({
+      orderId: request.orderId,
+      items: request.items,
+      orderNotes: request.orderNotes,
+      action: {
+        type: 'refund',
+        refunds: refunds.map((refund) => ({
+          ...refund,
+          staffId: refund.staffId ?? staff?.staffId,
+          staffShiftId: refund.staffShiftId ?? activeShift?.id,
+        })),
+      },
+    });
+
+    setPendingEditRefundSettlement(null);
+    toast.success(t('orderDashboard.orderItemsUpdated', { count: 1 }));
+    await loadOrders();
+  }, [activeShift?.id, bridge.orders, loadOrders, pendingEditRefundSettlement, staff?.staffId, t]);
+
   const handleSplitComplete = async (_result: SplitPaymentResult) => {
+    splitPaymentCompletedRef.current = true;
     setSplitPaymentData(null);
     await silentRefresh().catch(() => {});
   };
+
+  const handleSplitPaymentClose = useCallback(() => {
+    const closingSplitPayment = splitPaymentData;
+    const wasSuccessful = splitPaymentCompletedRef.current;
+    splitPaymentCompletedRef.current = false;
+    setSplitPaymentData(null);
+    if (!wasSuccessful && closingSplitPayment?.kind === 'edit-settlement') {
+      toast(
+        t('orderDashboard.orderEditPartialPaymentSaved', {
+          defaultValue: 'Order changes were saved. The remaining balance is still pending payment.',
+        }),
+      );
+    }
+    void silentRefresh().catch(() => {});
+  }, [silentRefresh, splitPaymentData, t]);
 
   // Handle bulk actions
   const handleBulkAction = async (action: string) => {
@@ -2068,11 +2299,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       toast.error(t('orderDashboard.paymentMethodEditUnavailable'));
       return;
     }
-
-    if (editPaymentTarget.currentMethod === nextMethod) {
-      toast.success(t('orderDashboard.paymentMethodNoChange'));
-      return;
-    }
+    const sameMethodRequested = editPaymentTarget.currentMethod === nextMethod;
 
     setIsUpdatingPaymentMethod(true);
     try {
@@ -2084,7 +2311,19 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         throw new Error(result?.error || 'Failed to update payment method');
       }
 
-      toast.success(t('orderDashboard.paymentMethodUpdated'));
+      const retriedSync = Boolean(result?.data?.retriedSync);
+      if (sameMethodRequested && !retriedSync) {
+        toast.success(t('orderDashboard.paymentMethodNoChange'));
+        return;
+      }
+
+      toast.success(
+        retriedSync
+          ? t('orderDashboard.paymentMethodSyncRetried', {
+              defaultValue: 'Payment sync retry queued',
+            })
+          : t('orderDashboard.paymentMethodUpdated')
+      );
       await loadOrders();
       setShowEditPaymentModal(false);
       setEditPaymentTarget(null);
@@ -2093,7 +2332,11 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       clearBulkSelection();
     } catch (error) {
       console.error('Failed to update payment method:', error);
-      toast.error(t('orderDashboard.paymentMethodUpdateFailed'));
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : t('orderDashboard.paymentMethodUpdateFailed');
+      toast.error(message);
     } finally {
       setIsUpdatingPaymentMethod(false);
     }
@@ -2174,39 +2417,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   // Handle order items edit
   const handleOrderItemsSave = async (items: OrderItem[], orderNotes?: string) => {
     try {
-      // Update order items for all pending edit orders
-      for (const orderId of pendingEditOrders) {
-        const result = await bridge.invoke('order:update-items', {
+      await applySettlementAwareOrderEdit(
+        pendingEditOrders.map((orderId) => ({
           orderId,
+          orderNumber: (orders.find((order) => order.id === orderId) as any)?.order_number
+            || orders.find((order) => order.id === orderId)?.orderNumber,
           items,
-          orderNotes
-        });
-
-        if (!result?.success) {
-          throw new Error(result?.error || 'Failed to update order items');
-        }
-      }
-
-      toast.success(t('orderDashboard.orderItemsUpdated', { count: pendingEditOrders.length }));
-
-      // Refresh orders to show updated data
-      await loadOrders();
-
-      // Close modal and clear state
-      setShowEditOrderModal(false);
-      setPendingEditOrders([]);
-      setEditingSingleOrder(null);
-      clearBulkSelection();
+          orderNotes,
+        })),
+      );
     } catch (error) {
       console.error('Failed to update order items:', error);
-      toast.error(t('orderDashboard.orderItemsFailed'));
+      const errorMessage = extractOrderDashboardErrorMessage(error);
+      toast.error(errorMessage || t('orderDashboard.orderItemsFailed'));
     }
   };
 
   const handleEditOrderClose = () => {
-    setShowEditOrderModal(false);
-    setPendingEditOrders([]);
-    setEditingSingleOrder(null);
+    resetEditOrderState();
   };
 
   // Handle menu-based order edit completion
@@ -2217,44 +2445,21 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     notes?: string;
   }) => {
     try {
-      const result = await bridge.invoke('order:update-items', {
+      await applySettlementAwareOrderEdit([{
         orderId: orderData.orderId,
+        orderNumber: currentEditOrderNumber,
         items: orderData.items,
-        orderNotes: orderData.notes
-      });
-
-      if (!result?.success) {
-        throw new Error(result?.error || 'Failed to update order items');
-      }
-
-      toast.success(t('orderDashboard.orderItemsUpdated', { count: 1 }));
-
-      // Refresh orders to show updated data
-      await loadOrders();
-
-      // Close modal and clear state
-      setShowEditMenuModal(false);
-      setPendingEditOrders([]);
-      setEditingSingleOrder(null);
-      clearBulkSelection();
-      // Clear the persisted edit order details
-      setCurrentEditOrderId(undefined);
-      setCurrentEditOrderNumber(undefined);
-      setCurrentEditSupabaseId(undefined);
+        orderNotes: orderData.notes,
+      }]);
     } catch (error) {
       console.error('Failed to update order items:', error);
-      toast.error(t('orderDashboard.orderItemsFailed'));
+      const errorMessage = extractOrderDashboardErrorMessage(error);
+      toast.error(errorMessage || t('orderDashboard.orderItemsFailed'));
     }
   };
 
   const handleEditMenuClose = () => {
-    setShowEditMenuModal(false);
-    setPendingEditOrders([]);
-    setEditingSingleOrder(null);
-    // Clear the persisted edit order details
-    setCurrentEditOrderId(undefined);
-    setCurrentEditOrderNumber(undefined);
-    setCurrentEditSupabaseId(undefined);
+    resetEditOrderState();
   };
 
   // Get customer info for the first selected order (for editing)
@@ -2633,15 +2838,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       {splitPaymentData && (
         <SplitPaymentModal
           isOpen={true}
-          onClose={() => setSplitPaymentData(null)}
+          onClose={handleSplitPaymentClose}
           orderId={splitPaymentData.orderId}
           orderTotal={splitPaymentData.orderTotal}
           items={splitPaymentData.items}
-          initialMode="by-items"
+          initialMode={splitPaymentData.initialMode || 'by-items'}
           isGhostOrder={splitPaymentData.isGhostOrder}
+          collectionMode={splitPaymentData.collectionMode}
+          allowDiscounts={splitPaymentData.kind !== 'edit-settlement'}
           onSplitComplete={handleSplitComplete}
         />
       )}
+
+      <EditOrderRefundSettlementModal
+        isOpen={pendingEditRefundSettlement !== null}
+        orderNumber={pendingEditRefundSettlement?.request.orderNumber}
+        preview={pendingEditRefundSettlement?.preview || null}
+        onConfirm={handleEditRefundSettlementConfirm}
+      />
 
       {/* Order Approval Panel */}
       {showApprovalPanel && selectedOrderForApproval && (

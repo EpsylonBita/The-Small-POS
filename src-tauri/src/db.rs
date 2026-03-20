@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 36;
+const CURRENT_SCHEMA_VERSION: i32 = 37;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -245,6 +245,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 36 {
         migrate_v36(conn)?;
+    }
+    if current < 37 {
+        migrate_v37(conn)?;
     }
 
     Ok(())
@@ -2472,6 +2475,41 @@ fn migrate_v36(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v36 mark schema version: {e}"))?;
 
     info!("Applied migration v36 (remote payment ids + expanded payment origins)");
+    Ok(())
+}
+
+fn migrate_v37(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "payment_adjustments", "refund_method")? {
+        conn.execute_batch(
+            "ALTER TABLE payment_adjustments
+             ADD COLUMN refund_method TEXT
+             CHECK (refund_method IN ('cash', 'card'));",
+        )
+        .map_err(|e| format!("migration v37 add payment_adjustments.refund_method: {e}"))?;
+    }
+
+    if !column_exists(conn, "payment_adjustments", "cash_handler")? {
+        conn.execute_batch(
+            "ALTER TABLE payment_adjustments
+             ADD COLUMN cash_handler TEXT
+             CHECK (cash_handler IN ('cashier_drawer', 'driver_shift'));",
+        )
+        .map_err(|e| format!("migration v37 add payment_adjustments.cash_handler: {e}"))?;
+    }
+
+    if !column_exists(conn, "payment_adjustments", "adjustment_context")? {
+        conn.execute_batch(
+            "ALTER TABLE payment_adjustments
+             ADD COLUMN adjustment_context TEXT NOT NULL DEFAULT 'manual'
+             CHECK (adjustment_context IN ('manual', 'edit_settlement'));",
+        )
+        .map_err(|e| format!("migration v37 add payment_adjustments.adjustment_context: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (37)", [])
+        .map_err(|e| format!("migration v37 mark schema version: {e}"))?;
+
+    info!("Applied migration v37 (payment adjustment settlement attribution)");
     Ok(())
 }
 

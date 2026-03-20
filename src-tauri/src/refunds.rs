@@ -10,7 +10,7 @@
 //! - Works fully offline; syncs when connectivity returns
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -18,19 +18,93 @@ use uuid::Uuid;
 use crate::db::DbState;
 use crate::storage;
 
-// ---------------------------------------------------------------------------
-// Refund payment
-// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefundMethod {
+    Cash,
+    Card,
+}
 
-/// Record a partial (or full) refund against a payment.
-///
-/// Inserts a `payment_adjustments` row with `adjustment_type = 'refund'`,
-/// validates the refund does not exceed the remaining balance, and enqueues
-/// a sync entry.  If the total refunds equal the original payment amount,
-/// the payment status is set to `'refunded'`.
-pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CashHandler {
+    CashierDrawer,
+    DriverShift,
+}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdjustmentContext {
+    Manual,
+    EditSettlement,
+}
+
+impl RefundMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            RefundMethod::Cash => "cash",
+            RefundMethod::Card => "card",
+        }
+    }
+}
+
+impl CashHandler {
+    fn as_str(self) -> &'static str {
+        match self {
+            CashHandler::CashierDrawer => "cashier_drawer",
+            CashHandler::DriverShift => "driver_shift",
+        }
+    }
+}
+
+impl AdjustmentContext {
+    fn as_str(self) -> &'static str {
+        match self {
+            AdjustmentContext::Manual => "manual",
+            AdjustmentContext::EditSettlement => "edit_settlement",
+        }
+    }
+}
+
+fn normalize_refund_method(value: Option<&str>) -> Option<RefundMethod> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cash") => Some(RefundMethod::Cash),
+        Some("card") => Some(RefundMethod::Card),
+        _ => None,
+    }
+}
+
+fn normalize_cash_handler(value: Option<&str>) -> Option<CashHandler> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cashier_drawer") => Some(CashHandler::CashierDrawer),
+        Some("driver_shift") => Some(CashHandler::DriverShift),
+        _ => None,
+    }
+}
+
+fn normalize_adjustment_context(value: Option<&str>) -> AdjustmentContext {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("edit_settlement") => AdjustmentContext::EditSettlement,
+        _ => AdjustmentContext::Manual,
+    }
+}
+
+pub(crate) fn refund_payment_in_connection(
+    conn: &Connection,
+    payload: &Value,
+) -> Result<Value, String> {
     let payment_id = str_field(payload, "paymentId")
         .or_else(|| str_field(payload, "payment_id"))
         .ok_or("Missing paymentId")?;
@@ -40,13 +114,37 @@ pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     }
     let reason = str_field(payload, "reason").ok_or("Missing reason")?;
     let staff_id = str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let staff_shift_id =
+        str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
+    let requested_refund_method = normalize_refund_method(
+        str_field(payload, "refundMethod")
+            .or_else(|| str_field(payload, "refund_method"))
+            .as_deref(),
+    );
+    let requested_cash_handler = normalize_cash_handler(
+        str_field(payload, "cashHandler")
+            .or_else(|| str_field(payload, "cash_handler"))
+            .as_deref(),
+    );
+    let adjustment_context = normalize_adjustment_context(
+        str_field(payload, "adjustmentContext")
+            .or_else(|| str_field(payload, "adjustment_context"))
+            .as_deref(),
+    );
 
-    // Fetch the payment — must be completed (not voided/refunded)
-    let (order_id, original_amount, pay_status): (String, f64, String) = conn
+    let (order_id, original_amount, pay_status, payment_method, payment_shift_id): (
+        String,
+        f64,
+        String,
+        String,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT order_id, amount, status FROM order_payments WHERE id = ?1",
+            "SELECT order_id, amount, status, method, staff_shift_id
+             FROM order_payments
+             WHERE id = ?1",
             params![payment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
@@ -54,7 +152,16 @@ pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         return Err("Cannot refund a voided payment".into());
     }
 
-    // Sum prior refunds for this payment
+    let refund_method =
+        requested_refund_method.unwrap_or_else(|| match payment_method.to_ascii_lowercase().as_str() {
+            "card" => RefundMethod::Card,
+            _ => RefundMethod::Cash,
+        });
+    let cash_handler = match refund_method {
+        RefundMethod::Cash => Some(requested_cash_handler.unwrap_or(CashHandler::CashierDrawer)),
+        RefundMethod::Card => None,
+    };
+
     let prior_refunds: f64 = conn
         .query_row(
             "SELECT COALESCE(SUM(amount), 0.0) FROM payment_adjustments
@@ -66,13 +173,11 @@ pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     let remaining = original_amount - prior_refunds;
     if amount > remaining + 0.001 {
-        // 0.001 tolerance for floating point
         return Err(format!(
             "Refund amount {amount:.2} exceeds remaining balance {remaining:.2}"
         ));
     }
 
-    // Determine sync_state based on whether the parent payment has synced
     let pay_sync_state: String = conn
         .query_row(
             "SELECT sync_state FROM order_payments WHERE id = ?1",
@@ -92,108 +197,149 @@ pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let new_total_refunds = prior_refunds + amount;
     let is_fully_refunded = (new_total_refunds - original_amount).abs() < 0.01;
 
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("begin transaction: {e}"))?;
+    conn.execute(
+        "INSERT INTO payment_adjustments (
+            id, payment_id, order_id, adjustment_type, amount,
+            reason, staff_id, sync_state, refund_method, cash_handler,
+            adjustment_context, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        params![
+            adjustment_id,
+            payment_id,
+            order_id,
+            amount,
+            reason,
+            staff_id,
+            initial_sync_state,
+            refund_method.as_str(),
+            cash_handler.map(CashHandler::as_str),
+            adjustment_context.as_str(),
+            now,
+        ],
+    )
+    .map_err(|e| format!("insert adjustment: {e}"))?;
 
-    let result = (|| -> Result<(), String> {
-        // Insert adjustment
+    if is_fully_refunded {
         conn.execute(
-            "INSERT INTO payment_adjustments (
-                id, payment_id, order_id, adjustment_type, amount,
-                reason, staff_id, sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?8)",
-            params![
-                adjustment_id,
-                payment_id,
-                order_id,
-                amount,
-                reason,
-                staff_id,
-                initial_sync_state,
-                now,
-            ],
+            "UPDATE order_payments SET status = 'refunded', updated_at = ?1 WHERE id = ?2",
+            params![now, payment_id],
         )
-        .map_err(|e| format!("insert adjustment: {e}"))?;
+        .map_err(|e| format!("update payment status: {e}"))?;
+    }
 
-        // If fully refunded, update payment status
-        if is_fully_refunded {
-            conn.execute(
-                "UPDATE order_payments SET status = 'refunded', updated_at = ?1 WHERE id = ?2",
-                params![now, payment_id],
-            )
-            .map_err(|e| format!("update payment status: {e}"))?;
-        }
-
-        // Update cash drawer total_refunds.
-        // Resolve shift_id from the order's staff_shift_id.
-        let shift_id: Option<String> = conn
-            .query_row(
-                "SELECT staff_shift_id FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        if let Some(ref sid) = shift_id {
-            conn.execute(
-                "UPDATE cash_drawer_sessions SET
-                    total_refunds = COALESCE(total_refunds, 0) + ?1,
-                    updated_at = ?2
-                 WHERE staff_shift_id = ?3",
-                params![amount, now, sid],
-            )
-            .map_err(|e| format!("update drawer refunds: {e}"))?;
-        }
-
-        // Enqueue for sync
-        let idempotency_key = format!("adjustment:{adjustment_id}");
-        let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
-        let branch_id = storage::get_credential("branch_id").unwrap_or_default();
-        let sync_payload = serde_json::json!({
-            "adjustmentId": adjustment_id,
-            "paymentId": payment_id,
-            "orderId": order_id,
-            "adjustmentType": "refund",
-            "amount": amount,
-            "reason": reason,
-            "staffId": staff_id,
-            "terminalId": terminal_id,
-            "branchId": branch_id,
-        })
-        .to_string();
-
-        let queue_status = if initial_sync_state == "waiting_parent" {
-            "deferred"
-        } else {
-            "pending"
-        };
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-             VALUES ('payment_adjustment', ?1, 'insert', ?2, ?3, ?4)",
-            params![adjustment_id, sync_payload, idempotency_key, queue_status],
+    let order_shift_id: Option<String> = conn
+        .query_row(
+            "SELECT staff_shift_id FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
         )
-        .map_err(|e| format!("enqueue adjustment sync: {e}"))?;
+        .ok()
+        .flatten();
 
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit: {e}"))?;
+    match cash_handler {
+        Some(CashHandler::CashierDrawer) => {
+            let target_shift_id = staff_shift_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(payment_shift_id.clone())
+                .or(order_shift_id.clone());
+            if let Some(ref sid) = target_shift_id {
+                conn.execute(
+                    "UPDATE cash_drawer_sessions SET
+                        total_refunds = COALESCE(total_refunds, 0) + ?1,
+                        updated_at = ?2
+                     WHERE staff_shift_id = ?3",
+                    params![amount, now, sid],
+                )
+                .map_err(|e| format!("update drawer refunds: {e}"))?;
+            }
         }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
+        Some(CashHandler::DriverShift) => {
+            let updated = conn
+                .execute(
+                    "UPDATE driver_earnings
+                     SET cash_collected = CASE
+                            WHEN COALESCE(cash_collected, 0) - ?1 < 0 THEN 0
+                            ELSE COALESCE(cash_collected, 0) - ?1
+                         END,
+                         cash_to_return = CASE
+                            WHEN COALESCE(cash_to_return, 0) - ?1 < 0 THEN 0
+                            ELSE COALESCE(cash_to_return, 0) - ?1
+                         END,
+                         payment_method = CASE
+                            WHEN COALESCE(card_amount, 0) > 0 AND
+                                 CASE WHEN COALESCE(cash_collected, 0) - ?1 < 0 THEN 0 ELSE COALESCE(cash_collected, 0) - ?1 END > 0
+                                THEN 'mixed'
+                            WHEN COALESCE(card_amount, 0) > 0 THEN 'card'
+                            ELSE 'cash'
+                         END,
+                         updated_at = ?2
+                     WHERE order_id = ?3
+                       AND COALESCE(settled, 0) = 0
+                       AND COALESCE(is_transferred, 0) = 0",
+                    params![amount, now, order_id],
+                )
+                .map_err(|e| format!("update driver settlement refund: {e}"))?;
+            if updated == 0 {
+                return Err("Driver cash refund requires an active unsettled driver earning".into());
+            }
+        }
+        None => {
+            let _ = conn.execute(
+                "UPDATE driver_earnings
+                 SET card_amount = CASE
+                        WHEN COALESCE(card_amount, 0) - ?1 < 0 THEN 0
+                        ELSE COALESCE(card_amount, 0) - ?1
+                     END,
+                     payment_method = CASE
+                        WHEN CASE WHEN COALESCE(card_amount, 0) - ?1 < 0 THEN 0 ELSE COALESCE(card_amount, 0) - ?1 END > 0
+                             AND COALESCE(cash_collected, 0) > 0
+                            THEN 'mixed'
+                        WHEN COALESCE(cash_collected, 0) > 0 THEN 'cash'
+                        ELSE 'card'
+                     END,
+                     updated_at = ?2
+                 WHERE order_id = ?3
+                   AND COALESCE(settled, 0) = 0
+                   AND COALESCE(is_transferred, 0) = 0",
+                params![amount, now, order_id],
+            );
         }
     }
 
-    info!(
-        adjustment_id = %adjustment_id,
-        payment_id = %payment_id,
-        amount = %amount,
-        "Refund recorded"
-    );
+    let idempotency_key = format!("adjustment:{adjustment_id}");
+    let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
+    let branch_id = storage::get_credential("branch_id").unwrap_or_default();
+    let sync_payload = serde_json::json!({
+        "adjustmentId": adjustment_id,
+        "paymentId": payment_id,
+        "orderId": order_id,
+        "adjustmentType": "refund",
+        "amount": amount,
+        "reason": reason,
+        "staffId": staff_id,
+        "staffShiftId": staff_shift_id,
+        "terminalId": terminal_id,
+        "branchId": branch_id,
+        "refundMethod": refund_method.as_str(),
+        "cashHandler": cash_handler.map(CashHandler::as_str),
+        "adjustmentContext": adjustment_context.as_str(),
+    })
+    .to_string();
+
+    let queue_status = if initial_sync_state == "waiting_parent" {
+        "deferred"
+    } else {
+        "pending"
+    };
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+         VALUES ('payment_adjustment', ?1, 'insert', ?2, ?3, ?4)",
+        params![adjustment_id, sync_payload, idempotency_key, queue_status],
+    )
+    .map_err(|e| format!("enqueue adjustment sync: {e}"))?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -202,8 +348,57 @@ pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         "amount": amount,
         "remainingBalance": original_amount - new_total_refunds,
         "fullyRefunded": is_fully_refunded,
+        "refundMethod": refund_method.as_str(),
+        "cashHandler": cash_handler.map(CashHandler::as_str),
+        "adjustmentContext": adjustment_context.as_str(),
         "message": format!("Refund of {amount:.2} recorded"),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Refund payment
+// ---------------------------------------------------------------------------
+
+/// Record a partial (or full) refund against a payment.
+///
+/// Inserts a `payment_adjustments` row with `adjustment_type = 'refund'`,
+/// validates the refund does not exceed the remaining balance, and enqueues
+/// a sync entry.  If the total refunds equal the original payment amount,
+/// the payment status is set to `'refunded'`.
+pub fn refund_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = refund_payment_in_connection(&conn, payload);
+
+    match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            let payment_id = value
+                .get("paymentId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let adjustment_id = value
+                .get("adjustmentId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let amount = value.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+            info!(
+                adjustment_id = %adjustment_id,
+                payment_id = %payment_id,
+                amount = %amount,
+                "Refund recorded"
+            );
+            Ok(value)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +603,7 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
         .prepare(
             "SELECT id, payment_id, order_id, adjustment_type, amount,
                     reason, staff_id, sync_state, sync_last_error,
+                    refund_method, cash_handler, adjustment_context,
                     created_at, updated_at
              FROM payment_adjustments
              WHERE order_id = ?1
@@ -427,8 +623,11 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
                 "staffId": row.get::<_, Option<String>>(6)?,
                 "syncState": row.get::<_, String>(7)?,
                 "syncLastError": row.get::<_, Option<String>>(8)?,
-                "createdAt": row.get::<_, String>(9)?,
-                "updatedAt": row.get::<_, String>(10)?,
+                "refundMethod": row.get::<_, Option<String>>(9)?,
+                "cashHandler": row.get::<_, Option<String>>(10)?,
+                "adjustmentContext": row.get::<_, Option<String>>(11)?,
+                "createdAt": row.get::<_, String>(12)?,
+                "updatedAt": row.get::<_, String>(13)?,
             }))
         })
         .map_err(|e| e.to_string())?;
