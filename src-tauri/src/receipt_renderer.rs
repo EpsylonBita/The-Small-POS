@@ -182,6 +182,8 @@ pub struct PaymentLine {
     pub detail: Option<String>,
 }
 
+pub const PAYMENT_DETAIL_AMOUNT_UNKNOWN: &str = "__amount_unknown__";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AdjustmentLine {
     pub label: String,
@@ -430,6 +432,7 @@ pub struct LayoutConfig {
     pub font_type: FontType,
     pub layout_density: LayoutDensity,
     pub header_emphasis: HeaderEmphasis,
+    pub layout_density_scale: f32,
     /// Use comma as decimal separator (e.g. Greek: 17,70 instead of 17.70).
     pub decimal_comma: bool,
     pub classic_customer_render_mode: ClassicCustomerRenderMode,
@@ -472,6 +475,7 @@ impl Default for LayoutConfig {
             font_type: FontType::A,
             layout_density: LayoutDensity::Compact,
             header_emphasis: HeaderEmphasis::Strong,
+            layout_density_scale: 1.0,
             decimal_comma: false,
             classic_customer_render_mode: ClassicCustomerRenderMode::Text,
             emulation_mode: ReceiptEmulationMode::Auto,
@@ -1013,7 +1017,7 @@ fn translate_order_type(lang: &str, order_type: &str) -> String {
     translated.to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderWarning {
     pub code: String,
     pub message: String,
@@ -1483,13 +1487,6 @@ fn append_customizations_html(body: &mut String, item: &ReceiptItem, lang: &str)
     }
 }
 
-fn is_completed_delivery_status(status: &str) -> bool {
-    matches!(
-        status.trim().to_ascii_lowercase().as_str(),
-        "completed" | "delivered"
-    )
-}
-
 fn delivery_value_or_dash(value: Option<&str>) -> String {
     value
         .map(str::trim)
@@ -1630,12 +1627,10 @@ fn delivery_fields<'a>(doc: &'a OrderReceiptDoc, lang: &str) -> Vec<(&'a str, &'
 fn delivery_slip_info_lines(doc: &OrderReceiptDoc, lang: &str) -> Vec<(String, String)> {
     let (address, city, postal, floor) = normalize_delivery_address_components(doc);
     let mut lines = Vec::new();
-    if doc.delivery_slip_mode == DeliverySlipMode::AssignDriver {
-        lines.push((
-            receipt_label(lang, "Driver").to_string(),
-            delivery_value_or_dash(doc.driver_name.as_deref()),
-        ));
-    }
+    lines.push((
+        receipt_label(lang, "Driver").to_string(),
+        delivery_value_or_dash(doc.driver_name.as_deref()),
+    ));
 
     lines.push((
         receipt_label(lang, "Customer").to_string(),
@@ -1674,12 +1669,20 @@ fn is_change_like_payment_label(label: &str) -> bool {
     normalized == "change" || normalized == "received" || normalized == "ρέστα"
 }
 
-fn delivery_payment_method_label(doc: &OrderReceiptDoc, lang: &str) -> Option<String> {
-    if !doc.order_type.trim().eq_ignore_ascii_case("delivery") {
-        return None;
-    }
+fn payment_amount_unknown(payment: &PaymentLine) -> bool {
+    payment
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|detail| detail.eq_ignore_ascii_case(PAYMENT_DETAIL_AMOUNT_UNKNOWN))
+}
+
+fn method_only_payment_label(doc: &OrderReceiptDoc, lang: &str) -> Option<String> {
     doc.payments.iter().find_map(|payment| {
         if is_change_like_payment_label(&payment.label) {
+            return None;
+        }
+        if !payment_amount_unknown(payment) {
             return None;
         }
         let mapped = receipt_label(lang, &payment.label).trim();
@@ -1688,6 +1691,12 @@ fn delivery_payment_method_label(doc: &OrderReceiptDoc, lang: &str) -> Option<St
         } else {
             Some(mapped.to_string())
         }
+    })
+}
+
+fn has_payment_amount_warning(doc: &OrderReceiptDoc) -> bool {
+    doc.payments.iter().any(|payment| {
+        !is_change_like_payment_label(&payment.label) && payment_amount_unknown(payment)
     })
 }
 
@@ -1721,14 +1730,23 @@ fn append_customizations_html_v2(body: &mut String, item: &ReceiptItem, lang: &s
 }
 
 fn should_render_delivery_block(doc: &OrderReceiptDoc) -> bool {
-    doc.order_type.trim().eq_ignore_ascii_case("delivery")
-        && is_completed_delivery_status(&doc.status)
-        && doc
-            .driver_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some()
+    if !doc.order_type.trim().eq_ignore_ascii_case("delivery") {
+        return false;
+    }
+
+    [
+        doc.driver_name.as_deref(),
+        doc.delivery_address.as_deref(),
+        doc.customer_phone.as_deref(),
+        doc.delivery_city.as_deref(),
+        doc.delivery_postal_code.as_deref(),
+        doc.delivery_floor.as_deref(),
+        doc.name_on_ringer.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .any(|value| !value.is_empty())
 }
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -1946,22 +1964,22 @@ fn html_shell(title: &str, body: &str, cfg: &LayoutConfig) -> String {
         LayoutDensity::Compact => 0.9_f32,
         LayoutDensity::Balanced => 1.0_f32,
         LayoutDensity::Spacious => 1.18_f32,
-    };
+    } * cfg.layout_density_scale.clamp(0.7, 1.35);
     let classic_meta_line_height = match cfg.layout_density {
         LayoutDensity::Compact => 1.65_f32,
         LayoutDensity::Balanced => 1.85_f32,
         LayoutDensity::Spacious => 2.05_f32,
-    };
+    } * cfg.layout_density_scale.clamp(0.7, 1.35);
     let classic_detail_line_height = match cfg.layout_density {
         LayoutDensity::Compact => 1.55_f32,
         LayoutDensity::Balanced => 1.75_f32,
         LayoutDensity::Spacious => 1.95_f32,
-    };
+    } * cfg.layout_density_scale.clamp(0.7, 1.35);
     let classic_footer_line_height = match cfg.layout_density {
         LayoutDensity::Compact => 1.7_f32,
         LayoutDensity::Balanced => 2.0_f32,
         LayoutDensity::Spacious => 2.2_f32,
-    };
+    } * cfg.layout_density_scale.clamp(0.7, 1.35);
     let classic_header_weight = if cfg.header_emphasis == HeaderEmphasis::Strong {
         700
     } else {
@@ -2152,7 +2170,7 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
             let render_delivery_block = should_render_delivery_block(doc);
             let display_date = format_datetime_human(&doc.created_at);
             let order_type_display = translate_order_type(lang, &doc.order_type);
-            let delivery_method_only_payment = delivery_payment_method_label(doc, lang);
+            let delivery_method_only_payment = method_only_payment_label(doc, lang);
             let mut body = String::new();
             let banner = build_status_banner_html(doc);
             body.push_str(&banner);
@@ -2333,6 +2351,13 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                             // Use "change" class for Received/Change rows
                             let is_change = payment.label.eq_ignore_ascii_case("Change")
                                 || payment.label == "\u{03A1}\u{03AD}\u{03C3}\u{03C4}\u{03B1}";
+                            if payment_amount_unknown(payment) {
+                                body.push_str(&format!(
+                                    "<tr><td class=\"dim\">{}</td><td class=\"r\"></td></tr>",
+                                    esc(label)
+                                ));
+                                continue;
+                            }
                             if is_change {
                                 body.push_str(&format!(
                                     "<tr class=\"change\"><td>{}</td><td class=\"r\">{}</td></tr>",
@@ -2935,12 +2960,47 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 }
             }
             body.push_str("</div>");
-            if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+            body.push_str("<div class=\"section\">");
+            if let Some(method_label) = method_only_payment_label(doc, lang) {
                 body.push_str(&format!(
-                    "<div class=\"section center\"><strong>{}</strong></div>",
+                    "<div class=\"center\"><strong>{}</strong></div>",
                     esc(&method_label)
                 ));
+            } else if doc.payments.is_empty() {
+                body.push_str(&format!(
+                    "<div class=\"line\"><span>{}</span><span></span></div>",
+                    esc(receipt_label(lang, "No payment recorded"))
+                ));
+            } else {
+                for payment in &doc.payments {
+                    let label = receipt_label(lang, &payment.label);
+                    if payment_amount_unknown(payment) {
+                        body.push_str(&format!(
+                            "<div class=\"center\"><strong>{}</strong></div>",
+                            esc(label)
+                        ));
+                        continue;
+                    }
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(label),
+                        money_with_currency(payment.amount, cur)
+                    ));
+                }
+                if let Some(masked) = doc
+                    .masked_card
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    body.push_str(&format!(
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "Card")),
+                        esc(masked)
+                    ));
+                }
             }
+            body.push_str("</div>");
             // Footer
             body.push_str(&format!(
                 "<div class=\"section center\">{}</div>",
@@ -3489,20 +3549,6 @@ fn emit_centered_wrapped(builder: &mut EscPosBuilder, text: &str, width: usize) 
     }
 }
 
-fn emit_centered_address_lines(builder: &mut EscPosBuilder, address: &str, width: usize) {
-    let segments = split_address_segments(address);
-    if segments.is_empty() {
-        emit_centered_wrapped(builder, address, width);
-        return;
-    }
-
-    for segment in segments {
-        for line in wrap(&segment, width.max(8)) {
-            builder.center().text(&line).lf();
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct EscPosStyle {
     modern: bool,
@@ -3828,35 +3874,24 @@ fn emit_header(
             {
                 builder.center().bold(true).text(label).lf().bold(false);
             }
-            let mut rendered_address = false;
+            let primary_line = header_primary_line(cfg);
+            if !primary_line.is_empty() {
+                builder.center().bold(true);
+                emit_centered_wrapped(builder, primary_line, header_width);
+                builder.bold(false);
+            }
+            emit_rule(builder, header_width, style.profile.block_rule);
+            // Phone + VAT/DOY are left aligned in classic receipt v2.
             if let Some(address) = cfg
                 .store_address
                 .as_deref()
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
             {
-                rendered_address = true;
-                builder.center().bold(true);
-                emit_centered_address_lines(builder, address, header_width);
-                builder.bold(false);
-            }
-            if !rendered_address && !cfg.show_logo {
-                let org = cfg.organization_name.trim();
-                if !org.is_empty() {
-                    builder.center().bold(true);
-                    emit_centered_wrapped(builder, org, header_width);
-                    builder.bold(false);
-                }
-                if let Some(subtitle) = cfg.store_subtitle.as_deref().map(str::trim).filter(|v| {
-                    let org = cfg.organization_name.trim();
-                    !v.is_empty() && *v != org && !v.eq_ignore_ascii_case(org)
-                }) {
-                    builder.center();
-                    emit_centered_wrapped(builder, subtitle, header_width);
+                for segment in split_address_segments(address) {
+                    emit_wrapped(builder, &segment, header_width);
                 }
             }
-            emit_rule(builder, header_width, style.profile.block_rule);
-            // Phone + VAT/DOY are left aligned in classic receipt v2.
             let phone_val = cfg
                 .store_phone
                 .as_deref()
@@ -4039,6 +4074,7 @@ struct RasterTextStyle {
     tracking_px: f32,
     weight: RasterTextWeight,
     ink: u8,
+    apply_body_boldness: bool,
 }
 
 impl RasterTextStyle {
@@ -4080,13 +4116,18 @@ fn raster_exact_preset_for_paper(paper: PaperWidth) -> RasterExactPreset {
         PaperWidth::Mm112 => 1.22_f32,
     };
     let scaled_i = |value: i32| ((value as f32) * scale).round() as i32;
-    let style = |size_px: f32, line_height: i32, tracking_px: f32, weight: RasterTextWeight| {
+    let style = |size_px: f32,
+                 line_height: i32,
+                 tracking_px: f32,
+                 weight: RasterTextWeight,
+                 apply_body_boldness: bool| {
         RasterTextStyle {
             size_px: size_px * scale,
             line_height: scaled_i(line_height).max(12),
             tracking_px: tracking_px * scale,
             weight,
             ink: 0,
+            apply_body_boldness,
         }
     };
 
@@ -4101,19 +4142,33 @@ fn raster_exact_preset_for_paper(paper: PaperWidth) -> RasterExactPreset {
         rule_thickness: scaled_i(2).max(1),
         banner_padding_y: scaled_i(4).max(2),
         short_star_count: 12,
-        address_style: style(34.0, 42, 0.1, RasterTextWeight::Bold),
-        contact_style: style(29.0, 36, 0.05, RasterTextWeight::Regular),
-        banner_style: style(36.0, 44, 0.15, RasterTextWeight::Bold),
-        meta_style: style(29.0, 36, 0.05, RasterTextWeight::Regular),
-        section_style: style(33.0, 41, 0.1, RasterTextWeight::Bold),
-        item_style: style(30.0, 38, 0.05, RasterTextWeight::Regular),
-        customization_style: style(27.0, 34, 0.05, RasterTextWeight::Regular),
-        subtotal_style: style(31.0, 39, 0.05, RasterTextWeight::Regular),
-        total_style: style(44.0, 54, 0.15, RasterTextWeight::Bold),
-        payment_style: style(31.0, 39, 0.05, RasterTextWeight::Regular),
-        footer_star_style: style(22.0, 28, 0.1, RasterTextWeight::Regular),
-        footer_text_style: style(30.0, 37, 0.05, RasterTextWeight::Regular),
+        address_style: style(34.0, 42, 0.1, RasterTextWeight::Bold, false),
+        contact_style: style(29.0, 36, 0.05, RasterTextWeight::Regular, true),
+        banner_style: style(36.0, 44, 0.15, RasterTextWeight::Bold, false),
+        meta_style: style(29.0, 36, 0.05, RasterTextWeight::Regular, true),
+        section_style: style(33.0, 41, 0.1, RasterTextWeight::Bold, false),
+        item_style: style(30.0, 38, 0.05, RasterTextWeight::Regular, true),
+        customization_style: style(27.0, 34, 0.05, RasterTextWeight::Regular, true),
+        subtotal_style: style(31.0, 39, 0.05, RasterTextWeight::Regular, true),
+        total_style: style(44.0, 54, 0.15, RasterTextWeight::Bold, false),
+        payment_style: style(31.0, 39, 0.05, RasterTextWeight::Regular, true),
+        footer_star_style: style(22.0, 28, 0.1, RasterTextWeight::Regular, false),
+        footer_text_style: style(30.0, 37, 0.05, RasterTextWeight::Regular, true),
     }
+}
+
+fn classic_raster_spacing_scale(cfg: &LayoutConfig) -> f32 {
+    if cfg.template != ReceiptTemplate::Classic {
+        return 1.0;
+    }
+
+    let base = match cfg.layout_density {
+        LayoutDensity::Compact => 0.9_f32,
+        LayoutDensity::Balanced => 1.0_f32,
+        LayoutDensity::Spacious => 1.18_f32,
+    };
+
+    base * cfg.layout_density_scale.clamp(0.7, 1.35)
 }
 
 fn raster_readability_scale(cfg: &LayoutConfig) -> f32 {
@@ -4144,6 +4199,13 @@ fn scale_raster_text_style(style: RasterTextStyle, scale: f32) -> RasterTextStyl
     }
 }
 
+fn scale_raster_text_spacing(style: RasterTextStyle, scale: f32) -> RasterTextStyle {
+    RasterTextStyle {
+        line_height: ((style.line_height as f32) * scale).round().max(10.0) as i32,
+        ..style
+    }
+}
+
 fn scale_raster_exact_preset(mut preset: RasterExactPreset, scale: f32) -> RasterExactPreset {
     let scaled_i = |value: i32| ((value as f32) * scale).round().max(1.0) as i32;
     preset.top_inset = scaled_i(preset.top_inset);
@@ -4170,6 +4232,64 @@ fn scale_raster_exact_preset(mut preset: RasterExactPreset, scale: f32) -> Raste
     preset
 }
 
+fn scale_raster_exact_spacing(mut preset: RasterExactPreset, scale: f32) -> RasterExactPreset {
+    let scaled_i = |value: i32| ((value as f32) * scale).round().max(1.0) as i32;
+    preset.top_inset = scaled_i(preset.top_inset);
+    preset.bottom_padding = scaled_i(preset.bottom_padding);
+    preset.small_gap = scaled_i(preset.small_gap);
+    preset.medium_gap = scaled_i(preset.medium_gap);
+    preset.large_gap = scaled_i(preset.large_gap);
+    preset.rule_dash_dots = scaled_i(preset.rule_dash_dots).max(2);
+    preset.rule_gap_dots = scaled_i(preset.rule_gap_dots).max(1);
+    preset.banner_padding_y = scaled_i(preset.banner_padding_y).max(1);
+    preset.address_style = scale_raster_text_spacing(preset.address_style, scale);
+    preset.contact_style = scale_raster_text_spacing(preset.contact_style, scale);
+    preset.banner_style = scale_raster_text_spacing(preset.banner_style, scale);
+    preset.meta_style = scale_raster_text_spacing(preset.meta_style, scale);
+    preset.section_style = scale_raster_text_spacing(preset.section_style, scale);
+    preset.item_style = scale_raster_text_spacing(preset.item_style, scale);
+    preset.customization_style = scale_raster_text_spacing(preset.customization_style, scale);
+    preset.subtotal_style = scale_raster_text_spacing(preset.subtotal_style, scale);
+    preset.total_style = scale_raster_text_spacing(preset.total_style, scale);
+    preset.payment_style = scale_raster_text_spacing(preset.payment_style, scale);
+    preset.footer_star_style = scale_raster_text_spacing(preset.footer_star_style, scale);
+    preset.footer_text_style = scale_raster_text_spacing(preset.footer_text_style, scale);
+    preset
+}
+
+fn apply_raster_header_emphasis(
+    mut preset: RasterExactPreset,
+    cfg: &LayoutConfig,
+) -> RasterExactPreset {
+    if cfg.template != ReceiptTemplate::Classic {
+        return preset;
+    }
+
+    let strong_headers = cfg.header_emphasis == HeaderEmphasis::Strong;
+    let tracking_scale = if strong_headers { 1.0_f32 } else { 0.5_f32 };
+    let header_weight = if strong_headers {
+        RasterTextWeight::Bold
+    } else {
+        RasterTextWeight::Regular
+    };
+    let header_padding_scale = if strong_headers {
+        1.0_f32
+    } else {
+        2.0_f32 / 3.0_f32
+    };
+
+    preset.banner_padding_y = ((preset.banner_padding_y as f32) * header_padding_scale)
+        .round()
+        .max(1.0) as i32;
+    preset.address_style.weight = header_weight;
+    preset.address_style.tracking_px *= tracking_scale;
+    preset.banner_style.weight = header_weight;
+    preset.banner_style.tracking_px *= tracking_scale;
+    preset.section_style.weight = header_weight;
+    preset.section_style.tracking_px *= tracking_scale;
+    preset
+}
+
 fn raster_exact_preset_for_layout(cfg: &LayoutConfig) -> RasterExactPreset {
     let base = raster_exact_preset_for_paper(cfg.paper_width);
     // Apply user-configurable text_scale for classic layout so raster-exact
@@ -4179,7 +4299,23 @@ fn raster_exact_preset_for_layout(cfg: &LayoutConfig) -> RasterExactPreset {
     } else {
         1.0
     };
-    scale_raster_exact_preset(base, classic_scale * raster_readability_scale(cfg))
+    let preset = scale_raster_exact_preset(base, classic_scale * raster_readability_scale(cfg));
+    let preset = scale_raster_exact_spacing(preset, classic_raster_spacing_scale(cfg));
+    apply_raster_header_emphasis(preset, cfg)
+}
+
+fn body_boldness_offsets(weight: u32) -> &'static [(i32, i32)] {
+    const NONE: &[(i32, i32)] = &[];
+    const LEVEL_3: &[(i32, i32)] = &[(1, 0)];
+    const LEVEL_4: &[(i32, i32)] = &[(1, 0), (0, 1)];
+    const LEVEL_5: &[(i32, i32)] = &[(1, 0), (0, 1), (1, 1)];
+
+    match weight {
+        600 => LEVEL_3,
+        700 => LEVEL_4,
+        800.. => LEVEL_5,
+        _ => NONE,
+    }
 }
 
 struct RasterFonts {
@@ -4283,6 +4419,7 @@ struct TtfReceiptComposer {
     preset: RasterExactPreset,
     fonts: &'static RasterFonts,
     missing_glyph_count: usize,
+    body_font_weight: u32,
 }
 
 impl TtfReceiptComposer {
@@ -4313,6 +4450,7 @@ impl TtfReceiptComposer {
             preset,
             fonts,
             missing_glyph_count: 0,
+            body_font_weight: cfg.body_font_weight,
         })
     }
 
@@ -4365,6 +4503,11 @@ impl TtfReceiptComposer {
         let scale = Scale::uniform(style.size_px.max(1.0));
         let v_metrics = font.v_metrics(scale);
         let baseline = y as f32 + v_metrics.ascent;
+        let overdraw_offsets = if style.apply_body_boldness {
+            body_boldness_offsets(self.body_font_weight)
+        } else {
+            &[]
+        };
 
         let mut caret = start_x as f32;
         let mut prev = None;
@@ -4379,12 +4522,12 @@ impl TtfReceiptComposer {
             let advance = glyph.unpositioned().h_metrics().advance_width;
             if let Some(bounds) = glyph.pixel_bounding_box() {
                 glyph.draw(|gx, gy, value| {
-                    self.blend_pixel(
-                        bounds.min.x + gx as i32,
-                        bounds.min.y + gy as i32,
-                        style.ink,
-                        value,
-                    );
+                    let px = bounds.min.x + gx as i32;
+                    let py = bounds.min.y + gy as i32;
+                    self.blend_pixel(px, py, style.ink, value);
+                    for (dx, dy) in overdraw_offsets {
+                        self.blend_pixel(px + dx, py + dy, style.ink, value);
+                    }
                 });
             }
             caret += advance + style.tracking_px;
@@ -4533,6 +4676,7 @@ fn draw_bitmap_text(
     letter_spacing: i32,
     color: u8,
     bold: bool,
+    extra_offsets: &[(i32, i32)],
 ) {
     let mut cursor_x = x;
     let scale_i32 = scale as i32;
@@ -4564,6 +4708,17 @@ fn draw_bitmap_text(
                                 && (ty as u32) < image.height()
                             {
                                 image.put_pixel(bx as u32, ty as u32, Luma([color]));
+                            }
+                        }
+                        for (extra_x, extra_y) in extra_offsets {
+                            let ox = tx + extra_x;
+                            let oy = ty + extra_y;
+                            if ox >= 0
+                                && oy >= 0
+                                && (ox as u32) < image.width()
+                                && (oy as u32) < image.height()
+                            {
+                                image.put_pixel(ox as u32, oy as u32, Luma([color]));
                             }
                         }
                     }
@@ -4598,12 +4753,17 @@ struct BitmapReceiptComposer {
     normal_scale: u32,
     large_scale: u32,
     letter_spacing: i32,
+    spacing_scale: f32,
+    header_bold: bool,
+    banner_padding_y: i32,
+    body_font_weight: u32,
 }
 
 impl BitmapReceiptComposer {
     fn new(cfg: &LayoutConfig) -> Self {
         let physical_width = default_printable_width_dots_for_paper(cfg.paper_width) as i32;
         let readability_scale = raster_readability_scale(cfg);
+        let spacing_scale = classic_raster_spacing_scale(cfg);
         let mut left_margin = cfg.left_margin_dots as i32;
         if left_margin < 0 {
             left_margin = 0;
@@ -4626,10 +4786,18 @@ impl BitmapReceiptComposer {
             physical_width,
             left_margin,
             content_width,
-            y: ((10.0 * readability_scale).round() as i32).max(8),
+            y: ((10.0 * readability_scale * spacing_scale).round() as i32).max(8),
             normal_scale,
             large_scale,
             letter_spacing: 2,
+            spacing_scale,
+            header_bold: cfg.header_emphasis == HeaderEmphasis::Strong,
+            banner_padding_y: if cfg.header_emphasis == HeaderEmphasis::Strong {
+                4
+            } else {
+                3
+            },
+            body_font_weight: cfg.body_font_weight,
         }
     }
 
@@ -4639,16 +4807,19 @@ impl BitmapReceiptComposer {
     }
 
     fn line_height_for_scale(&self, scale: u32) -> i32 {
-        (8 * scale as i32 + 6).max(10)
+        (((8 * scale as i32 + 6) as f32) * self.spacing_scale)
+            .round()
+            .max(10.0) as i32
     }
 
-    fn draw_text_line(
+    fn draw_text_line_internal(
         &mut self,
         text: &str,
         align: BitmapAlign,
         bold: bool,
         scale: u32,
         color: u8,
+        apply_body_boldness: bool,
     ) {
         let text = text.trim_end();
         let text_w = bitmap_text_width(text, scale, self.letter_spacing);
@@ -4656,6 +4827,11 @@ impl BitmapReceiptComposer {
             BitmapAlign::Left => self.left_margin,
             BitmapAlign::Center => self.left_margin + (self.content_width - text_w).max(0) / 2,
             BitmapAlign::Right => self.left_margin + (self.content_width - text_w).max(0),
+        };
+        let extra_offsets = if apply_body_boldness {
+            body_boldness_offsets(self.body_font_weight)
+        } else {
+            &[]
         };
         draw_bitmap_text(
             &mut self.image,
@@ -4666,8 +4842,31 @@ impl BitmapReceiptComposer {
             self.letter_spacing,
             color,
             bold,
+            extra_offsets,
         );
         self.y += self.line_height_for_scale(scale);
+    }
+
+    fn draw_text_line(
+        &mut self,
+        text: &str,
+        align: BitmapAlign,
+        bold: bool,
+        scale: u32,
+        color: u8,
+    ) {
+        self.draw_text_line_internal(text, align, bold, scale, color, false);
+    }
+
+    fn draw_body_text_line(
+        &mut self,
+        text: &str,
+        align: BitmapAlign,
+        bold: bool,
+        scale: u32,
+        color: u8,
+    ) {
+        self.draw_text_line_internal(text, align, bold, scale, color, true);
     }
 
     fn draw_left_wrapped(&mut self, text: &str, bold: bool, scale: u32) {
@@ -4676,43 +4875,85 @@ impl BitmapReceiptComposer {
         }
     }
 
+    fn draw_left_wrapped_body(&mut self, text: &str, bold: bool, scale: u32) {
+        for line in wrap(text, self.chars_per_line()) {
+            self.draw_body_text_line(&line, BitmapAlign::Left, bold, scale, 0);
+        }
+    }
+
     fn draw_pair(&mut self, label: &str, value: &str, bold: bool, scale: u32) {
+        self.draw_pair_internal(label, value, bold, scale, false);
+    }
+
+    fn draw_pair_body(&mut self, label: &str, value: &str, bold: bool, scale: u32) {
+        self.draw_pair_internal(label, value, bold, scale, true);
+    }
+
+    fn draw_pair_internal(
+        &mut self,
+        label: &str,
+        value: &str,
+        bold: bool,
+        scale: u32,
+        apply_body_boldness: bool,
+    ) {
         let label = label.trim();
         let value = value.trim();
         if value.is_empty() {
-            self.draw_left_wrapped(label, bold, scale);
+            if apply_body_boldness {
+                self.draw_left_wrapped_body(label, bold, scale);
+            } else {
+                self.draw_left_wrapped(label, bold, scale);
+            }
             return;
         }
         let width = self.chars_per_line();
         let value_len = value.chars().count();
         if value_len >= width.saturating_sub(2) {
-            self.draw_left_wrapped(label, bold, scale);
-            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            if apply_body_boldness {
+                self.draw_left_wrapped_body(label, bold, scale);
+                self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            } else {
+                self.draw_left_wrapped(label, bold, scale);
+                self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            }
             return;
         }
         let max_label_width = width.saturating_sub(value_len + 1).max(8);
         let lines = wrap(label, max_label_width);
         if lines.is_empty() {
-            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            if apply_body_boldness {
+                self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            } else {
+                self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            }
             return;
         }
         for line in &lines[..lines.len().saturating_sub(1)] {
-            self.draw_text_line(line, BitmapAlign::Left, bold, scale, 0);
+            if apply_body_boldness {
+                self.draw_body_text_line(line, BitmapAlign::Left, bold, scale, 0);
+            } else {
+                self.draw_text_line(line, BitmapAlign::Left, bold, scale, 0);
+            }
         }
         let tail = lines.last().map(String::as_str).unwrap_or_default();
         let tail_len = tail.chars().count();
         if tail_len + value_len < width {
             let gap = width.saturating_sub(tail_len + value_len);
-            self.draw_text_line(
-                &format!("{tail}{}{value}", " ".repeat(gap)),
-                BitmapAlign::Left,
-                bold,
-                scale,
-                0,
-            );
+            let merged = format!("{tail}{}{value}", " ".repeat(gap));
+            if apply_body_boldness {
+                self.draw_body_text_line(&merged, BitmapAlign::Left, bold, scale, 0);
+            } else {
+                self.draw_text_line(&merged, BitmapAlign::Left, bold, scale, 0);
+            }
         } else {
-            self.draw_text_line(tail, BitmapAlign::Left, bold, scale, 0);
-            self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            if apply_body_boldness {
+                self.draw_body_text_line(tail, BitmapAlign::Left, bold, scale, 0);
+                self.draw_body_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            } else {
+                self.draw_text_line(tail, BitmapAlign::Left, bold, scale, 0);
+                self.draw_text_line(value, BitmapAlign::Right, bold, scale, 0);
+            }
         }
     }
 
@@ -4744,7 +4985,7 @@ impl BitmapReceiptComposer {
     }
 
     fn draw_reverse_banner(&mut self, text: &str) {
-        let banner_h = self.line_height_for_scale(self.normal_scale) + 4;
+        let banner_h = self.line_height_for_scale(self.normal_scale) + self.banner_padding_y.max(2);
         let top = self.y;
         let bottom = top + banner_h;
         for py in top..bottom {
@@ -4758,7 +4999,7 @@ impl BitmapReceiptComposer {
                 }
             }
         }
-        let text_y = top + 3;
+        let text_y = top + (self.banner_padding_y / 2).max(1);
         let text_w = bitmap_text_width(text, self.normal_scale, self.letter_spacing);
         let text_x = self.left_margin + (self.content_width - text_w).max(0) / 2;
         draw_bitmap_text(
@@ -4769,7 +5010,8 @@ impl BitmapReceiptComposer {
             self.normal_scale,
             self.letter_spacing,
             255,
-            true,
+            self.header_bold,
+            &[],
         );
         self.y += banner_h + 2;
     }
@@ -4779,7 +5021,8 @@ impl BitmapReceiptComposer {
     }
 
     fn into_cropped(self) -> GrayImage {
-        let final_height = (self.y + 20).clamp(1, self.image.height() as i32) as u32;
+        let final_height = (self.y + (20.0_f32 * self.spacing_scale).round() as i32)
+            .clamp(1, self.image.height() as i32) as u32;
         image::imageops::crop_imm(
             &self.image,
             0,
@@ -4906,13 +5149,54 @@ fn receipt_like_logo_gap(paper: PaperWidth) -> u32 {
     }
 }
 
-fn compose_receipt_like_logo_image(body: GrayImage, cfg: &LayoutConfig) -> GrayImage {
+fn logo_fallback_warning(message: impl Into<String>) -> RenderWarning {
+    RenderWarning {
+        code: "logo_text_fallback".to_string(),
+        message: message.into(),
+    }
+}
+
+fn compose_receipt_like_logo_image(
+    body: GrayImage,
+    cfg: &LayoutConfig,
+) -> (GrayImage, Vec<RenderWarning>) {
+    if !cfg.show_logo {
+        return (body, Vec::new());
+    }
+
+    if cfg
+        .logo_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return (
+            body,
+            vec![logo_fallback_warning(
+                "Logo enabled but no logo source is configured; using text header fallback",
+            )],
+        );
+    }
+
     let logo = match crate::print::load_receipt_like_logo_image(cfg) {
         Ok(Some(logo)) => logo,
-        Ok(None) => return body,
+        Ok(None) => {
+            return (
+                body,
+                vec![logo_fallback_warning(
+                    "Logo rendering was skipped; using text header fallback",
+                )],
+            )
+        }
         Err(err) => {
             tracing::warn!(error = %err, "Receipt logo embed failed; keeping body-only raster output");
-            return body;
+            return (
+                body,
+                vec![logo_fallback_warning(format!(
+                    "Logo rendering failed; using text header fallback ({err})"
+                ))],
+            );
         }
     };
 
@@ -4924,16 +5208,20 @@ fn compose_receipt_like_logo_image(body: GrayImage, cfg: &LayoutConfig) -> GrayI
     let logo_x = ((combined.width() as i32 - logo.width() as i32) / 2).max(0) as u32;
     copy_gray_image(&mut combined, &logo, logo_x, top_padding);
     copy_gray_image(&mut combined, &body, 0, top_padding + logo.height() + gap);
-    combined
+    (combined, Vec::new())
 }
 
-fn finalize_raster_exact_bytes(body: GrayImage, cfg: &LayoutConfig, embed_logo: bool) -> Vec<u8> {
-    let composed = if embed_logo {
+fn finalize_raster_exact_bytes(
+    body: GrayImage,
+    cfg: &LayoutConfig,
+    embed_logo: bool,
+) -> (Vec<u8>, Vec<RenderWarning>) {
+    let (composed, warnings) = if embed_logo {
         compose_receipt_like_logo_image(body, cfg)
     } else {
-        body
+        (body, Vec::new())
     };
-    raster_image_to_escpos_bytes(&composed, cfg)
+    (raster_image_to_escpos_bytes(&composed, cfg), warnings)
 }
 
 fn render_classic_customer_raster_exact_ttf(
@@ -4953,6 +5241,7 @@ fn render_classic_customer_raster_exact_ttf(
     let items_label_upper = receipt_label(lang, "ITEMS").to_uppercase();
     let order_type_display = translate_order_type(lang, &doc.order_type);
     let short_number = extract_short_order_number(&doc.order_number);
+    let render_delivery_block = should_render_delivery_block(doc);
     let mut canvas = TtfReceiptComposer::try_new(cfg)?;
     let preset = canvas.preset;
     let cur = resolve_raster_currency_symbol(cfg, canvas.fonts);
@@ -4966,6 +5255,11 @@ fn render_classic_customer_raster_exact_ttf(
     {
         canvas.draw_text_line(copy_label, BitmapAlign::Center, preset.section_style);
     }
+    let primary_line = header_primary_line(cfg);
+    if !primary_line.is_empty() {
+        canvas.draw_text_line(primary_line, BitmapAlign::Center, preset.address_style);
+    }
+    canvas.draw_rule();
     if let Some(address) = cfg
         .store_address
         .as_deref()
@@ -4973,15 +5267,9 @@ fn render_classic_customer_raster_exact_ttf(
         .filter(|value| !value.is_empty())
     {
         for segment in split_address_segments(address) {
-            canvas.draw_wrapped(&segment, BitmapAlign::Center, preset.address_style);
-        }
-    } else if !cfg.show_logo {
-        let org = cfg.organization_name.trim();
-        if !org.is_empty() {
-            canvas.draw_text_line(org, BitmapAlign::Center, preset.address_style);
+            canvas.draw_wrapped(&segment, BitmapAlign::Left, preset.contact_style);
         }
     }
-    canvas.draw_rule();
     if let Some(phone) = cfg
         .store_phone
         .as_deref()
@@ -5046,6 +5334,17 @@ fn render_classic_customer_raster_exact_ttf(
     if is_delivery_slip {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
             canvas.draw_pair(&format!("{label}:"), &value, preset.contact_style);
+        }
+        canvas.draw_rule();
+    } else if render_delivery_block {
+        canvas.draw_text_line(
+            receipt_label(lang, "DELIVERY"),
+            BitmapAlign::Left,
+            preset.section_style,
+        );
+        canvas.draw_rule();
+        for (label, value) in delivery_fields(doc, lang) {
+            canvas.draw_pair(&format!("{label}:"), value, preset.contact_style);
         }
         canvas.draw_rule();
     }
@@ -5143,12 +5442,17 @@ fn render_classic_customer_raster_exact_ttf(
         canvas.draw_rule();
     }
 
-    if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+    if let Some(method_label) = method_only_payment_label(doc, lang) {
         canvas.add_gap(preset.small_gap);
         canvas.draw_text_line(&method_label, BitmapAlign::Center, preset.section_style);
     } else {
         for payment in &doc.payments {
             let pay_label = format!("{}:", receipt_label(lang, &payment.label));
+            if payment_amount_unknown(payment) {
+                canvas.add_gap(preset.small_gap);
+                canvas.draw_text_line(&pay_label, BitmapAlign::Center, preset.section_style);
+                continue;
+            }
             let value = money_locale(payment.amount, comma);
             canvas.draw_pair(&pay_label, &value, preset.payment_style);
         }
@@ -5216,6 +5520,7 @@ fn render_classic_customer_raster_exact_bitmap(
     let items_label_upper = receipt_label(lang, "ITEMS").to_ascii_uppercase();
     let order_type_display = translate_order_type(lang, &doc.order_type);
     let short_number = extract_short_order_number(&doc.order_number);
+    let render_delivery_block = should_render_delivery_block(doc);
     let cur = if cfg.currency_symbol.trim().is_empty() {
         " \u{20AC}".to_string()
     } else {
@@ -5233,11 +5538,22 @@ fn render_classic_customer_raster_exact_bitmap(
         canvas.draw_text_line(
             copy_label,
             BitmapAlign::Center,
-            true,
+            canvas.header_bold,
             canvas.normal_scale,
             0,
         );
     }
+    let primary_line = header_primary_line(cfg);
+    if !primary_line.is_empty() {
+        canvas.draw_text_line(
+            primary_line,
+            BitmapAlign::Center,
+            canvas.header_bold,
+            canvas.normal_scale,
+            0,
+        );
+    }
+    canvas.draw_rule();
     if let Some(address) = cfg
         .store_address
         .as_deref()
@@ -5245,17 +5561,9 @@ fn render_classic_customer_raster_exact_bitmap(
         .filter(|value| !value.is_empty())
     {
         for segment in split_address_segments(address) {
-            for line in wrap(&segment, canvas.chars_per_line()) {
-                canvas.draw_text_line(&line, BitmapAlign::Center, true, canvas.normal_scale, 0);
-            }
-        }
-    } else if !cfg.show_logo {
-        let org = cfg.organization_name.trim();
-        if !org.is_empty() {
-            canvas.draw_text_line(org, BitmapAlign::Center, true, canvas.normal_scale, 0);
+            canvas.draw_left_wrapped_body(&segment, false, canvas.normal_scale);
         }
     }
-    canvas.draw_rule();
     if let Some(phone) = cfg
         .store_phone
         .as_deref()
@@ -5311,17 +5619,30 @@ fn render_classic_customer_raster_exact_bitmap(
         type_label,
         order_type_display,
     );
-    canvas.draw_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
+    canvas.draw_body_text_line(&meta_line, BitmapAlign::Left, false, canvas.normal_scale, 0);
     canvas.draw_rule();
     if is_delivery_slip {
         for (label, value) in delivery_slip_info_lines(doc, lang) {
-            canvas.draw_pair(&format!("{label}:"), &value, false, canvas.normal_scale);
+            canvas.draw_pair_body(&format!("{label}:"), &value, false, canvas.normal_scale);
+        }
+        canvas.draw_rule();
+    } else if render_delivery_block {
+        canvas.draw_text_line(
+            receipt_label(lang, "DELIVERY"),
+            BitmapAlign::Left,
+            canvas.header_bold,
+            canvas.normal_scale,
+            0,
+        );
+        canvas.draw_rule();
+        for (label, value) in delivery_fields(doc, lang) {
+            canvas.draw_pair_body(&format!("{label}:"), value, false, canvas.normal_scale);
         }
         canvas.draw_rule();
     }
     let order_notes = order_note_lines(doc);
     for note in &order_notes {
-        canvas.draw_left_wrapped(
+        canvas.draw_left_wrapped_body(
             &format!("_{}: {note}_", receipt_label(lang, "Note")),
             false,
             canvas.normal_scale,
@@ -5334,7 +5655,7 @@ fn render_classic_customer_raster_exact_bitmap(
     canvas.draw_text_line(
         &items_label_upper,
         BitmapAlign::Left,
-        true,
+        canvas.header_bold,
         canvas.normal_scale,
         0,
     );
@@ -5343,7 +5664,7 @@ fn render_classic_customer_raster_exact_bitmap(
         if let Some(cat_line) = category_line(lang, item) {
             canvas.draw_left_wrapped(&cat_line, true, canvas.normal_scale);
         }
-        canvas.draw_pair(
+        canvas.draw_pair_body(
             &format!("{} x {}", qty(item.quantity), item.name),
             &money_locale(item.total, comma),
             false,
@@ -5351,20 +5672,20 @@ fn render_classic_customer_raster_exact_bitmap(
         );
         let (with_items, without_items) = split_customizations(item);
         for customization in with_items {
-            canvas.draw_left_wrapped(
+            canvas.draw_left_wrapped_body(
                 &format!("  + {}", customization_display(lang, customization, true)),
                 false,
                 canvas.normal_scale,
             );
         }
         if !without_items.is_empty() {
-            canvas.draw_left_wrapped(
+            canvas.draw_left_wrapped_body(
                 &format!("  - {}", receipt_label(lang, "Without")),
                 false,
                 canvas.normal_scale,
             );
             for customization in without_items {
-                canvas.draw_left_wrapped(
+                canvas.draw_left_wrapped_body(
                     &format!(
                         "    - {}",
                         customization_display(lang, customization, false)
@@ -5380,7 +5701,7 @@ fn render_classic_customer_raster_exact_bitmap(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            canvas.draw_left_wrapped(
+            canvas.draw_left_wrapped_body(
                 &format!("  _{}: {note}_", receipt_label(lang, "Note")),
                 false,
                 canvas.normal_scale,
@@ -5402,7 +5723,7 @@ fn render_classic_customer_raster_exact_bitmap(
             );
             canvas.draw_rule();
         } else {
-            canvas.draw_pair(
+            canvas.draw_pair_body(
                 &label,
                 &money_locale(total.amount, comma),
                 false,
@@ -5411,20 +5732,31 @@ fn render_classic_customer_raster_exact_bitmap(
         }
     }
 
-    if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+    if let Some(method_label) = method_only_payment_label(doc, lang) {
         canvas.add_spacer(1);
         canvas.draw_text_line(
             &method_label,
             BitmapAlign::Center,
-            true,
+            canvas.header_bold,
             canvas.normal_scale,
             0,
         );
     } else {
         for payment in &doc.payments {
             let pay_label = format!("{}:", receipt_label(lang, &payment.label));
+            if payment_amount_unknown(payment) {
+                canvas.add_spacer(1);
+                canvas.draw_text_line(
+                    &pay_label,
+                    BitmapAlign::Center,
+                    canvas.header_bold,
+                    canvas.normal_scale,
+                    0,
+                );
+                continue;
+            }
             let value = money_locale(payment.amount, comma);
-            canvas.draw_pair(&pay_label, &value, false, canvas.normal_scale);
+            canvas.draw_pair_body(&pay_label, &value, false, canvas.normal_scale);
         }
 
         if let Some(masked) = doc
@@ -5433,7 +5765,7 @@ fn render_classic_customer_raster_exact_bitmap(
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            canvas.draw_pair(
+            canvas.draw_pair_body(
                 receipt_label(lang, "Card"),
                 masked,
                 false,
@@ -5466,7 +5798,7 @@ fn render_classic_customer_raster_exact_bitmap(
         canvas.add_spacer(1);
         let footer_width = canvas.chars_per_line().saturating_sub(2).max(12);
         for line in wrap(translated, footer_width) {
-            canvas.draw_text_line(&line, BitmapAlign::Center, false, canvas.large_scale, 0);
+            canvas.draw_body_text_line(&line, BitmapAlign::Center, false, canvas.large_scale, 0);
         }
         canvas.draw_text_line(
             &"*".repeat(canvas.chars_per_line().max(24)),
@@ -5483,7 +5815,7 @@ fn render_classic_customer_raster_exact_bitmap(
 fn render_classic_customer_raster_exact(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<RenderWarning>), String> {
     match render_classic_customer_raster_exact_ttf(document, cfg) {
         Ok(image) => Ok(finalize_raster_exact_bytes(image, cfg, true)),
         Err(err) => {
@@ -5509,6 +5841,11 @@ fn emit_raster_common_header(
     {
         canvas.draw_text_line(copy_label, BitmapAlign::Center, preset.section_style);
     }
+    let primary_line = header_primary_line(cfg);
+    if !primary_line.is_empty() {
+        canvas.draw_text_line(primary_line, BitmapAlign::Center, preset.address_style);
+    }
+    canvas.draw_rule();
     if let Some(address) = cfg
         .store_address
         .as_deref()
@@ -5516,15 +5853,9 @@ fn emit_raster_common_header(
         .filter(|value| !value.is_empty())
     {
         for segment in split_address_segments(address) {
-            canvas.draw_wrapped(&segment, BitmapAlign::Center, preset.address_style);
-        }
-    } else if !cfg.show_logo {
-        let org = cfg.organization_name.trim();
-        if !org.is_empty() {
-            canvas.draw_text_line(org, BitmapAlign::Center, preset.address_style);
+            canvas.draw_wrapped(&segment, BitmapAlign::Left, preset.contact_style);
         }
     }
-    canvas.draw_rule();
     if let Some(phone) = cfg
         .store_phone
         .as_deref()
@@ -6114,7 +6445,7 @@ fn render_classic_non_customer_raster_exact_ttf(
 fn render_classic_raster_exact(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<RenderWarning>), String> {
     match document {
         ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
             render_classic_customer_raster_exact(document, cfg)
@@ -6131,7 +6462,7 @@ fn render_classic_raster_exact(
 pub fn render_classic_raster_exact_preview_data_url(
     document: &ReceiptDocument,
     cfg: &LayoutConfig,
-) -> Result<String, String> {
+) -> Result<(String, Vec<RenderWarning>), String> {
     let body = match document {
         ReceiptDocument::OrderReceipt(_) | ReceiptDocument::DeliverySlip(_) => {
             match render_classic_customer_raster_exact_ttf(document, cfg) {
@@ -6148,14 +6479,14 @@ pub fn render_classic_raster_exact_preview_data_url(
             render_classic_non_customer_raster_exact_ttf(document, cfg)?
         }
     };
-    let composed = compose_receipt_like_logo_image(body, cfg);
+    let (composed, warnings) = compose_receipt_like_logo_image(body, cfg);
     let mut encoded = Vec::new();
     image::DynamicImage::ImageLuma8(composed)
         .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
         .map_err(|err| format!("failed to encode preview png: {err}"))?;
-    Ok(format!(
-        "data:image/png;base64,{}",
-        BASE64_STANDARD.encode(encoded)
+    Ok((
+        format!("data:image/png;base64,{}", BASE64_STANDARD.encode(encoded)),
+        warnings,
     ))
 }
 
@@ -6164,9 +6495,22 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
     let style = escpos_style(cfg, doc_target);
     let classic_customer_layout = !style.modern && doc_target.is_customer_receipt();
     let mut warnings = Vec::new();
+    let payment_warning_doc = match document {
+        ReceiptDocument::OrderReceipt(doc) | ReceiptDocument::DeliverySlip(doc) => Some(doc),
+        _ => None,
+    };
+    if payment_warning_doc.is_some_and(has_payment_amount_warning) {
+        warnings.push(RenderWarning {
+            code: "payment_amount_unavailable".to_string(),
+            message:
+                "Payment amount unavailable from stored payment rows; rendered method only from order snapshot"
+                    .to_string(),
+        });
+    }
     if !style.modern && cfg.classic_customer_render_mode == ClassicCustomerRenderMode::RasterExact {
         match render_classic_raster_exact(document, cfg) {
-            Ok(bytes) => {
+            Ok((bytes, raster_warnings)) => {
+                warnings.extend(raster_warnings);
                 return EscPosRender {
                     bytes,
                     warnings,
@@ -6646,7 +6990,7 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 // Modern: dash rule separator before payments
                 emit_rule(&mut builder, width, '-');
             }
-            let delivery_method_only_payment = delivery_payment_method_label(doc, lang);
+            let delivery_method_only_payment = method_only_payment_label(doc, lang);
             if let Some(method_label) = delivery_method_only_payment.as_deref() {
                 builder
                     .center()
@@ -6671,6 +7015,16 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                         } else {
                             raw_pay_label
                         };
+                        if payment_amount_unknown(payment) {
+                            builder
+                                .center()
+                                .bold(true)
+                                .text(label)
+                                .lf()
+                                .bold(false)
+                                .left();
+                            continue;
+                        }
                         let is_change = payment.label == "Change";
                         if is_change {
                             emit_pair(
@@ -7070,15 +7424,60 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                     emit_pair(&mut builder, &label_text, &val, width);
                 }
             }
-            if let Some(method_label) = delivery_payment_method_label(doc, lang) {
+            let delivery_method_only_payment = method_only_payment_label(doc, lang);
+            if delivery_method_only_payment.is_some()
+                || !doc.payments.is_empty()
+                || doc
+                    .masked_card
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())
+            {
                 emit_rule(&mut builder, width, style.profile.block_rule);
+            }
+            if let Some(method_label) = delivery_method_only_payment.as_deref() {
                 builder
                     .center()
                     .bold(true)
-                    .text(&method_label)
+                    .text(method_label)
                     .lf()
                     .bold(false)
                     .left();
+            } else {
+                for payment in &doc.payments {
+                    let raw_pay_label = receipt_label(lang, &payment.label);
+                    let pay_label_colon;
+                    let label = if !style.modern {
+                        pay_label_colon = format!("{}:", raw_pay_label);
+                        pay_label_colon.as_str()
+                    } else {
+                        raw_pay_label
+                    };
+                    if payment_amount_unknown(payment) {
+                        builder
+                            .center()
+                            .bold(true)
+                            .text(label)
+                            .lf()
+                            .bold(false)
+                            .left();
+                        continue;
+                    }
+                    let pay_amount = if style.profile.currency_on_all {
+                        money_with_currency_locale(payment.amount, cur, comma)
+                    } else {
+                        money_locale(payment.amount, comma)
+                    };
+                    emit_pair(&mut builder, label, &pay_amount, width);
+                }
+                if let Some(masked) = doc
+                    .masked_card
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    emit_pair(&mut builder, receipt_label(lang, "Card"), masked, width);
+                }
             }
         }
         ReceiptDocument::ShiftCheckout(doc) => {
@@ -7929,7 +8328,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_block_hidden_for_non_final_delivery_status() {
+    fn delivery_block_renders_for_delivery_orders_even_before_final_status() {
         let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
             order_number: "A-78".to_string(),
             order_type: "delivery".to_string(),
@@ -7942,12 +8341,13 @@ mod tests {
 
         let out = render_escpos(&doc, &LayoutConfig::default());
         let text = String::from_utf8_lossy(&out.bytes);
-        assert!(!text.contains("Driver"));
-        assert!(!text.contains("Nikos Driver"));
+        assert!(text.contains("Driver"));
+        assert!(text.contains("Nikos Driver"));
+        assert!(text.contains("Main St 12"));
     }
 
     #[test]
-    fn delivery_block_hidden_when_driver_name_missing() {
+    fn delivery_block_renders_address_when_driver_name_missing() {
         let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
             order_number: "A-79".to_string(),
             order_type: "delivery".to_string(),
@@ -7960,7 +8360,7 @@ mod tests {
         let out = render_escpos(&doc, &LayoutConfig::default());
         let text = String::from_utf8_lossy(&out.bytes);
         assert!(!text.contains("Driver"));
-        assert!(!text.contains("Main St 12"));
+        assert!(text.contains("Main St 12"));
     }
 
     #[test]
@@ -7982,7 +8382,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_receipt_header_uses_address_then_left_phone_vat_sequence() {
+    fn classic_receipt_header_includes_branch_then_left_address_phone_vat_sequence() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             organization_name: "Brand Co".to_string(),
@@ -8002,17 +8402,19 @@ mod tests {
 
         let out = render_escpos(&doc, &cfg);
         let text = String::from_utf8_lossy(&out.bytes);
+        let branch_pos = text.find("Downtown Branch").unwrap_or(usize::MAX);
         let address_pos = text.find("Main St 10").unwrap_or(usize::MAX);
         let phone_pos = text.find("2100000000").unwrap_or(usize::MAX);
         let vat_pos = text.find("VAT: 123456789").unwrap_or(usize::MAX);
 
+        assert!(branch_pos < address_pos);
         assert!(address_pos < phone_pos);
         assert!(phone_pos < vat_pos);
+        assert!(text.contains("Downtown Branch"));
         assert!(text.contains("Phone: 2100000000"));
         assert!(text.contains("VAT: 123456789"));
         assert!(text.contains("TAX_OFFICE: DOY ATHENS"));
         assert!(!text.contains("Brand Co"));
-        assert!(!text.contains("Downtown Branch"));
 
         // Modern template skips store name in HEADER (it appears in footer)
         let modern_cfg = LayoutConfig {
@@ -8623,15 +9025,14 @@ mod tests {
     }
 
     #[test]
-    fn delivery_slip_info_lines_delivery_order_excludes_driver_and_uses_dash_fallback() {
+    fn delivery_slip_info_lines_delivery_order_starts_with_driver_dash_fallback() {
         let doc = OrderReceiptDoc {
             delivery_slip_mode: DeliverySlipMode::DeliveryOrder,
             ..OrderReceiptDoc::default()
         };
         let lines = delivery_slip_info_lines(&doc, "en");
-        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Customer"));
+        assert_eq!(lines.first().map(|(k, _)| k.as_str()), Some("Driver"));
         assert_eq!(lines.first().map(|(_, v)| v.as_str()), Some("-"));
-        assert!(lines.iter().all(|(label, _)| label != "Driver"));
         assert!(lines.iter().all(|(label, _)| label != "Driver ID"));
     }
 
@@ -8720,7 +9121,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_slip_payment_renders_method_only_without_amount() {
+    fn delivery_slip_payment_renders_amount_when_available() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             footer_text: None,
@@ -8746,12 +9147,11 @@ mod tests {
 
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
         assert!(text.contains("Cash"));
-        assert!(!text.contains("11.20"));
-        assert!(!text.contains("11,20"));
+        assert!(text.contains("11.20") || text.contains("11,20"));
     }
 
     #[test]
-    fn delivery_order_receipt_payment_renders_method_only_without_amount() {
+    fn delivery_order_receipt_payment_renders_amount_when_available() {
         let cfg = LayoutConfig {
             template: ReceiptTemplate::Classic,
             footer_text: None,
@@ -8783,8 +9183,7 @@ mod tests {
 
         let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
         assert!(text.contains("Cash"));
-        assert!(!text.contains("11.20"));
-        assert!(!text.contains("11,20"));
+        assert!(text.contains("11.20") || text.contains("11,20"));
     }
 
     #[test]
@@ -9742,11 +10141,15 @@ mod tests {
             ..LayoutConfig::default()
         };
 
-        let small = render_classic_raster_exact_preview_data_url(&doc, &small_cfg)
-            .expect("small preview should render");
-        let large = render_classic_raster_exact_preview_data_url(&doc, &large_cfg)
-            .expect("large preview should render");
+        let (small, small_warnings) =
+            render_classic_raster_exact_preview_data_url(&doc, &small_cfg)
+                .expect("small preview should render");
+        let (large, large_warnings) =
+            render_classic_raster_exact_preview_data_url(&doc, &large_cfg)
+                .expect("large preview should render");
 
+        assert!(small_warnings.is_empty());
+        assert!(large_warnings.is_empty());
         assert_ne!(
             small, large,
             "text scale should change raster preview output"
@@ -9790,14 +10193,192 @@ mod tests {
             ..LayoutConfig::default()
         };
 
-        let small = render_classic_raster_exact_preview_data_url(&doc, &small_cfg)
-            .expect("small logo preview should render");
-        let large = render_classic_raster_exact_preview_data_url(&doc, &large_cfg)
-            .expect("large logo preview should render");
+        let (small, small_warnings) =
+            render_classic_raster_exact_preview_data_url(&doc, &small_cfg)
+                .expect("small logo preview should render");
+        let (large, large_warnings) =
+            render_classic_raster_exact_preview_data_url(&doc, &large_cfg)
+                .expect("large logo preview should render");
 
+        assert!(small_warnings.is_empty());
+        assert!(large_warnings.is_empty());
         assert_ne!(
             small, large,
             "logo scale should change raster preview output"
+        );
+    }
+
+    #[test]
+    fn raster_exact_preview_data_url_changes_with_layout_density() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-4".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let compact_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            layout_density: LayoutDensity::Compact,
+            ..LayoutConfig::default()
+        };
+        let spacious_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            layout_density: LayoutDensity::Spacious,
+            ..LayoutConfig::default()
+        };
+
+        let (compact, _) = render_classic_raster_exact_preview_data_url(&doc, &compact_cfg)
+            .expect("compact preview should render");
+        let (spacious, _) = render_classic_raster_exact_preview_data_url(&doc, &spacious_cfg)
+            .expect("spacious preview should render");
+
+        assert_ne!(
+            compact, spacious,
+            "layout density should change raster preview output"
+        );
+    }
+
+    #[test]
+    fn raster_exact_preview_data_url_changes_with_header_emphasis() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-5".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let normal_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            header_emphasis: HeaderEmphasis::Normal,
+            ..LayoutConfig::default()
+        };
+        let strong_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            header_emphasis: HeaderEmphasis::Strong,
+            ..LayoutConfig::default()
+        };
+
+        let (normal, _) = render_classic_raster_exact_preview_data_url(&doc, &normal_cfg)
+            .expect("normal header preview should render");
+        let (strong, _) = render_classic_raster_exact_preview_data_url(&doc, &strong_cfg)
+            .expect("strong header preview should render");
+
+        assert_ne!(
+            normal, strong,
+            "header emphasis should change raster preview output"
+        );
+    }
+
+    #[test]
+    fn raster_exact_preview_data_url_changes_with_body_boldness() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-6".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            items: vec![ReceiptItem {
+                name: "Waffle".to_string(),
+                quantity: 1.0,
+                total: 9.2,
+                ..ReceiptItem::default()
+            }],
+            totals: vec![TotalsLine {
+                label: "TOTAL".to_string(),
+                amount: 9.2,
+                emphasize: true,
+                discount_percent: None,
+            }],
+            payments: vec![PaymentLine {
+                label: "Cash".to_string(),
+                amount: 9.2,
+                detail: None,
+            }],
+            ..OrderReceiptDoc::default()
+        });
+        let normal_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            body_font_weight: 400,
+            ..LayoutConfig::default()
+        };
+        let bold_cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            body_font_weight: 800,
+            ..LayoutConfig::default()
+        };
+
+        let (normal, _) = render_classic_raster_exact_preview_data_url(&doc, &normal_cfg)
+            .expect("normal body preview should render");
+        let (bold, _) = render_classic_raster_exact_preview_data_url(&doc, &bold_cfg)
+            .expect("bold body preview should render");
+
+        assert_ne!(
+            normal, bold,
+            "body boldness should change raster preview output"
+        );
+    }
+
+    #[test]
+    fn raster_exact_delivery_receipt_grows_when_delivery_fields_are_present() {
+        let base_doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-7".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let delivery_doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-8".to_string(),
+            order_type: "delivery".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            customer_phone: Some("6900000000".to_string()),
+            delivery_address: Some("Main St 12".to_string()),
+            driver_name: Some("Nikos Driver".to_string()),
+            ..OrderReceiptDoc::default()
+        });
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            ..LayoutConfig::default()
+        };
+
+        let base = render_classic_customer_raster_exact_ttf(&base_doc, &cfg)
+            .expect("base delivery preview should render");
+        let with_fields = render_classic_customer_raster_exact_ttf(&delivery_doc, &cfg)
+            .expect("delivery fields preview should render");
+
+        assert!(
+            with_fields.height() > base.height(),
+            "delivery block should increase raster receipt height"
+        );
+    }
+
+    #[test]
+    fn raster_exact_preview_returns_logo_fallback_warning_when_source_missing() {
+        let doc = ReceiptDocument::OrderReceipt(OrderReceiptDoc {
+            order_number: "S-9".to_string(),
+            order_type: "pickup".to_string(),
+            created_at: "2026-03-09T18:00:00Z".to_string(),
+            ..OrderReceiptDoc::default()
+        });
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            classic_customer_render_mode: ClassicCustomerRenderMode::RasterExact,
+            show_logo: true,
+            logo_url: None,
+            ..LayoutConfig::default()
+        };
+
+        let (_, warnings) = render_classic_raster_exact_preview_data_url(&doc, &cfg)
+            .expect("preview with missing logo should render");
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.code == "logo_text_fallback"),
+            "expected logo fallback warning when logo is enabled without a source"
         );
     }
 }

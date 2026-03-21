@@ -63,6 +63,8 @@ export interface ReceiptSamplePreviewRequest {
     logoSource?: string;
     textScale?: number;
     logoScale?: number;
+    layoutDensityScale?: number;
+    bodyBoldness?: number;
   };
 }
 
@@ -71,6 +73,7 @@ export interface ReceiptSamplePreviewResponse {
   kind?: 'html' | 'image';
   html?: string;
   dataUrl?: string;
+  warnings?: string[];
   effectiveTemplate?: 'classic' | 'modern';
   effectiveRenderMode?: 'text' | 'raster_exact';
   supportsTextScale?: boolean;

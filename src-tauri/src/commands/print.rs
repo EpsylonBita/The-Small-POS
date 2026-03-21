@@ -3387,6 +3387,31 @@ fn preview_f32_field(value: &serde_json::Value, keys: &[&str]) -> Option<f32> {
         })
 }
 
+fn preview_u32_field(value: &serde_json::Value, keys: &[&str]) -> Option<u32> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|entry| {
+            entry
+                .as_u64()
+                .or_else(|| {
+                    entry
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<u64>().ok())
+                })
+                .map(|number| number as u32)
+        })
+}
+
+fn preview_body_font_weight(level: u32) -> u32 {
+    match level.clamp(1, 5) {
+        2 => 500,
+        3 => 600,
+        4 => 700,
+        5 => 800,
+        _ => 400,
+    }
+}
+
 fn preview_bool_field(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
     keys.iter()
         .filter_map(|key| value.get(*key))
@@ -3474,16 +3499,31 @@ fn apply_receipt_preview_overrides(
     {
         layout.logo_scale = logo_scale_override.clamp(0.5, 2.0);
     }
+    if let Some(layout_density_scale_override) =
+        preview_f32_field(settings, &["layoutDensityScale", "layout_density_scale"])
+            .or_else(|| preview_f32_field(payload, &["layoutDensityScale", "layout_density_scale"]))
+    {
+        layout.layout_density_scale = layout_density_scale_override.clamp(0.7, 1.35);
+    }
+    if let Some(body_boldness_override) =
+        preview_u32_field(settings, &["bodyBoldness", "body_boldness"])
+            .or_else(|| preview_u32_field(payload, &["bodyBoldness", "body_boldness"]))
+    {
+        layout.body_font_weight = preview_body_font_weight(body_boldness_override);
+    }
 
     let logo_supported = printers::read_capability_snapshot(profile).supports_logo
         || matches!(
             layout.detected_brand,
             crate::printers::PrinterBrand::Star | crate::printers::PrinterBrand::Epson
         );
+    let raster_exact_receipt_logo = layout.template == receipt_renderer::ReceiptTemplate::Classic
+        && layout.classic_customer_render_mode
+            == receipt_renderer::ClassicCustomerRenderMode::RasterExact;
     if let Some(show_logo_override) = preview_bool_field(settings, &["showLogo", "show_logo"])
         .or_else(|| preview_bool_field(payload, &["showLogo", "show_logo"]))
     {
-        layout.show_logo = show_logo_override && logo_supported;
+        layout.show_logo = show_logo_override && (logo_supported || raster_exact_receipt_logo);
         if !layout.show_logo {
             layout.logo_url = None;
         }
@@ -3522,12 +3562,13 @@ fn build_receipt_sample_preview_response(
     }
 
     if is_exact_preview {
-        let data_url =
+        let (data_url, warnings) =
             receipt_renderer::render_classic_raster_exact_preview_data_url(&document, &layout)?;
         return Ok(serde_json::json!({
             "success": true,
             "kind": "image",
             "dataUrl": data_url,
+            "warnings": warnings.iter().map(|warning| warning.message.clone()).collect::<Vec<_>>(),
             "effectiveTemplate": effective_template,
             "effectiveRenderMode": effective_render_mode,
             "supportsTextScale": supports_text_scale,
@@ -3540,6 +3581,7 @@ fn build_receipt_sample_preview_response(
         "success": true,
         "kind": "html",
         "html": html,
+        "warnings": Vec::<String>::new(),
         "effectiveTemplate": effective_template,
         "effectiveRenderMode": effective_render_mode,
         "supportsTextScale": supports_text_scale,
@@ -4067,6 +4109,23 @@ mod dto_tests {
             .as_str()
             .expect("html preview")
             .contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn apply_receipt_preview_overrides_applies_density_and_boldness_settings() {
+        let profile = serde_json::json!({});
+        let payload = serde_json::json!({
+            "receiptSettings": {
+                "layoutDensityScale": 1.2,
+                "bodyBoldness": 5
+            }
+        });
+        let mut layout = receipt_renderer::LayoutConfig::default();
+
+        apply_receipt_preview_overrides(&profile, &payload, &mut layout);
+
+        assert!((layout.layout_density_scale - 1.2).abs() < f32::EPSILON);
+        assert_eq!(layout.body_font_weight, 800);
     }
 
     #[test]

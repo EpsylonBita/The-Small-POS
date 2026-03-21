@@ -5,6 +5,22 @@
 - Hardware output is generated directly as ESC/POS bytes from structured data. The legacy HTML-to-text stripping path is removed from queue printing.
 - HTML artifacts are still written to `receipts/` for preview/audit/debug.
 
+## Classic Raster Receipt Fixes (2026-03-21)
+- `order_receipt` now falls back to the order snapshot when `order_payments` has no completed rows:
+  - `payment_status=paid` with `payment_method=cash|card` renders a real payment line using `total_amount`
+  - other stored payment methods still render the method label, but keep the amount intentionally blank and emit a render warning instead of dropping the payment block
+- Delivery metadata now renders on customer receipt reprints whenever the order is `delivery` and any delivery field exists:
+  - address, phone, city, postal code, floor, and ringer name no longer depend on a driver being present
+  - driver name is optional on `order_receipt`
+  - `delivery_slip` always includes a driver row, using `-` only when unassigned
+- Classic `raster_exact` output now honors the same live typography controls that the HTML preview already exposed:
+  - `layout_density` directly changes raster spacing and line heights
+  - `receipt.layout_density_scale` adds a fine-grain multiplier on top of the preset so operators can tighten or loosen spacing without changing the preset bucket
+  - `header_emphasis` directly changes raster header weight and banner padding
+  - `body_boldness` now applies extra overdraw passes to raster body/meta/payment/footer text, and the settings preview now sends that override explicitly instead of only using the last saved local value
+- Receipt-like classic `raster_exact` jobs always attempt embedded-logo composition when `show_logo` is enabled, even if the capability snapshot reports `supportsLogo=false`.
+- When embedded-logo composition cannot use the configured source, printing continues with the text header fallback and now surfaces a warning to preview/test-print callers so the UI can explain the skip.
+
 ## LAN Raw TCP Dispatch (2026-03-07)
 - `system` printer profiles still dispatch through the Windows spooler and require a valid installed Windows printer queue.
 - `network` and `wifi` printer profiles now dispatch ESC/POS bytes directly over raw TCP and do not require Windows installation.

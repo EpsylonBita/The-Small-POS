@@ -467,6 +467,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
   // Receipt action toggles and body boldness
   const [receiptActions, setReceiptActions] = useState<Record<ReceiptActionKey, boolean>>(RECEIPT_ACTION_DEFAULTS)
   const [bodyBoldness, setBodyBoldness] = useState<number>(1)
+  const [layoutDensityScale, setLayoutDensityScale] = useState<number>(1)
 
   // Load printers and statuses
   const loadPrinters = useCallback(async () => {
@@ -493,23 +494,30 @@ const PrinterSettingsModal: React.FC<Props> = ({
 
   const loadReceiptLogoSettings = useCallback(async () => {
     try {
-      const [showLogoRaw, logoSourceRaw, orgLogoRaw, textScaleRaw, logoScaleRaw] = await Promise.all([
+      const [showLogoRaw, logoSourceRaw, orgLogoRaw, textScaleRaw, logoScaleRaw, layoutDensityScaleRaw] = await Promise.all([
         bridge.settings.get({ category: 'receipt', key: 'show_logo', defaultValue: false }),
         bridge.settings.get({ category: 'receipt', key: 'logo_source' }),
         bridge.settings.get({ category: 'organization', key: 'logo_url' }),
         bridge.settings.get({ category: 'receipt', key: 'text_scale' }),
         bridge.settings.get({ category: 'receipt', key: 'logo_scale' }),
+        bridge.settings.get({ category: 'receipt', key: 'layout_density_scale' }),
       ])
       setLogoEnabled(parseBooleanSetting(showLogoRaw))
       setLogoSourceOverride(asTrimmedString(logoSourceRaw))
       setOrgLogoSource(asTrimmedString(orgLogoRaw))
       const parsedTextScale = parseFloat(asTrimmedString(textScaleRaw))
       const parsedLogoScale = parseFloat(asTrimmedString(logoScaleRaw))
+      const parsedLayoutDensityScale = parseFloat(asTrimmedString(layoutDensityScaleRaw))
       if (Number.isFinite(parsedTextScale) && parsedTextScale > 0) {
         setFormData(prev => ({ ...prev, textScale: parsedTextScale }))
       }
       if (Number.isFinite(parsedLogoScale) && parsedLogoScale > 0) {
         setFormData(prev => ({ ...prev, logoScale: parsedLogoScale }))
+      }
+      if (Number.isFinite(parsedLayoutDensityScale) && parsedLayoutDensityScale > 0) {
+        setLayoutDensityScale(parsedLayoutDensityScale)
+      } else {
+        setLayoutDensityScale(1)
       }
       setLogoLoaded(true)
     } catch (e) {
@@ -615,6 +623,10 @@ const PrinterSettingsModal: React.FC<Props> = ({
       console.error('Failed to save body boldness:', e)
     }
   }, [bridge])
+
+  const handleLayoutDensityScaleChange = useCallback((value: number) => {
+    setLayoutDensityScale(value)
+  }, [])
 
   // Initial load (status updates are pushed by Rust monitor events)
   useEffect(() => {
@@ -846,13 +858,17 @@ const PrinterSettingsModal: React.FC<Props> = ({
         logoSource: effectiveLogoSource,
         textScale: formData.textScale,
         logoScale: formData.logoScale,
+        layoutDensityScale,
+        bodyBoldness,
       },
     }
   }, [
+    bodyBoldness,
     buildProfileDraft,
     effectiveLogoSource,
     formData.logoScale,
     formData.textScale,
+    layoutDensityScale,
     logoEnabled,
     logoLoaded,
     viewMode,
@@ -936,6 +952,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
             settings: {
               text_scale: String(formData.textScale),
               logo_scale: String(formData.logoScale),
+              layout_density_scale: String(layoutDensityScale),
             },
           })
         } catch (scaleErr) {
@@ -1939,7 +1956,7 @@ const PrinterSettingsModal: React.FC<Props> = ({
 
                     <div>
                       <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
-                        {t('settings.printer.layoutDensity', 'Layout Density')}
+                        {t('settings.printer.layoutDensityPreset', 'Density Preset')}
                       </label>
                       <select
                         value={formData.layoutDensity}
@@ -1951,6 +1968,21 @@ const PrinterSettingsModal: React.FC<Props> = ({
                         <option value="spacious">{t('settings.printer.layoutDensitySpacious', 'Spacious')}</option>
                       </select>
                     </div>
+
+                    <ReceiptScaleSlider
+                      label={t('settings.printer.layoutDensity', 'Layout Density')}
+                      value={layoutDensityScale}
+                      min={0.7}
+                      max={1.35}
+                      step={0.05}
+                      defaultValue={1}
+                      onChange={handleLayoutDensityScaleChange}
+                      hint={t(
+                        'settings.printer.layoutDensityScaleHint',
+                        'Fine-tune spacing around the preset. Lower values tighten the receipt, higher values open it up.',
+                      )}
+                      resetLabel={t('settings.printer.resetToDefault', 'Reset')}
+                    />
 
                     <div>
                       <label className="block text-xs font-medium mb-1 liquid-glass-modal-text-muted">
@@ -2340,6 +2372,11 @@ const PrinterSettingsModal: React.FC<Props> = ({
             <div className="mb-2 text-[11px] text-white/45">
               {previewDetails}
             </div>
+            {preview?.warnings && preview.warnings.length > 0 && (
+              <div className="mb-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100">
+                {preview.warnings.join(' ')}
+              </div>
+            )}
             <div className="flex-1 bg-white/5 rounded-lg border border-white/10 overflow-hidden relative">
               {previewBusy && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/20 z-10">

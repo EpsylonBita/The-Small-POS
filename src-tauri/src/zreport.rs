@@ -3182,12 +3182,7 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
 /// Deletes in FK-safe order within a transaction.
 /// Returns a JSON object with per-table deletion counts.
 fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Value, String> {
-    fn safe_delete(
-        conn: &Connection,
-        table: &str,
-        sql: &str,
-        cutoff_at: Option<&str>,
-    ) -> i64 {
+    fn safe_delete(conn: &Connection, table: &str, sql: &str, cutoff_at: Option<&str>) -> i64 {
         let execution = if sql.contains("?1") {
             conn.execute(sql, params![cutoff_at.unwrap_or_default()])
         } else {
@@ -4691,9 +4686,18 @@ mod tests {
         let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T18:00:00Z")
             .expect("cleanup should succeed");
 
-        assert_eq!(result["orders"], 3, "only pre-cutoff orders should be cleared");
-        assert_eq!(result["order_payments"], 3, "only pre-cutoff payments should be cleared");
-        assert_eq!(result["staff_shifts"], 1, "only the closed business-day shift should be cleared");
+        assert_eq!(
+            result["orders"], 3,
+            "only pre-cutoff orders should be cleared"
+        );
+        assert_eq!(
+            result["order_payments"], 3,
+            "only pre-cutoff payments should be cleared"
+        );
+        assert_eq!(
+            result["staff_shifts"], 1,
+            "only the closed business-day shift should be cleared"
+        );
 
         let conn = db.conn.lock().unwrap();
         let remaining_orders: i64 = conn
@@ -4713,7 +4717,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(remaining_active_shifts, 1, "next-day active shift must remain");
+        assert_eq!(
+            remaining_active_shifts, 1,
+            "next-day active shift must remain"
+        );
     }
 
     #[test]

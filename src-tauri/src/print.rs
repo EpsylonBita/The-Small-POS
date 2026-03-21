@@ -27,7 +27,7 @@ use crate::receipt_renderer::{
     self, AdjustmentLine, ClassicCustomerRenderMode, CommandProfile, DeliverySlipMode, FontType,
     HeaderEmphasis, KitchenTicketDoc, LayoutConfig, LayoutDensity, OrderReceiptDoc, PaymentLine,
     ReceiptCustomizationLine, ReceiptDocument, ReceiptEmulationMode, ReceiptItem, ReceiptTemplate,
-    ShiftCheckoutDoc, TotalsLine, ZReportDoc,
+    ShiftCheckoutDoc, TotalsLine, ZReportDoc, PAYMENT_DETAIL_AMOUNT_UNKNOWN,
 };
 
 // ---------------------------------------------------------------------------
@@ -864,6 +864,68 @@ fn extract_masked_card_reference(input: &str) -> Option<String> {
     extract_last4_digits(trimmed).map(|last4| format!("****{last4}"))
 }
 
+fn title_case_payment_method(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mapped = match trimmed.to_ascii_lowercase().as_str() {
+        "cash" => return Some("Cash".to_string()),
+        "card" => return Some("Card".to_string()),
+        _ => trimmed,
+    };
+
+    let mut words = Vec::new();
+    for part in mapped
+        .split(|ch: char| ch == '_' || ch == '-' || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            let mut word = String::new();
+            word.push(first.to_ascii_uppercase());
+            word.push_str(chars.as_str().to_ascii_lowercase().as_str());
+            words.push(word);
+        }
+    }
+
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+fn fallback_payment_line_from_order_snapshot(
+    payment_method: &str,
+    payment_status: &str,
+    total_amount: f64,
+) -> Option<PaymentLine> {
+    let trimmed_method = payment_method.trim();
+    if trimmed_method.is_empty() {
+        return None;
+    }
+
+    let normalized_method = trimmed_method.to_ascii_lowercase();
+    let label = title_case_payment_method(trimmed_method)?;
+    if payment_status.trim().eq_ignore_ascii_case("paid")
+        && matches!(normalized_method.as_str(), "cash" | "card")
+    {
+        Some(PaymentLine {
+            label,
+            amount: total_amount,
+            detail: None,
+        })
+    } else {
+        Some(PaymentLine {
+            label,
+            amount: 0.0,
+            detail: Some(PAYMENT_DETAIL_AMOUNT_UNKNOWN.to_string()),
+        })
+    }
+}
+
 fn push_unique_trimmed_note(target: &mut Vec<String>, value: Option<&str>) {
     let Some(trimmed) = value.map(str::trim).filter(|entry| !entry.is_empty()) else {
         return;
@@ -1177,7 +1239,14 @@ pub fn resolve_layout_config(
         detected_brand,
         crate::printers::PrinterBrand::Star | crate::printers::PrinterBrand::Epson
     );
-    if receipt_like_entity && !capability_snapshot.supports_logo && !brand_supports_logo {
+    let receipt_like_raster_logo = receipt_like_entity
+        && template == ReceiptTemplate::Classic
+        && classic_customer_render_mode == ClassicCustomerRenderMode::RasterExact;
+    if receipt_like_entity
+        && !receipt_like_raster_logo
+        && !capability_snapshot.supports_logo
+        && !brand_supports_logo
+    {
         show_logo = false;
     }
     info!(
@@ -1267,6 +1336,10 @@ pub fn resolve_layout_config(
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(1.0)
         .clamp(0.5, 2.0);
+    let layout_density_scale = setting_text(&conn, "receipt", "layout_density_scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0)
+        .clamp(0.7, 1.35);
     let body_font_weight: u32 = match setting_text(&conn, "receipt", "body_boldness").as_deref() {
         Some("2") => 500,
         Some("3") => 600,
@@ -1300,6 +1373,7 @@ pub fn resolve_layout_config(
         font_type,
         layout_density,
         header_emphasis,
+        layout_density_scale,
         decimal_comma: matches!(
             app_language.as_str(),
             "el" | "de" | "fr" | "it" | "es" | "pt" | "nl"
@@ -2048,7 +2122,9 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     COALESCE(delivery_city, ''), COALESCE(delivery_postal_code, ''),
                     COALESCE(delivery_floor, ''), COALESCE(name_on_ringer, ''),
                     COALESCE(driver_id, ''), COALESCE(driver_name, ''), COALESCE(staff_id, ''),
-                    COALESCE(delivery_notes, ''), COALESCE(special_instructions, '')
+                    COALESCE(delivery_notes, ''), COALESCE(special_instructions, ''),
+                    COALESCE(payment_method, ''), COALESCE(payment_status, ''),
+                    COALESCE(payment_transaction_id, '')
              FROM orders WHERE id = ?1",
             params![order_id],
             |row| {
@@ -2078,6 +2154,9 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
                     row.get::<_, String>(22)?,
                     row.get::<_, String>(23)?,
                     row.get::<_, String>(24)?,
+                    row.get::<_, String>(25)?,
+                    row.get::<_, String>(26)?,
+                    row.get::<_, String>(27)?,
                 ))
             },
         )
@@ -2108,6 +2187,9 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         staff_id,
         delivery_notes,
         special_instructions,
+        payment_method,
+        payment_status,
+        payment_transaction_id,
     ) = order;
     let menu_lookup = build_menu_category_lookup(&conn);
 
@@ -2257,6 +2339,18 @@ pub fn build_order_receipt_doc(db: &DbState, order_id: &str) -> Result<OrderRece
         if masked_card.is_none() && method == "card" {
             masked_card = extract_masked_card_reference(&transaction_ref);
         }
+    }
+    if payments.is_empty() {
+        if let Some(payment) = fallback_payment_line_from_order_snapshot(
+            &payment_method,
+            &payment_status,
+            total_amount,
+        ) {
+            payments.push(payment);
+        }
+    }
+    if masked_card.is_none() {
+        masked_card = extract_masked_card_reference(&payment_transaction_id);
     }
 
     let mut adjustments_stmt = conn
@@ -4776,6 +4870,87 @@ mod tests {
     }
 
     #[test]
+    fn test_build_order_receipt_doc_falls_back_to_paid_cash_order_snapshot() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    payment_method, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-snapshot-cash', 'ORD-SNAPSHOT-CASH', '[]', 21.50, 21.50, 'completed', 'pickup',
+                    'cash', 'paid', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-snapshot-cash").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Cash");
+        assert!((doc.payments[0].amount - 21.50).abs() < 0.001);
+        assert_eq!(doc.payments[0].detail, None);
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_falls_back_to_paid_card_order_snapshot_and_masked_card() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    payment_method, payment_status, payment_transaction_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-snapshot-card', 'ORD-SNAPSHOT-CARD', '[]', 19.40, 19.40, 'completed', 'delivery',
+                    'card', 'paid', 'last4-4321',
+                    'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-snapshot-card").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Card");
+        assert!((doc.payments[0].amount - 19.40).abs() < 0.001);
+        assert_eq!(doc.payments[0].detail, None);
+        assert_eq!(doc.masked_card.as_deref(), Some("****4321"));
+    }
+
+    #[test]
+    fn test_build_order_receipt_doc_marks_unknown_snapshot_method_without_inventing_amount() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    payment_method, payment_status, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'ord-snapshot-other', 'ORD-SNAPSHOT-OTHER', '[]', 13.10, 13.10, 'completed', 'pickup',
+                    'bank_transfer', 'authorized', 'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let doc = build_order_receipt_doc(&db, "ord-snapshot-other").unwrap();
+        assert_eq!(doc.payments.len(), 1);
+        assert_eq!(doc.payments[0].label, "Bank Transfer");
+        assert_eq!(doc.payments[0].amount, 0.0);
+        assert_eq!(
+            doc.payments[0].detail.as_deref(),
+            Some(PAYMENT_DETAIL_AMOUNT_UNKNOWN)
+        );
+    }
+
+    #[test]
     fn test_build_order_receipt_doc_card_keeps_amount_and_masked_card() {
         let db = test_db();
         {
@@ -5301,6 +5476,40 @@ mod tests {
         let profile = serde_json::json!({});
         let layout = resolve_layout_config(&db, &profile, "order_receipt").unwrap();
         assert_eq!(layout.body_font_weight, 600);
+    }
+
+    #[test]
+    fn test_resolve_layout_config_keeps_logo_enabled_for_classic_raster_exact_receipts() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["receipt", "show_logo", "true"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO local_settings (setting_category, setting_key, setting_value) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["receipt", "logo_source", "data:image/png;base64,ZmFrZQ=="],
+            )
+            .unwrap();
+        }
+        let profile = serde_json::json!({
+            "paperWidthMm": 80,
+            "receiptTemplate": "classic",
+            "printerName": "Unknown Receipt",
+            "connectionJson": "{\"type\":\"system\",\"systemName\":\"Unknown Receipt\",\"render_mode\":\"raster_exact\",\"capabilities\":{\"status\":\"unverified\",\"supportsLogo\":false}}"
+        });
+        let layout = resolve_layout_config(&db, &profile, "order_receipt").unwrap();
+
+        assert_eq!(
+            layout.classic_customer_render_mode,
+            ClassicCustomerRenderMode::RasterExact
+        );
+        assert!(
+            layout.show_logo,
+            "classic raster exact receipts should keep embedded logo enabled"
+        );
     }
 
     #[test]
