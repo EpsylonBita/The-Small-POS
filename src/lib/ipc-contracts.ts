@@ -169,6 +169,11 @@ export interface SyncFinancialQueueItem {
   lastError: string | null;
   createdAt: string;
   payload: string;
+  parentShiftId?: string | null;
+  parentShiftSyncStatus?: string | null;
+  parentShiftQueueId?: number | null;
+  parentShiftQueueStatus?: string | null;
+  dependencyBlockReason?: string | null;
 }
 
 export interface SyncFinancialQueueItemsResponse {

@@ -172,40 +172,77 @@ fn query_financial_queue_items(limit: i64, db: &db::DbState) -> Result<serde_jso
              LIMIT ?1"
         ))
         .map_err(|e| e.to_string())?;
-    let rows = stmt
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        String,
+    )> = stmt
         .query_map([limit], |row| {
-            let queue_id = row.get::<_, i64>(0)?;
-            let entity_type = row.get::<_, String>(1)?;
-            let entity_id = row.get::<_, String>(2)?;
-            let operation = row.get::<_, String>(3)?;
-            let payload = row.get::<_, String>(4)?;
-            let status = row.get::<_, String>(5)?;
-            let last_error = row.get::<_, Option<String>>(6)?;
-            let retry_count = row.get::<_, i64>(7)?;
-            let created_at = row.get::<_, String>(8)?;
-
-            Ok(serde_json::json!({
-                "queueId": queue_id,
-                "entityType": entity_type,
-                "entityId": entity_id,
-                "operation": operation,
-                "payload": payload,
-                "status": status,
-                "lastError": last_error,
-                "retryCount": retry_count,
-                "createdAt": created_at,
-                // Compatibility aliases for legacy renderer fields
-                "id": queue_id,
-                "table_name": entity_type,
-                "record_id": entity_id,
-                "data": payload,
-                "attempts": retry_count,
-                "error_message": last_error,
-                "created_at": created_at,
-            }))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+            ))
         })
-        .map_err(|e| e.to_string())?;
-    let items: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    let items: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(
+            |(
+                queue_id,
+                entity_type,
+                entity_id,
+                operation,
+                payload,
+                status,
+                last_error,
+                retry_count,
+                created_at,
+            )| {
+                let dependency =
+                    sync::resolve_financial_parent_shift_dependency(&conn, &entity_type, &payload);
+                serde_json::json!({
+                    "queueId": queue_id,
+                    "entityType": entity_type,
+                    "entityId": entity_id,
+                    "operation": operation,
+                    "payload": payload,
+                    "status": status,
+                    "lastError": last_error,
+                    "retryCount": retry_count,
+                    "createdAt": created_at,
+                    "parentShiftId": dependency.as_ref().map(|value| value.parent_shift_id.clone()),
+                    "parentShiftSyncStatus": dependency.as_ref().and_then(|value| value.parent_shift_sync_status.clone()),
+                    "parentShiftQueueId": dependency.as_ref().and_then(|value| value.parent_shift_queue_id),
+                    "parentShiftQueueStatus": dependency.as_ref().and_then(|value| value.parent_shift_queue_status.clone()),
+                    "dependencyBlockReason": dependency.as_ref().and_then(|value| value.dependency_block_reason.clone()),
+                    // Compatibility aliases for legacy renderer fields
+                    "id": queue_id,
+                    "table_name": entity_type,
+                    "record_id": entity_id,
+                    "data": payload,
+                    "attempts": retry_count,
+                    "error_message": last_error,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect();
     Ok(serde_json::json!({ "items": items }))
 }
 
@@ -391,14 +428,7 @@ pub async fn sync_retry_financial_item(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let id = parse_retry_financial_item_payload(arg0)?;
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE sync_queue SET status = 'pending', retry_count = 0, last_error = NULL WHERE id = ?1",
-            rusqlite::params![id],
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    sync::retry_financial_queue_item(&db, id)?;
 
     let _ = app.emit("sync_retry_scheduled", serde_json::json!({ "id": id }));
     emit_sync_status_snapshot(&app, &db, &sync_state).await;
@@ -896,6 +926,183 @@ mod dto_tests {
             .expect("numeric queue id");
 
         assert!(queue_id > 0, "queue id should remain numeric");
+    }
+
+    #[test]
+    fn query_financial_queue_items_returns_parent_shift_dependency_metadata() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-parent', 'cashier-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert parent shift");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'shift', 'shift-parent', 'insert', '{}', 'shift-parent:open', 'failed', 'Shift sync needs retry'
+             )",
+            [],
+        )
+        .expect("insert failed shift queue row");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                'staff_payment',
+                'payment-1',
+                'insert',
+                '{\"cashierShiftId\":\"shift-parent\",\"amount\":20}',
+                'payment-1:insert',
+                'deferred'
+             )",
+            [],
+        )
+        .expect("insert financial queue row");
+
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = query_financial_queue_items(10, &db).expect("query financial queue");
+        let items = response
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("items array");
+        let item = items.first().expect("first item");
+
+        assert_eq!(
+            item.get("parentShiftId")
+                .and_then(serde_json::Value::as_str),
+            Some("shift-parent")
+        );
+        assert_eq!(
+            item.get("parentShiftSyncStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            item.get("parentShiftQueueStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            item.get("dependencyBlockReason")
+                .and_then(serde_json::Value::as_str),
+            Some("Cashier shift sync needs attention")
+        );
+    }
+
+    #[test]
+    fn retry_financial_item_requeues_parent_shift_dependency() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-parent', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .expect("insert parent shift");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, last_error
+             ) VALUES (
+                'shift', 'shift-parent', 'insert', '{}', 'shift-parent:open', 'failed', 3, 'Network error while syncing shift'
+             )",
+            [],
+        )
+        .expect("insert failed shift queue row");
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, last_error
+             ) VALUES (
+                'staff_payment',
+                'payment-1',
+                'insert',
+                '{\"cashierShiftId\":\"shift-parent\",\"amount\":20}',
+                'payment-1:insert',
+                'deferred',
+                1,
+                'Waiting for cashier shift sync'
+             )",
+            [],
+        )
+        .expect("insert financial queue row");
+
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let child_queue_id = {
+            let conn = db.conn.lock().expect("lock db");
+            conn.query_row(
+                "SELECT id FROM sync_queue WHERE entity_type = 'staff_payment' AND entity_id = 'payment-1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("financial queue id")
+        };
+
+        sync::retry_financial_queue_item(&db, child_queue_id).expect("retry financial item");
+
+        let conn = db.conn.lock().expect("lock db");
+        let (shift_queue_status, shift_retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("shift queue row");
+        let shift_sync_status: String = conn
+            .query_row(
+                "SELECT sync_status FROM staff_shifts WHERE id = 'shift-parent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("shift sync status");
+        let (child_status, child_retry_count, child_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE id = ?1",
+                [child_queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("financial queue row");
+
+        assert_eq!(shift_queue_status, "pending");
+        assert_eq!(shift_retry_count, 0);
+        assert_eq!(shift_sync_status, "pending");
+        assert_eq!(child_status, "deferred");
+        assert_eq!(child_retry_count, 0);
+        assert_eq!(
+            child_error.as_deref(),
+            Some("Waiting for cashier shift sync")
+        );
     }
 
     #[test]

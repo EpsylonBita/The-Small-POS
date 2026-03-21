@@ -4390,10 +4390,10 @@ mod tests {
                 "INSERT INTO orders (
                     id, order_number, items, total_amount, subtotal, status, order_type,
                     delivery_address, delivery_city, delivery_postal_code, delivery_floor,
-                    name_on_ringer, driver_name, sync_status, created_at, updated_at
+                    name_on_ringer, driver_name, delivery_notes, sync_status, created_at, updated_at
                  ) VALUES (
                     'ord-delivery', 'ORD-DEL-1', '[]', 10.0, 10.0, 'delivered', 'delivery',
-                    'Main St 42', 'Athens', '10558', '2', 'Papadopoulos', 'Nikos Driver',
+                    'Main St 42', 'Athens', '10558', '2', 'Papadopoulos', 'Nikos Driver', 'Leave at the gate',
                     'pending', datetime('now'), datetime('now')
                  )",
                 [],
@@ -4409,6 +4409,10 @@ mod tests {
         assert_eq!(doc.delivery_floor.as_deref(), Some("2"));
         assert_eq!(doc.name_on_ringer.as_deref(), Some("Papadopoulos"));
         assert_eq!(doc.driver_name.as_deref(), Some("Nikos Driver"));
+        assert!(doc
+            .order_notes
+            .iter()
+            .any(|note| note == "Leave at the gate"));
         assert_eq!(doc.driver_id, None);
         assert_eq!(doc.delivery_slip_mode, DeliverySlipMode::DeliveryOrder);
     }

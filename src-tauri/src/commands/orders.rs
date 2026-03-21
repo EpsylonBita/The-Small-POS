@@ -531,7 +531,8 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
 }
 
 fn compute_order_items_total(items: &[serde_json::Value]) -> f64 {
-    items.iter()
+    items
+        .iter()
         .map(|item| {
             let qty = value_f64(item, &["quantity"]).unwrap_or(1.0);
             if let Some(tp) = value_f64(item, &["total_price", "totalPrice"]) {
@@ -584,8 +585,7 @@ fn update_order_items_in_connection(
     subtotal_amount: f64,
     now: &str,
 ) -> Result<(), String> {
-    let items_json =
-        serde_json::to_string(items).map_err(|e| format!("serialize items: {e}"))?;
+    let items_json = serde_json::to_string(items).map_err(|e| format!("serialize items: {e}"))?;
     if let Some(notes) = order_notes {
         conn.execute(
             "UPDATE orders
@@ -705,8 +705,10 @@ fn refresh_order_payment_snapshot(
     let next_payment_method = if next_payment_status == "partially_paid"
         || has_item_assignments
         || completed_payment_count > 1
-        || matches!(normalized_current_method.as_str(), "pending" | "split" | "mixed")
-    {
+        || matches!(
+            normalized_current_method.as_str(),
+            "pending" | "split" | "mixed"
+        ) {
         "split".to_string()
     } else {
         last_completed_method
@@ -742,7 +744,11 @@ fn enqueue_order_edit_sync(
         "paymentStatus": payment_status,
         "paymentMethod": payment_method,
     });
-    let idem = format!("order:edit-settlement:{}:{}", order_id, uuid::Uuid::new_v4());
+    let idem = format!(
+        "order:edit-settlement:{}:{}",
+        order_id,
+        uuid::Uuid::new_v4()
+    );
     conn.execute(
         "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
          VALUES ('order', ?1, 'update', ?2, ?3)",
@@ -1256,7 +1262,12 @@ pub async fn orders_preview_edit_settlement(
     let completed_payments = list_completed_payments_for_edit(&conn, &actual_order_id)?;
     let paid_total = completed_payments
         .iter()
-        .map(|payment| payment.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(0.0))
+        .map(|payment| {
+            payment
+                .get("amount")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0)
+        })
         .sum::<f64>();
     let delta = next_total - current_total;
     let required_action = if paid_total + 0.01 < next_total {
@@ -1267,7 +1278,8 @@ pub async fn orders_preview_edit_settlement(
         "none"
     };
     let driver_settlement = load_active_driver_settlement(&conn, &actual_order_id)?;
-    let driver_cash_owned = order_type.eq_ignore_ascii_case("delivery") && driver_settlement.is_some();
+    let driver_cash_owned =
+        order_type.eq_ignore_ascii_case("delivery") && driver_settlement.is_some();
 
     Ok(serde_json::json!({
         "success": true,
@@ -1307,7 +1319,8 @@ pub async fn orders_apply_edit_settlement(
     };
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let (next_total, next_subtotal) = derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
+    let (next_total, next_subtotal) =
+        derive_next_order_totals(&conn, &actual_order_id, &payload.items)?;
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
@@ -1335,7 +1348,9 @@ pub async fn orders_apply_edit_settlement(
 
         match action {
             EditSettlementActionPayload::None | EditSettlementActionPayload::MarkPartial => {}
-            EditSettlementActionPayload::Collect { payments: payment_rows } => {
+            EditSettlementActionPayload::Collect {
+                payments: payment_rows,
+            } => {
                 if payment_rows.is_empty() {
                     return Err("Collect action requires at least one payment".into());
                 }
@@ -1373,7 +1388,9 @@ pub async fn orders_apply_edit_settlement(
                     payments::record_payment_in_connection(&conn, &input, &options)?;
                 }
             }
-            EditSettlementActionPayload::Refund { refunds: refund_rows } => {
+            EditSettlementActionPayload::Refund {
+                refunds: refund_rows,
+            } => {
                 if refund_rows.is_empty() {
                     return Err("Refund action requires at least one payment allocation".into());
                 }
@@ -1423,20 +1440,25 @@ pub async fn orders_apply_edit_settlement(
         }))
     })();
 
-    match result {
+    let response = match result {
         Ok(value) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
-            if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
-                let _ = app.emit("order_realtime_update", order_json);
-            }
             Ok(value)
         }
         Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(error)
         }
+    }?;
+
+    drop(conn);
+
+    if let Ok(order_json) = sync::get_order_by_id(&db, &actual_order_id) {
+        let _ = app.emit("order_realtime_update", order_json);
     }
+
+    Ok(response)
 }
 
 #[tauri::command]
@@ -3027,13 +3049,8 @@ mod transition_tests {
             .unwrap();
         assert_eq!(count, 1);
 
-        let (status, retry_count, last_error, payload_text): (
-            String,
-            i64,
-            Option<String>,
-            String,
-        ) = conn
-            .query_row(
+        let (status, retry_count, last_error, payload_text): (String, i64, Option<String>, String) =
+            conn.query_row(
                 "SELECT status, retry_count, last_error, payload
                  FROM sync_queue
                  WHERE entity_type = 'driver_earning'
@@ -3115,12 +3132,9 @@ mod transition_tests {
         )
         .unwrap();
 
-        let (payment_status, payment_method, total_paid) = refresh_order_payment_snapshot(
-            &conn,
-            "order-edit-partial",
-            "2026-03-20T12:00:00Z",
-        )
-        .expect("refresh payment snapshot");
+        let (payment_status, payment_method, total_paid) =
+            refresh_order_payment_snapshot(&conn, "order-edit-partial", "2026-03-20T12:00:00Z")
+                .expect("refresh payment snapshot");
 
         assert_eq!(payment_status, "partially_paid");
         assert_eq!(payment_method, "split");

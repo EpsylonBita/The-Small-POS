@@ -134,7 +134,8 @@ fn parse_payment_items(payload: &Value) -> Vec<PaymentItemInput> {
         .get("items")
         .and_then(Value::as_array)
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .map(|item_val| PaymentItemInput {
                     item_index: item_val
                         .get("itemIndex")
@@ -172,7 +173,8 @@ fn build_payment_items_json(items: &[PaymentItemInput]) -> Option<Value> {
     }
 
     Some(Value::Array(
-        items.iter()
+        items
+            .iter()
             .map(|item| {
                 serde_json::json!({
                     "itemIndex": item.item_index,
@@ -212,8 +214,8 @@ pub(crate) fn normalize_external_payment_method(method: &str) -> Option<String> 
     match method.trim().to_ascii_lowercase().as_str() {
         "cash" => Some("cash".to_string()),
         "card" => Some("card".to_string()),
-        "other" | "online" | "digital_wallet" | "digital-wallet" | "wallet" | "split"
-        | "mixed" | "pending" => Some("other".to_string()),
+        "other" | "online" | "digital_wallet" | "digital-wallet" | "wallet" | "split" | "mixed"
+        | "pending" => Some("other".to_string()),
         _ => None,
     }
 }
@@ -292,7 +294,8 @@ pub(crate) fn build_payment_record_input(payload: &Value) -> Result<PaymentRecor
         discount_amount,
         payment_origin,
         terminal_device_id,
-        requested_staff_id: str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id")),
+        requested_staff_id: str_field(payload, "staffId")
+            .or_else(|| str_field(payload, "staff_id")),
         requested_staff_shift_id: str_field(payload, "staffShiftId")
             .or_else(|| str_field(payload, "staff_shift_id")),
         collected_by,
@@ -363,7 +366,13 @@ pub(crate) fn recompute_order_payment_state(
             payment_transaction_id = ?3,
             updated_at = ?4
          WHERE id = ?5",
-        params![new_payment_status, effective_method, payment_id, now, order_id],
+        params![
+            new_payment_status,
+            effective_method,
+            payment_id,
+            now,
+            order_id
+        ],
     )
     .map_err(|e| format!("update order payment: {e}"))?;
 
@@ -469,9 +478,7 @@ pub(crate) fn record_payment_in_connection(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string())
-            .ok_or(
-                "Cashier-collected delivery payments require an active cashier shift context",
-            )?;
+            .ok_or("Cashier-collected delivery payments require an active cashier shift context")?;
         let staff_id = input
             .requested_staff_id
             .as_deref()
@@ -516,7 +523,12 @@ pub(crate) fn record_payment_in_connection(
         };
         conn.execute(
             update_sql,
-            params![resolved_shift_id, resolved_staff_id, updated_at, input.order_id],
+            params![
+                resolved_shift_id,
+                resolved_staff_id,
+                updated_at,
+                input.order_id
+            ],
         )
         .map_err(|e| format!("update order ownership for payment: {e}"))?;
     }
@@ -702,8 +714,7 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
-    let recorded = match record_payment_in_connection(&conn, &input, &options)
-    {
+    let recorded = match record_payment_in_connection(&conn, &input, &options) {
         Ok(recorded) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
@@ -890,10 +901,7 @@ fn refresh_payment_sync_queue_entry(conn: &Connection, payment_id: &str) -> Resu
     Ok(())
 }
 
-fn payment_sync_queue_needs_retry(
-    conn: &Connection,
-    payment_id: &str,
-) -> Result<bool, String> {
+fn payment_sync_queue_needs_retry(conn: &Connection, payment_id: &str) -> Result<bool, String> {
     let queue_row: Option<(String, i64, Option<String>, Option<String>)> = match conn.query_row(
         "SELECT status,
                 COALESCE(retry_count, 0),
@@ -1620,8 +1628,7 @@ mod tests {
         .expect("mark local payment as mirrored");
         drop(conn);
 
-        update_payment_method(&db, "ord-method-edit", "card")
-            .expect("update payment method");
+        update_payment_method(&db, "ord-method-edit", "card").expect("update payment method");
 
         let conn = db.conn.lock().unwrap();
         let (order_method, order_status, order_sync_status): (String, String, String) = conn
@@ -1837,8 +1844,8 @@ mod tests {
         .expect("mark payment sync metadata synced");
         drop(conn);
 
-        let result = update_payment_method(&db, "ord-method-noop", "cash")
-            .expect("same-method no-op");
+        let result =
+            update_payment_method(&db, "ord-method-noop", "cash").expect("same-method no-op");
         assert_eq!(result["data"]["retriedSync"], false);
         assert_eq!(result["data"]["paymentMethod"], "cash");
 

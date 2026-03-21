@@ -19,7 +19,6 @@ import { useTheme } from '../contexts/theme-context';
 import { toast } from 'react-hot-toast';
 import OrderDetailsModal from '../components/modals/OrderDetailsModal';
 import { formatCurrency } from '../utils/format';
-import CustomerOrderHistoryModal from '../components/modals/CustomerOrderHistoryModal';
 import { getOrderStatusBadgeClasses } from '../utils/orderStatus';
 import { getBridge, isBrowser, offEvent, onEvent } from '../../lib';
 
@@ -214,10 +213,6 @@ const OrdersPage: React.FC = () => {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-
-  // Customer history modal state
-  const [showCustomerHistory, setShowCustomerHistory] = useState(false);
-  const [customerHistoryPhone, setCustomerHistoryPhone] = useState('');
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -649,14 +644,13 @@ const OrdersPage: React.FC = () => {
         onClose={() => setSelectedOrder(null)}
         onPrintReceipt={async () => {
           const orderId = selectedOrder?.id;
-          const printType = selectedOrder?.order_type === 'delivery' ? 'delivery' : 'customer';
           if (!orderId) {
             toast.error('No order ID available for printing');
             return;
           }
           toast.loading('Printing receipt...', { id: 'print-receipt' });
           try {
-            const result = await bridge.payments.printReceipt(orderId, printType);
+            const result = await bridge.payments.printReceipt(orderId, 'order_receipt');
             console.log('[OrdersPage] printReceipt result:', result);
             if (result?.success) {
               toast.success('Receipt sent to printer', { id: 'print-receipt' });
@@ -667,26 +661,6 @@ const OrdersPage: React.FC = () => {
             console.error('[OrdersPage] printReceipt error:', err);
             toast.error(`Print failed: ${err?.message || err}`, { id: 'print-receipt' });
           }
-        }}
-        onShowCustomerHistory={(phone) => {
-          setCustomerHistoryPhone(phone);
-          setShowCustomerHistory(true);
-        }}
-      />
-
-      {/* Customer Order History Modal */}
-      <CustomerOrderHistoryModal
-        isOpen={showCustomerHistory}
-        customerPhone={customerHistoryPhone}
-        customerName={selectedOrder?.customer_name}
-        onClose={() => {
-          setShowCustomerHistory(false);
-          setCustomerHistoryPhone('');
-        }}
-        onViewOrder={(orderId) => {
-          // Close history modal and load the selected order
-          setShowCustomerHistory(false);
-          // Optionally fetch and show the order
         }}
       />
     </div>

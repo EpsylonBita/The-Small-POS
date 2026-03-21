@@ -200,6 +200,21 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const cashierShift = cashierContext.cashierShift;
   const canRecord = Boolean(cashierShift?.id) && !resolving;
   const currentCashierStaffId = cashierShift?.staff_id || staff?.databaseStaffId || staff?.staffId || '';
+  const cashierShiftSyncStatus = String(cashierShift?.sync_status ?? '').trim().toLowerCase();
+  const isCashierShiftSyncBlocked = Boolean(
+    cashierShift?.id && cashierShiftSyncStatus && cashierShiftSyncStatus !== 'synced',
+  );
+  const cashierShiftSyncWarning = isCashierShiftSyncBlocked
+    ? cashierShiftSyncStatus === 'failed'
+      ? t('modals.expense.cashierShiftSyncFailedWarning', {
+          defaultValue:
+            'This cashier shift is saved locally, but its sync needs attention. New expenses and staff payments will stay local until the cashier shift sync succeeds.',
+        })
+      : t('modals.expense.cashierShiftSyncPendingWarning', {
+          defaultValue:
+            'This cashier shift is still waiting to sync. New expenses and staff payments are saved locally now and will sync after the cashier shift reaches the server.',
+        })
+    : '';
 
   const totalExpenses = useMemo(
     () => expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
@@ -628,51 +643,87 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         </div>
 
         {cashierShift ? (
-          <div className="mt-5 grid gap-3 lg:grid-cols-3">
-            <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/85 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
-              <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-300">
-                <UserRound className="h-4 w-4" />
-                <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                  {t('modals.expense.cashierLabel', 'Cashier')}
-                </span>
+          <>
+            <div className="mt-5 grid gap-3 lg:grid-cols-3">
+              <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/85 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+                <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-300">
+                  <UserRound className="h-4 w-4" />
+                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
+                    {t('modals.expense.cashierLabel', 'Cashier')}
+                  </span>
+                </div>
+                <div className="mt-3 text-lg font-black text-slate-900 dark:text-white">
+                  {cashierShift.staff_name || staff?.name || t('common.roleNames.cashier', 'Cashier')}
+                </div>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  {t('common.roleNames.cashier', 'Cashier')}
+                </p>
               </div>
-              <div className="mt-3 text-lg font-black text-slate-900 dark:text-white">
-                {cashierShift.staff_name || staff?.name || t('common.roleNames.cashier', 'Cashier')}
+
+              <div className="rounded-2xl border border-sky-200/70 bg-sky-50/85 p-4 dark:border-sky-500/20 dark:bg-sky-500/10">
+                <div className="flex items-center gap-2 text-sky-600 dark:text-sky-300">
+                  <Wallet className="h-4 w-4" />
+                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
+                    {t('modals.expense.branchLabel', 'Branch')}
+                  </span>
+                </div>
+                <div className="mt-3 break-all text-base font-bold text-slate-900 dark:text-white">
+                  {cashierContext.branchId || '-'}
+                </div>
               </div>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                {t('common.roleNames.cashier', 'Cashier')}
-              </p>
+
+              <div className="rounded-2xl border border-violet-200/70 bg-violet-50/85 p-4 dark:border-violet-500/20 dark:bg-violet-500/10">
+                <div className="flex items-center gap-2 text-violet-600 dark:text-violet-300">
+                  <Clock3 className="h-4 w-4" />
+                  <span className="text-xs font-semibold uppercase tracking-[0.16em]">
+                    {t('modals.expense.shiftStartedLabel', 'Shift started')}
+                  </span>
+                </div>
+                <div className="mt-3 text-base font-bold text-slate-900 dark:text-white">
+                  {formatDateTime(cashierShift.check_in_time, {
+                    day: '2-digit',
+                    month: 'short',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </div>
+              </div>
             </div>
 
-            <div className="rounded-2xl border border-sky-200/70 bg-sky-50/85 p-4 dark:border-sky-500/20 dark:bg-sky-500/10">
-              <div className="flex items-center gap-2 text-sky-600 dark:text-sky-300">
-                <Wallet className="h-4 w-4" />
-                <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                  {t('modals.expense.branchLabel', 'Branch')}
-                </span>
+            {isCashierShiftSyncBlocked && (
+              <div className="mt-5 rounded-3xl border border-amber-300/70 bg-amber-50/90 p-5 dark:border-amber-500/20 dark:bg-amber-500/10">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-2xl bg-amber-100/90 p-3 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+                      {t('modals.expense.waitingForCashierShiftSync', {
+                        defaultValue: 'Waiting for cashier shift sync',
+                      })}
+                    </h3>
+                    <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+                      {cashierShiftSyncWarning}
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold text-amber-800 dark:text-amber-100">
+                      <span className="rounded-lg border border-amber-300/70 bg-white/60 px-3 py-1.5 dark:border-amber-500/20 dark:bg-black/10">
+                        {t('modals.expense.cashierShiftIdLabel', {
+                          defaultValue: 'Cashier shift',
+                        })}
+                        : {cashierShift.id}
+                      </span>
+                      <span className="rounded-lg border border-amber-300/70 bg-white/60 px-3 py-1.5 dark:border-amber-500/20 dark:bg-black/10">
+                        {t('modals.expense.cashierShiftSyncStatusLabel', {
+                          defaultValue: 'Local sync status',
+                        })}
+                        : {cashierShiftSyncStatus.replace(/_/g, ' ')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div className="mt-3 break-all text-base font-bold text-slate-900 dark:text-white">
-                {cashierContext.branchId || '-'}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-violet-200/70 bg-violet-50/85 p-4 dark:border-violet-500/20 dark:bg-violet-500/10">
-              <div className="flex items-center gap-2 text-violet-600 dark:text-violet-300">
-                <Clock3 className="h-4 w-4" />
-                <span className="text-xs font-semibold uppercase tracking-[0.16em]">
-                  {t('modals.expense.shiftStartedLabel', 'Shift started')}
-                </span>
-              </div>
-              <div className="mt-3 text-base font-bold text-slate-900 dark:text-white">
-                {formatDateTime(cashierShift.check_in_time, {
-                  day: '2-digit',
-                  month: 'short',
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </div>
-            </div>
-          </div>
+            )}
+          </>
         ) : (
           <div className="mt-5 rounded-3xl border border-amber-300/70 bg-amber-50/90 p-5 dark:border-amber-500/20 dark:bg-amber-500/10">
             <div className="flex items-start gap-3">

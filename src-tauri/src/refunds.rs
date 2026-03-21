@@ -144,7 +144,15 @@ pub(crate) fn refund_payment_in_connection(
              FROM order_payments
              WHERE id = ?1",
             params![payment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|_| format!("Payment not found: {payment_id}"))?;
 
@@ -152,11 +160,12 @@ pub(crate) fn refund_payment_in_connection(
         return Err("Cannot refund a voided payment".into());
     }
 
-    let refund_method =
-        requested_refund_method.unwrap_or_else(|| match payment_method.to_ascii_lowercase().as_str() {
+    let refund_method = requested_refund_method.unwrap_or_else(|| {
+        match payment_method.to_ascii_lowercase().as_str() {
             "card" => RefundMethod::Card,
             _ => RefundMethod::Cash,
-        });
+        }
+    });
     let cash_handler = match refund_method {
         RefundMethod::Cash => Some(requested_cash_handler.unwrap_or(CashHandler::CashierDrawer)),
         RefundMethod::Card => None,
@@ -283,7 +292,9 @@ pub(crate) fn refund_payment_in_connection(
                 )
                 .map_err(|e| format!("update driver settlement refund: {e}"))?;
             if updated == 0 {
-                return Err("Driver cash refund requires an active unsettled driver earning".into());
+                return Err(
+                    "Driver cash refund requires an active unsettled driver earning".into(),
+                );
             }
         }
         None => {

@@ -45,7 +45,6 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   order,
   onClose,
   onPrintReceipt,
-  onShowCustomerHistory,
 }) => {
   const bridge = getBridge();
   const { t } = useTranslation();
@@ -53,24 +52,59 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const [orderData, setOrderData] = useState<any>(null);
   const [orderPayments, setOrderPayments] = useState<any[]>([]);
   const [paidItems, setPaidItems] = useState<any[]>([]);
+  const [customerOrders, setCustomerOrders] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showSplitPaymentModal, setShowSplitPaymentModal] = useState(false);
 
   useEffect(() => {
-    if (isOpen && orderId && !order) {
-      loadOrderData();
-    } else if (order) {
+    if (!isOpen) {
+      setOrderData(null);
+      setOrderPayments([]);
+      setPaidItems([]);
+      setCustomerOrders([]);
+      setLoading(false);
+      setHistoryLoading(false);
+      return;
+    }
+
+    if (order) {
       setOrderData(order);
+      const seedPhone = order.customer_phone || order.customerPhone || order.customer?.phone || '';
+      if (seedPhone) {
+        void loadCustomerHistory(seedPhone);
+      } else {
+        setCustomerOrders([]);
+      }
+    }
+
+    if (orderId) {
+      void loadOrderData(orderId);
     }
   }, [isOpen, orderId, order]);
 
-  const loadOrderData = async () => {
+  const loadOrderData = async (targetOrderId = orderId) => {
+    if (!targetOrderId) {
+      return;
+    }
+
     try {
       setLoading(true);
-      const result = await bridge.orders.getById(orderId);
-      if (result) {
-        setOrderData(result);
+      const result: any = await bridge.orders.getById(targetOrderId);
+      const hydratedOrder = result?.order ?? result?.data ?? result;
+      if (hydratedOrder) {
+        setOrderData(hydratedOrder);
+        const hydratedPhone =
+          hydratedOrder.customer_phone ||
+          hydratedOrder.customerPhone ||
+          hydratedOrder.customer?.phone ||
+          '';
+        if (hydratedPhone) {
+          void loadCustomerHistory(hydratedPhone);
+        } else {
+          setCustomerOrders([]);
+        }
       }
     } catch (error) {
       console.error('Error loading order:', error);
@@ -102,6 +136,33 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     }
   };
 
+  const loadCustomerHistory = async (phone: string) => {
+    const normalizedPhone = String(phone || '').replace(/\D+/g, '');
+    if (!normalizedPhone) {
+      setCustomerOrders([]);
+      return;
+    }
+
+    try {
+      setHistoryLoading(true);
+      const result = await bridge.orders.getByCustomerPhone(phone);
+      if (result?.success && Array.isArray(result.orders)) {
+        setCustomerOrders(result.orders);
+      } else if (Array.isArray(result)) {
+        setCustomerOrders(result);
+      } else if (Array.isArray(result?.data)) {
+        setCustomerOrders(result.data);
+      } else {
+        setCustomerOrders([]);
+      }
+    } catch (error) {
+      console.error('Error loading customer order history:', error);
+      setCustomerOrders([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen || !orderId) {
       return;
@@ -109,9 +170,6 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
     void loadPaymentState();
   }, [isOpen, orderId]);
-
-  if (!isOpen) return null;
-
 
   const getStatusColor = (status: string) => getOrderStatusBadgeClasses(status);
 
@@ -164,73 +222,80 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     fallbackLabel: t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' }),
   });
   const customerPhone = customer.phone || displayOrder.customer_phone || displayOrder.customerPhone || '';
+  const customerEmail = customer.email || displayOrder.customer_email || displayOrder.customerEmail || '';
+  const normalizedCustomerPhone = String(customerPhone || '').replace(/\D+/g, '');
 
-  // Build delivery address object from various field patterns
-  // Rust backend returns camelCase (deliveryCity), props may use snake_case (delivery_city)
   const normalizeText = (value: any): string => typeof value === 'string' ? value.trim() : '';
-  const parsePackedDeliveryAddress = (value: string) => {
-    const segments = value
-      .split(/[\n|,]+/)
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-
-    const firstLine = segments[0] || '';
-    let city = '';
-    let postalCode = '';
-    let floor = '';
-
-    const extractPostal = (segment: string): string => {
-      const compact = segment.replace(/\s+/g, '');
-      const fullMatch = compact.match(/\b\d{5}\b/);
-      if (fullMatch) return fullMatch[0];
-      const splitMatch = segment.match(/\b(\d{3})\s*(\d{2})\b/);
-      return splitMatch ? `${splitMatch[1]}${splitMatch[2]}` : '';
-    };
-    const extractFloor = (segment: string): string => {
-      const floorMatch = segment.match(/(?:floor|όροφος|οροφος|όρ\.?)\s*:?\s*(\d+)/i);
-      return floorMatch?.[1] || '';
-    };
-    const extractCity = (segment: string): string => {
-      if (/(?:floor|όροφος|οροφος|όρ\.?)/i.test(segment)) return '';
-      return segment
-        .replace(/\d+/g, ' ')
-        .replace(/[,:;|_-]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-    };
-
-    for (const segment of segments.slice(1)) {
-      if (!postalCode) postalCode = extractPostal(segment);
-      if (!floor) floor = extractFloor(segment);
-      if (!city) city = extractCity(segment);
-    }
-
-    return { firstLine, city, postalCode, floor };
-  };
-
   const rawAddress = displayOrder.delivery_address || displayOrder.deliveryAddress;
-  const rawCity = displayOrder.delivery_city || displayOrder.deliveryCity || '';
-  const rawPostalCode = displayOrder.delivery_postal_code || displayOrder.deliveryPostalCode || '';
-  const rawFloor = displayOrder.delivery_floor || displayOrder.deliveryFloor || '';
-  const rawNotes = displayOrder.delivery_notes || displayOrder.deliveryNotes || '';
-  const rawRinger = displayOrder.name_on_ringer || displayOrder.nameOnRinger || '';
   const rawAddressText = normalizeText(
     typeof rawAddress === 'string'
       ? rawAddress
       : (rawAddress?.address || rawAddress?.street_address || rawAddress?.street || '')
   );
-  const parsedPackedAddress = rawAddressText ? parsePackedDeliveryAddress(rawAddressText) : null;
+  const deliveryAddress = {
+    address: rawAddressText,
+    city: normalizeText(displayOrder.delivery_city || displayOrder.deliveryCity || rawAddress?.city || ''),
+    postal_code: normalizeText(
+      displayOrder.delivery_postal_code || displayOrder.deliveryPostalCode || rawAddress?.postal_code || '',
+    ),
+    floor: normalizeText(
+      displayOrder.delivery_floor ||
+        displayOrder.deliveryFloor ||
+        rawAddress?.floor ||
+        rawAddress?.floor_number ||
+        '',
+    ),
+    notes: normalizeText(displayOrder.delivery_notes || displayOrder.deliveryNotes || rawAddress?.notes || ''),
+    name_on_ringer: normalizeText(
+      displayOrder.name_on_ringer || displayOrder.nameOnRinger || rawAddress?.name_on_ringer || '',
+    ),
+  };
+  const hasDeliveryAddress = Object.values(deliveryAddress).some((value) => Boolean(value));
 
-  const hasDeliveryAddress = rawAddress || rawCity || rawPostalCode || rawFloor || rawNotes || rawRinger;
-
-  const deliveryAddress = hasDeliveryAddress ? {
-    address: normalizeText(parsedPackedAddress?.firstLine || rawAddressText || ''),
-    city: normalizeText(rawCity || rawAddress?.city || parsedPackedAddress?.city || ''),
-    postal_code: normalizeText(rawPostalCode || rawAddress?.postal_code || parsedPackedAddress?.postalCode || ''),
-    floor: normalizeText(rawFloor || rawAddress?.floor || rawAddress?.floor_number || parsedPackedAddress?.floor || ''),
-    notes: normalizeText(rawNotes || rawAddress?.notes || ''),
-    name_on_ringer: normalizeText(rawRinger || rawAddress?.name_on_ringer || ''),
-  } : {};
+  const currentOrderKeys = new Set(
+    [
+      orderId,
+      displayOrder.id,
+      displayOrder.order_number,
+      displayOrder.orderNumber,
+      displayOrder.client_order_id,
+      displayOrder.clientOrderId,
+      displayOrder.supabase_id,
+      displayOrder.supabaseId,
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const orderMatchesCurrent = (candidate: any) => {
+    const candidateKeys = [
+      candidate?.id,
+      candidate?.orderId,
+      candidate?.order_id,
+      candidate?.order_number,
+      candidate?.orderNumber,
+      candidate?.client_order_id,
+      candidate?.clientOrderId,
+      candidate?.supabase_id,
+      candidate?.supabaseId,
+    ]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean);
+    return candidateKeys.some((value) => currentOrderKeys.has(value));
+  };
+  const sortedCustomerOrders = [...customerOrders]
+    .filter((entry) => {
+      const entryPhone = String(entry?.customer_phone || entry?.customerPhone || '').replace(/\D+/g, '');
+      return !normalizedCustomerPhone || !entryPhone || entryPhone === normalizedCustomerPhone;
+    })
+    .sort(
+      (a, b) =>
+        new Date(b?.created_at || b?.createdAt || 0).getTime() -
+        new Date(a?.created_at || a?.createdAt || 0).getTime(),
+    );
+  const repeatOrderCount = normalizedCustomerPhone
+    ? sortedCustomerOrders.length + (sortedCustomerOrders.some(orderMatchesCurrent) ? 0 : 1)
+    : 0;
+  const recentOrders = sortedCustomerOrders.filter((entry) => !orderMatchesCurrent(entry)).slice(0, 4);
 
   const subtotal = displayOrder.subtotal || 0;
   const tax = displayOrder.tax || displayOrder.tax_amount || displayOrder.taxAmount || 0;
@@ -347,7 +412,9 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     }
     return normalizedMethod;
   })();
-  const createdAt = displayOrder.created_at ? new Date(displayOrder.created_at) : new Date();
+  const createdAt = displayOrder.created_at || displayOrder.createdAt
+    ? new Date(displayOrder.created_at || displayOrder.createdAt)
+    : new Date();
   const isGhostOrder =
     displayOrder.is_ghost === true ||
     displayOrder.isGhost === true ||
@@ -358,6 +425,24 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   const hasDriverAssignment = !!(displayOrder.driver_id || displayOrder.driverId || driverName);
   const isDelivered = status?.toLowerCase() === 'completed' || status?.toLowerCase() === 'delivered';
   const isDeliveryOrder = orderType?.toLowerCase() === 'delivery';
+  const displayOrderNumber = displayOrder.order_number || displayOrder.orderNumber || orderId;
+  const createdDateTimeLabel = `${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`;
+  const primaryAddressLine = deliveryAddress.address || t('modals.orderDetails.noAddress', { defaultValue: 'No address' });
+  const totalItemCount = items.reduce((sum: number, item: any) => sum + Number(item?.quantity || 1), 0);
+  const serviceNotes = [displayOrder.special_instructions, displayOrder.specialInstructions, displayOrder.notes]
+    .map((note) => normalizeText(note))
+    .filter(
+      (note, index, array) =>
+        Boolean(note) &&
+        array.findIndex((existing) => existing.toLowerCase() === note.toLowerCase()) === index,
+    );
+  const isDarkTheme = resolvedTheme === 'dark';
+  const shellPanelClass =
+    'rounded-[30px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-[rgba(12,14,20,0.88)]';
+  const insetPanelClass =
+    'rounded-2xl border border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]';
+  const mutedEyebrowClass =
+    'text-[11px] font-semibold uppercase tracking-[0.32em] liquid-glass-modal-text-muted';
 
   // Parse customizations/ingredients with prices
   // Edge Case Handling (Requirements 5.3, 5.5):
@@ -505,34 +590,66 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const modalHeader = (
-    <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
-      <div className="flex justify-between items-start gap-4">
-        <div className="flex-1">
-          <h2 className="text-2xl font-bold liquid-glass-modal-text">
-            {t('modals.orderDetails.title') || 'Order Details'}
-          </h2>
-          <div className="flex items-center gap-3 mt-2 flex-wrap">
-            <span className="text-sm liquid-glass-modal-text-muted">
-              {t('modals.orderDetails.orderNumber') || 'Order'} #{displayOrder.order_number || orderId}
-            </span>
-            <span className="text-xs liquid-glass-modal-text-muted">
-              {`${formatDate(createdAt)} ${formatTime(createdAt, { hour: '2-digit', minute: '2-digit' })}`}
-            </span>
-            <span className={`text-xs px-3 py-1 rounded-full border ${getStatusColor(status)}`}>
+    <div className="flex-shrink-0 border-b liquid-glass-modal-border bg-gradient-to-br from-emerald-500/[0.08] via-cyan-500/[0.05] to-transparent px-6 py-5 dark:from-emerald-500/[0.12] dark:via-cyan-500/[0.09]">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.26em] ${
+              isDarkTheme
+                ? 'border-white/10 bg-white/[0.06] text-white/70'
+                : 'border-zinc-200 bg-white/80 text-zinc-500'
+            }`}>
+              <Package className="h-3.5 w-3.5" />
+              {t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
+            </div>
+            <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${getStatusColor(status)}`}>
               {status?.toUpperCase() || 'PENDING'}
             </span>
           </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <h2 className="text-3xl font-bold tracking-tight liquid-glass-modal-text">
+              #{displayOrderNumber}
+            </h2>
+            <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm ${
+              isDarkTheme
+                ? 'bg-white/[0.06] text-white/70'
+                : 'bg-zinc-100 text-zinc-600'
+            }`}>
+              <Clock className="h-4 w-4" />
+              {createdDateTimeLabel}
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm liquid-glass-modal-text-muted">
+            <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
+              {isDeliveryOrder ? <Truck className="h-4 w-4 text-orange-400" /> : <Clock className="h-4 w-4 text-blue-400" />}
+              {getOrderTypeLabel(orderType)}
+            </span>
+            <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
+              {getPaymentMethodIcon(paymentMethodPresentation)}
+              {getPaymentMethodLabel(paymentMethodPresentation)}
+            </span>
+            {isDeliveryOrder && hasDriverAssignment ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 dark:border-white/10 dark:bg-white/[0.04]">
+                <Car className="h-4 w-4 text-cyan-400" />
+                {driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' })}
+              </span>
+            ) : null}
+          </div>
+          {isDeliveryOrder && hasDeliveryAddress ? (
+            <p className="mt-4 max-w-4xl whitespace-pre-line text-sm leading-6 liquid-glass-modal-text-muted">
+              {primaryAddressLine}
+            </p>
+          ) : null}
         </div>
         <button
           onClick={onClose}
-          className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
+          className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-zinc-200/70 bg-white/80 text-zinc-700 shadow-sm transition-colors hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-200 dark:hover:bg-white/[0.08]"
           aria-label={t('common.actions.close')}
         >
-          <X className="w-6 h-6" />
+          <X className="h-6 w-6" />
         </button>
       </div>
     </div>
-
   );
 
   const canRefund = paymentStatus === 'paid' || paymentStatus === 'completed';
@@ -560,38 +677,38 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
   };
 
   const modalFooter = (
-    <div className="flex-shrink-0 px-6 py-4 border-t liquid-glass-modal-border bg-white/5 dark:bg-black/20">
+    <div className="flex-shrink-0 border-t liquid-glass-modal-border bg-white/85 px-6 py-4 backdrop-blur-xl dark:bg-black/30">
       <div className={`grid gap-3 ${footerGridCols}`}>
         {onPrintReceipt && (
           <button
             onClick={onPrintReceipt}
-            className="liquid-glass-modal-button w-full gap-2"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-200/70 bg-white/90 px-4 text-sm font-semibold text-zinc-900 transition hover:bg-white dark:border-white/10 dark:bg-white/[0.05] dark:text-zinc-100 dark:hover:bg-white/[0.08]"
           >
-            <Printer className="w-4 h-4" />
+            <Printer className="h-4 w-4" />
             {t('modals.orderDetails.printReceipt') || 'Print Receipt'}
           </button>
         )}
         {canSplitPayment && (
           <button
             onClick={() => setShowSplitPaymentModal(true)}
-            className="liquid-glass-modal-button w-full gap-2 bg-pink-600/10 hover:bg-pink-600/20 text-pink-400 border-pink-500/20"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-fuchsia-300/60 bg-fuchsia-50 px-4 text-sm font-semibold text-fuchsia-700 transition hover:bg-fuchsia-100 dark:border-fuchsia-500/25 dark:bg-fuchsia-500/10 dark:text-fuchsia-200 dark:hover:bg-fuchsia-500/15"
           >
-            <Split className="w-4 h-4" />
+            <Split className="h-4 w-4" />
             {t('payment.split.title', { defaultValue: 'Split Payment' })}
           </button>
         )}
         {canRefund && (
           <button
             onClick={() => setShowRefundModal(true)}
-            className="liquid-glass-modal-button w-full gap-2 bg-red-600/10 hover:bg-red-600/20 text-red-400 border-red-500/20"
+            className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-red-300/70 bg-red-50 px-4 text-sm font-semibold text-red-700 transition hover:bg-red-100 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 dark:hover:bg-red-500/15"
           >
-            <RotateCcw className="w-4 h-4" />
+            <RotateCcw className="h-4 w-4" />
             {t('modals.orderDetails.voidRefund', { defaultValue: 'Void / Refund' })}
           </button>
         )}
         <button
           onClick={onClose}
-          className="liquid-glass-modal-button w-full gap-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30"
+          className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-2xl border border-zinc-300/80 bg-zinc-100 px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-200 dark:border-white/10 dark:bg-zinc-900/80 dark:text-zinc-100 dark:hover:bg-zinc-800"
         >
           {t('common.actions.close') || 'Close'}
         </button>
@@ -599,294 +716,350 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
     </div>
   );
 
+  if (!isOpen) return null;
+
   return (
     <>
     <LiquidGlassModal
       isOpen={isOpen}
       onClose={onClose}
       size="lg"
-      className="!max-w-4xl"
+      className="!w-[92vw] !max-w-6xl"
       contentClassName="p-0 overflow-hidden"
       ariaLabel={t('modals.orderDetails.title', { defaultValue: 'Order Details' })}
       header={modalHeader}
       footer={modalFooter}
     >
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 min-h-0 scrollbar-hide">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-6 scrollbar-hide">
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+            <div className={`h-12 w-12 animate-spin rounded-full border-2 ${
+              isDarkTheme
+                ? 'border-white/15 border-t-cyan-300'
+                : 'border-zinc-200 border-t-blue-600'
+            }`}></div>
           </div>
         ) : (
           <div className="space-y-6">
 
-            {/* Order Type & Payment Banner */}
-            <div className="liquid-glass-modal-card">
-              <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-lg ${isDeliveryOrder ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                    {isDeliveryOrder ? <Truck className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+            <section className={`${shellPanelClass} overflow-hidden p-6`}>
+              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+                <div className="space-y-4">
+                  <div className={mutedEyebrowClass}>{t('modals.orderDetails.title', { defaultValue: 'Order Details' })}</div>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                          isDeliveryOrder
+                            ? 'bg-orange-500/15 text-orange-500 dark:bg-orange-500/20 dark:text-orange-300'
+                            : 'bg-blue-500/15 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300'
+                        }`}>
+                          {isDeliveryOrder ? <Truck className="h-5 w-5" /> : <Clock className="h-5 w-5" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-lg font-semibold liquid-glass-modal-text">{getOrderTypeLabel(orderType)}</div>
+                          <div className="text-sm liquid-glass-modal-text-muted">{createdDateTimeLabel}</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300">
+                          {getPaymentMethodIcon(paymentMethodPresentation)}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-lg font-semibold liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</div>
+                          <div className="text-sm capitalize liquid-glass-modal-text-muted">{paymentStatus}</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className={`${insetPanelClass} px-4 py-4 md:col-span-2 xl:col-span-1`}>
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                          isDeliveryOrder
+                            ? 'bg-cyan-500/15 text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-300'
+                            : 'bg-violet-500/15 text-violet-600 dark:bg-violet-500/20 dark:text-violet-300'
+                        }`}>
+                          {isDeliveryOrder ? <Car className="h-5 w-5" /> : <User className="h-5 w-5" />}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-lg font-semibold liquid-glass-modal-text">
+                            {isDeliveryOrder
+                              ? (driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' }))
+                              : (customerName || t('modals.orderDetails.guestCustomer', { defaultValue: 'Guest' }))}
+                          </div>
+                          <div className="text-sm liquid-glass-modal-text-muted">
+                            {isDeliveryOrder
+                              ? hasDriverAssignment
+                                ? (isDelivered
+                                  ? t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })
+                                  : t('modals.orderDetails.assignedDriver', { defaultValue: 'Assigned Driver' }))
+                                : t('modals.orderDetails.processing', { defaultValue: 'Processing' })
+                              : (customerPhone || customerEmail || t('modals.orderDetails.processing', { defaultValue: 'Processing' }))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="font-semibold liquid-glass-modal-text">
-                      {getOrderTypeLabel(orderType)}
-                    </h3>
-                    <p className="text-sm liquid-glass-modal-text-muted">
-                      {isDeliveryOrder && deliveryAddress?.address
-                        ? deliveryAddress.address
-                        : t('modals.orderDetails.processing') || 'Processing'}
-                    </p>
-                  </div>
+                  {isDeliveryOrder && hasDeliveryAddress ? (
+                    <div className={`${insetPanelClass} px-4 py-4`}>
+                      <div className={mutedEyebrowClass}>{t('modals.orderDetails.savedAddress', { defaultValue: 'Saved Address' })}</div>
+                      <p className="mt-3 whitespace-pre-line text-base leading-7 liquid-glass-modal-text">
+                        {primaryAddressLine}
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
-                {/* Payment Method */}
-                <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 border border-white/10">
-                  {getPaymentMethodIcon(paymentMethodPresentation)}
-                  <div>
-                    <p className="font-medium liquid-glass-modal-text">{getPaymentMethodLabel(paymentMethodPresentation)}</p>
-                    <p className="text-xs liquid-glass-modal-text-muted capitalize">{paymentStatus}</p>
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  <div className={`${insetPanelClass} px-5 py-5`}>
+                    <div className={mutedEyebrowClass}>{t('modals.orderDetails.total', { defaultValue: 'Total' })}</div>
+                    <div className="mt-3 text-3xl font-bold tracking-tight liquid-glass-modal-text">
+                      {formatCurrency(total)}
+                    </div>
+                    <div className="mt-2 text-sm liquid-glass-modal-text-muted">
+                      {remainingAmount > 0
+                        ? `${t('splitPayment.remaining', { defaultValue: 'Remaining' })}: ${formatCurrency(remainingAmount)}`
+                        : `${t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: ${formatCurrency(paidAmount || total)}`}
+                    </div>
+                  </div>
+                  <div className={`${insetPanelClass} px-5 py-5`}>
+                    <div className={mutedEyebrowClass}>{t('modals.orderDetails.orderItems', { defaultValue: 'Items' })}</div>
+                    <div className="mt-3 flex items-end justify-between gap-3">
+                      <div className="text-3xl font-bold tracking-tight liquid-glass-modal-text">
+                        {totalItemCount}
+                      </div>
+                      {normalizedCustomerPhone ? (
+                        <div className="rounded-full border border-emerald-300/70 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-500/25 dark:bg-emerald-500/10 dark:text-emerald-200">
+                          {t('modals.orderDetails.customerOrderIndex', {
+                            count: repeatOrderCount || 1,
+                            defaultValue: 'Order #{{count}}',
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="mt-2 text-sm liquid-glass-modal-text-muted">
+                      {normalizedCustomerPhone
+                        ? repeatOrderCount > 1
+                          ? t('modals.orderDetails.previousOrdersCount', {
+                            count: repeatOrderCount - 1,
+                            defaultValue: '{{count}} previous orders on this phone',
+                          })
+                          : t('modals.orderDetails.firstOrder', { defaultValue: 'First recorded order' })
+                        : t('modals.orderDetails.processing', { defaultValue: 'Processing' })}
+                    </div>
+                    {completedPayments.length > 0 ? (
+                      <div className="mt-4 rounded-2xl border border-zinc-200/70 bg-white/70 px-4 py-3 text-sm liquid-glass-modal-text-muted dark:border-white/10 dark:bg-white/[0.04]">
+                        <div>{t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: {formatCurrency(paidAmount)}</div>
+                        <div>{t('splitPayment.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(remainingAmount)}</div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
-              {completedPayments.length > 0 && (
-                <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-3">
-                    <h4 className="text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                      {t('payment.split.title', { defaultValue: 'Split Payment' })}
-                    </h4>
-                    <div className="flex items-center gap-4 text-xs liquid-glass-modal-text-muted">
-                      <span>{t('modals.orderDetails.paid', { defaultValue: 'Paid' })}: {formatCurrency(paidAmount)}</span>
-                      <span>{t('splitPayment.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(remainingAmount)}</span>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {completedPayments.map((payment: any) => {
-                      const paymentMethodName = String(payment?.method || payment?.payment_method || '').toLowerCase();
-                      const paymentCreatedAt = payment?.created_at || payment?.createdAt;
-                      const paymentOrigin = String(payment?.paymentOrigin || payment?.payment_origin || 'manual').toLowerCase();
-                      const paymentItems = Array.isArray(payment?.items) ? payment.items : [];
-                      const paymentDiscount = Number(payment?.discountAmount || payment?.discount_amount || 0);
-                      const paymentStaffId = payment?.staffId || payment?.staff_id;
-                      const paymentShiftId = payment?.staffShiftId || payment?.staff_shift_id;
-                      const transactionRef = payment?.transactionRef || payment?.transaction_ref;
+            </section>
 
-                      return (
-                        <div
-                          key={payment?.id || payment?.paymentId || `${paymentMethodName}-${paymentCreatedAt}`}
-                          className="rounded-lg border border-white/10 bg-white/5 px-3 py-3 space-y-3"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              {getPaymentMethodIcon(paymentMethodName)}
-                              <div>
-                                <p className="text-sm font-medium liquid-glass-modal-text">
-                                  {getPaymentMethodLabel(paymentMethodName)}
-                                </p>
-                                <p className="text-xs liquid-glass-modal-text-muted">
-                                  {paymentCreatedAt
-                                    ? `${formatDate(new Date(paymentCreatedAt))} ${formatTime(new Date(paymentCreatedAt), { hour: '2-digit', minute: '2-digit' })}`
-                                    : t('modals.orderDetails.processing', { defaultValue: 'Processing' })}
-                                </p>
-                              </div>
-                            </div>
-                            <span className="font-semibold liquid-glass-modal-text">
-                              {formatCurrency(Number(payment?.amount || 0))}
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
-                              paymentMethodName === 'card'
-                                ? 'border border-blue-500/30 bg-blue-500/15 text-blue-300'
-                                : paymentMethodName === 'cash'
-                                  ? 'border border-green-500/30 bg-green-500/15 text-green-300'
-                                  : 'border border-purple-500/30 bg-purple-500/15 text-purple-300'
-                            }`}>
-                              {getPaymentMethodLabel(paymentMethodName)}
-                            </span>
-                            <span className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold uppercase tracking-wide ${
-                              paymentOrigin === 'terminal'
-                                ? 'border border-cyan-500/30 bg-cyan-500/15 text-cyan-300'
-                                : 'border border-white/15 bg-white/10 text-white/70'
-                            }`}>
-                              {paymentOrigin === 'terminal'
-                                ? t('splitPayment.terminalApproved', { defaultValue: 'Terminal' })
-                                : t('modals.orderDetails.manual', { defaultValue: 'Manual' })}
-                            </span>
-                            {paymentDiscount > 0 && (
-                              <span className="inline-flex items-center rounded-full border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 font-semibold text-yellow-300">
-                                {t('modals.orderDetails.discount', { defaultValue: 'Discount' })}: -{formatCurrency(paymentDiscount)}
-                              </span>
-                            )}
-                          </div>
-                          {(paymentStaffId || paymentShiftId || transactionRef) && (
-                            <div className="space-y-1 text-xs liquid-glass-modal-text-muted">
-                              {paymentStaffId && (
-                                <p>
-                                  {t('modals.orderDetails.staff', { defaultValue: 'Staff' })}: {paymentStaffId}
-                                </p>
-                              )}
-                              {paymentShiftId && (
-                                <p>
-                                  {t('modals.orderDetails.shift', { defaultValue: 'Shift' })}: {paymentShiftId}
-                                </p>
-                              )}
-                              {transactionRef && (
-                                <p className="truncate">
-                                  {t('modals.orderDetails.transaction', { defaultValue: 'Transaction' })}: {transactionRef}
-                                </p>
-                              )}
-                            </div>
-                          )}
-                          {paymentItems.length > 0 && (
-                            <div className="space-y-2 border-t border-white/10 pt-3">
-                              <p className="text-[11px] font-semibold uppercase tracking-wider liquid-glass-modal-text-muted">
-                                {t('modals.orderDetails.coveredItems', { defaultValue: 'Covered Items' })}
-                              </p>
-                              <div className="space-y-1.5">
-                                {paymentItems.map((paymentItem: any, itemIndex: number) => (
-                                  <div
-                                    key={`${payment?.id || payment?.paymentId || paymentCreatedAt}-item-${paymentItem?.itemIndex ?? paymentItem?.item_index ?? itemIndex}`}
-                                    className="flex items-center justify-between gap-2 rounded-md bg-white/5 px-2.5 py-2 text-xs"
-                                  >
-                                    <span className="truncate liquid-glass-modal-text">
-                                      {(paymentItem?.itemQuantity ?? paymentItem?.item_quantity ?? 1) > 1
-                                        ? `${paymentItem?.itemQuantity ?? paymentItem?.item_quantity ?? 1}x `
-                                        : ''}
-                                      {paymentItem?.itemName || paymentItem?.item_name || t('modals.orderDetails.item', { defaultValue: 'Item' })}
-                                    </span>
-                                    <span className="whitespace-nowrap font-medium text-emerald-400">
-                                      {formatCurrency(Number(paymentItem?.itemAmount ?? paymentItem?.item_amount ?? 0))}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
               {/* Left Column: Customer, Delivery & Driver Info */}
-              <div className="md:col-span-1 space-y-6">
+              <div className="space-y-6">
 
                 {/* Customer Card */}
-                <div className="liquid-glass-modal-card">
-                  <div className="flex items-center justify-between mb-4">
-                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                      <User className="w-4 h-4" />
-                      {t('modals.orderDetails.customerInformation') || 'Customer'}
-                    </h4>
-                    {/* Customer History Button */}
-                    {isDeliveryOrder && customerPhone && onShowCustomerHistory && (
-                      <button
-                        onClick={() => onShowCustomerHistory(customerPhone)}
-                        className="flex items-center gap-1 px-2 py-1 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors border border-blue-500/30"
-                      >
-                        <History className="w-3 h-3" />
-                        {t('modals.orderDetails.history') || 'History'}
-                      </button>
-                    )}
+                <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
+                  <div className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
+                    <User className="w-4 h-4" />
+                    {t('modals.orderDetails.customerInformation') || 'Customer'}
                   </div>
-                  <div className="space-y-3">
+                  <div className="space-y-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-purple-200 bg-purple-50 text-lg font-bold text-purple-700 shadow-sm dark:border-purple-500/25 dark:bg-purple-500/15 dark:text-purple-200">
                         {customerName ? customerName.charAt(0).toUpperCase() : '?'}
                       </div>
-                      <div>
-                        <div className="font-semibold liquid-glass-modal-text">
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold liquid-glass-modal-text">
                           {customerName || t('modals.orderDetails.guestCustomer') || 'Guest'}
                         </div>
-                        {customerPhone && (
-                          <div className="flex items-center gap-1 text-sm liquid-glass-modal-text-muted">
+                        {customerPhone ? (
+                          <div className="mt-1 flex items-center gap-1 text-sm liquid-glass-modal-text-muted">
                             <Phone className="w-3 h-3" />
                             {customerPhone}
+                          </div>
+                        ) : null}
+                        {customerEmail ? (
+                          <div className="mt-1 text-xs liquid-glass-modal-text-muted">
+                            {customerEmail}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {normalizedCustomerPhone ? (
+                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
+                    <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
+                      <History className="w-4 h-4" />
+                      {t('modals.orderDetails.repeatCustomer', { defaultValue: 'Repeat Customer' })}
+                    </div>
+                    <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+                      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-700 dark:text-emerald-200">
+                        {t('modals.orderDetails.customerOrderIndex', {
+                          count: repeatOrderCount || 1,
+                          defaultValue: 'Order #{{count}}',
+                        })}
+                      </div>
+                      <div className="mt-2 text-sm text-emerald-800 dark:text-emerald-100">
+                        {repeatOrderCount > 1
+                          ? t('modals.orderDetails.previousOrdersCount', {
+                            count: repeatOrderCount - 1,
+                            defaultValue: '{{count}} previous orders on this phone',
+                          })
+                          : t('modals.orderDetails.firstOrder', { defaultValue: 'First recorded order' })}
+                      </div>
+                    </div>
+                    <div className="mt-4">
+                      <div className="mb-3 flex items-center justify-between">
+                        <div className="text-sm font-semibold liquid-glass-modal-text">
+                          {t('modals.orderDetails.recentOrders', { defaultValue: 'Recent Orders' })}
+                        </div>
+                        {historyLoading && (
+                          <div className="h-4 w-4 animate-spin rounded-full border border-zinc-300 border-t-zinc-700 dark:border-zinc-700 dark:border-t-zinc-200" />
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        {recentOrders.length > 0 ? (
+                          recentOrders.map((historyOrder) => (
+                            <div
+                              key={`${historyOrder.id || historyOrder.order_number || historyOrder.orderNumber}-${historyOrder.created_at || historyOrder.createdAt || ''}`}
+                              className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-3 py-3 dark:border-white/10 dark:bg-white/5"
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold liquid-glass-modal-text">
+                                  #{historyOrder.order_number || historyOrder.orderNumber || historyOrder.id}
+                                </div>
+                                <div className="text-xs liquid-glass-modal-text-muted">
+                                  {`${formatDate(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()))} ${formatTime(new Date(historyOrder.created_at || historyOrder.createdAt || Date.now()), { hour: '2-digit', minute: '2-digit' })}`}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className={`inline-flex items-center rounded-full border px-2 py-1 text-[10px] font-semibold ${getStatusColor(historyOrder.status || 'pending')}`}>
+                                  {historyOrder.status || 'pending'}
+                                </span>
+                                <span className="text-sm font-semibold liquid-glass-modal-text">
+                                  {formatCurrency(Number(historyOrder.total_amount || historyOrder.totalAmount || 0))}
+                                </span>
+                                <ChevronRight className="w-4 h-4 liquid-glass-modal-text-muted" />
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="rounded-2xl border border-dashed border-zinc-200 px-4 py-4 text-sm liquid-glass-modal-text-muted dark:border-white/10">
+                            {t('modals.orderDetails.noRecentOrders', { defaultValue: 'No previous orders found' })}
                           </div>
                         )}
                       </div>
                     </div>
                   </div>
-                </div>
+                ) : null}
 
                 {/* Delivery Address Card - Show only for delivery orders */}
-                {isDeliveryOrder && (
-                  <div className="liquid-glass-modal-card">
-                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
+                {isDeliveryOrder && hasDeliveryAddress && (
+                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
+                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
                       <MapPin className="w-4 h-4" />
                       {t('modals.orderDetails.deliveryAddress') || 'Delivery Address'}
                     </h4>
-                    <div className="p-3 bg-white/5 dark:bg-black/20 rounded-lg border border-white/10 dark:border-white/5 space-y-2">
-                      <div className="space-y-2">
-                        <div>
-                          <div className="text-xs font-semibold uppercase tracking-wide liquid-glass-modal-text-muted">
-                            {t('modals.orderDetails.streetAddress', { defaultValue: 'Address' })}
-                          </div>
-                          <p className="font-medium liquid-glass-modal-text">
-                            {deliveryAddress.address || '-'}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <Building className="w-3 h-3" />
-                          <span>
-                            {t('modals.orderDetails.city', { defaultValue: 'City' })}: {deliveryAddress.city || '-'}
+                    <div className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+                      <div className="text-xs font-semibold uppercase tracking-[0.22em] liquid-glass-modal-text-muted">
+                        {t('modals.orderDetails.savedAddress', { defaultValue: 'Saved Address' })}
+                      </div>
+                      <p className="mt-2 whitespace-pre-line font-medium liquid-glass-modal-text">
+                        {deliveryAddress.address || t('modals.orderDetails.noAddress') || 'No address'}
+                      </p>
+                    </div>
+
+                    <div className="mt-4 space-y-2">
+                      {deliveryAddress.city ? (
+                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
+                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
+                            <MapPin className="w-3 h-3" />
+                            {t('modals.orderDetails.city', { defaultValue: 'City' })}
                           </span>
+                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.city}</span>
                         </div>
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <MapPin className="w-3 h-3" />
-                          <span>
-                            {t('modals.orderDetails.postalCode', { defaultValue: 'Postal' })}: {deliveryAddress.postal_code || '-'}
+                      ) : null}
+                      {deliveryAddress.postal_code ? (
+                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
+                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
+                            <Layers className="w-3 h-3" />
+                            {t('modals.orderDetails.postalCode', { defaultValue: 'Postal Code' })}
                           </span>
+                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.postal_code}</span>
                         </div>
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <Layers className="w-3 h-3" />
-                          <span>
-                            {t('modals.orderDetails.floor', { defaultValue: 'Floor' })}: {deliveryAddress.floor || '-'}
+                      ) : null}
+                      {deliveryAddress.floor ? (
+                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
+                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
+                            <Layers className="w-3 h-3" />
+                            {t('modals.orderDetails.floor', { defaultValue: 'Floor' })}
                           </span>
+                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.floor}</span>
                         </div>
-                        <div className="flex items-center gap-2 text-sm liquid-glass-modal-text-muted">
-                          <Bell className="w-3 h-3" />
-                          <span>
-                            {t('modals.orderDetails.nameOnRinger', { defaultValue: 'Bell' })}: {deliveryAddress.name_on_ringer || '-'}
+                      ) : null}
+                      {deliveryAddress.name_on_ringer ? (
+                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm dark:border-white/10 dark:bg-white/5">
+                          <span className="flex items-center gap-2 liquid-glass-modal-text-muted">
+                            <Bell className="w-3 h-3" />
+                            {t('modals.orderDetails.nameOnRinger', { defaultValue: 'Bell' })}
                           </span>
+                          <span className="font-medium liquid-glass-modal-text">{deliveryAddress.name_on_ringer}</span>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {deliveryAddress.notes ? (
+                      <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/90 px-4 py-3 dark:border-amber-500/20 dark:bg-amber-500/10">
+                        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700 dark:text-amber-200">
+                          {t('modals.orderDetails.deliveryNotes', { defaultValue: 'Delivery Notes' })}
+                        </div>
+                        <div className="mt-2 flex items-start gap-2 text-sm text-amber-900 dark:text-amber-100">
+                          <FileText className="mt-0.5 w-3 h-3 shrink-0" />
+                          <span>{deliveryAddress.notes}</span>
                         </div>
                       </div>
-
-                      {/* Delivery Notes */}
-                      {deliveryAddress.notes && (
-                        <div className="mt-3 pt-3 border-t border-white/10">
-                          <div className="flex items-start gap-2 text-sm">
-                            <FileText className="w-3 h-3 mt-0.5 text-yellow-400" />
-                            <span className="liquid-glass-modal-text-muted italic">
-                              {deliveryAddress.notes}
-                            </span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    ) : null}
                   </div>
                 )}
 
-                {/* Driver Info - Show for delivered orders */}
-                {isDeliveryOrder && isDelivered && hasDriverAssignment && (
-                  <div className="liquid-glass-modal-card">
-                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
+                {/* Driver Info - Show for assigned and delivered delivery orders */}
+                {isDeliveryOrder && hasDriverAssignment && (
+                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
+                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
                       <Truck className="w-4 h-4" />
-                      {t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })}
+                      {t('modals.orderDetails.deliveryFulfillment', { defaultValue: 'Delivery Fulfillment' })}
                     </h4>
-                    <div className="p-3 bg-green-500/10 rounded-lg border border-green-500/20">
+                    <div className={`rounded-2xl border px-4 py-3 ${
+                      isDelivered
+                        ? 'border-green-500/20 bg-green-500/10'
+                        : 'border-cyan-500/20 bg-cyan-500/10'
+                    }`}>
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-green-500 to-teal-600 flex items-center justify-center text-white font-bold text-lg shadow-lg">
+                        <div className={`flex h-10 w-10 items-center justify-center rounded-full text-white font-bold text-lg shadow-lg ${
+                          isDelivered
+                            ? 'bg-gradient-to-br from-green-500 to-teal-600'
+                            : 'bg-gradient-to-br from-cyan-500 to-blue-600'
+                        }`}>
                           {driverName ? driverName.charAt(0).toUpperCase() : <Car className="w-5 h-5" />}
                         </div>
                         <div>
                           <div className="font-semibold liquid-glass-modal-text">
                             {driverName || t('modals.orderDetails.unknownDriver', { defaultValue: 'Unknown Driver' })}
                           </div>
-                          <div className="text-xs text-green-400 flex items-center gap-1">
-                            <CheckCircle className="w-3 h-3" aria-hidden="true" />
-                            {t('modals.orderDetails.delivered', { defaultValue: 'Delivered' })}
+                          <div className={`text-xs flex items-center gap-1 ${
+                            isDelivered ? 'text-green-400' : 'text-cyan-400'
+                          }`}>
+                            {isDelivered ? <CheckCircle className="w-3 h-3" aria-hidden="true" /> : <Truck className="w-3 h-3" aria-hidden="true" />}
+                            {isDelivered
+                              ? t('modals.orderDetails.deliveredBy', { defaultValue: 'Delivered By' })
+                              : t('modals.orderDetails.assignedDriver', { defaultValue: 'Assigned Driver' })}
                           </div>
                         </div>
                       </div>
@@ -894,17 +1067,41 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
                 )}
 
+                {serviceNotes.length > 0 ? (
+                  <div className="liquid-glass-modal-card rounded-[28px] border border-zinc-200/80 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-zinc-900/75">
+                    <h4 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
+                      <FileText className="w-4 h-4" />
+                      {t('modals.orderDetails.serviceNotes', { defaultValue: 'Service Notes' })}
+                    </h4>
+                    <div className="space-y-2">
+                      {serviceNotes.map((note) => (
+                        <div
+                          key={note}
+                          className="rounded-2xl border border-zinc-200/70 bg-zinc-50/90 px-4 py-3 text-sm liquid-glass-modal-text dark:border-white/10 dark:bg-white/5"
+                        >
+                          {note}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
               </div>
 
               {/* Right Column: Order Items */}
-              <div className="md:col-span-2">
-                <div className="liquid-glass-modal-card h-full flex flex-col">
-                  <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider liquid-glass-modal-text-muted mb-4">
-                    <Package className="w-4 h-4" />
-                    {t('modals.orderDetails.orderItems') || 'Items'}
-                  </h4>
+              <div className="min-w-0">
+                <div className={`${shellPanelClass} flex h-full flex-col p-6`}>
+                  <div className="mb-5 flex items-center justify-between gap-3">
+                    <h4 className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.28em] liquid-glass-modal-text-muted">
+                      <Package className="w-4 h-4" />
+                      {t('modals.orderDetails.orderItems') || 'Items'}
+                    </h4>
+                    <span className="rounded-full border border-zinc-200/70 bg-white/70 px-3 py-1 text-xs font-semibold liquid-glass-modal-text dark:border-white/10 dark:bg-white/[0.04]">
+                      {totalItemCount}
+                    </span>
+                  </div>
 
-                  <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
+                  <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
                     {items.length > 0 ? (
                       items.map((item: any, index: number) => {
                         const customizations = parseCustomizations(item.customizations);
@@ -924,16 +1121,16 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         return (
                           <div
                             key={item.id || index}
-                            className={`p-4 rounded-lg border transition-colors ${
+                            className={`rounded-[24px] border px-4 py-4 transition-colors ${
                               shouldShowItemPaymentState && isItemPaid
-                                ? 'bg-green-500/5 border-green-500/20 hover:bg-green-500/10'
-                                : 'bg-white/5 dark:bg-white/5 border-white/10 hover:bg-white/10'
+                                ? 'border-green-500/20 bg-green-500/8'
+                                : 'border-zinc-200/70 bg-white/70 dark:border-white/10 dark:bg-white/[0.04]'
                             }`}
                           >
                             {/* Item Header */}
                             <div className="flex items-start justify-between mb-2">
                               <div className="flex items-start gap-3 flex-1">
-                                <div className="w-8 h-8 rounded-md bg-orange-500/20 text-orange-400 flex items-center justify-center font-bold text-sm border border-orange-500/20 flex-shrink-0">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-orange-300/60 bg-orange-50 text-sm font-bold text-orange-700 dark:border-orange-500/25 dark:bg-orange-500/10 dark:text-orange-200">
                                   {item.quantity || 1}x
                                 </div>
                                 <div className="flex-1">
@@ -944,8 +1141,8 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                     </div>
                                   )}
                                   {/* Item name (subcategory) */}
-                                  <div className="font-medium liquid-glass-modal-text">
-                                    {item.name || item.menu_item?.name || 'Item'}
+                                  <div className="text-lg font-semibold liquid-glass-modal-text">
+                                    {item.name || item.item_name || item.menu_item_name || item.menu_item?.name || 'Item'}
                                   </div>
                                   {shouldShowItemPaymentState && (
                                     <div className="mt-1 space-y-1.5">
@@ -996,7 +1193,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 </div>
                               </div>
                               <div className="text-right">
-                                <div className="font-semibold liquid-glass-modal-text">
+                                <div className="text-lg font-semibold liquid-glass-modal-text">
                                   {formatCurrency(item.total_price || item.price || 0)}
                                 </div>
                                 <div className="text-xs liquid-glass-modal-text-muted">
@@ -1007,17 +1204,17 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                             {/* Customizations/Ingredients */}
                             {customizations.length > 0 && (
-                              <div className="ml-11 mt-2 space-y-1">
+                              <div className="ml-14 mt-3 space-y-2">
                                 {/* Added ingredients */}
                                 {customizations.filter(c => !c.isWithout).length > 0 && (
-                                  <div className="border-l-2 border-green-500/30 pl-3 space-y-1">
+                                  <div className="space-y-1 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 px-3 py-3 dark:border-emerald-500/15 dark:bg-emerald-500/[0.06]">
                                     {customizations.filter(c => !c.isWithout).map((c, idx) => (
                                       <div key={`add-${idx}`} className="flex justify-between text-xs">
                                         <span className="flex items-center gap-1 liquid-glass-modal-text-muted">
-                                          <span className="text-green-400">+</span> {c.name}{c.isLittle ? ` (${littleLabel})` : ''}
+                                          <span className="text-emerald-500">+</span> {c.name}{c.isLittle ? ` (${littleLabel})` : ''}
                                         </span>
                                         {c.price > 0 && (
-                                          <span className="text-green-400 font-medium">+{formatCurrency(c.price)}</span>
+                                          <span className="font-medium text-emerald-600 dark:text-emerald-300">+{formatCurrency(c.price)}</span>
                                         )}
                                       </div>
                                     ))}
@@ -1025,10 +1222,10 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                                 )}
                                 {/* Without ingredients */}
                                 {customizations.filter(c => c.isWithout).length > 0 && (
-                                  <div className="border-l-2 border-red-500/30 pl-3 space-y-1 mt-1">
-                                    <div className="text-[11px] text-red-300">{withoutLabel}</div>
+                                  <div className="mt-1 space-y-1 rounded-2xl border border-red-200/70 bg-red-50/70 px-3 py-3 dark:border-red-500/15 dark:bg-red-500/[0.06]">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-red-700 dark:text-red-300">{withoutLabel}</div>
                                     {customizations.filter(c => c.isWithout).map((c, idx) => (
-                                      <div key={`without-${idx}`} className="flex justify-between text-xs text-red-400">
+                                      <div key={`without-${idx}`} className="flex justify-between text-xs text-red-600 dark:text-red-300">
                                         <span className="line-through">- {c.name}</span>
                                       </div>
                                     ))}
@@ -1039,7 +1236,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
 
                             {/* Item Notes */}
                             {itemNotes && (
-                              <div className="ml-11 mt-2 text-xs liquid-glass-modal-text-muted italic flex items-center gap-1">
+                              <div className="ml-14 mt-3 flex items-center gap-1 text-xs italic liquid-glass-modal-text-muted">
                                 <FileText className="w-3 h-3" />
                                 <span>{itemNotes}</span>
                               </div>
@@ -1055,12 +1252,12 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                   </div>
 
                   {/* Totals Section */}
-                  <div className="mt-6 pt-6 border-t border-gray-200/50 dark:border-gray-700/50 space-y-2">
+                  <div className={`${insetPanelClass} mt-6 space-y-2 px-5 py-5`}>
                     <div className="flex justify-between text-sm liquid-glass-modal-text-muted">
                       <span>{t('modals.orderDetails.subtotal') || 'Subtotal'}</span>
                       <div className="flex items-center gap-2">
                         {discountAmount > 0 && (
-                          <span className="line-through text-xs text-gray-500">{formatCurrency(originalSubtotal)}</span>
+                          <span className="line-through text-xs text-zinc-400">{formatCurrency(originalSubtotal)}</span>
                         )}
                         <span>{formatCurrency(subtotal)}</span>
                       </div>
@@ -1078,7 +1275,7 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                       </div>
                     )}
                     {discountAmount > 0 && (
-                      <div className="flex justify-between text-sm text-green-400 font-medium">
+                      <div className="flex justify-between text-sm font-medium text-emerald-600 dark:text-emerald-300">
                         <span>
                           {t('modals.orderDetails.discount') || 'Discount'}
                           {discountPercentage > 0 && ` (${discountPercentage}%)`}
@@ -1086,11 +1283,11 @@ const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                         <span>-{formatCurrency(discountAmount)}</span>
                       </div>
                     )}
-                    <div className="flex justify-between items-end pt-2 border-t border-dashed border-gray-300 dark:border-gray-600">
-                      <span className="font-bold text-lg liquid-glass-modal-text">
+                    <div className="flex justify-between items-end border-t border-dashed border-zinc-300 pt-3 dark:border-white/10">
+                      <span className="text-lg font-bold liquid-glass-modal-text">
                         {t('modals.orderDetails.total') || 'Total'}
                       </span>
-                      <span className="font-bold text-2xl text-blue-600 dark:text-blue-400">
+                      <span className="text-3xl font-bold tracking-tight text-blue-600 dark:text-blue-300">
                         {formatCurrency(total)}
                       </span>
                     </div>

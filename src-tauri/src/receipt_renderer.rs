@@ -1310,6 +1310,10 @@ fn should_render_shift_checkout_driver_summary(doc: &ShiftCheckoutDoc) -> bool {
     doc.role_type == "driver"
 }
 
+fn should_render_minimal_shift_checkout(doc: &ShiftCheckoutDoc) -> bool {
+    crate::shifts::is_non_financial_shift_role(&doc.role_type)
+}
+
 fn customization_qty(value: f64) -> String {
     if value <= 0.0 {
         return "1".to_string();
@@ -2949,20 +2953,10 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
         }
         ReceiptDocument::ShiftCheckout(doc) => {
             let role_display = receipt_role_text(lang, &doc.role_type);
-            let expected = doc
-                .expected_amount
-                .map(money)
-                .unwrap_or_else(|| "N/A".to_string());
-            let closing = doc
-                .closing_amount
-                .map(money)
-                .unwrap_or_else(|| "N/A".to_string());
-            let variance = doc
-                .variance_amount
-                .map(money)
-                .unwrap_or_else(|| "N/A".to_string());
             let mut body = format!(
                 "<div class=\"center\"><strong>{}</strong></div><div class=\"section\">\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>\
                  <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "SHIFT CHECKOUT")),
@@ -2970,115 +2964,127 @@ pub fn render_html(document: &ReceiptDocument, cfg: &LayoutConfig) -> String {
                 esc(&role_display),
                 esc(receipt_label(lang, "Staff")),
                 esc(&doc.staff_name),
-            );
-            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
-                body.push_str(&format!(
-                    "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                    esc(receipt_label(lang, "Terminal")),
-                    esc(terminal_name)
-                ));
-            }
-            body.push_str(&format!(
-                "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
                 esc(receipt_label(lang, "Check-in")),
                 esc(&format_datetime_human(&doc.check_in)),
                 esc(receipt_label(lang, "Check-out")),
                 esc(&format_datetime_human(&doc.check_out)),
-                esc(receipt_label(lang, "Orders")),
-                doc.orders_count,
-                esc(receipt_label(lang, "Sales")),
-                money(doc.sales_amount),
-                esc(receipt_label(lang, "Expenses")),
-                money(doc.total_expenses),
-                esc(receipt_label(lang, "Refunds")),
-                money(doc.cash_refunds),
-                esc(receipt_label(lang, "Opening")),
-                money(doc.opening_amount),
-            ));
-            if doc.transferred_staff_count > 0 {
-                body.push_str(&format!(
-                    "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                     <div class=\"line\"><span>{}</span><span>+{}</span></div>",
-                    esc(receipt_label(lang, "Transferred Staff")),
-                    doc.transferred_staff_count,
-                    esc(receipt_label(lang, "Transferred Staff Returns")),
-                    money(doc.transferred_staff_returns),
-                ));
-            }
-            body.push_str(&format!(
-                "<div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                 <div class=\"line\"><span>{}</span><span>{}</span></div>",
-                esc(receipt_label(lang, "Expected")),
-                expected,
-                esc(receipt_label(lang, "Closing")),
-                closing,
-                esc(receipt_label(lang, "Variance")),
-                variance,
-            ));
-            if !doc.driver_deliveries.is_empty() {
-                body.push_str(&format!(
-                    "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
-                    esc(receipt_label(lang, "DRIVER DELIVERIES"))
-                ));
-                for line in &doc.driver_deliveries {
-                    let label = format!("#{} {}", line.order_number, line.payment_method);
+            );
+            if !should_render_minimal_shift_checkout(doc) {
+                let expected = doc
+                    .expected_amount
+                    .map(money)
+                    .unwrap_or_else(|| "N/A".to_string());
+                let closing = doc
+                    .closing_amount
+                    .map(money)
+                    .unwrap_or_else(|| "N/A".to_string());
+                let variance = doc
+                    .variance_amount
+                    .map(money)
+                    .unwrap_or_else(|| "N/A".to_string());
+                if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
                     body.push_str(&format!(
                         "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(&label),
-                        money(line.total_amount),
+                        esc(receipt_label(lang, "Terminal")),
+                        esc(terminal_name)
                     ));
                 }
-            }
-            if should_render_shift_checkout_driver_summary(doc) {
                 body.push_str(&format!(
-                    "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
-                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
-                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>\
                      <div class=\"line\"><span>{}</span><span>{}</span></div>\
                      <div class=\"line\"><span>{}</span><span>{}</span></div>\
                      <div class=\"line\"><span>{}</span><span>{}</span></div>\
                      <div class=\"line\"><span>{}</span><span>{}</span></div>",
-                    esc(receipt_label(lang, "DRIVER SUMMARY")),
-                    esc(receipt_label(lang, "Cash Collected")),
-                    money(doc.total_cash_collected),
-                    esc(receipt_label(lang, "Card Collected")),
-                    money(doc.total_card_collected),
-                    esc(receipt_label(lang, "Delivery Fees")),
-                    money(doc.total_delivery_fees),
-                    esc(receipt_label(lang, "Tips")),
-                    money(doc.total_tips),
-                    esc(receipt_label(lang, "Starting")),
+                    esc(receipt_label(lang, "Orders")),
+                    doc.orders_count,
+                    esc(receipt_label(lang, "Sales")),
+                    money(doc.sales_amount),
+                    esc(receipt_label(lang, "Expenses")),
+                    money(doc.total_expenses),
+                    esc(receipt_label(lang, "Refunds")),
+                    money(doc.cash_refunds),
+                    esc(receipt_label(lang, "Opening")),
                     money(doc.opening_amount),
-                    esc(receipt_label(lang, "+ Cash")),
-                    money(doc.total_cash_collected),
                 ));
-                if doc.total_expenses > 0.0 {
+                if doc.transferred_staff_count > 0 {
                     body.push_str(&format!(
-                        "<div class=\"line\"><span>{}</span><span>{}</span></div>",
-                        esc(receipt_label(lang, "- Expenses")),
-                        money(doc.total_expenses),
+                        "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>+{}</span></div>",
+                        esc(receipt_label(lang, "Transferred Staff")),
+                        doc.transferred_staff_count,
+                        esc(receipt_label(lang, "Transferred Staff Returns")),
+                        money(doc.transferred_staff_returns),
                     ));
                 }
                 body.push_str(&format!(
-                    "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                    esc(receipt_label(lang, "= To Return")),
-                    money(doc.amount_to_return),
+                    "<div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                     <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                    esc(receipt_label(lang, "Expected")),
+                    expected,
+                    esc(receipt_label(lang, "Closing")),
+                    closing,
+                    esc(receipt_label(lang, "Variance")),
+                    variance,
                 ));
-            }
-            if !should_render_shift_checkout_driver_summary(doc) {
-                if let Some(expected_amount) = doc.expected_amount {
+                if !doc.driver_deliveries.is_empty() {
+                    body.push_str(&format!(
+                        "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>",
+                        esc(receipt_label(lang, "DRIVER DELIVERIES"))
+                    ));
+                    for line in &doc.driver_deliveries {
+                        let label = format!("#{} {}", line.order_number, line.payment_method);
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(&label),
+                            money(line.total_amount),
+                        ));
+                    }
+                }
+                if should_render_shift_checkout_driver_summary(doc) {
+                    body.push_str(&format!(
+                        "</div><div class=\"section\"><div class=\"center\"><strong>{}</strong></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>\
+                         <div class=\"line\"><span>{}</span><span>{}</span></div>",
+                        esc(receipt_label(lang, "DRIVER SUMMARY")),
+                        esc(receipt_label(lang, "Cash Collected")),
+                        money(doc.total_cash_collected),
+                        esc(receipt_label(lang, "Card Collected")),
+                        money(doc.total_card_collected),
+                        esc(receipt_label(lang, "Delivery Fees")),
+                        money(doc.total_delivery_fees),
+                        esc(receipt_label(lang, "Tips")),
+                        money(doc.total_tips),
+                        esc(receipt_label(lang, "Starting")),
+                        money(doc.opening_amount),
+                        esc(receipt_label(lang, "+ Cash")),
+                        money(doc.total_cash_collected),
+                    ));
+                    if doc.total_expenses > 0.0 {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><span>{}</span><span>{}</span></div>",
+                            esc(receipt_label(lang, "- Expenses")),
+                            money(doc.total_expenses),
+                        ));
+                    }
                     body.push_str(&format!(
                         "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
-                        esc(receipt_label(lang, "Expected In Drawer")),
-                        money(expected_amount),
+                        esc(receipt_label(lang, "= To Return")),
+                        money(doc.amount_to_return),
                     ));
+                }
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    if let Some(expected_amount) = doc.expected_amount {
+                        body.push_str(&format!(
+                            "<div class=\"line\"><strong>{}</strong><strong>{}</strong></div>",
+                            esc(receipt_label(lang, "Expected In Drawer")),
+                            money(expected_amount),
+                        ));
+                    }
                 }
             }
             body.push_str("</div>");
@@ -5754,12 +5760,14 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &receipt_role_text(lang, &doc.role_type),
                 preset.meta_style,
             );
-            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Terminal")),
-                    terminal_name,
-                    preset.meta_style,
-                );
+            if !should_render_minimal_shift_checkout(doc) {
+                if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Terminal")),
+                        terminal_name,
+                        preset.meta_style,
+                    );
+                }
             }
             canvas.draw_pair(
                 &format!("{}:", receipt_label(lang, "Check-in")),
@@ -5771,146 +5779,148 @@ fn render_classic_non_customer_raster_exact_ttf(
                 &format_datetime_human(&doc.check_out),
                 preset.meta_style,
             );
-            canvas.draw_rule();
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Orders")),
-                &doc.orders_count.to_string(),
-                preset.item_style,
-            );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Sales")),
-                &money_with_currency_locale(doc.sales_amount, &cur, comma),
-                preset.item_style,
-            );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Expenses")),
-                &money_with_currency_locale(doc.total_expenses, &cur, comma),
-                preset.item_style,
-            );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Refunds")),
-                &money_with_currency_locale(doc.cash_refunds, &cur, comma),
-                preset.item_style,
-            );
-            canvas.draw_pair(
-                &format!("{}:", receipt_label(lang, "Opening")),
-                &money_with_currency_locale(doc.opening_amount, &cur, comma),
-                preset.item_style,
-            );
-            if doc.transferred_staff_count > 0 {
+            if !should_render_minimal_shift_checkout(doc) {
+                canvas.draw_rule();
                 canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Transferred Staff")),
-                    &doc.transferred_staff_count.to_string(),
+                    &format!("{}:", receipt_label(lang, "Orders")),
+                    &doc.orders_count.to_string(),
                     preset.item_style,
                 );
                 canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Transferred Staff Returns")),
-                    &format!(
-                        "+{}",
-                        money_with_currency_locale(doc.transferred_staff_returns, &cur, comma)
-                    ),
+                    &format!("{}:", receipt_label(lang, "Sales")),
+                    &money_with_currency_locale(doc.sales_amount, &cur, comma),
                     preset.item_style,
                 );
-            }
-            if let Some(expected) = doc.expected_amount {
                 canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Expected")),
-                    &money_with_currency_locale(expected, &cur, comma),
+                    &format!("{}:", receipt_label(lang, "Expenses")),
+                    &money_with_currency_locale(doc.total_expenses, &cur, comma),
                     preset.item_style,
                 );
-            }
-            if let Some(closing) = doc.closing_amount {
                 canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Closing")),
-                    &money_with_currency_locale(closing, &cur, comma),
+                    &format!("{}:", receipt_label(lang, "Refunds")),
+                    &money_with_currency_locale(doc.cash_refunds, &cur, comma),
                     preset.item_style,
                 );
-            }
-            if let Some(variance) = doc.variance_amount {
                 canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Variance")),
-                    &money_with_currency_locale(variance, &cur, comma),
+                    &format!("{}:", receipt_label(lang, "Opening")),
+                    &money_with_currency_locale(doc.opening_amount, &cur, comma),
                     preset.item_style,
                 );
-            }
-            if !should_render_shift_checkout_driver_summary(doc) {
-                if let Some(expected) = doc.expected_amount {
-                    canvas.draw_rule();
+                if doc.transferred_staff_count > 0 {
                     canvas.draw_pair(
-                        &format!("{}:", receipt_label(lang, "Expected In Drawer")),
-                        &money_with_currency_locale(expected, &cur, comma),
-                        preset.total_style,
+                        &format!("{}:", receipt_label(lang, "Transferred Staff")),
+                        &doc.transferred_staff_count.to_string(),
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Transferred Staff Returns")),
+                        &format!(
+                            "+{}",
+                            money_with_currency_locale(doc.transferred_staff_returns, &cur, comma)
+                        ),
+                        preset.item_style,
                     );
                 }
-            }
-            if should_render_shift_checkout_driver_summary(doc) {
-                if !doc.driver_deliveries.is_empty() {
+                if let Some(expected) = doc.expected_amount {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Expected")),
+                        &money_with_currency_locale(expected, &cur, comma),
+                        preset.item_style,
+                    );
+                }
+                if let Some(closing) = doc.closing_amount {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Closing")),
+                        &money_with_currency_locale(closing, &cur, comma),
+                        preset.item_style,
+                    );
+                }
+                if let Some(variance) = doc.variance_amount {
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Variance")),
+                        &money_with_currency_locale(variance, &cur, comma),
+                        preset.item_style,
+                    );
+                }
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    if let Some(expected) = doc.expected_amount {
+                        canvas.draw_rule();
+                        canvas.draw_pair(
+                            &format!("{}:", receipt_label(lang, "Expected In Drawer")),
+                            &money_with_currency_locale(expected, &cur, comma),
+                            preset.total_style,
+                        );
+                    }
+                }
+                if should_render_shift_checkout_driver_summary(doc) {
+                    if !doc.driver_deliveries.is_empty() {
+                        canvas.draw_rule();
+                        canvas.draw_text_line(
+                            receipt_label(lang, "DRIVER DELIVERIES"),
+                            BitmapAlign::Left,
+                            preset.section_style,
+                        );
+                        canvas.draw_rule();
+                        for line in &doc.driver_deliveries {
+                            let label = format!("#{} {}", line.order_number, line.payment_method);
+                            canvas.draw_pair(
+                                &label,
+                                &money_with_currency_locale(line.total_amount, &cur, comma),
+                                preset.item_style,
+                            );
+                        }
+                    }
                     canvas.draw_rule();
                     canvas.draw_text_line(
-                        receipt_label(lang, "DRIVER DELIVERIES"),
+                        receipt_label(lang, "DRIVER SUMMARY"),
                         BitmapAlign::Left,
                         preset.section_style,
                     );
                     canvas.draw_rule();
-                    for line in &doc.driver_deliveries {
-                        let label = format!("#{} {}", line.order_number, line.payment_method);
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Cash Collected")),
+                        &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Card Collected")),
+                        &money_with_currency_locale(doc.total_card_collected, &cur, comma),
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Delivery Fees")),
+                        &money_with_currency_locale(doc.total_delivery_fees, &cur, comma),
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Tips")),
+                        &money_with_currency_locale(doc.total_tips, &cur, comma),
+                        preset.item_style,
+                    );
+                    canvas.draw_rule();
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "Starting")),
+                        &money_with_currency_locale(doc.opening_amount, &cur, comma),
+                        preset.item_style,
+                    );
+                    canvas.draw_pair(
+                        &format!("{}:", receipt_label(lang, "+ Cash")),
+                        &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
+                        preset.item_style,
+                    );
+                    if doc.total_expenses > 0.0 {
                         canvas.draw_pair(
-                            &label,
-                            &money_with_currency_locale(line.total_amount, &cur, comma),
+                            &format!("{}:", receipt_label(lang, "- Expenses")),
+                            &money_with_currency_locale(doc.total_expenses, &cur, comma),
                             preset.item_style,
                         );
                     }
-                }
-                canvas.draw_rule();
-                canvas.draw_text_line(
-                    receipt_label(lang, "DRIVER SUMMARY"),
-                    BitmapAlign::Left,
-                    preset.section_style,
-                );
-                canvas.draw_rule();
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Cash Collected")),
-                    &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Card Collected")),
-                    &money_with_currency_locale(doc.total_card_collected, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Delivery Fees")),
-                    &money_with_currency_locale(doc.total_delivery_fees, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Tips")),
-                    &money_with_currency_locale(doc.total_tips, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_rule();
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "Starting")),
-                    &money_with_currency_locale(doc.opening_amount, &cur, comma),
-                    preset.item_style,
-                );
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "+ Cash")),
-                    &money_with_currency_locale(doc.total_cash_collected, &cur, comma),
-                    preset.item_style,
-                );
-                if doc.total_expenses > 0.0 {
                     canvas.draw_pair(
-                        &format!("{}:", receipt_label(lang, "- Expenses")),
-                        &money_with_currency_locale(doc.total_expenses, &cur, comma),
+                        &format!("{}:", receipt_label(lang, "= To Return")),
+                        &money_with_currency_locale(doc.amount_to_return, &cur, comma),
                         preset.item_style,
                     );
                 }
-                canvas.draw_pair(
-                    &format!("{}:", receipt_label(lang, "= To Return")),
-                    &money_with_currency_locale(doc.amount_to_return, &cur, comma),
-                    preset.item_style,
-                );
             }
         }
         ReceiptDocument::ZReport(doc) => {
@@ -7091,13 +7101,15 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &doc.staff_name,
                 width,
             );
-            if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Terminal"),
-                    terminal_name,
-                    width,
-                );
+            if !should_render_minimal_shift_checkout(doc) {
+                if let Some(terminal_name) = non_empty_receipt_value(&doc.terminal_name) {
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Terminal"),
+                        terminal_name,
+                        width,
+                    );
+                }
             }
             emit_pair(
                 &mut builder,
@@ -7111,171 +7123,173 @@ pub fn render_escpos(document: &ReceiptDocument, cfg: &LayoutConfig) -> EscPosRe
                 &format_datetime_human(&doc.check_out),
                 width,
             );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Orders"),
-                &doc.orders_count.to_string(),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Sales"),
-                &money_locale(doc.sales_amount, comma),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Expenses"),
-                &money_locale(doc.total_expenses, comma),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Refunds"),
-                &money_locale(doc.cash_refunds, comma),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Opening"),
-                &money_locale(doc.opening_amount, comma),
-                width,
-            );
-            if doc.transferred_staff_count > 0 {
+            if !should_render_minimal_shift_checkout(doc) {
                 emit_pair(
                     &mut builder,
-                    receipt_label(lang, "Transferred Staff"),
-                    &doc.transferred_staff_count.to_string(),
+                    receipt_label(lang, "Orders"),
+                    &doc.orders_count.to_string(),
                     width,
                 );
                 emit_pair(
                     &mut builder,
-                    receipt_label(lang, "Transferred Staff Returns"),
-                    &format!("+{}", money_locale(doc.transferred_staff_returns, comma)),
+                    receipt_label(lang, "Sales"),
+                    &money_locale(doc.sales_amount, comma),
                     width,
                 );
-            }
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Expected"),
-                &doc.expected_amount
-                    .map(|v| money_locale(v, comma))
-                    .unwrap_or_else(|| "N/A".to_string()),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Closing"),
-                &doc.closing_amount
-                    .map(|v| money_locale(v, comma))
-                    .unwrap_or_else(|| "N/A".to_string()),
-                width,
-            );
-            emit_pair(
-                &mut builder,
-                receipt_label(lang, "Variance"),
-                &doc.variance_amount
-                    .map(|v| money_locale(v, comma))
-                    .unwrap_or_else(|| "N/A".to_string()),
-                width,
-            );
-            if !should_render_shift_checkout_driver_summary(doc) {
-                if let Some(expected) = doc.expected_amount {
-                    emit_rule(&mut builder, width, '-');
-                    emit_pair_bold(
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Expenses"),
+                    &money_locale(doc.total_expenses, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Refunds"),
+                    &money_locale(doc.cash_refunds, comma),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Opening"),
+                    &money_locale(doc.opening_amount, comma),
+                    width,
+                );
+                if doc.transferred_staff_count > 0 {
+                    emit_pair(
                         &mut builder,
-                        receipt_label(lang, "Expected In Drawer"),
-                        &money_locale(expected, comma),
+                        receipt_label(lang, "Transferred Staff"),
+                        &doc.transferred_staff_count.to_string(),
+                        width,
+                    );
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Transferred Staff Returns"),
+                        &format!("+{}", money_locale(doc.transferred_staff_returns, comma)),
                         width,
                     );
                 }
-            }
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Expected"),
+                    &doc.expected_amount
+                        .map(|v| money_locale(v, comma))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Closing"),
+                    &doc.closing_amount
+                        .map(|v| money_locale(v, comma))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                    width,
+                );
+                emit_pair(
+                    &mut builder,
+                    receipt_label(lang, "Variance"),
+                    &doc.variance_amount
+                        .map(|v| money_locale(v, comma))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                    width,
+                );
+                if !should_render_shift_checkout_driver_summary(doc) {
+                    if let Some(expected) = doc.expected_amount {
+                        emit_rule(&mut builder, width, '-');
+                        emit_pair_bold(
+                            &mut builder,
+                            receipt_label(lang, "Expected In Drawer"),
+                            &money_locale(expected, comma),
+                            width,
+                        );
+                    }
+                }
 
-            // Driver-specific delivery breakdown
-            if should_render_shift_checkout_driver_summary(doc) {
-                if !doc.driver_deliveries.is_empty() {
+                // Driver-specific delivery breakdown
+                if should_render_shift_checkout_driver_summary(doc) {
+                    if !doc.driver_deliveries.is_empty() {
+                        builder.lf();
+                        builder
+                            .center()
+                            .bold(true)
+                            .text(receipt_label(lang, "DELIVERIES"))
+                            .lf()
+                            .bold(false)
+                            .left();
+                        emit_rule(&mut builder, width, '-');
+                        for d in &doc.driver_deliveries {
+                            let label = format!("#{} {}", d.order_number, d.payment_method);
+                            emit_pair(
+                                &mut builder,
+                                &label,
+                                &money_locale(d.total_amount, comma),
+                                width,
+                            );
+                        }
+                        emit_rule(&mut builder, width, '-');
+                    }
+
                     builder.lf();
                     builder
                         .center()
                         .bold(true)
-                        .text(receipt_label(lang, "DELIVERIES"))
+                        .text(receipt_label(lang, "DRIVER SUMMARY"))
                         .lf()
                         .bold(false)
                         .left();
                     emit_rule(&mut builder, width, '-');
-                    for d in &doc.driver_deliveries {
-                        let label = format!("#{} {}", d.order_number, d.payment_method);
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Cash Collected"),
+                        &money_locale(doc.total_cash_collected, comma),
+                        width,
+                    );
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Card Collected"),
+                        &money_locale(doc.total_card_collected, comma),
+                        width,
+                    );
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Delivery Fees"),
+                        &money_locale(doc.total_delivery_fees, comma),
+                        width,
+                    );
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Tips"),
+                        &money_locale(doc.total_tips, comma),
+                        width,
+                    );
+                    emit_rule(&mut builder, width, '-');
+
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "Starting"),
+                        &money_locale(doc.opening_amount, comma),
+                        width,
+                    );
+                    emit_pair(
+                        &mut builder,
+                        receipt_label(lang, "+ Cash"),
+                        &money_locale(doc.total_cash_collected, comma),
+                        width,
+                    );
+                    if doc.total_expenses > 0.0 {
                         emit_pair(
                             &mut builder,
-                            &label,
-                            &money_locale(d.total_amount, comma),
+                            receipt_label(lang, "- Expenses"),
+                            &money_locale(doc.total_expenses, comma),
                             width,
                         );
                     }
-                    emit_rule(&mut builder, width, '-');
-                }
-
-                builder.lf();
-                builder
-                    .center()
-                    .bold(true)
-                    .text(receipt_label(lang, "DRIVER SUMMARY"))
-                    .lf()
-                    .bold(false)
-                    .left();
-                emit_rule(&mut builder, width, '-');
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Cash Collected"),
-                    &money_locale(doc.total_cash_collected, comma),
-                    width,
-                );
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Card Collected"),
-                    &money_locale(doc.total_card_collected, comma),
-                    width,
-                );
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Delivery Fees"),
-                    &money_locale(doc.total_delivery_fees, comma),
-                    width,
-                );
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Tips"),
-                    &money_locale(doc.total_tips, comma),
-                    width,
-                );
-                emit_rule(&mut builder, width, '-');
-
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "Starting"),
-                    &money_locale(doc.opening_amount, comma),
-                    width,
-                );
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "+ Cash"),
-                    &money_locale(doc.total_cash_collected, comma),
-                    width,
-                );
-                if doc.total_expenses > 0.0 {
                     emit_pair(
                         &mut builder,
-                        receipt_label(lang, "- Expenses"),
-                        &money_locale(doc.total_expenses, comma),
+                        receipt_label(lang, "= To Return"),
+                        &money_locale(doc.amount_to_return, comma),
                         width,
                     );
                 }
-                emit_pair(
-                    &mut builder,
-                    receipt_label(lang, "= To Return"),
-                    &money_locale(doc.amount_to_return, comma),
-                    width,
-                );
             }
         }
         ReceiptDocument::ZReport(doc) => {
@@ -9066,6 +9080,82 @@ mod tests {
         assert!(html.contains("Transferred Staff Returns"));
         assert!(html.contains("Expected In Drawer"));
         assert!(html.contains("60.00"));
+    }
+
+    #[test]
+    fn html_non_financial_shift_checkout_renders_minimal_fields_only() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            ..LayoutConfig::default()
+        };
+        let html = render_html(
+            &ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+                shift_id: "SHIFT-KITCHEN-001".to_string(),
+                role_type: "kitchen".to_string(),
+                staff_name: "Kitchen Staff".to_string(),
+                terminal_name: "Front Counter".to_string(),
+                check_in: "2026-03-05T08:00:00Z".to_string(),
+                check_out: "2026-03-05T16:00:00Z".to_string(),
+                orders_count: 12,
+                sales_amount: 120.5,
+                total_expenses: 8.0,
+                cash_refunds: 1.5,
+                opening_amount: 50.0,
+                expected_amount: Some(161.0),
+                closing_amount: Some(160.0),
+                variance_amount: Some(-1.0),
+                ..ShiftCheckoutDoc::default()
+            }),
+            &cfg,
+        );
+
+        assert!(html.contains("Kitchen"));
+        assert!(html.contains("Check-in"));
+        assert!(html.contains("Check-out"));
+        assert!(!html.contains("Terminal"));
+        assert!(!html.contains("Orders"));
+        assert!(!html.contains("Sales"));
+        assert!(!html.contains("Expenses"));
+        assert!(!html.contains("Expected"));
+    }
+
+    #[test]
+    fn text_non_financial_shift_checkout_renders_minimal_fields_only() {
+        let cfg = LayoutConfig {
+            template: ReceiptTemplate::Classic,
+            language: "en".to_string(),
+            classic_customer_render_mode: ClassicCustomerRenderMode::Text,
+            ..LayoutConfig::default()
+        };
+        let doc = ReceiptDocument::ShiftCheckout(ShiftCheckoutDoc {
+            shift_id: "SHIFT-KITCHEN-002".to_string(),
+            role_type: "kitchen".to_string(),
+            staff_name: "Kitchen Staff".to_string(),
+            terminal_name: "Front Counter".to_string(),
+            check_in: "2026-03-05T08:00:00Z".to_string(),
+            check_out: "2026-03-05T16:00:00Z".to_string(),
+            orders_count: 12,
+            sales_amount: 120.5,
+            total_expenses: 8.0,
+            cash_refunds: 1.5,
+            opening_amount: 50.0,
+            expected_amount: Some(161.0),
+            closing_amount: Some(160.0),
+            variance_amount: Some(-1.0),
+            ..ShiftCheckoutDoc::default()
+        });
+        let text = String::from_utf8_lossy(&render_escpos(&doc, &cfg).bytes).to_string();
+
+        assert!(text.contains("SHIFT CHECKOUT"));
+        assert!(text.contains("Kitchen"));
+        assert!(text.contains("Check-in"));
+        assert!(text.contains("Check-out"));
+        assert!(!text.contains("Terminal"));
+        assert!(!text.contains("Orders"));
+        assert!(!text.contains("Sales"));
+        assert!(!text.contains("Expenses"));
+        assert!(!text.contains("Expected"));
     }
 
     #[test]

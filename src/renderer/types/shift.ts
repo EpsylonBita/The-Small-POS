@@ -25,6 +25,7 @@ export interface StaffShift {
   total_cash_sales: number;
   total_card_sales: number;
   payment_amount?: number;
+  sync_status?: string;
   is_day_start?: boolean;
   notes?: string;
   closed_by?: string;
@@ -290,6 +291,19 @@ export interface ShiftSummary {
     totalDeliveries: number;
     totalEarnings: number;
   };
+  cashierOrders?: Array<{
+    order_id: string;
+    order_number?: string;
+    created_at: string;
+    order_type: string;
+    table_number?: string;
+    customer_name?: string;
+    status: string;
+    total_amount: number;
+    payment_method: string;
+    cash_amount: number;
+    card_amount: number;
+  }>;
   /**
    * Active driver shifts that were inherited from the previous cashier.
    * These drivers checked in under a previous cashier who has since checked out,

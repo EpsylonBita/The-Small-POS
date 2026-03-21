@@ -404,6 +404,17 @@ function normalizeFinancialQueueItem(raw: unknown): SyncFinancialQueueItem | nul
     new Date().toISOString(),
   );
   const payload = toSyncFinancialPayload(item.payload ?? item.data);
+  const parentShiftId = toSyncFinancialString(item.parentShiftId, '');
+  const parentShiftSyncStatus = toSyncFinancialString(item.parentShiftSyncStatus, '');
+  const parentShiftQueueStatus = toSyncFinancialString(item.parentShiftQueueStatus, '');
+  const dependencyBlockReason = toSyncFinancialString(item.dependencyBlockReason, '');
+  const parentShiftQueueIdRaw = item.parentShiftQueueId;
+  const parentShiftQueueId =
+    typeof parentShiftQueueIdRaw === 'number'
+      ? parentShiftQueueIdRaw
+      : typeof parentShiftQueueIdRaw === 'string' && parentShiftQueueIdRaw.trim()
+        ? Number.parseInt(parentShiftQueueIdRaw, 10)
+        : null;
 
   if (!queueId || !entityType || !entityId) {
     return null;
@@ -419,6 +430,14 @@ function normalizeFinancialQueueItem(raw: unknown): SyncFinancialQueueItem | nul
     lastError,
     createdAt,
     payload,
+    parentShiftId: parentShiftId || null,
+    parentShiftSyncStatus: parentShiftSyncStatus || null,
+    parentShiftQueueId:
+      parentShiftQueueId != null && Number.isFinite(parentShiftQueueId)
+        ? parentShiftQueueId
+        : null,
+    parentShiftQueueStatus: parentShiftQueueStatus || null,
+    dependencyBlockReason: dependencyBlockReason || null,
   };
 }
 

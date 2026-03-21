@@ -13,6 +13,8 @@ interface HealthSupportEntryPointProps {
   onOpenFinancialPanel?: () => void;
   showWhenFallback?: boolean;
   defaultOpen?: boolean;
+  className?: string;
+  buttonClassName?: string;
 }
 
 export const HealthSupportEntryPoint: React.FC<HealthSupportEntryPointProps> = ({
@@ -22,6 +24,8 @@ export const HealthSupportEntryPoint: React.FC<HealthSupportEntryPointProps> = (
   onOpenFinancialPanel,
   showWhenFallback = true,
   defaultOpen = false,
+  className = '',
+  buttonClassName = '',
 }) => {
   const { t } = useTranslation();
   const { language } = useI18n();
@@ -56,11 +60,11 @@ export const HealthSupportEntryPoint: React.FC<HealthSupportEntryPointProps> = (
   };
 
   return (
-    <div className="space-y-2" data-testid="health-support-entrypoint">
+    <div className={`space-y-2 ${className}`.trim()} data-testid="health-support-entrypoint">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
-        className="inline-flex items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-500/20 dark:text-blue-300"
+        className={`inline-flex items-center gap-2 rounded-lg border border-blue-500/20 bg-blue-500/10 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-500/20 dark:text-blue-300 ${buttonClassName}`.trim()}
       >
         <HelpCircle className="w-4 h-4" />
         {t('support.actions.explain')}

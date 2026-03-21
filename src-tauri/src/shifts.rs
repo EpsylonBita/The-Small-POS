@@ -42,11 +42,16 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .or_else(|| str_field(payload, "role_type"))
         .unwrap_or_else(|| "cashier".to_string());
     let staff_name = str_field(payload, "staffName").or_else(|| str_field(payload, "staff_name"));
-    let opening_cash = num_field(payload, "openingCash")
+    let requested_opening_cash = num_field(payload, "openingCash")
         .or_else(|| num_field(payload, "opening_cash"))
         .or_else(|| num_field(payload, "startingAmount"))
         .or_else(|| num_field(payload, "starting_amount"))
         .unwrap_or(0.0);
+    let opening_cash = if is_non_financial_shift_role(&role_type) {
+        0.0
+    } else {
+        requested_opening_cash
+    };
 
     // Check for existing active shift
     let existing: Option<String> = conn
@@ -368,14 +373,21 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let calc_version = calc_version.unwrap_or(1);
     let shift_branch_id = shift_branch_id.unwrap_or_default();
     let shift_terminal_id = shift_terminal_id.unwrap_or_default();
+    let is_non_financial_role = is_non_financial_shift_role(&role_type);
+    let closing_cash_to_persist = if is_non_financial_role {
+        0.0
+    } else {
+        closing_cash
+    };
 
     let now = Utc::now().to_rfc3339();
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
-    let persisted_payment_amount = if role_type == "cashier" || role_type == "manager" {
-        None
-    } else {
-        payment_amount
-    };
+    let persisted_payment_amount =
+        if role_type == "cashier" || role_type == "manager" || is_non_financial_role {
+            None
+        } else {
+            payment_amount
+        };
 
     // Wrap the entire reconciliation + close in a single IMMEDIATE transaction so
     // that no order/payment can be inserted between the aggregate SELECTs and the
@@ -585,8 +597,10 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 - driver_given
                 + driver_returned
                 + inherited_driver_expected_returns;
+        } else if is_non_financial_role {
+            expected = 0.0;
         } else {
-            // Driver / server / kitchen: expected = opening + cash collected - expenses
+            // Driver / server: expected = opening + cash collected - expenses
             let cash_collected = if role_type == "driver" {
                 compute_shift_cash_collected(&conn, &shift_id, &role_type)?
             } else {
@@ -611,7 +625,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             expected = opening_cash + cash_collected - expenses;
         }
 
-        let variance = closing_cash - expected;
+        let variance = if is_non_financial_role {
+            0.0
+        } else {
+            closing_cash_to_persist - expected
+        };
 
         // Update cash drawer session (if cashier/manager) and persist the
         // reconciliation metadata captured during closeout.
@@ -624,7 +642,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     updated_at = ?4
                  WHERE staff_shift_id = ?6",
                 params![
-                    closing_cash,
+                    closing_cash_to_persist,
                     expected,
                     variance,
                     now,
@@ -648,16 +666,19 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                             driver_cash_returned = COALESCE(driver_cash_returned, 0) + ?1,
                             updated_at = ?2
                          WHERE id = ?3",
-                        params![closing_cash, now, drawer_id],
+                        params![closing_cash_to_persist, now, drawer_id],
                     )
                     .map_err(|e| format!("update cashier drawer for staff return: {e}"))?;
-                    returned_cash_target =
-                        Some((cashier_shift_id.clone(), drawer_id.clone(), closing_cash));
+                    returned_cash_target = Some((
+                        cashier_shift_id.clone(),
+                        drawer_id.clone(),
+                        closing_cash_to_persist,
+                    ));
                     info!(
                         staff_shift = %shift_id,
                         cashier_shift = %cashier_shift_id,
                         cashier_drawer = %drawer_id,
-                        actual_return = %closing_cash,
+                        actual_return = %closing_cash_to_persist,
                         role = %role_type,
                         "Cash-return staff checkout recorded on cashier drawer"
                     );
@@ -706,7 +727,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
              WHERE id = ?7",
             params![
                 now,
-                closing_cash,
+                closing_cash_to_persist,
                 expected,
                 variance,
                 persisted_payment_amount,
@@ -738,7 +759,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             "totalSalesAmount": total_sales,
             "totalCashSales": shift_cash_sales,
             "totalCardSales": shift_card_sales,
-            "closingCash": closing_cash,
+            "closingCash": closing_cash_to_persist,
             "expectedCash": expected,
             "variance": variance,
             "closedBy": closed_by,
@@ -1153,8 +1174,11 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
     let mut transferred_waiters: Vec<Value> = Vec::new();
     let mut waiter_tables: Vec<Value> = Vec::new();
     let mut staff_payments: Vec<Value> = Vec::new();
+    let mut cashier_orders: Vec<Value> = Vec::new();
 
     if role_type == "cashier" || role_type == "manager" {
+        cashier_orders =
+            build_cashier_order_history(&conn, shift_id, &check_in_time, cashier_check_out_time)?;
         driver_deliveries = build_cashier_staff_checkout_rows(
             &conn,
             shift_id,
@@ -1312,6 +1336,10 @@ pub fn get_shift_summary(db: &DbState, shift_id: &str) -> Result<Value, String> 
 
     if !transferred_waiters.is_empty() {
         result["transferredWaiters"] = serde_json::json!(transferred_waiters);
+    }
+
+    if role_type == "cashier" || role_type == "manager" {
+        result["cashierOrders"] = serde_json::json!(cashier_orders);
     }
 
     Ok(result)
@@ -1486,6 +1514,10 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 // Cash-return staff helpers
 // ---------------------------------------------------------------------------
+
+pub fn is_non_financial_shift_role(role_type: &str) -> bool {
+    matches!(role_type.trim().to_ascii_lowercase().as_str(), "kitchen")
+}
 
 fn role_returns_cash(role_type: &str) -> bool {
     matches!(role_type, "driver" | "server")
@@ -2019,6 +2051,124 @@ pub(crate) fn build_cashier_staff_checkout_rows(
     }
 
     Ok(result)
+}
+
+fn build_cashier_order_history(
+    conn: &rusqlite::Connection,
+    cashier_shift_id: &str,
+    cashier_check_in_time: &str,
+    cashier_check_out_time: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+    let sql = format!(
+        "SELECT
+                o.id,
+                o.order_number,
+                o.created_at,
+                COALESCE(o.order_type, 'dine-in'),
+                o.table_number,
+                o.customer_name,
+                o.status,
+                COALESCE(o.total_amount, 0),
+                COALESCE(o.payment_method, 'cash'),
+                COALESCE((
+                    SELECT SUM(op.amount)
+                    FROM order_payments op
+                    WHERE op.order_id = o.id
+                      AND op.status = 'completed'
+                      AND op.method = 'cash'
+                ), 0),
+                COALESCE((
+                    SELECT SUM(op.amount)
+                    FROM order_payments op
+                    WHERE op.order_id = o.id
+                      AND op.status = 'completed'
+                      AND op.method = 'card'
+                ), 0)
+         FROM orders o
+         WHERE o.staff_shift_id = ?1
+           AND COALESCE(o.is_ghost, 0) = 0
+           AND {order_financial_expr} >= ?2
+           AND (?3 IS NULL OR {order_financial_expr} <= ?3)
+         ORDER BY {order_financial_expr} DESC, o.created_at DESC"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare cashier order history: {e}"))?;
+
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        f64,
+        String,
+        f64,
+        f64,
+    )> = stmt
+        .query_map(
+            params![
+                cashier_shift_id,
+                cashier_check_in_time,
+                cashier_check_out_time
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    row.get::<_, String>(8)?,
+                    row.get::<_, f64>(9).unwrap_or(0.0),
+                    row.get::<_, f64>(10).unwrap_or(0.0),
+                ))
+            },
+        )
+        .map_err(|e| format!("query cashier order history: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                order_id,
+                order_number,
+                created_at,
+                order_type,
+                table_number,
+                customer_name,
+                status,
+                total_amount,
+                payment_method,
+                cash_amount,
+                card_amount,
+            )| {
+                serde_json::json!({
+                    "order_id": order_id,
+                    "order_number": order_number,
+                    "created_at": created_at,
+                    "order_type": order_type,
+                    "table_number": table_number,
+                    "customer_name": customer_name,
+                    "status": status,
+                    "total_amount": total_amount,
+                    "payment_method": payment_method,
+                    "cash_amount": cash_amount,
+                    "card_amount": card_amount,
+                })
+            },
+        )
+        .collect())
 }
 
 fn build_inherited_cash_staff_rows(
@@ -2766,8 +2916,74 @@ mod tests {
 
         assert!((expected_cash_amount - 85.0).abs() < f64::EPSILON);
         assert!(cash_variance.abs() < f64::EPSILON);
-        assert_eq!(payment_amount, None, "cashier close should no longer persist a standalone cashier payout");
+        assert_eq!(
+            payment_amount, None,
+            "cashier close should no longer persist a standalone cashier payout"
+        );
         assert!((total_staff_payments - 23.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_non_financial_shift_ignores_cash_amounts_on_open_and_close() {
+        let db = test_db();
+
+        let open_result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "kitchen-1",
+                "staffName": "Kitchen One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "kitchen",
+                "openingCash": 125.0,
+            }),
+        )
+        .expect("open kitchen shift");
+        let shift_id = open_result["shiftId"]
+            .as_str()
+            .expect("kitchen shift id")
+            .to_string();
+
+        close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": shift_id,
+                "closingCash": 88.0,
+                "paymentAmount": 20.0,
+            }),
+        )
+        .expect("close kitchen shift");
+
+        let conn = db.conn.lock().unwrap();
+        let (opening, closing, expected, variance, payment_amount): (
+            f64,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance, payment_amount
+                 FROM staff_shifts
+                 WHERE id = ?1",
+                params![shift_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .expect("load closed kitchen shift");
+        let drawer_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
+                params![shift_id],
+                |row| row.get(0),
+            )
+            .expect("count drawer rows");
+
+        assert_eq!(opening, 0.0);
+        assert_eq!(closing, Some(0.0));
+        assert_eq!(expected, Some(0.0));
+        assert_eq!(variance, Some(0.0));
+        assert_eq!(payment_amount, None);
+        assert_eq!(drawer_rows, 0);
     }
 
     #[test]
@@ -3362,6 +3578,27 @@ mod tests {
                 ],
             )
             .unwrap();
+
+            conn.execute(
+                "INSERT INTO driver_earnings (
+                    id, driver_id, staff_shift_id, order_id, branch_id,
+                    delivery_fee, tip_amount, total_earning, payment_method,
+                    cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, 'branch-1',
+                    0.0, 0.0, ?5, 'cash',
+                    ?5, 0.0, ?5, 0, ?6, ?6
+                )",
+                params![
+                    format!("earning-{order_id}"),
+                    shift_id,
+                    shift_id,
+                    order_id,
+                    total_amount,
+                    created_at
+                ],
+            )
+            .unwrap();
         }
         drop(conn);
 
@@ -3379,5 +3616,181 @@ mod tests {
         assert_eq!(rows[0]["driver_name"], "Current Driver");
         assert_eq!(rows[0]["starting_amount"], 20.0);
         assert_eq!(rows[0]["cash_collected"], 40.0);
+    }
+
+    #[test]
+    fn test_cashier_summary_includes_filtered_cashier_orders() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cashier_in = "2026-03-05T10:00:00Z";
+        let cashier_out = "2026-03-05T11:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, check_out_time, opening_cash_amount, status, calculation_version,
+                sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-orders', 'cashier-1', 'Cashier One', 'cashier', 'branch-1', 'term-1',
+                ?1, ?2, 100.0, 'closed', 2, 'pending', ?1, ?2
+            )",
+            params![cashier_in, cashier_out],
+        )
+        .unwrap();
+
+        for (order_id, order_number, total_amount, payment_method, created_at, is_ghost) in [
+            (
+                "order-valid",
+                "C-101",
+                40.0,
+                "mixed",
+                "2026-03-05T10:30:00Z",
+                0,
+            ),
+            (
+                "order-before",
+                "C-099",
+                15.0,
+                "cash",
+                "2026-03-05T09:55:00Z",
+                0,
+            ),
+            (
+                "order-after",
+                "C-102",
+                22.0,
+                "card",
+                "2026-03-05T11:15:00Z",
+                0,
+            ),
+            (
+                "order-ghost",
+                "C-103",
+                18.0,
+                "cash",
+                "2026-03-05T10:40:00Z",
+                1,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, status, order_type, payment_status,
+                    payment_method, staff_shift_id, customer_name, table_number, is_ghost,
+                    sync_status, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, '[]', ?3, 'completed', 'dine-in', 'paid',
+                    ?4, 'cashier-orders', 'Alex', 'T1', ?5, 'pending', ?6, ?6
+                )",
+                params![
+                    order_id,
+                    order_number,
+                    total_amount,
+                    payment_method,
+                    is_ghost,
+                    created_at
+                ],
+            )
+            .unwrap();
+        }
+
+        for (payment_id, order_id, method, amount, created_at) in [
+            (
+                "pay-valid-cash",
+                "order-valid",
+                "cash",
+                30.0,
+                "2026-03-05T10:30:00Z",
+            ),
+            (
+                "pay-valid-card",
+                "order-valid",
+                "card",
+                10.0,
+                "2026-03-05T10:30:00Z",
+            ),
+            (
+                "pay-before",
+                "order-before",
+                "cash",
+                15.0,
+                "2026-03-05T09:55:00Z",
+            ),
+            (
+                "pay-after",
+                "order-after",
+                "card",
+                22.0,
+                "2026-03-05T11:15:00Z",
+            ),
+            (
+                "pay-ghost",
+                "order-ghost",
+                "cash",
+                18.0,
+                "2026-03-05T10:40:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, staff_shift_id, currency, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, 'completed', 'cashier-orders', 'EUR', ?5, ?5
+                )",
+                params![payment_id, order_id, method, amount, created_at],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let summary = get_shift_summary(&db, "cashier-orders").unwrap();
+        let orders = summary["cashierOrders"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(
+            orders.len(),
+            1,
+            "only current-window non-ghost orders should appear"
+        );
+        assert_eq!(orders[0]["order_id"], "order-valid");
+        assert_eq!(orders[0]["order_number"], "C-101");
+        assert_eq!(orders[0]["payment_method"], "mixed");
+        assert_eq!(orders[0]["cash_amount"], 30.0);
+        assert_eq!(orders[0]["card_amount"], 10.0);
+        assert_eq!(orders[0]["customer_name"], "Alex");
+        assert_eq!(orders[0]["table_number"], "T1");
+    }
+
+    #[test]
+    fn test_cashier_summary_returns_empty_cashier_orders_for_quiet_shift() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let cashier_in = "2026-03-05T10:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, role_type, branch_id, terminal_id,
+                check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                created_at, updated_at
+            ) VALUES (
+                'cashier-quiet', 'cashier-quiet', 'Quiet Cashier', 'cashier', 'branch-1', 'term-1',
+                ?1, 50.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![cashier_in],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = get_shift_summary(&db, "cashier-quiet").unwrap();
+        let orders = summary["cashierOrders"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(
+            orders.is_empty(),
+            "quiet cashier shifts should expose an empty cashierOrders array"
+        );
     }
 }

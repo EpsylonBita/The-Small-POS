@@ -21,6 +21,7 @@ import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
 import { formatDate } from '../utils/format';
+import { cn } from '../utils/cn';
 import { buildHealthSupportContext } from '../support';
 import {
   getBridge,
@@ -83,6 +84,8 @@ interface SyncHealthPresentation {
   textClassName: string;
   dotClassName: string;
   detail: string;
+  panelClassName: string;
+  iconClassName: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +276,23 @@ const ENTITY_TYPE_KEYS: Record<string, string> = {
   staff_payment: 'sync.entityTypes.staffPayment',
 };
 
+const resolveSyncErrorMessage = (
+  error: string | null,
+  t: ReturnType<typeof useTranslation>['t'],
+) => {
+  if (!error) {
+    return null;
+  }
+
+  if (error === 'sync_queue_failed_items') {
+    return t('sync.health.errorDetail', {
+      defaultValue: 'Failed sync rows are blocking a clean state.',
+    });
+  }
+
+  return t(`sync.errors.${error}`, { defaultValue: error });
+};
+
 const getSyncHealthPresentation = (
   t: ReturnType<typeof useTranslation>['t'],
   state: SyncHealthState,
@@ -285,6 +305,9 @@ const getSyncHealthPresentation = (
           'bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300',
         textClassName: 'text-red-700 dark:text-red-300',
         dotClassName: 'bg-red-500',
+        panelClassName:
+          'border-red-200/80 bg-red-50/80 dark:border-red-400/25 dark:bg-red-500/10',
+        iconClassName: 'text-red-600 dark:text-red-300',
         detail: t('sync.health.errorDetail', {
           defaultValue: 'Failed sync rows are blocking a clean state.',
         }),
@@ -296,6 +319,9 @@ const getSyncHealthPresentation = (
           'bg-orange-500/10 border border-orange-500/30 text-orange-700 dark:text-orange-300',
         textClassName: 'text-orange-700 dark:text-orange-300',
         dotClassName: 'bg-orange-500',
+        panelClassName:
+          'border-orange-200/80 bg-orange-50/80 dark:border-orange-400/25 dark:bg-orange-500/10',
+        iconClassName: 'text-orange-600 dark:text-orange-300',
         detail: t('sync.health.blockedDetail', {
           defaultValue: 'A queue item is stuck and needs intervention.',
         }),
@@ -307,6 +333,9 @@ const getSyncHealthPresentation = (
           'bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300',
         textClassName: 'text-amber-700 dark:text-amber-300',
         dotClassName: 'bg-amber-500',
+        panelClassName:
+          'border-amber-200/80 bg-amber-50/80 dark:border-amber-400/25 dark:bg-amber-500/10',
+        iconClassName: 'text-amber-600 dark:text-amber-300',
         detail: t('sync.health.pendingDetail', {
           defaultValue: 'Sync work is queued or currently processing.',
         }),
@@ -318,6 +347,9 @@ const getSyncHealthPresentation = (
           'bg-slate-500/10 border border-slate-500/30 text-slate-700 dark:text-slate-300',
         textClassName: 'text-slate-700 dark:text-slate-300',
         dotClassName: 'bg-slate-500',
+        panelClassName:
+          'border-slate-200/80 bg-slate-50/80 dark:border-white/10 dark:bg-white/[0.05]',
+        iconClassName: 'text-slate-600 dark:text-slate-300',
         detail: t('sync.health.staleDetail', {
           defaultValue:
             'Reachability looks fine, but sync telemetry is older than expected.',
@@ -331,6 +363,9 @@ const getSyncHealthPresentation = (
           'bg-green-500/10 border border-green-500/30 text-green-700 dark:text-green-300',
         textClassName: 'text-green-700 dark:text-green-300',
         dotClassName: 'bg-green-500',
+        panelClassName:
+          'border-emerald-200/80 bg-emerald-50/80 dark:border-emerald-400/25 dark:bg-emerald-500/10',
+        iconClassName: 'text-emerald-600 dark:text-emerald-300',
         detail: t('sync.health.healthyDetail', {
           defaultValue: 'No local sync backlog or failures are currently visible.',
         }),
@@ -374,6 +409,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
   const [showFinancialPanel, setShowFinancialPanel] = useState(false);
   const [justRefreshed, setJustRefreshed] = useState(false);
   const [retryingBlockedOrder, setRetryingBlockedOrder] = useState(false);
+  const [advancedExpanded, setAdvancedExpanded] = useState(false);
 
   // --- System health state (eager on modal open) ---
   const [systemHealth, setSystemHealth] =
@@ -732,11 +768,26 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
 
   const totalPending =
     syncStatus.pendingItems + syncStatus.pendingPaymentItems;
+  const nextRetryAt = syncStatus.oldestNextRetryAt ?? queueFailure?.nextRetryAt ?? null;
+  const hasInvalidOrders = (systemHealth?.invalidOrders?.count ?? 0) > 0;
+  const advancedIssueCount =
+    (totalBacklog > 0 ? 1 : 0) +
+    (hasInvalidOrders ? 1 : 0) +
+    (systemHealth === null && !systemLoading ? 1 : 0);
+  const shouldOpenAdvancedByDefault =
+    totalBacklog > 0 || hasInvalidOrders || (systemHealth === null && !systemLoading);
+  const syncErrorDisplay = useMemo(
+    () => resolveSyncErrorMessage(syncStatus.error, t),
+    [syncStatus.error, t],
+  );
 
   const healthSupportContext = useMemo(
     () =>
       buildHealthSupportContext({
-        syncStatus,
+        syncStatus: {
+          ...syncStatus,
+          error: syncErrorDisplay,
+        },
         systemHealth,
         financialStats,
         totalBacklog,
@@ -749,6 +800,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
       }),
     [
       syncStatus,
+      syncErrorDisplay,
       systemHealth,
       financialStats,
       totalBacklog,
@@ -782,6 +834,784 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         ? 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
         : 'text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.55)]';
 
+  useEffect(() => {
+    if (showDetailPanel) {
+      setAdvancedExpanded(shouldOpenAdvancedByDefault);
+    }
+  }, [showDetailPanel, shouldOpenAdvancedByDefault]);
+
+  const modalSurfaceClass =
+    'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
+  const modalInsetClass =
+    'rounded-[22px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/20 dark:shadow-none';
+  const modalEyebrowClass =
+    'text-[11px] uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400';
+  const modalMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
+  const metaChipClass =
+    'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200';
+  const footerClass =
+    'sticky bottom-0 z-10 mt-5 border-t border-slate-200/80 bg-white/88 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/88';
+
+  const renderMetricTile = ({
+    label,
+    value,
+    detail,
+    valueClassName,
+    surfaceClassName,
+  }: {
+    label: string;
+    value: React.ReactNode;
+    detail?: string;
+    valueClassName?: string;
+    surfaceClassName?: string;
+  }) => (
+    <div className={cn(modalInsetClass, 'space-y-2', surfaceClassName)}>
+      <div className={modalEyebrowClass}>{label}</div>
+      <div className={cn('text-2xl font-black tracking-tight text-slate-900 dark:text-white', valueClassName)}>
+        {value}
+      </div>
+      {detail ? <p className="text-xs text-slate-500 dark:text-slate-400">{detail}</p> : null}
+    </div>
+  );
+
+  const renderStatusTile = ({
+    label,
+    value,
+    detail,
+    accentClassName,
+  }: {
+    label: string;
+    value: React.ReactNode;
+    detail?: React.ReactNode;
+    accentClassName?: string;
+  }) => (
+    <div className={modalInsetClass}>
+      <div className={modalEyebrowClass}>{label}</div>
+      <div className={cn('mt-2 text-lg font-black text-slate-900 dark:text-white', accentClassName)}>
+        {value}
+      </div>
+      {detail ? <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{detail}</div> : null}
+    </div>
+  );
+
+  const renderOverviewSection = () => (
+    <section className={cn(modalSurfaceClass, syncHealthPresentation.panelClassName)}>
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(300px,0.95fr)]">
+        <div className="space-y-4">
+          <div className={modalEyebrowClass}>{t('sync.dashboard.overviewEyebrow')}</div>
+          <div className="flex items-start gap-4">
+            <div className={cn('flex h-14 w-14 shrink-0 items-center justify-center rounded-[20px] border', syncHealthPresentation.panelClassName)}>
+              <svg
+                className={cn('h-7 w-7', syncHealthPresentation.iconClassName)}
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
+              </svg>
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-3">
+                <h3 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">
+                  {t('sync.dashboard.overviewTitle')}
+                </h3>
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-sm font-semibold',
+                    syncHealthPresentation.badgeClassName,
+                  )}
+                >
+                  <span className={cn('h-2.5 w-2.5 rounded-full', syncHealthPresentation.dotClassName)} />
+                  {syncHealthPresentation.label}
+                </span>
+              </div>
+              <p className="mt-3 max-w-3xl text-sm text-slate-600 dark:text-slate-300/85">
+                {syncHealthDetail}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className={metaChipClass}>
+                  <span className={cn('h-2 w-2 rounded-full', syncStatus.isOnline ? 'bg-green-500' : 'bg-red-500')} />
+                  {t('sync.dashboard.transportLabel')}: {syncStatus.isOnline ? t('sync.labels.online') : t('sync.labels.offline')}
+                </span>
+                <span className={metaChipClass}>
+                  {t('sync.dashboard.lastSyncLabel')}: {formatLastSync()}
+                </span>
+                <span className={cn(metaChipClass, healthColor)}>
+                  {t('sync.dashboard.healthScoreLabel')}: {Math.round(syncStatus.terminalHealth)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          {renderStatusTile({
+            label: t('sync.dashboard.statusSummaryTitle'),
+            value: isSynced ? t('sync.dashboard.allClear') : syncHealthPresentation.label,
+            detail: t('sync.dashboard.statusSummarySubtitle'),
+            accentClassName: syncHealthPresentation.textClassName,
+          })}
+          <HealthSupportEntryPoint
+            context={healthSupportContext}
+            onExportDiagnostics={handleExport}
+            onRefreshStatus={handleRefreshSupport}
+            onOpenFinancialPanel={() => setShowFinancialPanel(true)}
+            showWhenFallback
+            className="w-full"
+            buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+          />
+        </div>
+      </div>
+    </section>
+  );
+
+  const renderActionableSection = () => (
+    <section className={cn(modalSurfaceClass, 'space-y-4')}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className={modalEyebrowClass}>{t('sync.dashboard.actionableTitle')}</div>
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
+            {t('sync.dashboard.actionableSubtitle')}
+          </p>
+        </div>
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
+            isSynced
+              ? 'border border-emerald-200/90 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200'
+              : syncHealthPresentation.badgeClassName,
+          )}
+        >
+          {isSynced ? t('sync.dashboard.allClear') : t('sync.system.pending', { count: totalPending })}
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {renderMetricTile({
+          label: t('sync.dashboard.localQueue'),
+          value: syncStatus.pendingItems,
+          valueClassName:
+            syncStatus.pendingItems > 0
+              ? 'text-amber-600 dark:text-amber-300'
+              : 'text-emerald-600 dark:text-emerald-300',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.pendingPayments'),
+          value: syncStatus.pendingPaymentItems,
+          valueClassName:
+            syncStatus.pendingPaymentItems > 0
+              ? 'text-amber-600 dark:text-amber-300'
+              : 'text-emerald-600 dark:text-emerald-300',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.failedPayments'),
+          value: syncStatus.failedPaymentItems,
+          valueClassName:
+            syncStatus.failedPaymentItems > 0
+              ? 'text-red-600 dark:text-red-300'
+              : 'text-emerald-600 dark:text-emerald-300',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.queuedRemote'),
+          value: syncStatus.queuedRemote,
+          valueClassName:
+            syncStatus.queuedRemote > 0
+              ? 'text-cyan-600 dark:text-cyan-300'
+              : 'text-slate-700 dark:text-slate-200',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.deferred'),
+          value: syncStatus.backpressureDeferred,
+          valueClassName:
+            syncStatus.backpressureDeferred > 0
+              ? 'text-amber-600 dark:text-amber-300'
+              : 'text-slate-700 dark:text-slate-200',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.nextRetry'),
+          value: nextRetryAt ? new Date(nextRetryAt).toLocaleTimeString() : t('sync.dashboard.notAvailable'),
+          valueClassName: nextRetryAt ? 'text-amber-600 dark:text-amber-300 text-lg' : 'text-slate-700 dark:text-slate-200 text-lg',
+        })}
+      </div>
+
+      {queueFailure && hasBlockedQueue && (
+        <div className="rounded-[22px] border border-orange-200/90 bg-orange-50/90 p-4 dark:border-orange-400/30 dark:bg-orange-500/10">
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className={modalEyebrowClass}>{t('sync.blocker.title')}</div>
+                <div className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
+                  {ENTITY_TYPE_KEYS[queueFailure.entityType]
+                    ? t(ENTITY_TYPE_KEYS[queueFailure.entityType], { defaultValue: queueFailure.entityType })
+                    : queueFailure.entityType}{' '}
+                  {queueFailure.entityId}
+                </div>
+              </div>
+              <span className="text-xs font-bold uppercase tracking-wide text-orange-700 dark:text-orange-300">
+                {t(`sync.blocker.classification.${queueFailure.classification}`, {
+                  defaultValue: queueFailure.classification,
+                })}
+              </span>
+            </div>
+
+            <p className="break-words text-sm font-medium text-orange-800 dark:text-orange-100/90">
+              {queueFailure.lastError}
+            </p>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="text-xs text-slate-700 dark:text-slate-200">
+                <span className="font-semibold">{t('sync.blocker.retryProgress')}:</span>{' '}
+                <span className="font-mono">{queueFailure.retryCount}/{queueFailure.maxRetries}</span>
+              </div>
+              <div className="text-xs text-slate-700 dark:text-slate-200">
+                <span className="font-semibold">{t('sync.blocker.status')}:</span>{' '}
+                <span className="font-mono">{queueFailure.status}</span>
+              </div>
+              {queueFailure.nextRetryAt && (
+                <div className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  {t('sync.blocker.nextRetry')}: {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
+                </div>
+              )}
+            </div>
+
+            {queueFailure.entityType === 'order' && (
+              <button
+                onClick={handleRetryBlockedOrder}
+                disabled={retryingBlockedOrder || syncStatus.syncInProgress}
+                className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {retryingBlockedOrder ? t('sync.blocker.retrying') : t('sync.blocker.retryOrderNow')}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {queueFailure && hasScheduledRetryableQueueFailure && (
+        <div className="rounded-[22px] border border-amber-200/90 bg-amber-50/90 p-4 dark:border-amber-400/30 dark:bg-amber-500/10">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className={modalEyebrowClass}>{t('sync.blocker.recoveryTitle')}</div>
+              <p className="mt-2 text-sm text-slate-700 dark:text-slate-200">
+                {t('sync.blocker.recoveryDetail')}
+              </p>
+            </div>
+            <span className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+              {t(`sync.blocker.classification.${queueFailure.classification}`, {
+                defaultValue: queueFailure.classification,
+              })}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {syncErrorDisplay && (
+        <div className="rounded-[22px] border border-red-200/90 bg-red-50/90 p-4 dark:border-red-400/30 dark:bg-red-500/10">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-300" />
+            <div>
+              <div className="text-sm font-semibold text-red-700 dark:text-red-300">
+                {t('sync.labels.error')}
+              </div>
+              <p className="mt-1 text-sm text-red-700 dark:text-red-200/90">
+                {syncErrorDisplay}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+
+  const renderOperationsSection = () => (
+    <section className={cn(modalSurfaceClass, 'space-y-4')}>
+      <div>
+        <div className={modalEyebrowClass}>{t('sync.dashboard.operationsTitle')}</div>
+        <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
+          {t('sync.dashboard.operationsSubtitle')}
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        {renderStatusTile({
+          label: t('sync.labels.settings'),
+          value: `v${syncStatus.settingsVersion}`,
+          accentClassName: 'text-purple-700 dark:text-purple-300',
+        })}
+        {renderStatusTile({
+          label: t('sync.labels.menu'),
+          value: `v${syncStatus.menuVersion}`,
+          accentClassName: 'text-cyan-700 dark:text-cyan-300',
+        })}
+        <div className={cn(modalInsetClass, 'sm:col-span-2')}>
+          <div className={modalEyebrowClass}>{t('sync.dashboard.versionsTitle')}</div>
+          <div className="mt-2 text-lg font-black text-slate-900 dark:text-white">
+            {isMobileWaiter
+              ? t('terminal.type.mobile_waiter', { defaultValue: 'Mobile POS' })
+              : t('terminal.type.main', { defaultValue: 'Main' })}
+          </div>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            {t('sync.dashboard.versionsSubtitle')}
+          </p>
+          {isMobileWaiter && parentTerminalId && (
+            <div className="mt-3 inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-1 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200">
+              {t('terminal.labels.parentTerminal', { defaultValue: 'Parent' })}: {parentTerminalId.substring(0, 8)}...
+            </div>
+          )}
+        </div>
+      </div>
+
+      <OrderSyncRouteIndicator variant="dashboard" className="mt-0" />
+
+      <div className={modalInsetClass}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className={modalEyebrowClass}>{t('sync.dashboard.financialSummaryTitle')}</div>
+            <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
+              {t('sync.dashboard.financialSummarySubtitle')}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={async () => {
+                try {
+                  await loadFinancialStats();
+                  toast.success(
+                    t('sync.actions.refreshed', { defaultValue: 'Refreshed' }),
+                  );
+                } catch {
+                  toast.error(
+                    t('sync.actions.refreshFailed', {
+                      defaultValue: 'Refresh failed',
+                    }),
+                  );
+                }
+              }}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-emerald-200/90 bg-emerald-50 text-emerald-700 transition-colors hover:bg-emerald-100 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200 dark:hover:bg-emerald-500/16"
+              title={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setShowFinancialPanel(true)}
+              className="inline-flex items-center rounded-full border border-slate-200/90 bg-white/90 px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+            >
+              {t('sync.actions.manage')}
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          {(
+            [
+              ['driver_earnings', 'sync.financial.driver'],
+              ['staff_payments', 'sync.financial.staff'],
+              ['shift_expenses', 'sync.financial.expenses'],
+            ] as const
+          ).map(([key, label]) => {
+            const stats = financialStats[key];
+            const hasFailed = stats.failed > 0;
+            const hasPendingItems = stats.pending > 0;
+
+            return (
+              <div
+                key={key}
+                className={cn(
+                  'rounded-[18px] border px-4 py-3',
+                  hasFailed
+                    ? 'border-red-200/90 bg-red-50/85 dark:border-red-400/30 dark:bg-red-500/10'
+                    : hasPendingItems
+                      ? 'border-amber-200/90 bg-amber-50/85 dark:border-amber-400/30 dark:bg-amber-500/10'
+                      : 'border-emerald-200/90 bg-emerald-50/85 dark:border-emerald-400/30 dark:bg-emerald-500/10',
+                )}
+              >
+                <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                  {t(label)}
+                </div>
+                <div className="mt-3 text-sm font-semibold text-slate-900 dark:text-white">
+                  {hasFailed
+                    ? `${stats.failed} ${t('sync.financial.failed')}`
+                    : hasPendingItems
+                      ? `${stats.pending} ${t('sync.financial.pending')}`
+                      : t('sync.financial.complete')}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+
+  const renderAdvancedDiagnosticsSection = () => (
+    <section className={modalSurfaceClass}>
+      <button
+        type="button"
+        onClick={() => setAdvancedExpanded((current) => !current)}
+        className="flex w-full items-start justify-between gap-4 text-left"
+      >
+        <div>
+          <div className={modalEyebrowClass}>{t('sync.dashboard.advancedTitle')}</div>
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/80">
+            {t('sync.dashboard.advancedSubtitle')}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span
+            className={cn(
+              'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold',
+              advancedIssueCount > 0
+                ? 'border border-amber-200/90 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200'
+                : 'border border-emerald-200/90 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-200',
+            )}
+          >
+            {advancedIssueCount > 0 ? t('sync.system.pending', { count: advancedIssueCount }) : t('sync.dashboard.allClear')}
+          </span>
+          <ChevronDown
+            className={cn(
+              'h-5 w-5 text-slate-500 transition-transform dark:text-slate-300',
+              advancedExpanded && 'rotate-180',
+            )}
+          />
+        </div>
+      </button>
+
+      {advancedExpanded && (
+        <div className="mt-5 grid gap-4 xl:grid-cols-2">
+          {systemLoading && !systemHealth ? (
+            <div className="xl:col-span-2 flex items-center justify-center rounded-[22px] border border-slate-200/80 bg-slate-50/90 py-10 dark:border-white/10 dark:bg-black/20">
+              <div className="flex items-center gap-3 text-sm font-semibold text-slate-600 dark:text-slate-300">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                {t('sync.dashboard.loadingDiagnostics')}
+              </div>
+            </div>
+          ) : systemHealth ? (
+            <>
+              <div className={modalInsetClass}>
+                <div className="flex items-center justify-between">
+                  <div className={modalEyebrowClass}>{t('sync.system.syncBacklog')}</div>
+                  <span className={cn(
+                    'text-xs font-semibold',
+                    totalBacklog > 0 ? 'text-amber-600 dark:text-amber-300' : 'text-emerald-600 dark:text-emerald-300',
+                  )}>
+                    {totalBacklog > 0 ? t('sync.system.pending', { count: totalBacklog }) : t('sync.system.clear')}
+                  </span>
+                </div>
+                <div className="mt-4 space-y-2">
+                  {totalBacklog > 0 ? (
+                    Object.entries(systemHealth.syncBacklog).map(([type, statuses]) => {
+                      const pending = Object.entries(statuses)
+                        .filter(([s]) => s !== 'synced' && s !== 'applied')
+                        .reduce((sum, [, count]) => sum + count, 0);
+                      if (pending === 0) return null;
+                      return (
+                        <div key={type} className="flex items-center justify-between text-sm text-slate-700 dark:text-slate-200">
+                          <span>{ENTITY_TYPE_KEYS[type] ? t(ENTITY_TYPE_KEYS[type], { defaultValue: type }) : type}</span>
+                          <span className="font-mono font-semibold">{pending}</span>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <p className="text-sm text-slate-500 dark:text-slate-400">{t('sync.dashboard.allClear')}</p>
+                  )}
+                </div>
+              </div>
+
+              {(systemHealth.invalidOrders?.count ?? 0) > 0 && (
+                <div className="rounded-[22px] border border-red-200/90 bg-red-50/90 p-4 dark:border-red-400/30 dark:bg-red-500/10">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className={modalEyebrowClass}>{t('sync.system.invalidOrders')}</div>
+                    <span className="text-sm font-semibold text-red-700 dark:text-red-300">
+                      {t('sync.system.invalidCount', {
+                        count: systemHealth.invalidOrders!.count,
+                        defaultValue: '{{count}} invalid',
+                      })}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-sm text-red-700 dark:text-red-100/90">
+                    {t('sync.system.invalidOrdersDesc')}
+                  </p>
+                  <button
+                    onClick={handleRemoveInvalidOrders}
+                    className="mt-4 inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-700"
+                  >
+                    {t('sync.system.removeInvalidOrders')}
+                  </button>
+                  <div className="mt-4 space-y-2">
+                    {systemHealth.invalidOrders!.details.slice(0, 5).map((order) => (
+                      <div key={order.order_id} className="flex items-center justify-between text-xs text-red-700 dark:text-red-200/90">
+                        <span className="font-mono">{order.order_id.substring(0, 8)}...</span>
+                        <span>{order.invalid_menu_items.length} {t('sync.system.items')}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className={modalInsetClass}>
+                <div className="flex items-center justify-between">
+                  <div className={modalEyebrowClass}>{t('sync.system.printers')}</div>
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    {systemHealth.printerStatus.configured
+                      ? t('sync.system.configured', {
+                          count: systemHealth.printerStatus.profileCount,
+                          defaultValue: '{{count}} configured',
+                        })
+                      : t('sync.system.notConfigured')}
+                  </span>
+                </div>
+                {systemHealth.printerStatus.defaultProfile && (
+                  <div className="mt-3 text-sm text-slate-600 dark:text-slate-300">
+                    {t('sync.system.defaultPrinter')}: {systemHealth.printerStatus.defaultProfile}
+                  </div>
+                )}
+                {systemHealth.printerStatus.recentJobs.length > 0 && (
+                  <div className="mt-4 space-y-2">
+                    {systemHealth.printerStatus.recentJobs.slice(0, 3).map((job) => (
+                      <div key={job.id} className="flex items-center justify-between text-xs text-slate-700 dark:text-slate-200">
+                        <span>
+                          {ENTITY_TYPE_KEYS[job.entityType]
+                            ? t(ENTITY_TYPE_KEYS[job.entityType], { defaultValue: job.entityType })
+                            : job.entityType}
+                        </span>
+                        <span
+                          className={cn(
+                            'font-mono',
+                            job.status === 'printed' || job.status === 'dispatched'
+                              ? 'text-emerald-600 dark:text-emerald-300'
+                              : job.status === 'failed'
+                                ? 'text-red-600 dark:text-red-300'
+                                : 'text-amber-600 dark:text-amber-300',
+                          )}
+                        >
+                          {job.status}
+                          {job.warningCode ? ' !' : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className={modalInsetClass}>
+                <div className="flex items-center justify-between">
+                  <div className={modalEyebrowClass}>{t('sync.system.lastZReport')}</div>
+                  {systemHealth.lastZReport && <FileText className="h-4 w-4 text-blue-600 dark:text-blue-300" />}
+                </div>
+                {systemHealth.lastZReport ? (
+                  <div className="mt-4 space-y-2 text-sm text-slate-700 dark:text-slate-200">
+                    <div className="flex justify-between">
+                      <span>{t('sync.system.gross')}</span>
+                      <span className="font-semibold">{formatCurrency(systemHealth.lastZReport.totalGrossSales)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>{t('sync.system.net')}</span>
+                      <span className="font-semibold">{formatCurrency(systemHealth.lastZReport.totalNetSales)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>{t('sync.system.generated')}</span>
+                      <span className="font-mono text-xs">{new Date(systemHealth.lastZReport.generatedAt).toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>{t('sync.system.syncState')}</span>
+                      <span className={cn(
+                        'font-mono',
+                        systemHealth.lastZReport.syncState === 'applied'
+                          ? 'text-emerald-600 dark:text-emerald-300'
+                          : 'text-amber-600 dark:text-amber-300',
+                      )}>
+                        {systemHealth.lastZReport.syncState}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
+                    {t('sync.system.noReports')}
+                  </p>
+                )}
+              </div>
+
+              <div className={modalInsetClass}>
+                <div className={modalEyebrowClass}>{t('sync.system.database')}</div>
+                <div className="mt-4 flex items-center gap-3">
+                  <Database className="h-5 w-5 text-purple-600 dark:text-purple-300" />
+                  <div>
+                    <div className="text-lg font-black text-purple-700 dark:text-purple-300">
+                      v{systemHealth.schemaVersion}
+                    </div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400">
+                      {formatBytes(systemHealth.dbSizeBytes)}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4 border-t border-slate-200/80 pt-4 dark:border-white/10">
+                  <div className={modalEyebrowClass}>{t('sync.labels.pending')}</div>
+                  <div className="mt-2 flex items-center gap-2 text-lg font-black text-slate-900 dark:text-white">
+                    {systemHealth.pendingOrders === 0 ? (
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-300" />
+                    ) : (
+                      <Clock className="h-5 w-5 text-amber-600 dark:text-amber-300" />
+                    )}
+                    <span>{systemHealth.pendingOrders}</span>
+                  </div>
+                </div>
+              </div>
+
+              {Object.keys(systemHealth.lastSyncTimes).length > 0 && (
+                <div className={cn(modalInsetClass, 'xl:col-span-2')}>
+                  <div className={modalEyebrowClass}>{t('sync.system.lastSyncByEntity')}</div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {Object.entries(systemHealth.lastSyncTimes).map(([entity, ts]) => (
+                      <div key={entity} className="rounded-[18px] border border-slate-200/80 bg-white/80 px-3 py-3 dark:border-white/10 dark:bg-white/[0.03]">
+                        <div className="text-[11px] uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                          {ENTITY_TYPE_KEYS[entity] ? t(ENTITY_TYPE_KEYS[entity], { defaultValue: entity }) : entity}
+                        </div>
+                        <div className="mt-2 break-words text-xs font-mono text-slate-700 dark:text-slate-200">
+                          {ts ? new Date(ts).toLocaleString() : '\u2014'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="xl:col-span-2 rounded-[22px] border border-amber-200/90 bg-amber-50/90 p-5 dark:border-amber-400/30 dark:bg-amber-500/10">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
+                <div>
+                  <div className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+                    {t('sync.dashboard.advancedTitle')}
+                  </div>
+                  <p className="mt-1 text-sm text-amber-700 dark:text-amber-100/90">
+                    {t('sync.system.retry')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+
+  const renderDetailModal = () =>
+    ReactDOM.createPortal(
+      <div className="fixed inset-0 z-[10000]" style={{ isolation: 'isolate' }}>
+        <div
+          className="absolute inset-0"
+          style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
+          onClick={() => setShowDetailPanel(false)}
+        />
+
+        <div
+          className={`absolute top-1/2 left-1/2 flex max-h-[88vh] w-[92vw] max-w-5xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-[32px] liquid-glass-modal-shell transition-opacity ${
+            showFinancialPanel ? 'opacity-75' : 'opacity-100'
+          }`}
+          style={{ backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-slate-200/80 px-6 py-4 dark:border-white/10">
+            <div className="flex min-w-0 items-center gap-3">
+              <svg
+                className={`h-5 w-5 shrink-0 ${syncHealthPresentation.iconClassName}`}
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
+              </svg>
+              <div className="min-w-0">
+                <div className={modalEyebrowClass}>{t('sync.health.label')}</div>
+                <h3 className="truncate text-xl font-black tracking-tight text-slate-900 dark:text-white">
+                  {t('sync.labels.syncStatus')}
+                </h3>
+              </div>
+              <span
+                className={cn(
+                  'hidden items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold sm:inline-flex',
+                  syncHealthPresentation.badgeClassName,
+                )}
+              >
+                <span className={cn('h-2 w-2 rounded-full', syncHealthPresentation.dotClassName)} />
+                {syncHealthPresentation.label}
+              </span>
+            </div>
+
+            <button
+              onClick={() => setShowDetailPanel(false)}
+              className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
+              aria-label={t('common.actions.close')}
+            >
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+
+          <div
+            className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5"
+            style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
+          >
+            {renderOverviewSection()}
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
+              {renderActionableSection()}
+              {renderOperationsSection()}
+            </div>
+            {renderAdvancedDiagnosticsSection()}
+          </div>
+
+          <div className={footerClass}>
+            {exportPath && (
+              <div className="mb-3 flex flex-col gap-3 rounded-[20px] border border-emerald-200/90 bg-emerald-50/90 p-3 dark:border-emerald-400/30 dark:bg-emerald-500/10 sm:flex-row sm:items-center">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
+                  <span className="truncate text-sm font-medium text-emerald-700 dark:text-emerald-200">
+                    {t('sync.system.exportSuccess')}
+                  </span>
+                </div>
+                <button
+                  onClick={handleOpenExportDir}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-50 dark:border-emerald-400/30 dark:bg-transparent dark:text-emerald-200 dark:hover:bg-emerald-500/10"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  {t('sync.system.openFolder')}
+                </button>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={handleForceSync}
+                disabled={syncStatus.syncInProgress}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-500 to-cyan-500 px-4 py-3 text-sm font-bold text-white shadow-[0_14px_32px_rgba(59,130,246,0.28)] transition-all hover:from-blue-600 hover:to-cyan-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+              >
+                <RefreshCw className={cn('h-4 w-4', syncStatus.syncInProgress && 'animate-spin')} />
+                {syncStatus.syncInProgress ? t('sync.status.syncing') : t('sync.actions.forceSync')}
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200/90 bg-white/92 px-4 py-3 text-sm font-bold text-slate-700 transition-all hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-100 dark:hover:bg-white/[0.08]"
+              >
+                <Download className={cn('h-4 w-4', exporting && 'animate-bounce')} />
+                {exporting ? t('sync.system.exporting') : t('sync.system.exportDiagnostics')}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+
   // =========================================================================
   // Render
   // =========================================================================
@@ -790,7 +1620,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     <div className={`relative flex items-center gap-1.5 ${className}`}>
       {/* Heart Icon Status Indicator */}
       <button
-        className="group relative p-2 rounded-full hover:bg-white/10 transition-all duration-200"
+        className="group relative rounded-full p-2 transition-all duration-200 hover:bg-slate-100/80 dark:hover:bg-white/10"
         onClick={() => setShowDetailPanel(!showDetailPanel)}
         title={getStatusText()}
       >
@@ -830,830 +1660,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
         </div>
       )}
 
-      {/* ================================================================= */}
-      {/* Detail Modal                                                       */}
-      {/* ================================================================= */}
-      {showDetailPanel && ReactDOM.createPortal(
-        <div className="fixed inset-0 z-[10000]" style={{ isolation: 'isolate' }}>
-          {/* Backdrop — blur + dim layer; covers everything at body level */}
-          <div
-            className="absolute inset-0"
-            style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}
-            onClick={() => setShowDetailPanel(false)}
-          />
-
-          {/* Modal shell — sits above backdrop; isolation prevents blur from affecting it */}
-          <div
-            className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 liquid-glass-modal-shell rounded-2xl flex flex-col transition-opacity ${
-              showFinancialPanel ? 'opacity-75' : 'opacity-100'
-            }`}
-            style={{ width: '540px', maxWidth: '95vw', maxHeight: '85vh', backdropFilter: 'none', WebkitBackdropFilter: 'none' }}
-          >
-            {/* -- Header ------------------------------------------------- */}
-            <div className="flex items-center justify-between px-5 pt-4 pb-3 border-b liquid-glass-modal-border flex-shrink-0">
-              <div className="flex items-center gap-2">
-                <svg
-                  className={`w-5 h-5 ${isSynced ? 'text-green-500' : 'text-red-500'}`}
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M11.645 20.91l-.007-.003-.022-.012a15.247 15.247 0 01-.383-.218 25.18 25.18 0 01-4.244-3.17C4.688 15.36 2.25 12.174 2.25 8.25 2.25 5.322 4.714 3 7.688 3A5.5 5.5 0 0112 5.052 5.5 5.5 0 0116.313 3c2.973 0 5.437 2.322 5.437 5.25 0 3.925-2.438 7.111-4.739 9.256a25.175 25.175 0 01-4.244 3.17 15.247 15.247 0 01-.383.219l-.022.012-.007.004-.003.001a.752.752 0 01-.704 0l-.003-.001z" />
-                </svg>
-                <h3 className="text-lg font-bold text-black dark:text-white">
-                  {t('sync.labels.syncStatus')}
-                </h3>
-              </div>
-              <button
-                onClick={() => setShowDetailPanel(false)}
-                className="liquid-glass-modal-button p-1.5 min-h-0 min-w-0"
-                aria-label={t('common.actions.close')}
-              >
-                <svg
-                  className="w-5 h-5"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-            </div>
-
-            {/* -- Status banner ------------------------------------------ */}
-            <div className="flex items-center gap-3 px-5 py-2.5 text-xs font-semibold flex-shrink-0 flex-wrap">
-              <span className="flex items-center gap-1.5">
-                <span
-                  className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}
-                />
-                <span
-                  className={
-                    syncStatus.isOnline
-                      ? 'text-green-700 dark:text-green-300'
-                      : 'text-red-700 dark:text-red-300'
-                  }
-                >
-                  {syncStatus.isOnline
-                    ? t('sync.labels.online')
-                    : t('sync.labels.offline')}
-                </span>
-              </span>
-              <span className="text-slate-400 dark:text-slate-500">|</span>
-              <span className="flex items-center gap-2">
-                <span className="text-slate-500 dark:text-slate-400">
-                  {t('sync.health.label', { defaultValue: 'Sync health' })}
-                </span>
-                <span
-                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 ${syncHealthPresentation.badgeClassName}`}
-                >
-                  <span
-                    className={`h-2 w-2 rounded-full ${syncHealthPresentation.dotClassName}`}
-                  />
-                  <span>{syncHealthPresentation.label}</span>
-                </span>
-              </span>
-              <span className="text-slate-400 dark:text-slate-500">|</span>
-              <span className="text-slate-700 dark:text-slate-300">
-                {formatLastSync()}
-              </span>
-              <span className="text-slate-400 dark:text-slate-500">|</span>
-              <span className={healthColor}>
-                {Math.round(syncStatus.terminalHealth)}%
-              </span>
-            </div>
-
-            {/* -- Scrollable content (hidden scrollbar) ------------------- */}
-            <div
-              className="flex-1 overflow-y-auto px-5 pb-3 min-h-0 space-y-3 hide-scrollbar"
-              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' } as React.CSSProperties}
-            >
-              {/* ── SYNC SECTION ──────────────────────────────────────── */}
-
-              {(syncHealthState !== 'healthy' || isTelemetryStale) && (
-                <div
-                  className={`rounded-xl border px-3 py-2 ${
-                    syncHealthPresentation.badgeClassName
-                  }`}
-                >
-                  <div className="text-[11px] font-bold uppercase tracking-wide">
-                    {t('sync.health.label', { defaultValue: 'Sync health' })}
-                  </div>
-                  <div className={`mt-1 text-[11px] font-semibold ${syncHealthPresentation.textClassName}`}>
-                    {syncHealthPresentation.label}
-                  </div>
-                  <div className="mt-1 text-[10px] font-medium text-slate-600 dark:text-slate-300">
-                    {syncHealthDetail}
-                  </div>
-                </div>
-              )}
-
-              <HealthSupportEntryPoint
-                context={healthSupportContext}
-                onExportDiagnostics={handleExport}
-                onRefreshStatus={handleRefreshSupport}
-                onOpenFinancialPanel={() => setShowFinancialPanel(true)}
-                showWhenFallback
-              />
-
-              {/* Sync queue + payments compact card */}
-              <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                    {t('sync.labels.pending')}
-                  </span>
-                  <span
-                    className={`text-sm font-extrabold ${totalPending > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}
-                  >
-                    {totalPending}
-                  </span>
-                </div>
-                {(syncStatus.queuedRemote > 0 ||
-                  syncStatus.backpressureDeferred > 0) && (
-                  <div className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
-                    {t('sync.queue.queued', { defaultValue: 'queued' })} {syncStatus.queuedRemote} | {t('sync.queue.deferred', { defaultValue: 'deferred' })}{' '}
-                    {syncStatus.backpressureDeferred}
-                  </div>
-                )}
-                {syncStatus.oldestNextRetryAt && (
-                  <div className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
-                    {t('sync.queue.nextRetry', { defaultValue: 'next retry' })}{' '}
-                    {new Date(syncStatus.oldestNextRetryAt).toLocaleTimeString()}
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between pt-1.5 border-t liquid-glass-modal-border">
-                  <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                    {t('sync.labels.pendingPayments')}
-                  </span>
-                  <span className="text-sm font-extrabold text-orange-600 dark:text-orange-400">
-                    {syncStatus.pendingPaymentItems}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                    {t('sync.labels.failedPayments')}
-                  </span>
-                  <span
-                    className={`text-sm font-extrabold ${syncStatus.failedPaymentItems > 0 ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}
-                  >
-                    {syncStatus.failedPaymentItems}
-                  </span>
-                </div>
-              </div>
-
-              {queueFailure && hasBlockedQueue && (
-                <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                      {t('sync.blocker.title', { defaultValue: 'Current blocker' })}
-                    </span>
-                    <span
-                      className={`text-[10px] font-extrabold uppercase tracking-wide ${
-                        queueFailure.classification ===
-                        'backpressure'
-                          ? 'text-amber-600 dark:text-amber-400'
-                          : queueFailure.classification ===
-                              'permanent'
-                            ? 'text-red-600 dark:text-red-400'
-                            : queueFailure.classification ===
-                                'transient'
-                              ? 'text-orange-600 dark:text-orange-400'
-                              : 'text-slate-500 dark:text-slate-300'
-                      }`}
-                    >
-                      {t(
-                        `sync.blocker.classification.${queueFailure.classification}`,
-                        {
-                          defaultValue: queueFailure.classification,
-                        },
-                      )}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-700 dark:text-slate-200">
-                    <span className="font-semibold">
-                      {t('sync.blocker.entity', { defaultValue: 'Entity' })}:{' '}
-                    </span>
-                    <span className="font-mono">
-                      {ENTITY_TYPE_KEYS[queueFailure.entityType]
-                        ? t(
-                            ENTITY_TYPE_KEYS[
-                              queueFailure.entityType
-                            ],
-                            {
-                              defaultValue: queueFailure.entityType,
-                            },
-                          )
-                        : queueFailure.entityType}{' '}
-                      {queueFailure.entityId}
-                    </span>
-                  </div>
-                  <div className="text-[11px] font-semibold text-red-600 dark:text-red-300 break-words">
-                    {queueFailure.lastError}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div className="text-slate-600 dark:text-slate-300">
-                      <span className="font-semibold">
-                        {t('sync.blocker.retryProgress', {
-                          defaultValue: 'Retry',
-                        })}
-                        :{' '}
-                      </span>
-                      <span className="font-mono">
-                        {queueFailure.retryCount}/{queueFailure.maxRetries}
-                      </span>
-                    </div>
-                    <div className="text-slate-600 dark:text-slate-300">
-                      <span className="font-semibold">
-                        {t('sync.blocker.status', {
-                          defaultValue: 'Status',
-                        })}
-                        :{' '}
-                      </span>
-                      <span className="font-mono">
-                        {queueFailure.status}
-                      </span>
-                    </div>
-                    {queueFailure.nextRetryAt && (
-                      <div className="col-span-2 text-amber-600 dark:text-amber-400 font-semibold">
-                        {t('sync.blocker.nextRetry', {
-                          defaultValue: 'Next retry',
-                        })}
-                        :{' '}
-                        {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
-                      </div>
-                    )}
-                  </div>
-                  {queueFailure.entityType === 'order' && (
-                    <button
-                      onClick={handleRetryBlockedOrder}
-                      disabled={
-                        retryingBlockedOrder || syncStatus.syncInProgress
-                      }
-                      className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-blue-500/20 hover:bg-blue-500/30 text-blue-700 dark:text-blue-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {retryingBlockedOrder
-                        ? t('sync.blocker.retrying', {
-                            defaultValue: 'Retrying...',
-                          })
-                        : t('sync.blocker.retryOrderNow', {
-                            defaultValue: 'Retry Order Now',
-                          })}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {queueFailure && hasScheduledRetryableQueueFailure && (
-                <div className="liquid-glass-modal-card p-3 rounded-xl space-y-2 border border-amber-500/30">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide block">
-                        {t('sync.blocker.recoveryTitle', {
-                          defaultValue: 'Recovery in progress',
-                        })}
-                      </span>
-                      <span className="text-[10px] text-slate-600 dark:text-slate-300">
-                        {t('sync.blocker.recoveryDetail', {
-                          defaultValue:
-                            'This queue item is retryable and will be reprocessed automatically.',
-                        })}
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-extrabold uppercase tracking-wide ${
-                        queueFailure.classification === 'backpressure'
-                          ? 'text-amber-600 dark:text-amber-400'
-                          : 'text-orange-600 dark:text-orange-400'
-                      }`}
-                    >
-                      {t(
-                        `sync.blocker.classification.${queueFailure.classification}`,
-                        {
-                          defaultValue: queueFailure.classification,
-                        },
-                      )}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-700 dark:text-slate-200">
-                    <span className="font-semibold">
-                      {t('sync.blocker.entity', { defaultValue: 'Entity' })}:{' '}
-                    </span>
-                    <span className="font-mono">
-                      {ENTITY_TYPE_KEYS[queueFailure.entityType]
-                        ? t(ENTITY_TYPE_KEYS[queueFailure.entityType], {
-                            defaultValue: queueFailure.entityType,
-                          })
-                        : queueFailure.entityType}{' '}
-                      {queueFailure.entityId}
-                    </span>
-                  </div>
-                  <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-300 break-words">
-                    {queueFailure.lastError}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div className="text-slate-600 dark:text-slate-300">
-                      <span className="font-semibold">
-                        {t('sync.blocker.retryProgress', {
-                          defaultValue: 'Retry',
-                        })}
-                        :{' '}
-                      </span>
-                      <span className="font-mono">
-                        {queueFailure.retryCount}/{queueFailure.maxRetries}
-                      </span>
-                    </div>
-                    <div className="text-slate-600 dark:text-slate-300">
-                      <span className="font-semibold">
-                        {t('sync.blocker.status', {
-                          defaultValue: 'Status',
-                        })}
-                        :{' '}
-                      </span>
-                      <span className="font-mono">
-                        {queueFailure.status}
-                      </span>
-                    </div>
-                    {queueFailure.nextRetryAt && (
-                      <div className="col-span-2 text-amber-600 dark:text-amber-400 font-semibold">
-                        {t('sync.blocker.nextRetry', {
-                          defaultValue: 'Next retry',
-                        })}
-                        :{' '}
-                        {new Date(queueFailure.nextRetryAt).toLocaleTimeString()}
-                      </div>
-                    )}
-                  </div>
-                  {queueFailure.entityType === 'order' && (
-                    <button
-                      onClick={handleRetryBlockedOrder}
-                      disabled={
-                        retryingBlockedOrder || syncStatus.syncInProgress
-                      }
-                      className="w-full py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-blue-500/20 hover:bg-blue-500/30 text-blue-700 dark:text-blue-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {retryingBlockedOrder
-                        ? t('sync.blocker.retrying', {
-                            defaultValue: 'Retrying...',
-                          })
-                        : t('sync.blocker.retryOrderNow', {
-                            defaultValue: 'Retry Order Now',
-                          })}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Versions + terminal type compact card */}
-              <div className="liquid-glass-modal-card p-3 rounded-xl">
-                <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
-                  <span>
-                    <span className="font-bold text-black dark:text-white uppercase tracking-wide">
-                      {t('sync.labels.settings')}
-                    </span>{' '}
-                    <span className="font-extrabold text-purple-700 dark:text-purple-300">
-                      v{syncStatus.settingsVersion}
-                    </span>
-                  </span>
-                  <span>
-                    <span className="font-bold text-black dark:text-white uppercase tracking-wide">
-                      {t('sync.labels.menu')}
-                    </span>{' '}
-                    <span className="font-extrabold text-cyan-700 dark:text-cyan-300">
-                      v{syncStatus.menuVersion}
-                    </span>
-                  </span>
-                  <span>
-                    <span className="font-bold text-black dark:text-white uppercase tracking-wide">
-                      {t('terminal.labels.terminalType', {
-                        defaultValue: 'Terminal',
-                      })}
-                    </span>{' '}
-                    <span
-                      className={`font-extrabold ${isMobileWaiter ? 'text-blue-700 dark:text-blue-300' : 'text-green-700 dark:text-green-300'}`}
-                    >
-                      {isMobileWaiter
-                        ? t('terminal.type.mobile_waiter', {
-                            defaultValue: 'Mobile POS',
-                          })
-                        : t('terminal.type.main', { defaultValue: 'Main' })}
-                    </span>
-                  </span>
-                  {isMobileWaiter && parentTerminalId && (
-                    <span>
-                      <span className="font-bold text-black dark:text-white uppercase tracking-wide">
-                        {t('terminal.labels.parentTerminal', 'Parent')}
-                      </span>{' '}
-                      <span className="font-extrabold text-purple-700 dark:text-purple-300 font-mono">
-                        {parentTerminalId.substring(0, 8)}...
-                      </span>
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Financial Transactions */}
-              <div className="liquid-glass-modal-card p-3 rounded-xl">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                    {t('sync.financial.title')}
-                  </span>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={async () => {
-                        try {
-                          await loadFinancialStats();
-                          toast.success(
-                            t('sync.actions.refreshed', { defaultValue: 'Refreshed' }),
-                          );
-                        } catch {
-                          toast.error(
-                            t('sync.actions.refreshFailed', {
-                              defaultValue: 'Refresh failed',
-                            }),
-                          );
-                        }
-                      }}
-                      className="text-green-500 hover:text-green-400"
-                      title={t('sync.actions.refresh', { defaultValue: 'Refresh' })}
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => setShowFinancialPanel(true)}
-                      className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 underline"
-                    >
-                      {t('sync.actions.manage')}
-                    </button>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {(
-                    [
-                      ['driver_earnings', 'sync.financial.driver'],
-                      ['staff_payments', 'sync.financial.staff'],
-                      ['shift_expenses', 'sync.financial.expenses'],
-                    ] as const
-                  ).map(([key, label]) => {
-                    const stats = financialStats[key];
-                    return (
-                      <div key={key} className="text-center">
-                        <div className="text-[10px] font-bold text-black dark:text-white uppercase tracking-wide">
-                          {t(label)}
-                        </div>
-                        <div className="text-[11px] font-bold mt-0.5">
-                          {stats.pending > 0 && (
-                            <div className="text-blue-700 dark:text-blue-300">
-                              {stats.pending} {t('sync.financial.pending')}
-                            </div>
-                          )}
-                          {stats.failed > 0 && (
-                            <div className="text-red-700 dark:text-red-300">
-                              {stats.failed} {t('sync.financial.failed')}
-                            </div>
-                          )}
-                          {stats.pending === 0 && stats.failed === 0 && (
-                            <span className="text-green-700 dark:text-green-300">
-                              {t('sync.financial.complete')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Order Routing (conditional) */}
-              <OrderSyncRouteIndicator />
-
-              {/* Error */}
-              {syncStatus.error && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-2.5">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <div className="text-xs font-bold text-red-700 dark:text-red-400 mb-0.5">
-                        {t('sync.labels.error')}
-                      </div>
-                      <div className="text-[11px] font-semibold text-red-600 dark:text-red-300">
-                        {syncStatus.error}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ── DIVIDER ───────────────────────────────────────────── */}
-              <div className="border-t liquid-glass-modal-border my-1" />
-
-              {/* ── SYSTEM SECTION ────────────────────────────────────── */}
-
-              {systemLoading && !systemHealth ? (
-                <div className="flex items-center justify-center py-6">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
-                </div>
-              ) : systemHealth ? (
-                <>
-                  {/* Sync Backlog */}
-                  <div className="liquid-glass-modal-card p-3 rounded-xl">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                        {t('sync.system.syncBacklog', { defaultValue: 'Sync Backlog' })}
-                      </span>
-                      {totalBacklog === 0 ? (
-                        <span className="flex items-center gap-1 text-[11px] font-bold text-green-600 dark:text-green-400">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          {t('sync.system.clear', { defaultValue: 'Clear' })}
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-[11px] font-bold text-amber-600 dark:text-amber-400">
-                          <AlertTriangle className="w-3.5 h-3.5" />
-                          {t('sync.system.pending', { count: totalBacklog, defaultValue: '{{count}} pending' })}
-                        </span>
-                      )}
-                    </div>
-                    {totalBacklog > 0 && (
-                      <div className="space-y-0.5">
-                        {Object.entries(systemHealth.syncBacklog).map(([type, statuses]) => {
-                          const pending = Object.entries(statuses)
-                            .filter(([s]) => s !== 'synced' && s !== 'applied')
-                            .reduce((s, [, c]) => s + c, 0);
-                          if (pending === 0) return null;
-                          return (
-                            <div
-                              key={type}
-                              className="text-[11px] flex justify-between text-slate-600 dark:text-slate-400"
-                            >
-                              <span>{ENTITY_TYPE_KEYS[type] ? t(ENTITY_TYPE_KEYS[type], { defaultValue: type }) : type}</span>
-                              <span className="font-mono font-semibold">{pending}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Invalid Orders (conditional) */}
-                  {(systemHealth.invalidOrders?.count ?? 0) > 0 && (
-                    <div className="liquid-glass-modal-card p-3 rounded-xl border-red-500/30">
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
-                        <span className="text-[11px] font-bold text-red-700 dark:text-red-400 uppercase tracking-wide">
-                          {t('sync.system.invalidCount', {
-                            count: systemHealth.invalidOrders!.count,
-                            defaultValue: '{{count}} invalid',
-                          })}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-slate-500 dark:text-slate-400 mb-2">
-                        {t('sync.system.invalidOrdersDesc', { defaultValue: 'Orders have menu items not in local cache' })}
-                      </p>
-                      <button
-                        onClick={handleRemoveInvalidOrders}
-                        className="w-full px-2 py-1.5 rounded-lg text-[11px] font-bold bg-red-500 hover:bg-red-600 text-white mb-2"
-                      >
-                        {t('sync.system.removeInvalidOrders', { defaultValue: 'Remove Invalid Orders' })}
-                      </button>
-                      <div className="space-y-0.5 max-h-20 overflow-auto scrollbar-hide">
-                        {systemHealth.invalidOrders!.details.slice(0, 5).map((order) => (
-                          <div
-                            key={order.order_id}
-                            className="text-[10px] flex justify-between text-slate-500"
-                          >
-                            <span className="font-mono">
-                              {order.order_id.substring(0, 8)}...
-                            </span>
-                            <span className="text-red-500">
-                              {order.invalid_menu_items.length} {t('sync.system.items', { defaultValue: 'items' })}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Printers */}
-                  <div className="liquid-glass-modal-card p-3 rounded-xl">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                        {t('sync.system.printers', { defaultValue: 'Printers' })}
-                      </span>
-                      <span className="flex items-center gap-1.5">
-                        <Printer
-                          className={`w-3.5 h-3.5 ${systemHealth.printerStatus.configured ? 'text-green-500' : 'text-slate-400'}`}
-                        />
-                        <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                          {systemHealth.printerStatus.configured
-                            ? t('sync.system.configured', {
-                                count: systemHealth.printerStatus.profileCount,
-                                defaultValue: '{{count}} configured',
-                              })
-                            : t('sync.system.notConfigured', { defaultValue: 'Not configured' })}
-                        </span>
-                      </span>
-                    </div>
-                    {systemHealth.printerStatus.defaultProfile && (
-                      <div className="text-[10px] text-slate-500 dark:text-slate-400 mb-1">
-                        {t('sync.system.defaultPrinter', { defaultValue: 'Default' })}:{' '}
-                        {systemHealth.printerStatus.defaultProfile}
-                      </div>
-                    )}
-                    {systemHealth.printerStatus.recentJobs.length > 0 && (
-                      <div className="space-y-0.5">
-                        {systemHealth.printerStatus.recentJobs.slice(0, 3).map((job) => (
-                          <div
-                            key={job.id}
-                            className="text-[10px] flex justify-between text-slate-500"
-                          >
-                            <span>{ENTITY_TYPE_KEYS[job.entityType] ? t(ENTITY_TYPE_KEYS[job.entityType], { defaultValue: job.entityType }) : job.entityType}</span>
-                            <span
-                              className={`font-mono ${
-                                job.status === 'printed' || job.status === 'dispatched'
-                                  ? 'text-green-500'
-                                  : job.status === 'failed'
-                                    ? 'text-red-500'
-                                    : 'text-amber-500'
-                              }`}
-                            >
-                              {job.status}
-                              {job.warningCode ? ' !' : ''}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Last Z-Report */}
-                  <div className="liquid-glass-modal-card p-3 rounded-xl">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide">
-                        {t('sync.system.lastZReport', { defaultValue: 'Last Z-Report' })}
-                      </span>
-                      {systemHealth.lastZReport && (
-                        <FileText className="w-3.5 h-3.5 text-blue-500" />
-                      )}
-                    </div>
-                    {systemHealth.lastZReport ? (
-                      <div className="text-[11px] space-y-0.5 text-slate-600 dark:text-slate-400">
-                        <div className="flex justify-between">
-                          <span>{t('sync.system.gross', { defaultValue: 'Gross' })}</span>
-                          <span className="font-semibold text-black dark:text-white">
-                            {formatCurrency(systemHealth.lastZReport.totalGrossSales)}
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>{t('sync.system.net', { defaultValue: 'Net' })}</span>
-                          <span className="font-semibold">
-                            {formatCurrency(systemHealth.lastZReport.totalNetSales)}
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>{t('sync.system.generated', { defaultValue: 'Generated' })}</span>
-                          <span className="font-mono text-[10px]">
-                            {new Date(systemHealth.lastZReport.generatedAt).toLocaleString()}
-                          </span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>{t('sync.system.syncState', { defaultValue: 'Sync' })}</span>
-                          <span
-                            className={`font-mono ${systemHealth.lastZReport.syncState === 'applied' ? 'text-green-500' : 'text-amber-500'}`}
-                          >
-                            {systemHealth.lastZReport.syncState}
-                          </span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                        <FileText className="w-3.5 h-3.5" />
-                        {t('sync.system.noReports', { defaultValue: 'No reports generated' })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Database + Pending Queue */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="liquid-glass-modal-card p-3 rounded-xl">
-                      <div className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide mb-1">
-                        {t('sync.system.database', { defaultValue: 'Database' })}
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Database className="w-3.5 h-3.5 text-purple-500" />
-                        <span className="text-sm font-extrabold text-purple-700 dark:text-purple-300">
-                          v{systemHealth.schemaVersion}
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-slate-500 mt-0.5">
-                        {formatBytes(systemHealth.dbSizeBytes)}
-                      </div>
-                    </div>
-                    <div className="liquid-glass-modal-card p-3 rounded-xl">
-                      <div className="text-[11px] font-bold text-black dark:text-white uppercase tracking-wide mb-1">
-                        {t('sync.labels.pending')}
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        {systemHealth.pendingOrders === 0 ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                        ) : (
-                          <Clock className="w-3.5 h-3.5 text-amber-500" />
-                        )}
-                        <span
-                          className={`text-sm font-extrabold ${systemHealth.pendingOrders === 0 ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}`}
-                        >
-                          {systemHealth.pendingOrders}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Last Sync by Entity (collapsible) */}
-                  {Object.keys(systemHealth.lastSyncTimes).length > 0 && (
-                    <details className="liquid-glass-modal-card rounded-xl">
-                      <summary className="cursor-pointer p-3 flex items-center justify-between text-[11px] font-bold text-black dark:text-white uppercase tracking-wide select-none">
-                        {t('sync.system.lastSyncByEntity', { defaultValue: 'Last Sync by Entity' })}
-                        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
-                      </summary>
-                      <div className="px-3 pb-3 grid grid-cols-2 gap-x-4 gap-y-1">
-                        {Object.entries(systemHealth.lastSyncTimes).map(([entity, ts]) => (
-                          <div key={entity} className="text-[10px] text-slate-500">
-                            <span className="font-medium text-slate-700 dark:text-slate-300">
-                              {ENTITY_TYPE_KEYS[entity] ? t(ENTITY_TYPE_KEYS[entity], { defaultValue: entity }) : entity}
-                            </span>
-                            <div className="font-mono">
-                              {ts ? new Date(ts).toLocaleString() : '\u2014'}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-6">
-                  <AlertTriangle className="w-6 h-6 text-amber-500 mx-auto mb-2" />
-                  <p className="text-xs text-slate-500">
-                    {t('sync.system.retry', { defaultValue: 'Failed to load. Try refreshing.' })}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* -- Export success banner ----------------------------------- */}
-            {exportPath && (
-              <div className="mx-5 mb-2 p-2 rounded-lg flex items-center gap-2 bg-green-500/10 border border-green-500/20 flex-shrink-0">
-                <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
-                <span className="text-[11px] font-medium text-green-600 dark:text-green-400 truncate flex-1">
-                  {t('sync.system.exportSuccess', { defaultValue: 'Diagnostics exported' })}
-                </span>
-                <button
-                  onClick={handleOpenExportDir}
-                  className="flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold bg-green-500/20 hover:bg-green-500/30 text-green-600 dark:text-green-400"
-                >
-                  <FolderOpen className="w-3 h-3" />
-                  {t('sync.system.openFolder', { defaultValue: 'Open Folder' })}
-                </button>
-              </div>
-            )}
-
-            {/* -- Footer ------------------------------------------------- */}
-            <div className="flex gap-2 px-5 py-3 border-t liquid-glass-modal-border flex-shrink-0">
-              <button
-                onClick={handleForceSync}
-                disabled={syncStatus.syncInProgress}
-                className="flex-1 py-2 px-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transition-all duration-300 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
-              >
-                <span className="flex items-center justify-center gap-2">
-                  <RefreshCw
-                    className={`w-4 h-4 ${syncStatus.syncInProgress ? 'animate-spin' : ''}`}
-                  />
-                  {syncStatus.syncInProgress
-                    ? t('sync.status.syncing')
-                    : t('sync.actions.forceSync')}
-                </span>
-              </button>
-              <button
-                onClick={handleExport}
-                disabled={exporting}
-                className="py-2 px-3 rounded-xl font-bold text-sm liquid-glass-modal-card border liquid-glass-modal-border text-slate-700 dark:text-slate-200 hover:bg-white/20 dark:hover:bg-white/5 transition-all disabled:opacity-50"
-              >
-                <span className="flex items-center gap-1.5">
-                  <Download
-                    className={`w-4 h-4 ${exporting ? 'animate-bounce' : ''}`}
-                  />
-                  {exporting
-                    ? t('sync.system.exporting', { defaultValue: 'Exporting...' })
-                    : t('sync.system.exportDiagnostics', { defaultValue: 'Export' })}
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      {showDetailPanel && renderDetailModal()}
 
       <FinancialSyncPanel
         isOpen={showFinancialPanel}

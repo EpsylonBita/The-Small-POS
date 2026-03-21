@@ -22,8 +22,12 @@ export function formatMoneyInputWithCents(value: string): string {
     return '';
   }
 
-  if (digitsOnly.length <= 2) {
-    return digitsOnly;
+  if (digitsOnly.length === 1) {
+    return `0,0${digitsOnly}`;
+  }
+
+  if (digitsOnly.length === 2) {
+    return `0,${digitsOnly}`;
   }
 
   const integerPart = digitsOnly.slice(0, -2).replace(/^0+(?=\d)/, '');

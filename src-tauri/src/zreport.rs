@@ -93,6 +93,14 @@ fn local_report_date_from_timestamp(value: &str) -> String {
         .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
 }
 
+fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> String {
+    if !period_start_at.trim().is_empty() && !business_day::is_epoch_timestamp(period_start_at) {
+        return local_report_date_from_timestamp(period_start_at);
+    }
+
+    local_report_date_from_timestamp(cutoff_at)
+}
+
 fn resolve_period_start_at(conn: &Connection, branch_id: &str, cutoff_at: Option<&str>) -> String {
     business_day::resolve_period_start(conn, branch_id, cutoff_at)
 }
@@ -161,7 +169,8 @@ fn synthesize_pending_z_report_context(
         .flatten();
 
     latest_closed_at.and_then(|cutoff_at| {
-        let report_date = local_report_date_from_timestamp(&cutoff_at);
+        let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str()));
+        let report_date = report_date_for_business_window(&period_start_at, &cutoff_at);
         let today = Local::now().format("%Y-%m-%d").to_string();
 
         // Only synthesize a pending context for shifts from a previous day.
@@ -174,7 +183,7 @@ fn synthesize_pending_z_report_context(
         Some(PendingZReportContext {
             branch_id: branch_id.to_string(),
             report_date,
-            period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str())),
+            period_start_at,
             cutoff_at,
         })
     })
@@ -252,11 +261,12 @@ pub(crate) fn ensure_pending_z_report_context_for_branch(
         return Ok(Some(serde_json::json!(existing)));
     }
 
+    let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at));
     let context = PendingZReportContext {
         branch_id: branch_id.to_string(),
-        report_date: local_report_date_from_timestamp(cutoff_at),
+        report_date: report_date_for_business_window(&period_start_at, cutoff_at),
         cutoff_at: cutoff_at.to_string(),
-        period_start_at: resolve_period_start_at(conn, branch_id, Some(cutoff_at)),
+        period_start_at,
     };
 
     persist_pending_z_report_context(conn, &context)?;
@@ -3689,6 +3699,7 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::db;
+    use chrono::TimeZone;
     use rusqlite::Connection;
 
     fn test_db() -> DbState {
@@ -4850,6 +4861,60 @@ mod tests {
             status["status"], "idle",
             "same-day closed shifts should not trigger pending Z-report"
         );
+    }
+
+    #[test]
+    fn test_get_end_of_day_status_uses_business_day_start_for_overnight_shift() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let today = Local::now().date_naive();
+        let previous_day = today
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("previous day");
+        let check_in_local = Local
+            .from_local_datetime(&previous_day.and_hms_opt(15, 0, 0).expect("15:00"))
+            .single()
+            .expect("local 15:00");
+        let check_out_local = Local
+            .from_local_datetime(&today.and_hms_opt(6, 0, 0).expect("06:00"))
+            .single()
+            .expect("local 06:00");
+        let check_in = check_in_local
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let check_out = check_out_local
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expected_report_date = previous_day.format("%Y-%m-%d").to_string();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-overnight', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
+                200.0, 235.0, 235.0, 0.0,
+                ?1, ?2, 'closed', 2,
+                'pending', ?2, ?2
+             )",
+            params![check_in, check_out],
+        )
+        .expect("insert overnight shift");
+        drop(conn);
+
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
+        .expect("status should load");
+
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["pendingReportDate"], expected_report_date);
     }
 
     #[test]

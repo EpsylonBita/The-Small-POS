@@ -3388,8 +3388,106 @@ fn replace_local_payment_items(
     Ok(())
 }
 
-fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> Result<usize, String> {
-    let Some(remote_payment_id) = str_any(remote_payment, &["id", "payment_id", "paymentId"]) else {
+fn mark_payment_queue_row_synced(
+    conn: &Connection,
+    payment_id: &str,
+    synced_at: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE sync_queue
+         SET status = 'synced',
+             synced_at = ?1,
+             retry_count = 0,
+             next_retry_at = NULL,
+             last_error = NULL,
+             updated_at = ?1
+         WHERE entity_type = 'payment'
+           AND entity_id = ?2
+           AND status != 'synced'",
+        params![synced_at, payment_id],
+    )
+    .map_err(|e| format!("mark payment queue row synced: {e}"))?;
+
+    Ok(())
+}
+
+fn mark_local_payment_applied(
+    conn: &Connection,
+    payment_id: &str,
+    synced_at: &str,
+    remote_payment_id: Option<&str>,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE order_payments
+         SET sync_status = 'synced',
+             sync_state = 'applied',
+             remote_payment_id = COALESCE(?1, remote_payment_id),
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?2
+         WHERE id = ?3",
+        params![remote_payment_id, synced_at, payment_id],
+    )
+    .map_err(|e| format!("mark local payment applied: {e}"))?;
+
+    mark_payment_queue_row_synced(conn, payment_id, synced_at)
+}
+
+fn hydrate_local_payment_from_remote(
+    conn: &Connection,
+    local_order_id: &str,
+    local_payment_id: &str,
+    remote_payment_id: &str,
+    method: &str,
+    amount: f64,
+    currency: &str,
+    transaction_ref: Option<&str>,
+    items: Option<&Value>,
+    created_at: &str,
+    updated_at: &str,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE order_payments
+         SET method = ?1,
+             amount = ?2,
+             currency = ?3,
+             transaction_ref = COALESCE(?4, transaction_ref),
+             updated_at = ?5
+         WHERE id = ?6",
+        params![
+            method,
+            amount,
+            currency,
+            transaction_ref,
+            updated_at,
+            local_payment_id,
+        ],
+    )
+    .map_err(|e| format!("update remote payment mirror: {e}"))?;
+    mark_local_payment_applied(conn, local_payment_id, updated_at, Some(remote_payment_id))?;
+    replace_local_payment_items(conn, local_payment_id, local_order_id, items, created_at)?;
+    payments::recompute_order_payment_state(
+        conn,
+        local_order_id,
+        method,
+        items
+            .and_then(Value::as_array)
+            .map(|rows| !rows.is_empty())
+            .unwrap_or(false),
+        updated_at,
+        local_payment_id,
+    )?;
+
+    Ok(1)
+}
+
+fn sync_remote_payment_into_local(
+    conn: &Connection,
+    remote_payment: &Value,
+) -> Result<usize, String> {
+    let Some(remote_payment_id) = str_any(remote_payment, &["id", "payment_id", "paymentId"])
+    else {
         return Ok(0);
     };
     let Some(remote_order_id) = str_any(remote_payment, &["order_id", "orderId"]) else {
@@ -3408,8 +3506,11 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
         return Ok(0);
     };
 
-    let raw_method = str_any(remote_payment, &["payment_method", "paymentMethod", "method"])
-        .unwrap_or_else(|| "other".to_string());
+    let raw_method = str_any(
+        remote_payment,
+        &["payment_method", "paymentMethod", "method"],
+    )
+    .unwrap_or_else(|| "other".to_string());
     let Some(method) = payments::normalize_external_payment_method(&raw_method) else {
         return Ok(0);
     };
@@ -3421,10 +3522,9 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
 
     let created_at = str_any(remote_payment, &["created_at", "createdAt"])
         .unwrap_or_else(|| Utc::now().to_rfc3339());
-    let updated_at = str_any(remote_payment, &["updated_at", "updatedAt"])
-        .unwrap_or_else(|| created_at.clone());
-    let currency =
-        str_any(remote_payment, &["currency"]).unwrap_or_else(|| "EUR".to_string());
+    let updated_at =
+        str_any(remote_payment, &["updated_at", "updatedAt"]).unwrap_or_else(|| created_at.clone());
+    let currency = str_any(remote_payment, &["currency"]).unwrap_or_else(|| "EUR".to_string());
     let transaction_ref = str_any(
         remote_payment,
         &[
@@ -3435,6 +3535,18 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
         ],
     );
     let items = remote_payment.get("items");
+    let metadata_local_payment_id = remote_payment
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            metadata
+                .get("local_payment_id")
+                .or_else(|| metadata.get("localPaymentId"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
 
     let existing_local_payment_id: Option<String> = conn
         .query_row(
@@ -3449,38 +3561,50 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
         .map_err(|e| format!("resolve local payment by remote_payment_id: {e}"))?;
 
     if let Some(local_payment_id) = existing_local_payment_id {
-        conn.execute(
-            "UPDATE order_payments
-             SET method = ?1,
-                 amount = ?2,
-                 currency = ?3,
-                 transaction_ref = COALESCE(?4, transaction_ref),
-                 sync_status = 'synced',
-                 sync_state = 'applied',
-                 sync_retry_count = 0,
-                 sync_last_error = NULL,
-                 updated_at = ?5
-             WHERE id = ?6",
-            params![
-                method,
-                amount,
-                currency,
-                transaction_ref,
-                updated_at,
-                local_payment_id,
-            ],
-        )
-        .map_err(|e| format!("update remote payment mirror: {e}"))?;
-        replace_local_payment_items(conn, &local_payment_id, &local_order_id, items, &created_at)?;
-        payments::recompute_order_payment_state(
+        return hydrate_local_payment_from_remote(
             conn,
             &local_order_id,
-            &method,
-            items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
-            &updated_at,
             &local_payment_id,
-        )?;
-        return Ok(1);
+            &remote_payment_id,
+            &method,
+            amount,
+            &currency,
+            transaction_ref.as_deref(),
+            items,
+            &created_at,
+            &updated_at,
+        );
+    }
+
+    if let Some(local_payment_id) = metadata_local_payment_id {
+        let exact_local_payment_id: Option<String> = conn
+            .query_row(
+                "SELECT id
+                 FROM order_payments
+                 WHERE id = ?1
+                   AND order_id = ?2
+                 LIMIT 1",
+                params![local_payment_id, local_order_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("resolve local payment from remote metadata: {e}"))?;
+
+        if let Some(local_payment_id) = exact_local_payment_id {
+            return hydrate_local_payment_from_remote(
+                conn,
+                &local_order_id,
+                &local_payment_id,
+                &remote_payment_id,
+                &method,
+                amount,
+                &currency,
+                transaction_ref.as_deref(),
+                items,
+                &created_at,
+                &updated_at,
+            );
+        }
     }
 
     let placeholder_payment_id: Option<String> = conn
@@ -3502,40 +3626,19 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
         .map_err(|e| format!("resolve reconstructed payment placeholder: {e}"))?;
 
     if let Some(local_payment_id) = placeholder_payment_id {
-        conn.execute(
-            "UPDATE order_payments
-             SET remote_payment_id = ?1,
-                 method = ?2,
-                 amount = ?3,
-                 currency = ?4,
-                 transaction_ref = COALESCE(?5, transaction_ref),
-                 sync_status = 'synced',
-                 sync_state = 'applied',
-                 sync_retry_count = 0,
-                 sync_last_error = NULL,
-                 updated_at = ?6
-             WHERE id = ?7",
-            params![
-                remote_payment_id,
-                method,
-                amount,
-                currency,
-                transaction_ref,
-                updated_at,
-                local_payment_id,
-            ],
-        )
-        .map_err(|e| format!("hydrate reconstructed payment placeholder: {e}"))?;
-        replace_local_payment_items(conn, &local_payment_id, &local_order_id, items, &created_at)?;
-        payments::recompute_order_payment_state(
+        return hydrate_local_payment_from_remote(
             conn,
             &local_order_id,
-            &method,
-            items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
-            &updated_at,
             &local_payment_id,
-        )?;
-        return Ok(1);
+            &remote_payment_id,
+            &method,
+            amount,
+            &currency,
+            transaction_ref.as_deref(),
+            items,
+            &created_at,
+            &updated_at,
+        );
     }
 
     if let Some(transaction_ref) = transaction_ref.as_deref() {
@@ -3558,34 +3661,19 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
             .map_err(|e| format!("resolve orphan local payment mirror: {e}"))?;
 
         if let Some(local_payment_id) = orphan_local_payment_id {
-            conn.execute(
-                "UPDATE order_payments
-                 SET remote_payment_id = ?1,
-                     sync_status = 'synced',
-                     sync_state = 'applied',
-                     sync_retry_count = 0,
-                     sync_last_error = NULL,
-                     updated_at = ?2
-                 WHERE id = ?3",
-                params![remote_payment_id, updated_at, local_payment_id],
-            )
-            .map_err(|e| format!("attach remote_payment_id to local payment: {e}"))?;
-            replace_local_payment_items(
+            return hydrate_local_payment_from_remote(
                 conn,
-                &local_payment_id,
                 &local_order_id,
+                &local_payment_id,
+                &remote_payment_id,
+                &method,
+                amount,
+                &currency,
+                Some(transaction_ref),
                 items,
                 &created_at,
-            )?;
-            payments::recompute_order_payment_state(
-                conn,
-                &local_order_id,
-                &method,
-                items.and_then(Value::as_array).map(|rows| !rows.is_empty()).unwrap_or(false),
                 &updated_at,
-                &local_payment_id,
-            )?;
-            return Ok(1);
+            );
         }
     }
 
@@ -3607,6 +3695,51 @@ fn sync_remote_payment_into_local(conn: &Connection, remote_payment: &Value) -> 
         .map_err(|e| format!("insert remote payment mirror: {e}"))?;
 
     Ok(1)
+}
+
+fn reconcile_applied_payment_queue_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT op.id
+             FROM sync_queue sq
+             JOIN order_payments op ON op.id = sq.entity_id
+             WHERE sq.entity_type = 'payment'
+               AND sq.status != 'synced'
+               AND (
+                    COALESCE(op.remote_payment_id, '') != ''
+                    OR COALESCE(op.sync_state, '') = 'applied'
+               )
+             ORDER BY op.id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let payment_ids: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|row| row.ok())
+        .collect();
+    drop(stmt);
+
+    if payment_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut reconciled = 0usize;
+    for payment_id in payment_ids {
+        mark_local_payment_applied(&conn, &payment_id, &now, None)?;
+        reconciled += 1;
+    }
+
+    if reconciled > 0 {
+        info!(
+            reconciled,
+            "Payment reconciliation: marked locally applied payment queue rows as synced"
+        );
+    }
+
+    Ok(reconciled)
 }
 
 fn maybe_reconstruct_paid_remote_order_payment(
@@ -3693,8 +3826,11 @@ fn maybe_reconstruct_paid_remote_order_payment(
     let effective_business_timestamp =
         crate::business_day::resolve_order_financial_effective_at(conn, &local_order_id)
             .unwrap_or_else(|_| {
-                str_any(remote_order, &["updated_at", "updatedAt", "created_at", "createdAt"])
-                    .unwrap_or_else(|| Utc::now().to_rfc3339())
+                str_any(
+                    remote_order,
+                    &["updated_at", "updatedAt", "created_at", "createdAt"],
+                )
+                .unwrap_or_else(|| Utc::now().to_rfc3339())
             });
     let payload = serde_json::json!({
         "orderId": local_order_id,
@@ -4044,7 +4180,8 @@ async fn reconcile_remote_orders(
                 }
 
                 if !has_pending_queue {
-                    if let Err(error) = maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
+                    if let Err(error) =
+                        maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order)
                     {
                         warn!(
                             order_id = %local_id,
@@ -4278,11 +4415,15 @@ async fn reconcile_remote_payments(
             }
         }
 
-        let next_cursor = sanitize_payments_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
+        let next_cursor =
+            sanitize_payments_since_cursor(newest_updated_at.or(Some(sync_timestamp)));
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let current_stored =
-                sanitize_payments_since_cursor(crate::db::get_setting(&conn, "sync", "payments_since"));
+            let current_stored = sanitize_payments_since_cursor(crate::db::get_setting(
+                &conn,
+                "sync",
+                "payments_since",
+            ));
             if next_cursor > current_stored {
                 since_cursor = next_cursor.clone();
                 crate::db::set_setting(&conn, "sync", "payments_since", &next_cursor)?;
@@ -4294,6 +4435,129 @@ async fn reconcile_remote_payments(
         if !has_more {
             break;
         }
+    }
+
+    Ok(reconciled)
+}
+
+fn is_payment_total_conflict_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("payment exceeds order total")
+        || (lower.contains("http 422") && lower.contains("existing completed"))
+}
+
+async fn reconcile_remote_payments_for_local_order(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    local_order_id: &str,
+) -> Result<usize, String> {
+    let remote_order_id: Option<String> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT supabase_id
+             FROM orders
+             WHERE id = ?1
+             LIMIT 1",
+            params![local_order_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| format!("load remote order id for payment recovery: {e}"))?
+        .flatten()
+        .filter(|value: &String| !value.trim().is_empty())
+    };
+
+    let Some(remote_order_id) = remote_order_id else {
+        return Ok(0);
+    };
+
+    let path = format!(
+        "/api/pos/payments?limit=200&order_id={}",
+        percent_encode(&remote_order_id)
+    );
+    let resp = api::fetch_from_admin(admin_url, api_key, &path, "GET", None)
+        .await
+        .map_err(|e| format!("recover remote payments for order {local_order_id}: {e}"))?;
+
+    let typed: Option<PaymentIncrementalSyncResponse> = serde_json::from_value(resp.clone()).ok();
+    let payments = typed
+        .as_ref()
+        .map(|value| value.payments.clone())
+        .unwrap_or_else(|| {
+            resp.get("payments")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        });
+
+    if payments.is_empty() {
+        return Ok(0);
+    }
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut reconciled = 0usize;
+    for remote_payment in payments {
+        match sync_remote_payment_into_local(&conn, &remote_payment) {
+            Ok(changed) => {
+                reconciled += changed;
+            }
+            Err(error) => {
+                let remote_payment_id =
+                    str_any(&remote_payment, &["id", "payment_id", "paymentId"])
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                warn!(
+                    local_order_id = %local_order_id,
+                    remote_payment_id = %remote_payment_id,
+                    error = %error,
+                    "Failed targeted canonical payment recovery for local order"
+                );
+            }
+        }
+    }
+
+    Ok(reconciled)
+}
+
+async fn recover_payment_total_conflicts(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+) -> Result<usize, String> {
+    let local_order_ids: Vec<String> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT op.order_id
+                 FROM sync_queue sq
+                 JOIN order_payments op ON op.id = sq.entity_id
+                 WHERE sq.entity_type = 'payment'
+                   AND sq.status != 'synced'
+                   AND LOWER(COALESCE(sq.last_error, '')) LIKE '%payment exceeds order total%'",
+            )
+            .map_err(|e| format!("prepare payment conflict recovery query: {e}"))?;
+
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("query payment conflict recovery rows: {e}"))?
+            .filter_map(|row| row.ok())
+            .collect();
+        drop(stmt);
+        rows
+    };
+
+    let mut reconciled = 0usize;
+    for local_order_id in local_order_ids {
+        reconciled +=
+            reconcile_remote_payments_for_local_order(db, admin_url, api_key, &local_order_id)
+                .await?;
+    }
+
+    if reconciled > 0 {
+        info!(
+            reconciled,
+            "Recovered stale payment total-conflict rows from canonical remote payments"
+        );
     }
 
     Ok(reconciled)
@@ -4402,6 +4666,11 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     total_progress += reconciled_orders;
     let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
     total_progress += reconciled_payments;
+    let recovered_payment_conflicts =
+        recover_payment_total_conflicts(db, &admin_url, &api_key).await?;
+    total_progress += recovered_payment_conflicts;
+    let reconciled_applied_payments = reconcile_applied_payment_queue_rows(db)?;
+    total_progress += reconciled_applied_payments;
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
@@ -6009,6 +6278,33 @@ fn is_strict_shift_bound_financial_entity(entity_type: &str) -> bool {
     )
 }
 
+const WAITING_FOR_CASHIER_SHIFT_SYNC_REASON: &str = "Waiting for cashier shift sync";
+const CASHIER_SHIFT_SYNC_NEEDS_ATTENTION_REASON: &str = "Cashier shift sync needs attention";
+const CASHIER_SHIFT_MISSING_LOCALLY_REASON: &str = "Cashier shift is missing locally";
+
+#[derive(Debug, Clone)]
+struct ShiftQueueDependencyRow {
+    queue_id: i64,
+    status: String,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinancialParentShiftDependency {
+    pub parent_shift_id: String,
+    pub parent_shift_sync_status: Option<String>,
+    pub parent_shift_queue_id: Option<i64>,
+    pub parent_shift_queue_status: Option<String>,
+    pub dependency_block_reason: Option<String>,
+}
+
+fn is_actionable_shift_queue_status(status: &str) -> bool {
+    matches!(
+        status,
+        "pending" | "in_progress" | "deferred" | "queued_remote"
+    )
+}
+
 fn local_order_has_remote_identity(conn: &rusqlite::Connection, order_ref: &str) -> Option<bool> {
     conn.query_row(
         "SELECT COALESCE(supabase_id, '')
@@ -6033,18 +6329,451 @@ fn get_shift_sync_status(conn: &rusqlite::Connection, shift_id: &str) -> Option<
     .ok()
 }
 
-/// Check if a shift's sync_queue entry is permanently failed.
-fn is_shift_sync_failed(conn: &rusqlite::Connection, shift_id: &str) -> bool {
+fn load_parent_shift_queue_row(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+) -> Option<ShiftQueueDependencyRow> {
     conn.query_row(
-        "SELECT COUNT(*) FROM sync_queue
+        "SELECT id, status, last_error
+         FROM sync_queue
          WHERE entity_type = 'shift'
            AND entity_id = ?1
-           AND status = 'failed'",
+         ORDER BY
+           CASE status
+             WHEN 'pending' THEN 0
+             WHEN 'in_progress' THEN 1
+             WHEN 'deferred' THEN 2
+             WHEN 'queued_remote' THEN 3
+             WHEN 'failed' THEN 4
+             WHEN 'synced' THEN 5
+             WHEN 'applied' THEN 6
+             ELSE 9
+           END,
+           id DESC
+         LIMIT 1",
         params![shift_id],
-        |row| row.get::<_, i64>(0),
+        |row| {
+            Ok(ShiftQueueDependencyRow {
+                queue_id: row.get(0)?,
+                status: row.get(1)?,
+                last_error: row.get(2)?,
+            })
+        },
     )
-    .unwrap_or(0)
-        > 0
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn is_retryable_shift_sync_error(error: Option<&str>) -> bool {
+    let Some(error) = error.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+
+    let lower = error.to_lowercase();
+    if is_backpressure_error(error)
+        || lower.contains("network error")
+        || lower.contains("cannot reach admin dashboard")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("server error")
+        || lower.contains("http 5")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("temporar")
+        || lower.contains("backend yet")
+        || lower.contains("not found on backend yet")
+        || lower.contains("transferred_to_cashier_shift_id_fkey")
+    {
+        return true;
+    }
+
+    if lower.contains("validation")
+        || lower.contains("invalid")
+        || lower.contains("missing required")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("access denied")
+        || lower.contains("same branch")
+        || lower.contains("staff not found")
+        || lower.contains("branch not found")
+        || lower.contains("organization")
+    {
+        return false;
+    }
+
+    false
+}
+
+fn build_parent_shift_block_reason(
+    shift_sync_status: Option<&str>,
+    queue_row: Option<&ShiftQueueDependencyRow>,
+) -> Option<String> {
+    match shift_sync_status {
+        Some("synced") => None,
+        None => Some(CASHIER_SHIFT_MISSING_LOCALLY_REASON.to_string()),
+        Some(_) => match queue_row {
+            Some(row) if is_actionable_shift_queue_status(&row.status) => {
+                Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string())
+            }
+            Some(row) if row.status == "failed" => {
+                Some(CASHIER_SHIFT_SYNC_NEEDS_ATTENTION_REASON.to_string())
+            }
+            _ => Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string()),
+        },
+    }
+}
+
+fn build_shift_requeue_payload(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    operation: &str,
+) -> Option<String> {
+    if operation == "update" {
+        conn.query_row(
+            "SELECT json_object(
+                'shiftId', ss.id,
+                'staffId', ss.staff_id,
+                'staffName', ss.staff_name,
+                'branchId', ss.branch_id,
+                'terminalId', ss.terminal_id,
+                'roleType', ss.role_type,
+                'openingCash', COALESCE(ss.opening_cash_amount, 0),
+                'checkInTime', ss.check_in_time,
+                'checkOutTime', ss.check_out_time,
+                'calculationVersion', COALESCE(ss.calculation_version, 2),
+                'totalOrdersCount', COALESCE(ss.total_orders_count, 0),
+                'totalSalesAmount', COALESCE(ss.total_sales_amount, 0),
+                'totalCashSales', COALESCE(ss.total_cash_sales, 0),
+                'totalCardSales', COALESCE(ss.total_card_sales, 0),
+                'closingCash', ss.closing_cash_amount,
+                'expectedCash', ss.expected_cash_amount,
+                'variance', ss.cash_variance,
+                'closedBy', ss.closed_by,
+                'paymentAmount', ss.payment_amount,
+                'cashDrawer', CASE
+                    WHEN cds.id IS NOT NULL THEN json_object(
+                        'id', cds.id,
+                        'cashierId', cds.cashier_id,
+                        'openingAmount', COALESCE(cds.opening_amount, 0),
+                        'closingAmount', cds.closing_amount,
+                        'expectedAmount', cds.expected_amount,
+                        'varianceAmount', cds.variance_amount,
+                        'totalCashSales', COALESCE(cds.total_cash_sales, 0),
+                        'totalCardSales', COALESCE(cds.total_card_sales, 0),
+                        'totalRefunds', COALESCE(cds.total_refunds, 0),
+                        'totalExpenses', COALESCE(cds.total_expenses, 0),
+                        'cashDrops', COALESCE(cds.cash_drops, 0),
+                        'driverCashGiven', COALESCE(cds.driver_cash_given, 0),
+                        'driverCashReturned', COALESCE(cds.driver_cash_returned, 0),
+                        'totalStaffPayments', COALESCE(cds.total_staff_payments, 0),
+                        'openedAt', cds.opened_at,
+                        'closedAt', cds.closed_at,
+                        'reconciled', CASE WHEN COALESCE(cds.reconciled, 0) = 0 THEN json('false') ELSE json('true') END,
+                        'reconciledAt', cds.reconciled_at,
+                        'reconciledBy', cds.reconciled_by
+                    )
+                    ELSE NULL
+                END,
+                'returnedCashTargetCashierShiftId', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
+                    ELSE NULL
+                END,
+                'returnedCashTargetDrawerId', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN (
+                        SELECT id
+                        FROM cash_drawer_sessions
+                        WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                        LIMIT 1
+                    )
+                    ELSE NULL
+                END,
+                'returnedCashAmount', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.closing_cash_amount, 0)
+                    ELSE NULL
+                END,
+                'resolvedCashierShiftId', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
+                    ELSE NULL
+                END,
+                'resolvedCashierDrawerId', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN (
+                        SELECT id
+                        FROM cash_drawer_sessions
+                        WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                        LIMIT 1
+                    )
+                    ELSE NULL
+                END
+             )
+             FROM staff_shifts ss
+             LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+             WHERE ss.id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .ok()
+    } else {
+        conn.query_row(
+            "SELECT json_object(
+                'shiftId', ss.id,
+                'staffId', ss.staff_id,
+                'staffName', ss.staff_name,
+                'branchId', ss.branch_id,
+                'terminalId', ss.terminal_id,
+                'roleType', ss.role_type,
+                'openingCash', COALESCE(ss.opening_cash_amount, 0),
+                'checkInTime', ss.check_in_time,
+                'calculationVersion', COALESCE(ss.calculation_version, 2),
+                'responsibleCashierShiftId', ss.transferred_to_cashier_shift_id,
+                'responsibleCashierDrawerId', (
+                    SELECT id
+                    FROM cash_drawer_sessions
+                    WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
+                    LIMIT 1
+                ),
+                'startingAmountSourceCashierShiftId', ss.transferred_to_cashier_shift_id,
+                'borrowedStartingAmount', CASE
+                    WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.opening_cash_amount, 0)
+                    ELSE NULL
+                END
+             )
+             FROM staff_shifts ss
+             WHERE ss.id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+}
+
+fn enqueue_reconstructed_shift_sync_row(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    now: &str,
+) -> Result<Option<i64>, String> {
+    let status_str: Option<String> = conn
+        .query_row(
+            "SELECT status FROM staff_shifts WHERE id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load parent shift status: {e}"))?;
+
+    let Some(status_str) = status_str else {
+        return Ok(None);
+    };
+
+    let operation = if status_str == "closed" {
+        "update"
+    } else {
+        "insert"
+    };
+    let Some(payload) = build_shift_requeue_payload(conn, shift_id, operation) else {
+        return Ok(None);
+    };
+
+    let idem_key = format!("shift:requeue:{}:{}", shift_id, Uuid::new_v4());
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+         VALUES ('shift', ?1, ?2, ?3, ?4, 'pending')",
+        params![shift_id, operation, payload, idem_key],
+    )
+    .map_err(|e| format!("enqueue reconstructed shift sync row: {e}"))?;
+
+    let _ = conn.execute(
+        "UPDATE staff_shifts
+         SET sync_status = 'pending',
+             updated_at = ?1
+         WHERE id = ?2
+           AND COALESCE(sync_status, '') != 'synced'",
+        params![now, shift_id],
+    );
+
+    Ok(Some(conn.last_insert_rowid()))
+}
+
+fn reset_shift_queue_row_to_pending(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    queue_id: i64,
+    now: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE sync_queue
+         SET status = 'pending',
+             retry_count = 0,
+             last_error = NULL,
+             next_retry_at = NULL,
+             updated_at = ?1
+         WHERE id = ?2",
+        params![now, queue_id],
+    )
+    .map_err(|e| format!("reset parent shift queue row: {e}"))?;
+
+    let _ = conn.execute(
+        "UPDATE staff_shifts
+         SET sync_status = 'pending',
+             updated_at = ?1
+         WHERE id = ?2
+           AND COALESCE(sync_status, '') != 'synced'",
+        params![now, shift_id],
+    );
+
+    Ok(())
+}
+
+pub(crate) fn resolve_financial_parent_shift_dependency(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    payload: &str,
+) -> Option<FinancialParentShiftDependency> {
+    if !is_strict_shift_bound_financial_entity(entity_type) {
+        return None;
+    }
+
+    let parent_shift_id = extract_shift_id_from_financial_payload(payload)?;
+    let parent_shift_sync_status = get_shift_sync_status(conn, &parent_shift_id);
+    let queue_row = load_parent_shift_queue_row(conn, &parent_shift_id);
+
+    Some(FinancialParentShiftDependency {
+        parent_shift_id,
+        parent_shift_sync_status: parent_shift_sync_status.clone(),
+        parent_shift_queue_id: queue_row.as_ref().map(|row| row.queue_id),
+        parent_shift_queue_status: queue_row.as_ref().map(|row| row.status.clone()),
+        dependency_block_reason: build_parent_shift_block_reason(
+            parent_shift_sync_status.as_deref(),
+            queue_row.as_ref(),
+        ),
+    })
+}
+
+pub(crate) fn ensure_financial_parent_shift_dependency_recovery(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    payload: &str,
+    now: &str,
+) -> Result<Option<FinancialParentShiftDependency>, String> {
+    if !is_strict_shift_bound_financial_entity(entity_type) {
+        return Ok(None);
+    }
+
+    let Some(parent_shift_id) = extract_shift_id_from_financial_payload(payload) else {
+        return Ok(None);
+    };
+
+    let mut dependency = resolve_financial_parent_shift_dependency(conn, entity_type, payload)
+        .unwrap_or(FinancialParentShiftDependency {
+            parent_shift_id: parent_shift_id.clone(),
+            parent_shift_sync_status: None,
+            parent_shift_queue_id: None,
+            parent_shift_queue_status: None,
+            dependency_block_reason: Some(CASHIER_SHIFT_MISSING_LOCALLY_REASON.to_string()),
+        });
+
+    if dependency.parent_shift_sync_status.as_deref() == Some("synced") {
+        dependency.dependency_block_reason = None;
+        return Ok(Some(dependency));
+    }
+
+    if dependency.parent_shift_sync_status.is_none() {
+        dependency.dependency_block_reason = Some(CASHIER_SHIFT_MISSING_LOCALLY_REASON.to_string());
+        return Ok(Some(dependency));
+    }
+
+    let queue_row = load_parent_shift_queue_row(conn, &parent_shift_id);
+    match queue_row.as_ref().map(|row| row.status.as_str()) {
+        Some(status) if is_actionable_shift_queue_status(status) => {
+            dependency.dependency_block_reason =
+                Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string());
+        }
+        Some("failed") => {
+            let queue_row = queue_row.expect("queue row just matched failed");
+            if is_retryable_shift_sync_error(queue_row.last_error.as_deref()) {
+                reset_shift_queue_row_to_pending(conn, &parent_shift_id, queue_row.queue_id, now)?;
+                dependency = resolve_financial_parent_shift_dependency(conn, entity_type, payload)
+                    .unwrap_or(FinancialParentShiftDependency {
+                        parent_shift_id: parent_shift_id.clone(),
+                        parent_shift_sync_status: get_shift_sync_status(conn, &parent_shift_id),
+                        parent_shift_queue_id: Some(queue_row.queue_id),
+                        parent_shift_queue_status: Some("pending".to_string()),
+                        dependency_block_reason: Some(
+                            WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string(),
+                        ),
+                    });
+                dependency.dependency_block_reason =
+                    Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string());
+            } else {
+                dependency.dependency_block_reason =
+                    Some(CASHIER_SHIFT_SYNC_NEEDS_ATTENTION_REASON.to_string());
+            }
+        }
+        _ => {
+            if enqueue_reconstructed_shift_sync_row(conn, &parent_shift_id, now)?.is_some() {
+                dependency = resolve_financial_parent_shift_dependency(conn, entity_type, payload)
+                    .unwrap_or(FinancialParentShiftDependency {
+                        parent_shift_id: parent_shift_id.clone(),
+                        parent_shift_sync_status: get_shift_sync_status(conn, &parent_shift_id),
+                        parent_shift_queue_id: None,
+                        parent_shift_queue_status: Some("pending".to_string()),
+                        dependency_block_reason: Some(
+                            WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string(),
+                        ),
+                    });
+                dependency.dependency_block_reason =
+                    Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string());
+            } else {
+                dependency.dependency_block_reason =
+                    Some(CASHIER_SHIFT_SYNC_NEEDS_ATTENTION_REASON.to_string());
+            }
+        }
+    }
+
+    Ok(Some(dependency))
+}
+
+pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT entity_type, payload
+             FROM sync_queue
+             WHERE id = ?1",
+            params![queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load financial queue row for retry: {e}"))?;
+
+    let Some((entity_type, payload)) = row else {
+        return Err("Financial sync item not found".into());
+    };
+
+    let dependency =
+        ensure_financial_parent_shift_dependency_recovery(&conn, &entity_type, &payload, &now)?;
+    let (status, last_error) = match dependency {
+        Some(ref dependency) if dependency.dependency_block_reason.is_some() => {
+            ("deferred", dependency.dependency_block_reason.clone())
+        }
+        _ => ("pending", None),
+    };
+
+    conn.execute(
+        "UPDATE sync_queue
+         SET status = ?1,
+             retry_count = 0,
+             last_error = ?2,
+             next_retry_at = NULL,
+             updated_at = ?3
+         WHERE id = ?4",
+        params![status, last_error, now, queue_id],
+    )
+    .map_err(|e| format!("retry financial queue row: {e}"))?;
+
+    Ok(())
 }
 
 async fn sync_financial_batch(
@@ -6102,47 +6831,45 @@ async fn sync_financial_batch(
             let shift_id = extract_shift_id_from_financial_payload(payload);
 
             if let Some(ref sid) = shift_id {
-                let sync_status = get_shift_sync_status(&conn, sid);
+                let dependency = ensure_financial_parent_shift_dependency_recovery(
+                    &conn,
+                    entity_type,
+                    payload,
+                    &now,
+                )?;
 
-                match sync_status.as_deref() {
-                    Some("synced") => {
-                        // Parent shift synced — proceed normally
-                        ready.push(*item);
-                    }
-                    _ if is_shift_sync_failed(&conn, sid) => {
-                        // Parent shift permanently failed — cascade failure
-                        let _ = conn.execute(
-                            "UPDATE sync_queue
-                             SET status = 'failed',
-                                 last_error = 'Parent shift sync failed',
-                                 updated_at = ?1
-                             WHERE id = ?2",
-                            params![now, queue_id],
-                        );
-                        warn!(
-                            entity_type = %entity_type,
-                            entity_id = %entity_id,
-                            shift_id = %sid,
-                            "Financial item cascaded to failed — parent shift sync failed"
-                        );
-                    }
-                    _ => {
-                        // Parent shift not yet synced — defer
-                        let _ = conn.execute(
-                            "UPDATE sync_queue
-                             SET status = 'deferred',
-                                 last_error = 'Parent shift not yet synced',
-                                 updated_at = ?1
-                             WHERE id = ?2",
-                            params![now, queue_id],
-                        );
-                        info!(
-                            entity_type = %entity_type,
-                            entity_id = %entity_id,
-                            shift_id = %sid,
-                            "Financial item deferred — parent shift not yet synced"
-                        );
-                    }
+                if matches!(
+                    dependency
+                        .as_ref()
+                        .and_then(|value| value.parent_shift_sync_status.as_deref()),
+                    Some("synced")
+                ) {
+                    ready.push(*item);
+                } else {
+                    let block_reason = dependency
+                        .as_ref()
+                        .and_then(|value| value.dependency_block_reason.clone())
+                        .unwrap_or_else(|| WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string());
+                    let _ = conn.execute(
+                        "UPDATE sync_queue
+                         SET status = 'deferred',
+                             last_error = ?1,
+                             updated_at = ?2
+                         WHERE id = ?3",
+                        params![block_reason, now, queue_id],
+                    );
+                    info!(
+                        entity_type = %entity_type,
+                        entity_id = %entity_id,
+                        shift_id = %sid,
+                        parent_shift_sync_status = ?dependency
+                            .as_ref()
+                            .and_then(|value| value.parent_shift_sync_status.as_deref()),
+                        parent_shift_queue_status = ?dependency
+                            .as_ref()
+                            .and_then(|value| value.parent_shift_queue_status.as_deref()),
+                        "Financial item deferred — waiting on cashier shift dependency"
+                    );
                 }
             } else {
                 // No shift reference found — send as-is (server will validate)
@@ -6458,6 +7185,63 @@ async fn sync_payment_items(
                 synced += 1;
             }
             Err(e) => {
+                if is_payment_total_conflict_error(&e) {
+                    match reconcile_remote_payments_for_local_order(
+                        db,
+                        admin_url,
+                        api_key,
+                        local_order_id,
+                    )
+                    .await
+                    {
+                        Ok(recovered) if recovered > 0 => {
+                            let recovered_state = db
+                                .conn
+                                .lock()
+                                .ok()
+                                .and_then(|conn| {
+                                    conn.query_row(
+                                        "SELECT COALESCE(sync_state, ''), COALESCE(remote_payment_id, '')
+                                         FROM order_payments
+                                         WHERE id = ?1",
+                                        params![entity_id],
+                                        |row| {
+                                            Ok((
+                                                row.get::<_, String>(0)?,
+                                                row.get::<_, String>(1)?,
+                                            ))
+                                        },
+                                    )
+                                    .optional()
+                                    .ok()
+                                    .flatten()
+                                });
+
+                            if let Some((sync_state, remote_payment_id)) = recovered_state {
+                                if sync_state == "applied" || !remote_payment_id.trim().is_empty() {
+                                    info!(
+                                        payment_id = %entity_id,
+                                        order_id = %local_order_id,
+                                        recovered,
+                                        "Payment sync conflict resolved from canonical remote payment state"
+                                    );
+                                    synced += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(recovery_error) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                error = %recovery_error,
+                                "Payment conflict recovery failed"
+                            );
+                        }
+                    }
+                }
+
                 warn!(payment_id = %entity_id, error = %e, "Payment sync failed");
                 if let Ok(conn) = db.conn.lock() {
                     let new_retry = retry_count + 1;
@@ -7186,16 +7970,22 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, entity_type, entity_id, payload
+            "SELECT id, entity_type, entity_id, payload, last_error
              FROM sync_queue
              WHERE entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')
                AND status = 'deferred'",
         )
         .map_err(|e| e.to_string())?;
 
-    let rows: Vec<(i64, String, String, String)> = stmt
+    let rows: Vec<(i64, String, String, String, Option<String>)> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
@@ -7208,7 +7998,7 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
     let now = Utc::now().to_rfc3339();
     let mut promoted = 0;
 
-    for (queue_id, entity_type, entity_id, payload) in &rows {
+    for (queue_id, entity_type, entity_id, payload, last_error) in &rows {
         if is_driver_earning_entity(entity_type) {
             let should_promote = extract_order_id_from_financial_payload(payload)
                 .as_deref()
@@ -7246,27 +8036,15 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
             }
         };
 
-        // Check if parent shift sync failed permanently
-        if is_shift_sync_failed(&conn, &shift_id) {
-            let _ = conn.execute(
-                "UPDATE sync_queue
-                 SET status = 'failed',
-                     last_error = 'Parent shift sync failed',
-                     updated_at = ?1
-                 WHERE id = ?2 AND status = 'deferred'",
-                params![now, queue_id],
-            );
-            warn!(
-                entity_type = %entity_type,
-                entity_id = %entity_id,
-                shift_id = %shift_id,
-                "Deferred financial item cascaded to failed — parent shift permanently failed"
-            );
-            continue;
-        }
+        let dependency =
+            ensure_financial_parent_shift_dependency_recovery(&conn, entity_type, payload, &now)?;
 
-        // Check if parent shift has synced
-        if get_shift_sync_status(&conn, &shift_id).as_deref() == Some("synced") {
+        if matches!(
+            dependency
+                .as_ref()
+                .and_then(|value| value.parent_shift_sync_status.as_deref()),
+            Some("synced")
+        ) {
             let _ = conn.execute(
                 "UPDATE sync_queue SET status = 'pending', updated_at = ?1
                  WHERE id = ?2 AND status = 'deferred'",
@@ -7279,6 +8057,19 @@ fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
                 "Reconciled deferred financial -> pending (parent shift synced)"
             );
             promoted += 1;
+        } else {
+            let block_reason = dependency
+                .and_then(|value| value.dependency_block_reason)
+                .unwrap_or_else(|| WAITING_FOR_CASHIER_SHIFT_SYNC_REASON.to_string());
+            if last_error.as_deref() != Some(block_reason.as_str()) {
+                let _ = conn.execute(
+                    "UPDATE sync_queue
+                     SET last_error = ?1,
+                         updated_at = ?2
+                     WHERE id = ?3 AND status = 'deferred'",
+                    params![block_reason, now, queue_id],
+                );
+            }
         }
     }
 
@@ -7413,149 +8204,7 @@ fn requeue_falsely_synced_shifts(db: &DbState) -> Result<usize, String> {
             )
             .unwrap_or(0);
 
-        if existing == 0 {
-            let idem_key = format!("shift:requeue:{}:{}", shift_id, uuid::Uuid::new_v4());
-            let status_str = conn
-                .query_row(
-                    "SELECT status FROM staff_shifts WHERE id = ?1",
-                    params![shift_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap_or_else(|_| "active".to_string());
-
-            let operation = if status_str == "closed" {
-                "update"
-            } else {
-                "insert"
-            };
-
-            let payload: Option<String> = if operation == "update" {
-                conn.query_row(
-                    "SELECT json_object(
-                        'shiftId', ss.id,
-                        'staffId', ss.staff_id,
-                        'staffName', ss.staff_name,
-                        'branchId', ss.branch_id,
-                        'terminalId', ss.terminal_id,
-                        'roleType', ss.role_type,
-                        'openingCash', COALESCE(ss.opening_cash_amount, 0),
-                        'checkInTime', ss.check_in_time,
-                        'checkOutTime', ss.check_out_time,
-                        'calculationVersion', COALESCE(ss.calculation_version, 2),
-                        'totalOrdersCount', COALESCE(ss.total_orders_count, 0),
-                        'totalSalesAmount', COALESCE(ss.total_sales_amount, 0),
-                        'totalCashSales', COALESCE(ss.total_cash_sales, 0),
-                        'totalCardSales', COALESCE(ss.total_card_sales, 0),
-                        'closingCash', ss.closing_cash_amount,
-                        'expectedCash', ss.expected_cash_amount,
-                        'variance', ss.cash_variance,
-                        'closedBy', ss.closed_by,
-                        'paymentAmount', ss.payment_amount,
-                        'cashDrawer', CASE
-                            WHEN cds.id IS NOT NULL THEN json_object(
-                                'id', cds.id,
-                                'cashierId', cds.cashier_id,
-                                'openingAmount', COALESCE(cds.opening_amount, 0),
-                                'closingAmount', cds.closing_amount,
-                                'expectedAmount', cds.expected_amount,
-                                'varianceAmount', cds.variance_amount,
-                                'totalCashSales', COALESCE(cds.total_cash_sales, 0),
-                                'totalCardSales', COALESCE(cds.total_card_sales, 0),
-                                'totalRefunds', COALESCE(cds.total_refunds, 0),
-                                'totalExpenses', COALESCE(cds.total_expenses, 0),
-                                'cashDrops', COALESCE(cds.cash_drops, 0),
-                                'driverCashGiven', COALESCE(cds.driver_cash_given, 0),
-                                'driverCashReturned', COALESCE(cds.driver_cash_returned, 0),
-                                'totalStaffPayments', COALESCE(cds.total_staff_payments, 0),
-                                'openedAt', cds.opened_at,
-                                'closedAt', cds.closed_at,
-                                'reconciled', CASE WHEN COALESCE(cds.reconciled, 0) = 0 THEN json('false') ELSE json('true') END,
-                                'reconciledAt', cds.reconciled_at,
-                                'reconciledBy', cds.reconciled_by
-                            )
-                            ELSE NULL
-                        END,
-                        'returnedCashTargetCashierShiftId', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
-                            ELSE NULL
-                        END,
-                        'returnedCashTargetDrawerId', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN (
-                                SELECT id
-                                FROM cash_drawer_sessions
-                                WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
-                                LIMIT 1
-                            )
-                            ELSE NULL
-                        END,
-                        'returnedCashAmount', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.closing_cash_amount, 0)
-                            ELSE NULL
-                        END,
-                        'resolvedCashierShiftId', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN ss.transferred_to_cashier_shift_id
-                            ELSE NULL
-                        END,
-                        'resolvedCashierDrawerId', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN (
-                                SELECT id
-                                FROM cash_drawer_sessions
-                                WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
-                                LIMIT 1
-                            )
-                            ELSE NULL
-                        END
-                     )
-                     FROM staff_shifts ss
-                     LEFT JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
-                     WHERE ss.id = ?1",
-                    params![shift_id],
-                    |row| row.get(0),
-                )
-                .ok()
-            } else {
-                conn.query_row(
-                    "SELECT json_object(
-                        'shiftId', ss.id,
-                        'staffId', ss.staff_id,
-                        'staffName', ss.staff_name,
-                        'branchId', ss.branch_id,
-                        'terminalId', ss.terminal_id,
-                        'roleType', ss.role_type,
-                        'openingCash', COALESCE(ss.opening_cash_amount, 0),
-                        'checkInTime', ss.check_in_time,
-                        'calculationVersion', COALESCE(ss.calculation_version, 2),
-                        'responsibleCashierShiftId', ss.transferred_to_cashier_shift_id,
-                        'responsibleCashierDrawerId', (
-                            SELECT id
-                            FROM cash_drawer_sessions
-                            WHERE staff_shift_id = ss.transferred_to_cashier_shift_id
-                            LIMIT 1
-                        ),
-                        'startingAmountSourceCashierShiftId', ss.transferred_to_cashier_shift_id,
-                        'borrowedStartingAmount', CASE
-                            WHEN ss.role_type IN ('driver', 'server') THEN COALESCE(ss.opening_cash_amount, 0)
-                            ELSE NULL
-                        END
-                     )
-                     FROM staff_shifts ss
-                     WHERE ss.id = ?1",
-                    params![shift_id],
-                    |row| row.get(0),
-                )
-                .ok()
-            };
-
-            let _ = conn.execute(
-                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
-                 VALUES ('shift', ?1, ?2, ?3, ?4, 'pending')",
-                params![
-                    shift_id,
-                    operation,
-                    payload.unwrap_or_else(|| "{}".to_string()),
-                    idem_key
-                ],
-            );
+        if existing == 0 && enqueue_reconstructed_shift_sync_row(&conn, shift_id, &now)?.is_some() {
             requeued += 1;
         }
     }
@@ -8173,6 +8822,149 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_payment_sync_matches_metadata_local_payment_and_clears_queue_failure() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let remote_order = serde_json::json!({
+            "id": "remote-paid-order-meta",
+            "client_order_id": "ord-paid-meta-local",
+            "order_number": "ORD-REMOTE-META-1",
+            "items": [{ "name": "Toast", "quantity": 1, "price": 6.7 }],
+            "total_amount": 6.7,
+            "status": "completed",
+            "payment_status": "paid",
+            "payment_method": "cash",
+            "updated_at": "2026-03-20T11:00:00Z"
+        });
+
+        let local_order_id = materialize_remote_order(&conn, &remote_order)
+            .expect("materialize remote order")
+            .expect("local order id");
+
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-meta-local', ?1, 'cash', 6.7, 'EUR', 'completed',
+                'failed', 'failed', '2026-03-20T11:00:01Z', '2026-03-20T11:00:01Z'
+            )",
+            params![local_order_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'payment', 'pay-meta-local', 'insert', '{}', 'payment:pay-meta-local',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+
+        let remote_payment = serde_json::json!({
+            "id": "payment-remote-meta",
+            "order_id": "remote-paid-order-meta",
+            "amount": 6.7,
+            "payment_method": "cash",
+            "currency": "EUR",
+            "created_at": "2026-03-20T11:00:05Z",
+            "updated_at": "2026-03-20T11:00:05Z",
+            "metadata": {
+                "local_payment_id": "pay-meta-local"
+            }
+        });
+
+        let changed =
+            sync_remote_payment_into_local(&conn, &remote_payment).expect("sync remote payment");
+        assert_eq!(changed, 1);
+
+        let (remote_payment_id, sync_state, sync_status): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT remote_payment_id, sync_state, sync_status
+                 FROM order_payments
+                 WHERE id = 'pay-meta-local'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(remote_payment_id.as_deref(), Some("payment-remote-meta"));
+        assert_eq!(sync_state, "applied");
+        assert_eq!(sync_status, "synced");
+
+        let (queue_status, queue_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment' AND entity_id = 'pay-meta-local'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_status, "synced");
+        assert!(queue_error.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_applied_payment_queue_rows_clears_stale_failed_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-reconcile', 'remote-payment-reconcile', '[]', 13.4, 'completed', 'synced',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-applied-stale', 'ord-payment-reconcile', 'cash', 6.7, 'EUR', 'completed',
+                'remote-pay-applied', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'payment', 'pay-applied-stale', 'insert', '{}', 'payment:pay-applied-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reconciled = reconcile_applied_payment_queue_rows(&db).expect("reconcile applied rows");
+        assert_eq!(reconciled, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, queue_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment' AND entity_id = 'pay-applied-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(queue_status, "synced");
+        assert!(queue_error.is_none());
+    }
+
+    #[test]
     fn test_cleanup_guard_disables_repeated_delete_attempts() {
         STUCK_RECEIPT_CLEANUP_UNSUPPORTED.store(false, Ordering::SeqCst);
 
@@ -8190,6 +8982,8 @@ mod tests {
             "Queue is backed up. Please retry later. (HTTP 429): {\"queue_age_seconds\": 7200}";
         let permanent = "Invalid menu items: c10e6bdd-3436-4138-b81f-5d0f18354627";
         let transient = "Admin dashboard server error (HTTP 503)";
+        let payment_conflict =
+            "Payment exceeds order total (HTTP 422): \"Order total: 13.4, tip: 0, existing completed: 13.4, payment: 6.7\"";
 
         assert!(is_backpressure_error(backpressure));
         assert!(should_use_direct_order_fallback(backpressure));
@@ -8199,6 +8993,7 @@ mod tests {
 
         assert!(!is_permanent_order_sync_error(transient));
         assert!(is_transient_order_sync_error(transient));
+        assert!(is_payment_total_conflict_error(payment_conflict));
     }
 
     #[test]
@@ -9000,6 +9795,199 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn test_reconcile_staff_payment_requeues_missing_parent_shift_queue_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-parent-payment', 'cashier-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'staff_payment',
+                'payment-parent-blocked',
+                'insert',
+                '{\"cashierShiftId\":\"shift-parent-payment\",\"amount\":20}',
+                'payment-parent-blocked:insert',
+                'deferred',
+                'Waiting for cashier shift sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let shift_queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-parent-payment'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let child_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-parent-blocked'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(shift_queue_status, "pending");
+        assert_eq!(child_status, "deferred");
+    }
+
+    #[test]
+    fn test_reconcile_shift_expense_requeues_missing_parent_shift_queue_row() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-parent-expense', 'cashier-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'shift_expense',
+                'expense-parent-blocked',
+                'insert',
+                '{\"shiftId\":\"shift-parent-expense\",\"amount\":10}',
+                'expense-parent-blocked:insert',
+                'deferred',
+                'Waiting for cashier shift sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let shift_queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-parent-expense'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let child_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-parent-blocked'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(shift_queue_status, "pending");
+        assert_eq!(child_status, "deferred");
+    }
+
+    #[test]
+    fn test_reconcile_financials_keeps_child_blocked_when_parent_shift_failure_is_permanent() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-parent-permanent', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, last_error
+             ) VALUES (
+                 'shift', 'shift-parent-permanent', 'insert', '{}', 'shift-parent-permanent:open',
+                 'failed', 5, 'Validation failed: branch access denied'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'staff_payment',
+                'payment-permanent-blocked',
+                'insert',
+                '{\"cashierShiftId\":\"shift-parent-permanent\",\"amount\":20}',
+                'payment-permanent-blocked:insert',
+                'deferred',
+                'Waiting for cashier shift sync'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let (child_status, child_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-permanent-blocked'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let shift_queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-parent-permanent'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(child_status, "deferred");
+        assert_eq!(
+            child_error.as_deref(),
+            Some("Cashier shift sync needs attention")
+        );
+        assert_eq!(shift_queue_status, "failed");
     }
 
     #[test]

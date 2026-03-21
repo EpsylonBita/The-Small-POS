@@ -226,7 +226,10 @@ pub async fn payment_update_payment_status(
         .map_err(|e| format!("load payment reconciliation context: {e}"))?;
     if completed_payment_rows == 0
         && current_payment_status != payment_status
-        && matches!(payment_status.as_str(), "paid" | "partially_paid" | "refunded")
+        && matches!(
+            payment_status.as_str(),
+            "paid" | "partially_paid" | "refunded"
+        )
     {
         return Err(
             "Cannot promote payment status without completed payment rows; use payment_record instead"

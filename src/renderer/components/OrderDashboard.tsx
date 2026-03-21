@@ -18,6 +18,7 @@ import { AddCustomerModal } from './modals/AddCustomerModal';
 import { MenuModal } from './modals/MenuModal';
 import { EditOrderRefundSettlementModal } from './modals/EditOrderRefundSettlementModal';
 import { SplitPaymentModal } from './modals/SplitPaymentModal';
+import OrderDetailsModal from './modals/OrderDetailsModal';
 import type {
   SplitPaymentCollectionMode,
   SplitPaymentResult,
@@ -2922,8 +2923,41 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         onConfirm={handleEditRefundSettlementConfirm}
       />
 
-      {/* Order Approval Panel */}
-      {showApprovalPanel && selectedOrderForApproval && (
+      {/* Order Detail / Approval */}
+      {showApprovalPanel && selectedOrderForApproval && isViewOnlyMode && (
+        <OrderDetailsModal
+          isOpen={true}
+          orderId={selectedOrderForApproval.id || selectedOrderForApproval.order_number || ''}
+          order={selectedOrderForApproval}
+          onClose={() => {
+            setShowApprovalPanel(false);
+            setSelectedOrderForApproval(null);
+            setIsViewOnlyMode(true);
+          }}
+          onPrintReceipt={async () => {
+            const orderId = selectedOrderForApproval.id;
+            if (!orderId) {
+              toast.error(t('orders.messages.printFailed', { defaultValue: 'No order ID available for printing' }));
+              return;
+            }
+
+            toast.loading(t('orderApprovalPanel.printing', { defaultValue: 'Printing...' }), { id: 'dashboard-view-print' });
+            try {
+              const result = await bridge.payments.printReceipt(orderId, 'order_receipt');
+              if (result?.success) {
+                toast.success(t('orderApprovalPanel.printSuccess', { defaultValue: 'Receipt printed successfully' }), { id: 'dashboard-view-print' });
+              } else {
+                toast.error(result?.error || t('orderApprovalPanel.printFailed', { defaultValue: 'Failed to print receipt' }), { id: 'dashboard-view-print' });
+              }
+            } catch (error: any) {
+              console.error('[OrderDashboard] Failed to print receipt from view modal:', error);
+              toast.error(error?.message || t('orderApprovalPanel.printFailed', { defaultValue: 'Failed to print receipt' }), { id: 'dashboard-view-print' });
+            }
+          }}
+        />
+      )}
+
+      {showApprovalPanel && selectedOrderForApproval && !isViewOnlyMode && (
         <OrderApprovalPanel
           order={selectedOrderForApproval}
           onApprove={handleApproveOrder}
@@ -2931,9 +2965,9 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           onClose={() => {
             setShowApprovalPanel(false);
             setSelectedOrderForApproval(null);
-            setIsViewOnlyMode(true); // Reset to view-only mode
+            setIsViewOnlyMode(true);
           }}
-          viewOnly={isViewOnlyMode}
+          viewOnly={false}
         />
       )}
 
