@@ -252,4 +252,5 @@ export interface ZReportData {
   }>;
   daySummary?: { cashTotal: number; cardTotal: number; total: number; totalOrders: number };
   periodStart?: string;
+  periodEnd?: string;
 }

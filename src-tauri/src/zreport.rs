@@ -1945,10 +1945,13 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "driver": if role_type == "driver" { 1 } else { 0 },
         "kitchen": if role_type == "kitchen" { 1 } else { 0 },
     });
+    let now = Utc::now().to_rfc3339();
 
     // Build full report_json (matches Electron POS shape for server compat)
     let report_json = serde_json::json!({
         "date": report_date,
+        "periodStart": check_in_time,
+        "periodEnd": check_out_time.clone().unwrap_or_else(|| now.clone()),
         "shifts": shift_counts,
         "sales": {
             "totalOrders": total_orders,
@@ -1993,7 +1996,6 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     // --- Persist in transaction ---
 
     let z_report_id = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
     let payments_json_str = payments_breakdown.to_string();
     let report_json_str = report_json.to_string();
     let idempotency_key = format!("zreport:{z_report_id}");
@@ -2321,6 +2323,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let cutoff_at = window.cutoff_at.clone();
     let lower_bound_mode = window.lower_bound_mode;
     let cutoff_param = cutoff_at.as_deref();
+    let period_end = cutoff_at.clone().unwrap_or_else(|| now.clone());
 
     info!(
         branch_id = %branch_id,
@@ -2774,6 +2777,7 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     let report_json = serde_json::json!({
         "date": date,
         "periodStart": period_start,
+        "periodEnd": period_end,
         "shifts": {
             "total": shifts_total,
             "cashier": shifts_cashier,
@@ -3177,177 +3181,167 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
 ///
 /// Deletes in FK-safe order within a transaction.
 /// Returns a JSON object with per-table deletion counts.
-fn finalize_end_of_day_counts(conn: &Connection, report_date: &str) -> Value {
-    // Helper: try DELETE using date() extraction for proper date comparison,
-    // returns count (0 if table doesn't exist).
-    //
-    // Allowlisted table and column names to prevent any possibility of SQL
-    // injection if callers are ever changed.
-    const ALLOWED_TABLES: &[&str] = &[
-        "payment_adjustments",
-        "order_payments",
-        "driver_earnings",
-        "sync_queue",
-        "shift_expenses",
-        "staff_payments",
-        "print_jobs",
-        "cash_drawer_sessions",
-        "staff_shifts",
-        "orders",
-    ];
-    const ALLOWED_DATE_COLS: &[&str] = &["created_at"];
-
+fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Value, String> {
     fn safe_delete(
         conn: &Connection,
         table: &str,
-        date_col: &str,
-        report_date: &str,
-        extra_where: &str,
-        allowed_tables: &[&str],
-        allowed_date_cols: &[&str],
+        sql: &str,
+        cutoff_at: Option<&str>,
     ) -> i64 {
-        if !allowed_tables.contains(&table) {
-            warn!(table = %table, "safe_delete: table not in allowlist, skipping");
-            return 0;
-        }
-        if !allowed_date_cols.contains(&date_col) {
-            warn!(date_col = %date_col, "safe_delete: date column not in allowlist, skipping");
-            return 0;
-        }
-        let sql = format!("DELETE FROM {table} WHERE date({date_col}) <= ?1{extra_where}");
-        match conn.execute(&sql, params![report_date]) {
+        let execution = if sql.contains("?1") {
+            conn.execute(sql, params![cutoff_at.unwrap_or_default()])
+        } else {
+            conn.execute(sql, [])
+        };
+
+        match execution {
             Ok(count) => count as i64,
             Err(e) => {
-                // Table may not exist yet (e.g. driver_earnings from migration v14)
+                // Some tables may not exist yet in older local schemas.
                 warn!(table = %table, error = %e, "Cleanup: table delete failed (may not exist)");
                 0
             }
         }
     }
 
+    let financial_expr = business_day::order_financial_timestamp_expr("o");
+    let target_order_ids_sql = format!(
+        "SELECT o.id
+         FROM orders o
+         WHERE datetime({financial_expr}) <= datetime(?1)"
+    );
+
+    let target_order_ids: Vec<String> = conn
+        .prepare(&target_order_ids_sql)
+        .map_err(|e| format!("prepare cleanup order selector: {e}"))?
+        .query_map(params![cutoff_at], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query cleanup order selector: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("collect cleanup order selector: {e}"))?;
+
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp_z_report_order_ids;
+         CREATE TEMP TABLE temp_z_report_order_ids (
+             id TEXT PRIMARY KEY
+         );",
+    )
+    .map_err(|e| format!("prepare cleanup temp table: {e}"))?;
+
+    for order_id in &target_order_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_z_report_order_ids (id) VALUES (?1)",
+            params![order_id],
+        )
+        .map_err(|e| format!("stage cleanup order id: {e}"))?;
+    }
+
     let mut cleared = serde_json::Map::new();
 
-    // 1. payment_adjustments (FK->order_payments)
+    // 1. payment_adjustments linked to orders inside the closed business window.
     let c = safe_delete(
         conn,
         "payment_adjustments",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM payment_adjustments
+         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        None,
     );
     cleared.insert("payment_adjustments".into(), serde_json::json!(c));
 
-    // 2. order_payments (FK->orders)
+    // 2. order_payments linked to the same closed orders.
     let c = safe_delete(
         conn,
         "order_payments",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM order_payments
+         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        None,
     );
     cleared.insert("order_payments".into(), serde_json::json!(c));
 
-    // 3. driver_earnings (FK->orders, staff_shifts) -- may not exist yet
+    // 3. driver_earnings linked to the closed orders.
     let c = safe_delete(
         conn,
         "driver_earnings",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM driver_earnings
+         WHERE order_id IN (SELECT id FROM temp_z_report_order_ids)",
+        None,
     );
     cleared.insert("driver_earnings".into(), serde_json::json!(c));
 
-    // 4. sync_queue -- only clear synced items
+    // 4. sync_queue -- only clear synced items that were already materialized before the cutoff.
     let c = safe_delete(
         conn,
         "sync_queue",
-        "created_at",
-        report_date,
-        " AND status = 'synced'",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM sync_queue
+         WHERE status = 'synced'
+           AND datetime(created_at) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("sync_queue".into(), serde_json::json!(c));
 
-    // 5. shift_expenses (FK->staff_shifts)
+    // 5. shift_expenses by their own operational timestamp.
     let c = safe_delete(
         conn,
         "shift_expenses",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM shift_expenses
+         WHERE datetime(created_at) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("shift_expenses".into(), serde_json::json!(c));
 
-    // 6. staff_payments (FK->staff_shifts) -- may not exist yet
+    // 6. staff_payments by their own operational timestamp.
     let c = safe_delete(
         conn,
         "staff_payments",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM staff_payments
+         WHERE datetime(created_at) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("staff_payments".into(), serde_json::json!(c));
 
-    // 7. print_jobs (standalone)
+    // 7. print_jobs (standalone operational artifacts).
     let c = safe_delete(
         conn,
         "print_jobs",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM print_jobs
+         WHERE datetime(created_at) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("print_jobs".into(), serde_json::json!(c));
 
-    // 8. cash_drawer_sessions (FK->staff_shifts)
+    // 8. cash_drawer_sessions by close/open timestamp.
     let c = safe_delete(
         conn,
         "cash_drawer_sessions",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM cash_drawer_sessions
+         WHERE datetime(COALESCE(closed_at, opened_at, created_at)) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("cash_drawer_sessions".into(), serde_json::json!(c));
 
-    // 9. staff_shifts (parent of drawers/expenses)
+    // 9. staff_shifts by close/check-in timestamp.
     let c = safe_delete(
         conn,
         "staff_shifts",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM staff_shifts
+         WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)",
+        Some(cutoff_at),
     );
     cleared.insert("staff_shifts".into(), serde_json::json!(c));
 
-    // 10. orders (parent of payments/driver_earnings)
+    // 10. orders in the closed business window. Payments/adjustments were already removed above.
     let c = safe_delete(
         conn,
         "orders",
-        "created_at",
-        report_date,
-        "",
-        ALLOWED_TABLES,
-        ALLOWED_DATE_COLS,
+        "DELETE FROM orders
+         WHERE id IN (SELECT id FROM temp_z_report_order_ids)",
+        None,
     );
     cleared.insert("orders".into(), serde_json::json!(c));
 
-    Value::Object(cleared)
+    conn.execute_batch("DROP TABLE IF EXISTS temp_z_report_order_ids")
+        .map_err(|e| format!("cleanup temp order ids: {e}"))?;
+
+    Ok(Value::Object(cleared))
 }
 
 fn apply_local_day_rollover(
@@ -3391,7 +3385,7 @@ fn apply_local_day_rollover(
 
         info!("Order counter reset to 0 after Z-report");
 
-        Ok(finalize_end_of_day_counts(&conn, report_date))
+        finalize_end_of_day_counts(&conn, rollover_timestamp)
     })();
 
     match result {
@@ -3836,6 +3830,8 @@ mod tests {
         assert_eq!(report["syncState"], "pending");
 
         let report_json = report["reportJson"].as_object().expect("reportJson object");
+        assert_eq!(report_json["periodStart"], "2026-02-16T09:00:00Z");
+        assert_eq!(report_json["periodEnd"], "2026-02-16T18:00:00Z");
         assert_eq!(
             report_json["sales"]["byType"]["instore"]["cash"]["count"],
             2
@@ -4686,6 +4682,41 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_local_day_rollover_preserves_rows_after_cutoff() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_late_day_order(&db, "2026-02-16T19:00:00Z");
+        seed_next_day_active_shift(&db, "2026-02-17T08:00:00Z");
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T18:00:00Z")
+            .expect("cleanup should succeed");
+
+        assert_eq!(result["orders"], 3, "only pre-cutoff orders should be cleared");
+        assert_eq!(result["order_payments"], 3, "only pre-cutoff payments should be cleared");
+        assert_eq!(result["staff_shifts"], 1, "only the closed business-day shift should be cleared");
+
+        let conn = db.conn.lock().unwrap();
+        let remaining_orders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining_orders, 1, "post-cutoff order must remain locally");
+
+        let remaining_order_id: String = conn
+            .query_row("SELECT id FROM orders LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining_order_id, "ord-late");
+
+        let remaining_active_shifts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_active_shifts, 1, "next-day active shift must remain");
+    }
+
+    #[test]
     fn test_local_day_rollover_preserves_unsynced_sync_queue() {
         let db = test_db();
         seed_closed_shift(&db);
@@ -4950,6 +4981,8 @@ mod tests {
         assert_eq!(report["reportDate"], "2026-02-16");
         assert_eq!(report["totalOrders"], 3);
         assert_eq!(report["grossSales"], 100.0);
+        assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
+        assert_eq!(report["reportJson"]["periodEnd"], "2026-02-16T18:00:00Z");
     }
 
     #[test]

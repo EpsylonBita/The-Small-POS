@@ -259,6 +259,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               })}
             </div>
           )}
+          {zReport && zReport.periodEnd && (
+            <div className="mt-1 text-xs font-semibold text-amber-600 dark:text-amber-400">
+              {t('modals.zReport.periodUntil', {
+                date: formatDate(zReport.periodEnd),
+                time: formatTime(zReport.periodEnd),
+                defaultValue: `Period end: ${formatDate(zReport.periodEnd)} ${formatTime(zReport.periodEnd)}`
+              })}
+            </div>
+          )}
         </div>
 
         {isPendingLocalSubmit && (
