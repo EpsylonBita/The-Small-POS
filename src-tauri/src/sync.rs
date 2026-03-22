@@ -57,7 +57,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -67,12 +67,14 @@ use serde::Deserialize;
 
 use crate::api;
 use crate::can_transition_locally;
+use crate::db;
 use crate::db::DbState;
 use crate::normalize_status_for_storage;
 use crate::order_ownership;
 use crate::payments;
 use crate::print;
 use crate::storage;
+use crate::APP_START_EPOCH;
 
 // ---------------------------------------------------------------------------
 // Typed sync response schemas
@@ -261,6 +263,8 @@ static STUCK_RECEIPT_CLEANUP_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
 static SYNC_FAILURE_PRUNE_DONE: AtomicBool = AtomicBool::new(false);
 /// Ensure failed financial items (shift-not-found) are requeued once per session.
 static FAILED_FINANCIAL_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
+/// Requeue payment adjustments that failed against the old missing backend endpoint.
+static PAYMENT_ADJUSTMENT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Re-enqueue shifts that were wrongly marked synced due to ignored per-event errors.
 static SHIFT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_RETRY_DELAY_MS: i64 = 5_000;
@@ -1558,6 +1562,250 @@ pub async fn check_network_status() -> Value {
         Ok(resp) => serde_json::json!({ "isOnline": resp.status().is_success() }),
         Err(_) => serde_json::json!({ "isOnline": false }),
     }
+}
+
+fn read_terminal_setting(conn: &rusqlite::Connection, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| db::get_setting(conn, "terminal", key))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_terminal_setting_json(conn: &rusqlite::Connection, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| {
+        db::get_setting(conn, "terminal", key).and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<Value>(trimmed)
+                .ok()
+                .filter(Value::is_object)
+        })
+    })
+}
+
+fn resolve_heartbeat_platform() -> Option<&'static str> {
+    match std::env::consts::OS {
+        "windows" => Some("windows"),
+        "android" => Some("android"),
+        "ios" => Some("ios"),
+        _ => None,
+    }
+}
+
+fn compute_uptime_seconds() -> u64 {
+    let started_at = APP_START_EPOCH.load(Ordering::Relaxed);
+    if started_at == 0 {
+        return 0;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(started_at)
+}
+
+fn build_terminal_heartbeat_payload(
+    db: &DbState,
+    sync_state: &SyncState,
+    network_is_online: bool,
+) -> Option<Value> {
+    if !network_is_online {
+        return None;
+    }
+
+    let terminal_id = storage::get_credential("terminal_id").or_else(|| {
+        db.conn
+            .lock()
+            .ok()
+            .and_then(|conn| read_terminal_setting(&conn, &["terminal_id"]))
+    })?;
+    let terminal_id = terminal_id.trim().to_string();
+    if terminal_id.is_empty() {
+        return None;
+    }
+
+    let status_payload = get_sync_status_for_event(db, &sync_state.last_sync, network_is_online);
+    let pending_updates = status_payload
+        .get("pendingItems")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let sync_errors = status_payload
+        .get("syncErrors")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let sync_in_progress = status_payload
+        .get("syncInProgress")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let sync_status = if sync_errors > 0 {
+        "failed"
+    } else if pending_updates > 0 || sync_in_progress {
+        "pending"
+    } else {
+        "synced"
+    };
+
+    let (branch_id, terminal_name, terminal_location, settings_hash, remote_view_capabilities) =
+        match db.conn.lock() {
+            Ok(conn) => (
+                storage::get_credential("branch_id")
+                    .or_else(|| read_terminal_setting(&conn, &["branch_id"])),
+                read_terminal_setting(&conn, &["name", "display_name", "displayName"]),
+                read_terminal_setting(&conn, &["location", "display_location", "displayLocation"]),
+                read_terminal_setting(&conn, &["settings_hash"]).unwrap_or_default(),
+                read_terminal_setting_json(
+                    &conn,
+                    &["remote_view_capabilities", "remoteViewCapabilities"],
+                ),
+            ),
+            Err(_) => (
+                storage::get_credential("branch_id"),
+                None,
+                None,
+                String::new(),
+                None,
+            ),
+        };
+
+    let financial_stats = status_payload
+        .get("financialStats")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut payload = serde_json::json!({
+        "terminal_id": terminal_id,
+        "status": "online",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime": compute_uptime_seconds(),
+        "memory_usage": 0,
+        "cpu_usage": 0,
+        "settings_hash": settings_hash,
+        "sync_status": sync_status,
+        "pending_updates": pending_updates,
+        "sync_stats": {
+            "driver_earnings": financial_stats.get("driver_earnings").cloned().unwrap_or_else(|| serde_json::json!({ "pending": 0, "failed": 0 })),
+            "staff_payments": financial_stats.get("staff_payments").cloned().unwrap_or_else(|| serde_json::json!({ "pending": 0, "failed": 0 })),
+            "shift_expenses": financial_stats.get("shift_expenses").cloned().unwrap_or_else(|| serde_json::json!({ "pending": 0, "failed": 0 })),
+        }
+    });
+
+    if let Some(branch_id) = branch_id {
+        payload["branch_id"] = Value::String(branch_id);
+    }
+    if let Some(name) = terminal_name {
+        payload["name"] = Value::String(name);
+    }
+    if let Some(location) = terminal_location {
+        payload["location"] = Value::String(location);
+    }
+    if let Some(platform) = resolve_heartbeat_platform() {
+        payload["platform"] = Value::String(platform.to_string());
+    }
+    if let Some(remote_view_capabilities) = remote_view_capabilities {
+        payload["remote_view_capabilities"] = remote_view_capabilities;
+    }
+
+    Some(payload)
+}
+
+async fn send_terminal_heartbeat_with_sender<F, Fut>(
+    db: &DbState,
+    sync_state: &SyncState,
+    network_is_online: bool,
+    sender: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let Some(payload) = build_terminal_heartbeat_payload(db, sync_state, network_is_online) else {
+        return Ok(false);
+    };
+
+    sender(payload).await.map(|_| true)
+}
+
+pub async fn send_terminal_heartbeat_now(
+    db: &DbState,
+    sync_state: &SyncState,
+) -> Result<bool, String> {
+    let network_status = check_network_status().await;
+    let network_is_online = network_status
+        .get("isOnline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let (admin_url, api_key) = match db.conn.lock() {
+        Ok(conn) => {
+            let admin_url = storage::get_credential("admin_dashboard_url")
+                .or_else(|| read_terminal_setting(&conn, &["admin_dashboard_url", "admin_url"]))
+                .map(|value| api::normalize_admin_url(&value))
+                .filter(|value| !value.trim().is_empty());
+            let api_key = load_zeroized_pos_api_key_optional()
+                .or_else(|| read_terminal_setting(&conn, &["pos_api_key"]).map(Zeroizing::new));
+            match (admin_url, api_key) {
+                (Some(admin_url), Some(api_key)) => (admin_url, api_key),
+                _ => return Ok(false),
+            }
+        }
+        Err(_) => return Ok(false),
+    };
+
+    send_terminal_heartbeat_with_sender(db, sync_state, network_is_online, |payload| async {
+        api::fetch_from_admin(
+            &admin_url,
+            api_key.as_str(),
+            "/api/pos/terminal-heartbeat",
+            "POST",
+            Some(payload),
+        )
+        .await
+    })
+    .await
+}
+
+pub fn start_terminal_heartbeat_loop(
+    db: Arc<DbState>,
+    sync_state: Arc<SyncState>,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    tauri::async_runtime::spawn(async move {
+        info!("Terminal heartbeat loop started (interval: {interval_secs}s)");
+        let mut should_wait = false;
+
+        loop {
+            if cancel.is_cancelled() {
+                info!("Terminal heartbeat loop cancelled");
+                break;
+            }
+
+            if should_wait {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(interval_secs)) => {}
+                    _ = cancel.cancelled() => {
+                        info!("Terminal heartbeat loop cancelled");
+                        break;
+                    }
+                }
+            }
+            should_wait = true;
+
+            if cancel.is_cancelled() {
+                break;
+            }
+
+            match send_terminal_heartbeat_now(db.as_ref(), sync_state.as_ref()).await {
+                Ok(true) => debug!("Terminal heartbeat sent"),
+                Ok(false) => debug!("Terminal heartbeat skipped"),
+                Err(error) => warn!(error = %error, "Terminal heartbeat failed"),
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -4632,6 +4880,20 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
         }
     }
 
+    if PAYMENT_ADJUSTMENT_REQUEUE_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        if let Ok(requeued) = requeue_failed_adjustment_missing_endpoint_rows(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Requeued failed payment adjustments blocked by the old missing sync endpoint"
+                );
+            }
+        }
+    }
+
     // One-time recovery: re-enqueue shifts that were wrongly marked as synced
     // due to the old sync_shift_batch ignoring per-event server errors.
     if SHIFT_REQUEUE_DONE
@@ -7313,17 +7575,23 @@ async fn sync_adjustment_items(
             continue;
         }
 
-        // Check if the parent payment has synced
-        let pay_synced: bool = match db.conn.lock() {
+        // Check if the parent payment has synced and capture the canonical remote payment id.
+        let (pay_synced, remote_payment_id): (bool, Option<String>) = match db.conn.lock() {
             Ok(conn) => conn
                 .query_row(
-                    "SELECT sync_state FROM order_payments WHERE id = ?1",
+                    "SELECT sync_state, remote_payment_id
+                     FROM order_payments
+                     WHERE id = ?1",
                     params![payment_id],
-                    |row| row.get::<_, String>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)? == "applied",
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
                 )
-                .map(|s| s == "applied")
-                .unwrap_or(false),
-            Err(_) => false,
+                .unwrap_or((false, None)),
+            Err(_) => (false, None),
         };
 
         if !pay_synced {
@@ -7357,14 +7625,20 @@ async fn sync_adjustment_items(
         let body = serde_json::json!({
             "adjustment_id": entity_id,
             "payment_id": payment_id,
+            "remote_payment_id": remote_payment_id.clone(),
+            "canonical_payment_id": remote_payment_id,
             "order_id": data.get("orderId").or_else(|| data.get("order_id")).and_then(Value::as_str),
             "adjustment_type": data.get("adjustmentType").or_else(|| data.get("adjustment_type")).and_then(Value::as_str),
             "amount": data.get("amount").and_then(Value::as_f64),
             "reason": data.get("reason").and_then(Value::as_str),
             "staff_id": data.get("staffId").or_else(|| data.get("staff_id")).and_then(Value::as_str),
+            "staff_shift_id": data.get("staffShiftId").or_else(|| data.get("staff_shift_id")).and_then(Value::as_str),
             "terminal_id": terminal_id,
             "branch_id": branch_id,
             "idempotency_key": idem_key,
+            "refund_method": data.get("refundMethod").or_else(|| data.get("refund_method")).and_then(Value::as_str),
+            "cash_handler": data.get("cashHandler").or_else(|| data.get("cash_handler")).and_then(Value::as_str),
+            "adjustment_context": data.get("adjustmentContext").or_else(|| data.get("adjustment_context")).and_then(Value::as_str),
         });
 
         match api::fetch_from_admin(
@@ -8253,6 +8527,52 @@ fn requeue_failed_shift_cashier_reference_rows(db: &DbState) -> Result<usize, St
     Ok(requeued)
 }
 
+fn requeue_failed_adjustment_missing_endpoint_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let requeued = conn
+        .execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE entity_type = 'payment_adjustment'
+               AND status = 'failed'
+               AND lower(COALESCE(last_error, '')) LIKE '%/api/pos/payments/adjustments/sync%'
+               AND (
+                    lower(COALESCE(last_error, '')) LIKE '%404%'
+                    OR lower(COALESCE(last_error, '')) LIKE '%not found%'
+                    OR lower(COALESCE(last_error, '')) LIKE '%endpoint%'
+               )",
+            params![now],
+        )
+        .map_err(|e| e.to_string())?;
+
+    if requeued > 0 {
+        let _ = conn.execute(
+            "UPDATE payment_adjustments
+             SET sync_state = 'pending',
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?1
+             WHERE id IN (
+                 SELECT entity_id
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND status = 'pending'
+                   AND updated_at = ?1
+             )",
+            params![now],
+        );
+    }
+
+    Ok(requeued)
+}
+
 /// Inline reconciliation: after successfully syncing an order that received
 /// a supabase_id, immediately promote any waiting_parent payments for that
 /// order. This provides low-latency sync for the common case (order + payment
@@ -8525,6 +8845,28 @@ mod tests {
         .unwrap();
     }
 
+    fn set_terminal_setting(db: &DbState, key: &str, value: &str) {
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "terminal", key, value).expect("set terminal setting");
+    }
+
+    fn insert_sync_queue_row(db: &DbState, entity_type: &str, status: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, retry_delay_ms
+             ) VALUES (?1, ?2, 'insert', '{}', ?3, ?4, 0, 5, 1000)",
+            params![
+                entity_type,
+                format!("{entity_type}-entity"),
+                format!("{entity_type}:{}", Uuid::new_v4()),
+                status,
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_categorize_sync_item_routes_financial_rows_out_of_order_path() {
         assert_eq!(categorize_sync_item("order"), SyncItemCategory::Order);
@@ -8683,6 +9025,121 @@ mod tests {
             )
             .unwrap();
         assert_eq!(supabase_id, "remote-order-1");
+    }
+
+    #[test]
+    fn build_terminal_heartbeat_payload_includes_identity_platform_and_sync_stats() {
+        let db = test_db();
+        let _ = storage::set_credential("terminal_id", "terminal-heartbeat-1");
+        let _ = storage::set_credential("branch_id", "branch-heartbeat-1");
+        set_terminal_setting(&db, "terminal_id", "terminal-heartbeat-1");
+        set_terminal_setting(&db, "branch_id", "branch-heartbeat-1");
+        set_terminal_setting(&db, "name", "Main Counter");
+        set_terminal_setting(&db, "location", "Front Desk");
+
+        insert_sync_queue_row(&db, "staff_payment", "pending");
+        insert_sync_queue_row(&db, "driver_earning", "failed");
+
+        let sync_state = SyncState::new();
+        if let Ok(mut guard) = sync_state.last_sync.lock() {
+            *guard = Some("2026-03-22T09:00:00Z".to_string());
+        }
+
+        let payload =
+            build_terminal_heartbeat_payload(&db, &sync_state, true).expect("heartbeat payload");
+
+        assert_eq!(
+            payload.get("terminal_id").and_then(Value::as_str),
+            Some("terminal-heartbeat-1")
+        );
+        assert_eq!(
+            payload.get("branch_id").and_then(Value::as_str),
+            Some("branch-heartbeat-1")
+        );
+        assert_eq!(
+            payload.get("name").and_then(Value::as_str),
+            Some("Main Counter")
+        );
+        assert_eq!(
+            payload.get("location").and_then(Value::as_str),
+            Some("Front Desk")
+        );
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str),
+            Some("online")
+        );
+        assert_eq!(
+            payload.get("sync_status").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            payload
+                .pointer("/sync_stats/staff_payments/pending")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            payload
+                .pointer("/sync_stats/driver_earnings/failed")
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn terminal_heartbeat_sender_skips_offline_and_does_not_mutate_sync_queue_on_failure() {
+        let db = test_db();
+        let _ = storage::set_credential("terminal_id", "terminal-heartbeat-2");
+        let _ = storage::set_credential("branch_id", "branch-heartbeat-2");
+        set_terminal_setting(&db, "terminal_id", "terminal-heartbeat-2");
+        set_terminal_setting(&db, "branch_id", "branch-heartbeat-2");
+        insert_sync_queue_row(&db, "payment", "pending");
+
+        let sync_state = SyncState::new();
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let offline_calls = call_count.clone();
+        let offline_result = runtime.block_on(send_terminal_heartbeat_with_sender(
+            &db,
+            &sync_state,
+            false,
+            move |_| {
+                let offline_calls = offline_calls.clone();
+                async move {
+                    offline_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "success": true }))
+                }
+            },
+        ));
+        assert_eq!(offline_result.expect("offline heartbeat result"), false);
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        let failure_calls = call_count.clone();
+        let failed_result = runtime.block_on(send_terminal_heartbeat_with_sender(
+            &db,
+            &sync_state,
+            true,
+            move |_| {
+                let failure_calls = failure_calls.clone();
+                async move {
+                    failure_calls.fetch_add(1, Ordering::SeqCst);
+                    Err("heartbeat failed".to_string())
+                }
+            },
+        ));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert!(failed_result.is_err());
+
+        let conn = db.conn.lock().unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_type = 'payment' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 
     #[test]
@@ -9687,6 +10144,85 @@ mod tests {
         assert_eq!(retry_count, 0);
         assert_eq!(last_error, None);
         assert_eq!(shift_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_requeue_failed_payment_adjustments_blocked_by_missing_endpoint_404() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-requeue', '[]', 12.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-adj-requeue', 'ord-adj-requeue', 'cash', 12.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, reason,
+                sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
+             ) VALUES (
+                'adj-404', 'pay-adj-requeue', 'ord-adj-requeue', 'refund', 2.0, 'Missing endpoint',
+                'failed', 5, 'HTTP 404 /api/pos/payments/adjustments/sync not found', datetime('now', '+10 minutes'), datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error, next_retry_at
+             ) VALUES (
+                'payment_adjustment', 'adj-404', 'insert', '{}', 'adjustment:adj-404',
+                'failed', 5, 5, 'Sync failed: POST /api/pos/payments/adjustments/sync returned HTTP 404 endpoint not found', datetime('now', '+10 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_failed_adjustment_missing_endpoint_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, queue_retry_count, queue_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment' AND entity_id = 'adj-404'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let (adjustment_state, adjustment_retry_count, adjustment_error): (
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT sync_state, sync_retry_count, sync_last_error
+                 FROM payment_adjustments
+                 WHERE id = 'adj-404'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
+        assert_eq!(queue_error, None);
+        assert_eq!(adjustment_state, "pending");
+        assert_eq!(adjustment_retry_count, 0);
+        assert_eq!(adjustment_error, None);
     }
 
     #[test]

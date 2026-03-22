@@ -494,6 +494,20 @@ pub fn run() {
                 );
             }
 
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    sync::start_terminal_heartbeat_loop(
+                        Arc::new(db),
+                        sync_state.clone(),
+                        30,
+                        cancel_token.clone(),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to init heartbeat database: {e} — terminal heartbeat loop disabled");
+                }
+            }
+
             // Third DB connection for the background print worker
             match db::init(&app_data_dir) {
                 Ok(db) => {
@@ -565,6 +579,7 @@ pub fn run() {
             if storage::is_configured() {
                 let startup_app = app.handle().clone();
                 let startup_db = db_for_startup;
+                let startup_sync_state = sync_state.clone();
                 tauri::async_runtime::spawn(async move {
                     let raw_api_key = Zeroizing::new(match storage::get_credential("pos_api_key") {
                         Some(k) => k,
@@ -658,6 +673,16 @@ pub fn run() {
                                             "Startup: cached terminal settings snapshot"
                                         );
                                     }
+                                }
+
+                                if let Err(error) =
+                                    sync::send_terminal_heartbeat_now(
+                                        sdb.as_ref(),
+                                        startup_sync_state.as_ref(),
+                                    )
+                                    .await
+                                {
+                                    warn!("Startup: failed to send terminal heartbeat: {error}");
                                 }
                             }
                         }
