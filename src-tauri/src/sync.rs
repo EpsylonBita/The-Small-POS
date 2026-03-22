@@ -59,7 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -1807,8 +1807,8 @@ pub fn start_terminal_heartbeat_loop(
             }
 
             match send_terminal_heartbeat_now(db.as_ref(), sync_state.as_ref()).await {
-                Ok(true) => debug!("Terminal heartbeat sent"),
-                Ok(false) => debug!("Terminal heartbeat skipped"),
+                Ok(true) => trace!("Terminal heartbeat sent"),
+                Ok(false) => trace!("Terminal heartbeat skipped"),
                 Err(error) => warn!(error = %error, "Terminal heartbeat failed"),
             }
         }

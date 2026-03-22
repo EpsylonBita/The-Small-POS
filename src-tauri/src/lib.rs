@@ -406,7 +406,7 @@ pub fn run() {
 
     // Initialize structured logging (console + rolling file)
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,the_small_pos_lib=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,the_small_pos_lib=info"));
 
     // Prune old log files before setting up the appender
     diagnostics::prune_old_logs();
