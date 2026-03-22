@@ -18,6 +18,26 @@ use uuid::Uuid;
 use crate::db::DbState;
 use crate::{business_day, order_ownership, storage};
 
+#[derive(Debug)]
+struct CheckInEligibility {
+    business_day_start_at: String,
+    has_cashier_for_business_day: bool,
+}
+
+impl CheckInEligibility {
+    fn requires_cashier_first(&self) -> bool {
+        !self.has_cashier_for_business_day
+    }
+
+    fn as_value(&self) -> Value {
+        serde_json::json!({
+            "businessDayStartAt": self.business_day_start_at,
+            "hasCashierForBusinessDay": self.has_cashier_for_business_day,
+            "requiresCashierFirst": self.requires_cashier_first(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Open shift
 // ---------------------------------------------------------------------------
@@ -77,6 +97,17 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
+        let check_in_eligibility =
+            resolve_check_in_eligibility(&conn, &branch_id, &terminal_id)?;
+        if role_type.trim().to_ascii_lowercase() != "cashier"
+            && check_in_eligibility.requires_cashier_first()
+        {
+            return Err(
+                "The first check-in for this business day must be a cashier. Start a cashier shift first."
+                    .to_string(),
+            );
+        }
+
         let responsible_cashier_assignment = if role_returns_cash(&role_type) {
             find_active_cashier_assignment(&conn, &branch_id, &terminal_id)?
         } else {
@@ -906,6 +937,16 @@ pub fn get_active_cashier_by_terminal_loose(
     )
 }
 
+pub fn get_check_in_eligibility(
+    db: &DbState,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let eligibility = resolve_check_in_eligibility(&conn, branch_id, terminal_id)?;
+    Ok(eligibility.as_value())
+}
+
 /// Get a specific shift by its ID.
 pub fn get_shift_by_id(db: &DbState, shift_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -1521,6 +1562,33 @@ pub fn is_non_financial_shift_role(role_type: &str) -> bool {
 
 fn role_returns_cash(role_type: &str) -> bool {
     matches!(role_type, "driver" | "server")
+}
+
+fn resolve_check_in_eligibility(
+    conn: &rusqlite::Connection,
+    branch_id: &str,
+    terminal_id: &str,
+) -> Result<CheckInEligibility, String> {
+    let business_day_start_at = business_day::resolve_period_start(conn, branch_id, None);
+    let has_cashier_for_business_day = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM staff_shifts
+                WHERE role_type = 'cashier'
+                  AND (?1 = '' OR branch_id = ?1 OR branch_id IS NULL)
+                  AND (?2 = '' OR terminal_id = ?2 OR terminal_id IS NULL)
+                  AND check_in_time >= ?3
+            )",
+            params![branch_id, terminal_id, business_day_start_at.as_str()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("query check-in eligibility: {e}"))?;
+
+    Ok(CheckInEligibility {
+        business_day_start_at,
+        has_cashier_for_business_day,
+    })
 }
 
 fn find_active_cashier_assignment(
@@ -2550,6 +2618,12 @@ mod tests {
         serde_json::from_str(&payload).expect("shift sync payload should be valid json")
     }
 
+    fn set_business_day_start(db: &DbState, timestamp: &str) {
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "system", "last_z_report_timestamp", timestamp)
+            .expect("set business day start");
+    }
+
     #[test]
     fn test_driver_close_returns_cash_to_cashier() {
         let db = test_db();
@@ -2681,6 +2755,117 @@ mod tests {
         assert_eq!(parsed["periodStartAt"], "2026-03-12T08:00:00Z");
         assert!(parsed["reportDate"].as_str().is_some());
         assert!(parsed["cutoffAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_check_in_eligibility_requires_cashier_first_when_only_previous_day_cashier_exists() {
+        let db = test_db();
+        set_business_day_start(&db, "2026-03-22T08:00:00Z");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version, sync_status,
+                    created_at, updated_at
+                 ) VALUES (
+                    'cashier-previous-day', 'cashier-1', 'cashier', 'branch-1', 'term-1',
+                    '2026-03-21T12:00:00Z', 120.0, 'closed', 2, 'pending',
+                    '2026-03-21T12:00:00Z', '2026-03-21T12:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = get_check_in_eligibility(&db, "branch-1", "term-1")
+            .expect("check-in eligibility should resolve");
+
+        assert_eq!(result["businessDayStartAt"], "2026-03-22T08:00:00Z");
+        assert_eq!(result["hasCashierForBusinessDay"], false);
+        assert_eq!(result["requiresCashierFirst"], true);
+    }
+
+    #[test]
+    fn test_shift_open_blocks_non_cashier_before_first_cashier_of_business_day() {
+        let db = test_db();
+        set_business_day_start(&db, "2026-03-22T08:00:00Z");
+
+        let result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "kitchen-1",
+                "staffName": "Kitchen One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "kitchen",
+            }),
+        );
+
+        assert!(result.is_err(), "non-cashier shift should be blocked");
+        assert_eq!(
+            result.unwrap_err(),
+            "The first check-in for this business day must be a cashier. Start a cashier shift first."
+        );
+    }
+
+    #[test]
+    fn test_shift_open_allows_cashier_as_first_shift_of_business_day() {
+        let db = test_db();
+        set_business_day_start(&db, "2026-03-22T08:00:00Z");
+
+        let result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-1",
+                "staffName": "Cashier One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 150.0,
+            }),
+        )
+        .expect("cashier should be allowed as first shift");
+
+        assert!(result["success"].as_bool().unwrap_or(true));
+        let eligibility = get_check_in_eligibility(&db, "branch-1", "term-1")
+            .expect("check-in eligibility should resolve after cashier opens");
+        assert_eq!(eligibility["requiresCashierFirst"], false);
+        assert_eq!(eligibility["hasCashierForBusinessDay"], true);
+    }
+
+    #[test]
+    fn test_shift_open_allows_non_cashier_after_first_cashier_of_business_day() {
+        let db = test_db();
+        set_business_day_start(&db, "2026-03-22T08:00:00Z");
+
+        open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-1",
+                "staffName": "Cashier One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 200.0,
+            }),
+        )
+        .expect("cashier should open first");
+
+        let result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "kitchen-1",
+                "staffName": "Kitchen One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "kitchen",
+            }),
+        )
+        .expect("non-cashier should open after cashier");
+
+        assert!(result["shiftId"].as_str().is_some());
     }
 
     #[test]

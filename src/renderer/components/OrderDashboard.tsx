@@ -19,6 +19,7 @@ import { MenuModal } from './modals/MenuModal';
 import { EditOrderRefundSettlementModal } from './modals/EditOrderRefundSettlementModal';
 import { SplitPaymentModal } from './modals/SplitPaymentModal';
 import OrderDetailsModal from './modals/OrderDetailsModal';
+import { ConfirmDialog } from './ui/ConfirmDialog';
 import type {
   SplitPaymentCollectionMode,
   SplitPaymentResult,
@@ -63,8 +64,14 @@ import { getBridge, offEvent, onEvent } from '../../lib';
 import type {
   OrderEditSettlementPreview,
   OrderEditSettlementRefund,
+  PickupToDeliveryConversionParams,
 } from '../../lib/ipc-adapter';
 import { buildSplitPaymentItems } from '../utils/splitPaymentItems';
+import {
+  calculatePickupToDeliveryTotal,
+  getPickupToDeliveryValidationAmount,
+  resolvePickupToDeliveryAddress,
+} from '../utils/pickup-to-delivery';
 
 interface OrderDashboardProps {
   className?: string;
@@ -102,6 +109,91 @@ interface PendingEditRefundSettlement {
   request: EditSettlementRequest;
 }
 
+interface PendingPickupConversion {
+  isOpen: boolean;
+  orders: Array<Pick<Order, 'id' | 'orderNumber' | 'status'>>;
+  outForDeliveryCount: number;
+}
+
+type OrderFlowCustomer = Customer & {
+  selected_address_id?: string | null;
+  editAddressId?: string;
+  city?: string | null;
+  postal_code?: string | null;
+  floor_number?: string | null;
+  notes?: string | null;
+};
+
+interface PickupToDeliveryContext {
+  orderId: string;
+  orderNumber: string;
+}
+
+const toLatLngCoordinates = (
+  coordinates:
+    | { lat: number; lng: number }
+    | { type: 'Point'; coordinates: [number, number] }
+    | null
+    | undefined,
+  latitude?: number | null,
+  longitude?: number | null,
+): { lat: number; lng: number } | undefined => {
+  if (
+    coordinates &&
+    'lat' in coordinates &&
+    Number.isFinite(coordinates.lat) &&
+    Number.isFinite(coordinates.lng)
+  ) {
+    return { lat: Number(coordinates.lat), lng: Number(coordinates.lng) };
+  }
+
+  if (
+    coordinates &&
+    'type' in coordinates &&
+    coordinates.type === 'Point' &&
+    Array.isArray(coordinates.coordinates) &&
+    coordinates.coordinates.length >= 2 &&
+    Number.isFinite(coordinates.coordinates[1]) &&
+    Number.isFinite(coordinates.coordinates[0])
+  ) {
+    return {
+      lat: Number(coordinates.coordinates[1]),
+      lng: Number(coordinates.coordinates[0]),
+    };
+  }
+
+  if (Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))) {
+    return {
+      lat: Number(latitude),
+      lng: Number(longitude),
+    };
+  }
+
+  return undefined;
+};
+
+const buildCustomerInfoFromOrderFlowCustomer = (customer: OrderFlowCustomer): CustomerInfo => {
+  const resolvedAddress = resolvePickupToDeliveryAddress(customer);
+  const coordinates = toLatLngCoordinates(
+    resolvedAddress?.coordinates ?? customer.coordinates,
+    resolvedAddress?.latitude ?? customer.latitude,
+    resolvedAddress?.longitude ?? customer.longitude,
+  );
+
+  return {
+    name: customer.name,
+    phone: customer.phone,
+    email: customer.email || '',
+    address: {
+      street: resolvedAddress?.streetAddress || customer.address || '',
+      city: resolvedAddress?.city || customer.city || '',
+      postalCode: resolvedAddress?.postalCode || customer.postal_code || '',
+      coordinates,
+    },
+    notes: resolvedAddress?.notes || customer.notes || '',
+  };
+};
+
 export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', orderFilter }) => {
   const bridge = getBridge();
   const { t } = useI18n();
@@ -135,7 +227,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const { hasDeliveryModule, hasTablesModule } = useAcquiredModules();
 
   // Delivery validation hook
-  const { validateAddress: validateDeliveryAddress } = useDeliveryValidation();
+  const {
+    validateAddress: validateDeliveryAddress,
+    requestOverride: requestDeliveryOverride,
+  } = useDeliveryValidation();
 
   // Get organizationId from module context (with terminal cache fallback)
   const { organizationId: moduleOrgId } = useModules();
@@ -291,6 +386,13 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const [showReceiptPreview, setShowReceiptPreview] = useState(false);
   const [receiptPreviewOrderId, setReceiptPreviewOrderId] = useState<string | null>(null);
   const [receiptPreviewPrinting, setReceiptPreviewPrinting] = useState(false);
+  const [pendingPickupConversion, setPendingPickupConversion] = useState<PendingPickupConversion>({
+    isOpen: false,
+    orders: [],
+    outForDeliveryCount: 0,
+  });
+  const [pickupToDeliveryContext, setPickupToDeliveryContext] =
+    useState<PickupToDeliveryContext | null>(null);
 
   // Bulk action loading state
   const [isBulkActionLoading, setIsBulkActionLoading] = useState(false);
@@ -339,6 +441,15 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     orders.filter(order => selectedOrders.includes(order.id))
   ), [orders, selectedOrders]);
 
+  const selectedSinglePickupOrder = React.useMemo(() => {
+    if (selectedOrderObjects.length !== 1) {
+      return null;
+    }
+    const [selectedOrder] = selectedOrderObjects;
+    const orderTypeValue = selectedOrder?.orderType || selectedOrder?.order_type;
+    return orderTypeValue === 'pickup' ? selectedOrder : null;
+  }, [selectedOrderObjects]);
+
   const selectedDeliveryOrders = React.useMemo(() => (
     selectedOrderObjects.filter(order => order.orderType === 'delivery')
   ), [selectedOrderObjects]);
@@ -354,6 +465,36 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       return status === 'out_for_delivery';
     })
   ), [selectedDeliveryOrders]);
+
+  const resetPickupToDeliveryFlow = useCallback(() => {
+    setPickupToDeliveryContext(null);
+    setExistingCustomer(null);
+    setCustomerInfo(null);
+    setPhoneNumber('');
+    setCustomerModalMode('new');
+    setShowPhoneLookupModal(false);
+    setShowAddCustomerModal(false);
+    setDeliveryZoneInfo(null);
+    setSpecialInstructions('');
+  }, []);
+
+  const closeCustomerSearchModal = useCallback(() => {
+    if (pickupToDeliveryContext) {
+      resetPickupToDeliveryFlow();
+      return;
+    }
+    setShowPhoneLookupModal(false);
+  }, [pickupToDeliveryContext, resetPickupToDeliveryFlow]);
+
+  const closeAddCustomerModal = useCallback(() => {
+    if (pickupToDeliveryContext) {
+      resetPickupToDeliveryFlow();
+      return;
+    }
+    setShowAddCustomerModal(false);
+    setExistingCustomer(null);
+    setCustomerModalMode('new');
+  }, [pickupToDeliveryContext, resetPickupToDeliveryFlow]);
 
   // Click-outside handler to auto-close bulk actions bar
   useEffect(() => {
@@ -873,6 +1014,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const handleMenuModalClose = () => {
     setShowMenuModal(false);
     setSelectedOrderType(null);
+    setPickupToDeliveryContext(null);
     // Reset all state
     setPhoneNumber('');
     setCustomerInfo(null);
@@ -885,8 +1027,194 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     setShowCustomerInfoModal(false);
   };
 
+  const convertPickupOrderToDelivery = useCallback(async (customer: OrderFlowCustomer) => {
+    if (!pickupToDeliveryContext) {
+      return false;
+    }
+
+    const targetOrder = orders.find((order) => order.id === pickupToDeliveryContext.orderId);
+    if (!targetOrder) {
+      toast.error(
+        t('orderDashboard.orderNotFound', { defaultValue: 'The selected order could not be found.' }),
+      );
+      return false;
+    }
+
+    const resolvedAddress = resolvePickupToDeliveryAddress(customer);
+    if (!resolvedAddress) {
+      toast.error(
+        t('orderDashboard.customerNoAddress') ||
+          'This customer has no delivery address. Please add an address first.',
+      );
+      return false;
+    }
+
+    const addressCoordinates = toLatLngCoordinates(
+      resolvedAddress.coordinates,
+      resolvedAddress.latitude,
+      resolvedAddress.longitude,
+    );
+    const addressString = [
+      resolvedAddress.streetAddress,
+      resolvedAddress.city,
+      resolvedAddress.postalCode,
+    ]
+      .filter(Boolean)
+      .join(', ');
+    const validationTarget = addressCoordinates || addressString;
+
+    if (!validationTarget) {
+      toast.error(
+        t('orderDashboard.customerNoAddress') ||
+          'This customer has no delivery address. Please add an address first.',
+      );
+      return false;
+    }
+
+    setIsBulkActionLoading(true);
+    try {
+      const validationAmount = getPickupToDeliveryValidationAmount(targetOrder);
+      let validationResult = await validateDeliveryAddress(validationTarget, validationAmount);
+      const canProceed =
+        validationResult?.uiState?.canProceed ??
+        validationResult?.deliveryAvailable ??
+        validationResult?.isValid ??
+        false;
+
+      if (!canProceed) {
+        const canAttemptOverride = Boolean(
+          validationResult?.uiState?.showOverrideOption ||
+            validationResult?.uiState?.requiresManagerApproval,
+        );
+
+        if (!canAttemptOverride) {
+          toast.error(
+            validationResult?.message ||
+              t('orderDashboard.deliveryValidationFailed', {
+                defaultValue: 'The selected address cannot be used for delivery.',
+              }),
+          );
+          return false;
+        }
+
+        const overrideResponse = await requestDeliveryOverride(
+          t('orderDashboard.pickupToDeliveryOverrideReason', {
+            defaultValue: `Pickup order ${pickupToDeliveryContext.orderNumber} converted to delivery`,
+          }),
+        );
+
+        if (!overrideResponse.success || !overrideResponse.approved) {
+          toast.error(
+            overrideResponse.message ||
+              t('orderDashboard.deliveryOverrideDenied', {
+                defaultValue: 'Manager approval is required to convert this order to delivery.',
+              }),
+          );
+          return false;
+        }
+
+        validationResult = {
+          ...validationResult,
+          override: {
+            ...(validationResult?.override || {}),
+            ...overrideResponse,
+            applied: true,
+          },
+        };
+      }
+
+      const deliveryFee = resolveDeliveryFee(validationResult);
+      const totalAmount = calculatePickupToDeliveryTotal(targetOrder, deliveryFee);
+      const conversionPayload: PickupToDeliveryConversionParams = {
+        orderId: targetOrder.id,
+        customerId: resolvedAddress.customerId || customer.id || undefined,
+        customerName: customer.name,
+        customerPhone: customer.phone,
+        customerEmail: customer.email || undefined,
+        deliveryAddress: resolvedAddress.streetAddress,
+        deliveryCity: resolvedAddress.city || undefined,
+        deliveryPostalCode: resolvedAddress.postalCode || undefined,
+        deliveryFloor: resolvedAddress.floor || undefined,
+        deliveryNotes: resolvedAddress.notes || undefined,
+        nameOnRinger: resolvedAddress.nameOnRinger || undefined,
+        deliveryFee,
+        totalAmount,
+      };
+
+      const result = await bridge.orders.convertPickupToDelivery(conversionPayload);
+      if (!result?.success) {
+        throw new Error(
+          extractOrderDashboardErrorMessage(result) ||
+            t('orderDashboard.convertToDeliveryFailed', {
+              defaultValue: 'Failed to convert order to delivery.',
+            }),
+        );
+      }
+
+      setSelectedOrders([targetOrder.id]);
+      setSelectionType('delivery');
+      resetPickupToDeliveryFlow();
+
+      try {
+        await silentRefresh();
+      } catch (refreshError) {
+        console.debug('[OrderDashboard] Silent refresh after pickup-to-delivery failed:', refreshError);
+        await loadOrders();
+      }
+
+      toast.success(
+        t('orderDashboard.convertedToDelivery', {
+          orderNumber: targetOrder.orderNumber || targetOrder.order_number || pickupToDeliveryContext.orderNumber,
+          defaultValue: 'Order converted to delivery.',
+        }),
+      );
+      return true;
+    } catch (error) {
+      console.error('[OrderDashboard] Failed to convert pickup order to delivery:', error);
+      toast.error(
+        extractOrderDashboardErrorMessage(error) ||
+          t('orderDashboard.convertToDeliveryFailed', {
+            defaultValue: 'Failed to convert order to delivery.',
+          }),
+      );
+      return false;
+    } finally {
+      setIsBulkActionLoading(false);
+    }
+  }, [
+    bridge.orders,
+    loadOrders,
+    orders,
+    pickupToDeliveryContext,
+    requestDeliveryOverride,
+    resetPickupToDeliveryFlow,
+    silentRefresh,
+    t,
+    validateDeliveryAddress,
+  ]);
+
   // Handler for clicking on customer card - select and proceed directly to menu
   const handleCustomerSelectedDirect = async (customer: any) => {
+    const orderFlowCustomer = customer as OrderFlowCustomer;
+
+    if (pickupToDeliveryContext) {
+      const resolvedAddress = resolvePickupToDeliveryAddress(orderFlowCustomer);
+      if (!resolvedAddress) {
+        toast.error(
+          t('orderDashboard.customerNoAddress') ||
+            'This customer has no delivery address. Please add an address first.',
+        );
+        setExistingCustomer(orderFlowCustomer as any);
+        setCustomerModalMode('addAddress');
+        setShowPhoneLookupModal(false);
+        setShowAddCustomerModal(true);
+        return;
+      }
+
+      await convertPickupOrderToDelivery(orderFlowCustomer);
+      return;
+    }
+
     console.log('[handleCustomerSelectedDirect] Called with customer:', JSON.stringify({
       id: customer?.id,
       name: customer?.name,
@@ -1002,6 +1330,24 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   };
 
   const handleNewCustomerAdded = async (customer: any) => {
+    const orderFlowCustomer = customer as OrderFlowCustomer;
+
+    if (pickupToDeliveryContext) {
+      const resolvedAddress = resolvePickupToDeliveryAddress(orderFlowCustomer);
+      if (!resolvedAddress) {
+        toast.error(
+          t('orderDashboard.customerNoAddress') ||
+            'This customer has no delivery address. Please add an address first.',
+        );
+        setExistingCustomer(orderFlowCustomer as any);
+        setCustomerModalMode('addAddress');
+        return;
+      }
+
+      await convertPickupOrderToDelivery(orderFlowCustomer);
+      return;
+    }
+
     console.log('[handleNewCustomerAdded] Called with customer:', JSON.stringify({
       id: customer?.id,
       name: customer?.name,
@@ -1950,21 +2296,109 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     void silentRefresh().catch(() => {});
   }, [silentRefresh, splitPaymentData, t]);
 
-  // Handle bulk actions
-  const handleBulkAction = async (action: string) => {
+  const closePickupConversionConfirm = useCallback(() => {
+    setPendingPickupConversion({
+      isOpen: false,
+      orders: [],
+      outForDeliveryCount: 0,
+    });
+  }, []);
+
+  const confirmPickupConversion = useCallback(async () => {
+    const ordersToConvert = pendingPickupConversion.orders;
+    closePickupConversionConfirm();
+
+    if (ordersToConvert.length === 0) {
+      return;
+    }
+
     setIsBulkActionLoading(true);
     try {
-      const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
-      const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
-      const deliveryOrdersInTransit = deliveryOrders.filter(order => {
-        const status = String(order.status || '').toLowerCase();
-        return status === 'out_for_delivery';
-      });
-      const deliveryOrdersNeedingDispatch = deliveryOrders.filter(order => {
-        const status = String(order.status || '').toLowerCase();
-        return status !== 'out_for_delivery' && status !== 'delivered' && status !== 'completed';
-      });
+      let successCount = 0;
+      for (const ord of ordersToConvert) {
+        const ok = await convertToPickup(ord.id);
+        if (ok) {
+          successCount++;
+          continue;
+        }
 
+        toast.error(
+          t('orderDashboard.convertToPickupFailed', { orderNumber: ord.orderNumber }) ||
+            `Failed to convert ${ord.orderNumber}`,
+        );
+        return;
+      }
+
+      if (successCount > 0) {
+        toast.success(
+          t('orderDashboard.convertedToPickup', { count: successCount }) ||
+            `Converted ${successCount} order(s) to pickup`,
+        );
+      }
+
+      setSelectionType('pickup');
+    } finally {
+      setIsBulkActionLoading(false);
+    }
+  }, [closePickupConversionConfirm, convertToPickup, pendingPickupConversion.orders, t]);
+
+  // Handle bulk actions
+  const handleBulkAction = async (action: string) => {
+    const deliveryOrders = selectedOrderObjects.filter(order => order.orderType === 'delivery');
+    const pickupOrders = selectedOrderObjects.filter(order => order.orderType !== 'delivery');
+    const deliveryOrdersInTransit = deliveryOrders.filter(order => {
+      const status = String(order.status || '').toLowerCase();
+      return status === 'out_for_delivery';
+    });
+    const deliveryOrdersNeedingDispatch = deliveryOrders.filter(order => {
+      const status = String(order.status || '').toLowerCase();
+      return status !== 'out_for_delivery' && status !== 'delivered' && status !== 'completed';
+    });
+
+    if (action === 'pickup') {
+      if (deliveryOrders.length === 0) {
+        toast.error(t('orderDashboard.noDeliveryOrdersSelected') || 'Select delivery orders to convert to pickup');
+        return;
+      }
+
+      setPendingPickupConversion({
+        isOpen: true,
+        orders: deliveryOrders.map(order => ({
+          id: order.id,
+          orderNumber: order.orderNumber,
+          status: order.status,
+        })),
+        outForDeliveryCount: deliveryOrdersInTransit.length,
+      });
+      return;
+    }
+
+    if (action === 'delivery') {
+      if (!selectedSinglePickupOrder) {
+        toast.error(
+          t('orderDashboard.noPickupOrderSelected') ||
+            'Select a single pickup order to convert to delivery.',
+        );
+        return;
+      }
+
+      setPickupToDeliveryContext({
+        orderId: selectedSinglePickupOrder.id,
+        orderNumber:
+          selectedSinglePickupOrder.orderNumber || selectedSinglePickupOrder.order_number || '',
+      });
+      setExistingCustomer(null);
+      setCustomerInfo(null);
+      setPhoneNumber('');
+      setCustomerModalMode('new');
+      setDeliveryZoneInfo(null);
+      setShowAddCustomerModal(false);
+      setShowPhoneLookupModal(true);
+      return;
+    }
+
+    setIsBulkActionLoading(true);
+    try {
       if (action === 'view') {
         if (selectedOrders.length === 1) {
           const ord = orders.find(o => o.id === selectedOrders[0]);
@@ -2005,29 +2439,6 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         }
         setPendingDeliveryOrders(deliveryOrders.map(o => o.id));
         setShowDriverModal(true);
-        return;
-      }
-
-      if (action === 'pickup') {
-        // Convert selected delivery orders to pickup
-        if (deliveryOrders.length === 0) {
-          toast.error(t('orderDashboard.noDeliveryOrdersSelected') || 'Select delivery orders to convert to pickup');
-          return;
-        }
-        let successCount = 0;
-        for (const ord of deliveryOrders) {
-          const ok = await convertToPickup(ord.id);
-          if (ok) successCount++;
-          else {
-            toast.error(t('orderDashboard.convertToPickupFailed', { orderNumber: ord.orderNumber }) || `Failed to convert ${ord.orderNumber}`);
-            return;
-          }
-        }
-        if (successCount > 0) {
-          toast.success(t('orderDashboard.convertedToPickup', { count: successCount }) || `Converted ${successCount} order(s) to pickup`);
-        }
-        // Switch selection context to pickup so Delivered button appears
-        setSelectionType('pickup');
         return;
       }
 
@@ -2398,9 +2809,8 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
     } catch (error) {
       console.error('Failed to update payment method:', error);
       const message =
-        error instanceof Error && error.message
-          ? error.message
-          : t('orderDashboard.paymentMethodUpdateFailed');
+        extractOrderDashboardErrorMessage(error) ||
+        t('orderDashboard.paymentMethodUpdateFailed');
       toast.error(message);
     } finally {
       setIsUpdatingPaymentMethod(false);
@@ -2622,6 +3032,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
         <BulkActionsBar
           selectedCount={selectedOrders.length}
           selectionType={selectionType}
+          canConvertPickupToDelivery={Boolean(selectedSinglePickupOrder)}
           deliverySelectionCanBeCompleted={deliverySelectionCanBeCompleted}
           activeTab={activeTab}
           onBulkAction={handleBulkAction}
@@ -2833,7 +3244,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       {showPhoneLookupModal && (
         <CustomerSearchModal
           isOpen={showPhoneLookupModal}
-          onClose={() => setShowPhoneLookupModal(false)}
+          onClose={closeCustomerSearchModal}
           onCustomerSelected={handleCustomerSelectedDirect}
           onAddNewCustomer={handleAddNewCustomer}
           onEditCustomer={handleEditCustomer}
@@ -2845,25 +3256,30 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       {showAddCustomerModal && (
         <AddCustomerModal
           isOpen={showAddCustomerModal}
-          onClose={() => {
-            setShowAddCustomerModal(false);
-            setExistingCustomer(null);
-            setCustomerModalMode('new');
-          }}
+          onClose={closeAddCustomerModal}
           onCustomerAdded={handleNewCustomerAdded}
           initialPhone={phoneNumber}
-          initialCustomer={existingCustomer ? {
-            id: existingCustomer.id,
-            phone: existingCustomer.phone || '',
-            name: existingCustomer.name,
-            email: existingCustomer.email,
-            address: existingCustomer.addresses?.[0]?.street || existingCustomer.address || undefined,
-            city: existingCustomer.addresses?.[0]?.city,
-            postal_code: existingCustomer.addresses?.[0]?.postal_code || existingCustomer.postal_code || undefined,
-            floor_number: existingCustomer.addresses?.[0]?.floor_number,
-            notes: existingCustomer.addresses?.[0]?.delivery_notes,
-            name_on_ringer: existingCustomer.name_on_ringer,
-          } : undefined}
+          initialCustomer={existingCustomer ? (() => {
+            const orderFlowCustomer = existingCustomer as OrderFlowCustomer;
+            const resolvedAddress = resolvePickupToDeliveryAddress(orderFlowCustomer);
+            const customerInfoData = buildCustomerInfoFromOrderFlowCustomer(orderFlowCustomer);
+            return {
+              ...(orderFlowCustomer as any),
+              id: orderFlowCustomer.id,
+              phone: orderFlowCustomer.phone || '',
+              name: orderFlowCustomer.name,
+              email: orderFlowCustomer.email,
+              address: resolvedAddress?.streetAddress || customerInfoData.address?.street || undefined,
+              city: resolvedAddress?.city || customerInfoData.address?.city || undefined,
+              postal_code: resolvedAddress?.postalCode || customerInfoData.address?.postalCode || undefined,
+              floor_number: resolvedAddress?.floor || orderFlowCustomer.floor_number || undefined,
+              notes: resolvedAddress?.notes || orderFlowCustomer.notes || undefined,
+              name_on_ringer: resolvedAddress?.nameOnRinger || orderFlowCustomer.name_on_ringer,
+              addresses: orderFlowCustomer.addresses || [],
+              editAddressId: orderFlowCustomer.editAddressId,
+              selected_address_id: orderFlowCustomer.selected_address_id,
+            };
+          })() : undefined}
           mode={customerModalMode}
         />
       )}
@@ -2972,6 +3388,49 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
       )}
 
       {/* Existing Modals */}
+      <ConfirmDialog
+        isOpen={pendingPickupConversion.isOpen}
+        onClose={closePickupConversionConfirm}
+        onConfirm={() => {
+          void confirmPickupConversion();
+        }}
+        title={
+          t('orderDashboard.confirmPickupConversionTitle', {
+            defaultValue: 'Convert delivery orders to pickup?',
+          }) || 'Convert delivery orders to pickup?'
+        }
+        message={
+          t('orderDashboard.confirmPickupConversionMessage', {
+            count: pendingPickupConversion.orders.length,
+            defaultValue:
+              'You are converting {{count}} delivery order(s) to pickup. Delivery assignment and driver handling will be removed.',
+          }) ||
+          `You are converting ${pendingPickupConversion.orders.length} delivery order(s) to pickup. Delivery assignment and driver handling will be removed.`
+        }
+        confirmText={t('orderDashboard.confirmPickupConversionConfirm', { defaultValue: 'Convert to pickup' })}
+        cancelText={t('common.actions.cancel')}
+        variant="warning"
+        isLoading={isBulkActionLoading}
+        details={
+          <div className="space-y-2">
+            <p>
+              {t('orderDashboard.confirmPickupConversionWarning', {
+                defaultValue: 'Delivery handling is removed for these orders.',
+              })}
+            </p>
+            {pendingPickupConversion.outForDeliveryCount > 0 && (
+              <p>
+                {t('orderDashboard.confirmPickupConversionTransitWarning', {
+                  count: pendingPickupConversion.outForDeliveryCount,
+                  defaultValue:
+                    '{{count}} order(s) are already out for delivery and may return to ready after the conversion.',
+                })}
+              </p>
+            )}
+          </div>
+        }
+      />
+
       <DriverAssignmentModal
         isOpen={showDriverModal}
         orderCount={pendingDeliveryOrders.length}

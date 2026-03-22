@@ -10,6 +10,14 @@ import {
   evaluatePrinterSupportRules,
   getHealthSupportExplanation,
 } from '../../src/renderer/support';
+import { buildGoogleMapsDirectionsUrl } from '../../src/renderer/utils/delivery-routing';
+import { sortOrdersOldestFirst } from '../../src/renderer/utils/order-sorting';
+import {
+  calculatePickupToDeliveryTotal,
+  getPickupToDeliveryValidationAmount,
+  resolvePickupToDeliveryAddress,
+} from '../../src/renderer/utils/pickup-to-delivery';
+import { parseSpecialAddressInput } from '../../src/renderer/utils/specialAddress';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
@@ -259,4 +267,152 @@ test('printer support entry point renders translated german copy', async () => {
   assert.match(html, /Fehlerbehebung/);
   assert.match(html, /Kein Drucker ist konfiguriert/);
   assert.match(html, /Schnellsetup öffnen/);
+});
+
+test('parseSpecialAddressInput normalizes #label addresses and skips zone validation', () => {
+  const parsed = parseSpecialAddressInput('#E-food');
+
+  assert.equal(parsed.isSpecialLabelInput, true);
+  assert.equal(parsed.shouldSkipZoneValidation, true);
+  assert.equal(parsed.normalizedAddress, 'E-food');
+});
+
+test('parseSpecialAddressInput keeps normal addresses on the validation path', () => {
+  const parsed = parseSpecialAddressInput('12 Main Street');
+
+  assert.equal(parsed.isSpecialLabelInput, false);
+  assert.equal(parsed.shouldSkipZoneValidation, false);
+  assert.equal(parsed.normalizedAddress, '12 Main Street');
+});
+
+test('parseSpecialAddressInput rejects empty # labels', () => {
+  const parsed = parseSpecialAddressInput('#   ');
+
+  assert.equal(parsed.isSpecialLabelInput, true);
+  assert.equal(parsed.shouldSkipZoneValidation, false);
+  assert.equal(parsed.normalizedAddress, '');
+});
+
+test('buildGoogleMapsDirectionsUrl falls back to current location when store origin is missing', () => {
+  const url = buildGoogleMapsDirectionsUrl(null, {
+    address: '12 Main Street',
+    coordinates: null,
+  });
+
+  assert.equal(
+    url,
+    'https://www.google.com/maps/dir/?api=1&destination=12+Main+Street&travelmode=driving',
+  );
+});
+
+test('buildGoogleMapsDirectionsUrl includes store origin when configured', () => {
+  const url = buildGoogleMapsDirectionsUrl(
+    {
+      label: 'Store',
+      address: '1 Store Road',
+      coordinates: null,
+    },
+    {
+      address: '12 Main Street',
+      coordinates: null,
+    },
+  );
+
+  assert.equal(
+    url,
+    'https://www.google.com/maps/dir/?api=1&destination=12+Main+Street&travelmode=driving&origin=1+Store+Road',
+  );
+});
+
+test('resolvePickupToDeliveryAddress prefers the selected customer address', () => {
+  const resolved = resolvePickupToDeliveryAddress({
+    id: 'customer-1',
+    name: 'Alice',
+    phone: '12345',
+    selected_address_id: 'addr-2',
+    addresses: [
+      {
+        id: 'addr-1',
+        customer_id: 'customer-1',
+        street_address: '1 First Street',
+        city: 'Athens',
+        postal_code: '11111',
+        is_default: true,
+        name_on_ringer: 'Default Bell',
+      },
+      {
+        id: 'addr-2',
+        customer_id: 'customer-1',
+        street_address: '2 Second Street',
+        city: 'Piraeus',
+        postal_code: '22222',
+        floor_number: '3',
+        delivery_notes: 'Side entrance',
+        name_on_ringer: 'Second Bell',
+        coordinates: { lat: 37.95, lng: 23.63 },
+        is_default: false,
+      },
+    ],
+  });
+
+  assert.equal(resolved?.addressId, 'addr-2');
+  assert.equal(resolved?.customerId, 'customer-1');
+  assert.equal(resolved?.streetAddress, '2 Second Street');
+  assert.equal(resolved?.city, 'Piraeus');
+  assert.equal(resolved?.postalCode, '22222');
+  assert.equal(resolved?.floor, '3');
+  assert.equal(resolved?.notes, 'Side entrance');
+  assert.equal(resolved?.nameOnRinger, 'Second Bell');
+  assert.deepEqual(resolved?.coordinates, { lat: 37.95, lng: 23.63 });
+});
+
+test('getPickupToDeliveryValidationAmount uses subtotal minus discount first', () => {
+  const amount = getPickupToDeliveryValidationAmount({
+    subtotal: 18,
+    discount_amount: 3,
+    total_amount: 20,
+    deliveryFee: 2,
+  });
+
+  assert.equal(amount, 15);
+});
+
+test('calculatePickupToDeliveryTotal replaces the existing delivery fee', () => {
+  const total = calculatePickupToDeliveryTotal(
+    {
+      totalAmount: 22,
+      deliveryFee: 2,
+    },
+    4,
+  );
+
+  assert.equal(total, 24);
+});
+
+test('sortOrdersOldestFirst keeps new realtime orders at the bottom', () => {
+  const sorted = sortOrdersOldestFirst([
+    {
+      id: 'order-new',
+      orderNumber: '00003',
+      createdAt: '2026-03-22T10:10:00.000Z',
+      updatedAt: '2026-03-22T10:10:00.000Z',
+    },
+    {
+      id: 'order-oldest',
+      orderNumber: '00001',
+      createdAt: '2026-03-22T10:00:00.000Z',
+      updatedAt: '2026-03-22T10:00:00.000Z',
+    },
+    {
+      id: 'order-middle',
+      orderNumber: '00002',
+      createdAt: '2026-03-22T10:05:00.000Z',
+      updatedAt: '2026-03-22T10:05:00.000Z',
+    },
+  ]);
+
+  assert.deepEqual(
+    sorted.map((order) => order.id),
+    ['order-oldest', 'order-middle', 'order-new'],
+  );
 });

@@ -3418,6 +3418,7 @@
   },
   "bulkActions": {
     "driver": "Fahrer",
+    "delivery": "Lieferung",
     "pickup": "Abholung",
     "edit": "Bearbeiten",
     "cancel": "Stornieren",

@@ -543,7 +543,11 @@ export class CustomerSyncService {
       }
       if ((updates as any).coordinates !== undefined) {
         const coordinates = (updates as any).coordinates
-        if (coordinates?.type === 'Point' && Array.isArray(coordinates.coordinates)) {
+        if (coordinates === null) {
+          updateData.coordinates = null
+          if (updateData.latitude === undefined) updateData.latitude = null
+          if (updateData.longitude === undefined) updateData.longitude = null
+        } else if (coordinates?.type === 'Point' && Array.isArray(coordinates.coordinates)) {
           updateData.coordinates = coordinates
           if (updateData.longitude === undefined) updateData.longitude = coordinates.coordinates[0]
           if (updateData.latitude === undefined) updateData.latitude = coordinates.coordinates[1]

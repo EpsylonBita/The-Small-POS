@@ -485,14 +485,11 @@ export const OrderCard = memo<OrderCardProps>(({
           deliveryAddress: deliveryAddressNormalized || resolvedAddress,
         });
         const hasAddress = Boolean(routeStop);
-        const hasOrigin = Boolean(storeMapOrigin);
-        const mapsUrl = storeMapOrigin && routeStop
+        const mapsUrl = routeStop
           ? buildGoogleMapsDirectionsUrl(storeMapOrigin, routeStop)
           : null;
         const isEnabled = Boolean(mapsUrl);
-        const disabledReason = !hasAddress
-          ? (t('orderCard.missingAddress') || 'No address available')
-          : (t('orderCard.missingStoreLocation') || 'Store location not configured');
+        const disabledReason = t('orderCard.missingAddress') || 'No address available';
         return (
           <div
             onClick={(e) => {
@@ -501,8 +498,8 @@ export const OrderCard = memo<OrderCardProps>(({
                 toast.error(t('orderCard.missingAddress') || 'Delivery address not available');
                 return;
               }
-              if (!hasOrigin || !mapsUrl) {
-                toast.error(t('orderCard.missingStoreLocation') || 'Store location not configured');
+              if (!mapsUrl) {
+                toast.error(t('orderCard.missingAddress') || 'Delivery address not available');
                 return;
               }
               void openExternalUrl(mapsUrl);

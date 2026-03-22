@@ -940,6 +940,28 @@ fn payment_sync_queue_needs_retry(conn: &Connection, payment_id: &str) -> Result
     Ok(false)
 }
 
+fn enqueue_order_payment_snapshot_sync(
+    conn: &Connection,
+    order_id: &str,
+    payment_status: &str,
+    payment_method: &str,
+) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "orderId": order_id,
+        "paymentStatus": payment_status,
+        "paymentMethod": payment_method,
+    });
+    let idempotency_key = format!("order:payment-method:{order_id}:{}", Uuid::new_v4());
+    conn.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('order', ?1, 'update', ?2, ?3)",
+        params![order_id, payload.to_string(), idempotency_key],
+    )
+    .map_err(|e| format!("enqueue order payment snapshot sync: {e}"))?;
+
+    Ok(())
+}
+
 pub fn update_payment_method(
     db: &DbState,
     order_id_raw: &str,
@@ -953,17 +975,28 @@ pub fn update_payment_method(
 
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, order_id_raw).ok_or("Order not found")?;
-    let order_status: String = conn
+    let (order_status, current_payment_status, current_order_payment_method): (
+        String,
+        String,
+        String,
+    ) = conn
         .query_row(
-            "SELECT COALESCE(status, 'pending') FROM orders WHERE id = ?1",
+            "SELECT COALESCE(status, 'pending'),
+                    COALESCE(payment_status, 'pending'),
+                    COALESCE(payment_method, '')
+             FROM orders
+             WHERE id = ?1",
             params![order_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|e| format!("load order status for payment method edit: {e}"))?;
+        .map_err(|e| format!("load order payment context for method edit: {e}"))?;
     let normalized_status = order_status.trim().to_ascii_lowercase();
     if normalized_status == "cancelled" || normalized_status == "canceled" {
         return Err("Cannot edit payment method for cancelled orders".into());
     }
+    let normalized_payment_status = current_payment_status.trim().to_ascii_lowercase();
+    let normalized_current_order_payment_method =
+        current_order_payment_method.trim().to_ascii_lowercase();
 
     type CompletedPaymentRow = (String, String, i64);
     let completed_payments = {
@@ -994,6 +1027,74 @@ pub fn update_payment_method(
         }
         payments
     };
+
+    if completed_payments.is_empty() {
+        if normalized_payment_status != "paid" {
+            return Err(
+                "Payment method can only be edited for fully paid orders when no local payment record exists"
+                    .into(),
+            );
+        }
+
+        if !matches!(
+            normalized_current_order_payment_method.as_str(),
+            "cash" | "card"
+        ) {
+            return Err(
+                "Payment method can only be edited for cash or card orders when no local payment record exists"
+                    .into(),
+            );
+        }
+
+        if normalized_current_order_payment_method == next_method {
+            return Ok(serde_json::json!({
+                "success": true,
+                "data": {
+                    "orderId": order_id,
+                    "paymentId": Value::Null,
+                    "paymentMethod": current_order_payment_method,
+                    "paymentStatus": current_payment_status,
+                    "retriedSync": false,
+                    "usedOrderSnapshotFallback": true,
+                }
+            }));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin payment snapshot fallback transaction: {e}"))?;
+        tx.execute(
+            "UPDATE orders
+             SET payment_method = ?1,
+                 sync_status = 'pending',
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![next_method, now, order_id],
+        )
+        .map_err(|e| format!("update order payment snapshot fallback: {e}"))?;
+        enqueue_order_payment_snapshot_sync(&tx, &order_id, &current_payment_status, &next_method)?;
+        tx.commit()
+            .map_err(|e| format!("commit payment snapshot fallback: {e}"))?;
+
+        info!(
+            order_id = %order_id,
+            method = %next_method,
+            "Payment method updated via order snapshot fallback"
+        );
+
+        return Ok(serde_json::json!({
+            "success": true,
+            "data": {
+                "orderId": order_id,
+                "paymentId": Value::Null,
+                "paymentMethod": next_method,
+                "paymentStatus": current_payment_status,
+                "retriedSync": false,
+                "usedOrderSnapshotFallback": true,
+            }
+        }));
+    }
 
     if completed_payments.len() != 1 {
         return Err(
@@ -1039,20 +1140,13 @@ pub fn update_payment_method(
             }));
         }
 
-        let current_status: String = conn
-            .query_row(
-                "SELECT COALESCE(payment_status, 'pending') FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("load current payment status: {e}"))?;
         return Ok(serde_json::json!({
             "success": true,
             "data": {
                 "orderId": order_id,
                 "paymentId": payment_id,
                 "paymentMethod": current_method,
-                "paymentStatus": current_status,
+                "paymentStatus": current_payment_status,
                 "retriedSync": false,
             }
         }));
@@ -1675,6 +1769,78 @@ mod tests {
             .expect("query refreshed payment queue row");
         assert_eq!(queue_status, "pending");
         assert!(payload.contains("\"method\":\"card\""));
+    }
+
+    #[test]
+    fn test_update_payment_method_falls_back_to_order_snapshot_when_payment_row_missing() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, items, total_amount, status, sync_status, payment_status,
+                payment_method, supabase_id, created_at, updated_at
+             ) VALUES (
+                'ord-method-fallback',
+                '[]',
+                18.5,
+                'completed',
+                'synced',
+                'paid',
+                'cash',
+                'remote-order-fallback',
+                datetime('now'),
+                datetime('now')
+             )",
+            [],
+        )
+        .expect("insert order for payment snapshot fallback");
+        drop(conn);
+
+        let result = update_payment_method(&db, "ord-method-fallback", "card")
+            .expect("update payment method via order snapshot fallback");
+        assert_eq!(result["data"]["paymentMethod"], "card");
+        assert_eq!(result["data"]["paymentStatus"], "paid");
+        assert_eq!(result["data"]["paymentId"], Value::Null);
+        assert_eq!(result["data"]["usedOrderSnapshotFallback"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (order_method, order_status, order_sync_status): (String, String, String) = conn
+            .query_row(
+                "SELECT payment_method, payment_status, sync_status
+                 FROM orders
+                 WHERE id = 'ord-method-fallback'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query fallback-updated order snapshot");
+        assert_eq!(order_method, "card");
+        assert_eq!(order_status, "paid");
+        assert_eq!(order_sync_status, "pending");
+
+        let payment_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-method-fallback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query payment count for fallback order");
+        assert_eq!(payment_count, 0);
+
+        let (queue_status, payload): (String, String) = conn
+            .query_row(
+                "SELECT status, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'order'
+                   AND entity_id = 'ord-method-fallback'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query fallback order sync row");
+        assert_eq!(queue_status, "pending");
+        assert!(payload.contains("\"paymentMethod\":\"card\""));
+        assert!(payload.contains("\"paymentStatus\":\"paid\""));
     }
 
     #[test]

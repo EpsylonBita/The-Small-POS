@@ -654,6 +654,8 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
         str_field(payload, "customerPhone").or_else(|| str_field(payload, "customer_phone"));
     let customer_email =
         str_field(payload, "customerEmail").or_else(|| str_field(payload, "customer_email"));
+    let customer_id =
+        str_field(payload, "customerId").or_else(|| str_field(payload, "customer_id"));
 
     // Validate user-facing string field lengths
     if let Some(ref v) = customer_name {
@@ -820,7 +822,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     conn.execute(
         "INSERT INTO orders (
-            id, order_number, customer_name, customer_phone, customer_email,
+            id, order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
@@ -829,14 +831,14 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             discount_amount, tip_amount, version, terminal_id, branch_id, plugin, tax_rate,
             delivery_fee, client_request_id, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5,
-            ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18, ?19,
-            ?20, ?21, ?22, 'pending', ?23, ?24,
-            ?25, ?26, ?27, ?28, ?29,
-            ?30, ?31, 1, ?32, ?33, ?34, ?35,
-            ?36, ?37, ?38, ?39, ?40
+            ?1, ?2, ?3, ?4, ?5, ?6,
+            ?7, ?8, ?9, ?10, ?11,
+            ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23, 'pending', ?24, ?25,
+            ?26, ?27, ?28, ?29, ?30,
+            ?31, ?32, 1, ?33, ?34, ?35, ?36,
+            ?37, ?38, ?39, ?40, ?41
         )",
         params![
             &order_id,
@@ -844,6 +846,7 @@ pub fn create_order(db: &DbState, payload: &Value) -> Result<Value, String> {
             &customer_name,
             &customer_phone,
             &customer_email,
+            &customer_id,
             &items,
             &total_amount,
             &tax_amount,
@@ -1073,7 +1076,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, order_number, customer_name, customer_phone, customer_email,
+            "SELECT id, order_number, customer_name, customer_phone, customer_email, customer_id,
                     items, total_amount, tax_amount, subtotal, status,
                     cancellation_reason, order_type, table_number, delivery_address,
                     delivery_notes, name_on_ringer, special_instructions,
@@ -1087,19 +1090,19 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
              FROM orders
              WHERE COALESCE(is_ghost, 0) = 0
-             ORDER BY created_at DESC",
+             ORDER BY created_at ASC",
         )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
         .query_map([], |row| {
             // Parse items JSON
-            let items_str: String = row.get(5)?;
+            let items_str: String = row.get(6)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
                 warn!("JSON parse fallback (items): {e}");
                 Value::Array(vec![])
             });
-            let ghost_metadata_str: Option<String> = row.get(42)?;
+            let ghost_metadata_str: Option<String> = row.get(43)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
                 .map(|raw| {
@@ -1109,7 +1112,7 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                     })
                 })
                 .unwrap_or(Value::Null);
-            let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
+            let is_ghost = row.get::<_, Option<i64>>(41)?.unwrap_or(0) != 0;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
@@ -1117,57 +1120,59 @@ pub fn get_all_orders(db: &DbState) -> Result<Vec<Value>, String> {
                 "customerName": row.get::<_, Option<String>>(2)?,
                 "customerPhone": row.get::<_, Option<String>>(3)?,
                 "customerEmail": row.get::<_, Option<String>>(4)?,
+                "customerId": row.get::<_, Option<String>>(5)?,
+                "customer_id": row.get::<_, Option<String>>(5)?,
                 "items": items,
-                "totalAmount": row.get::<_, f64>(6)?,
-                "taxAmount": row.get::<_, Option<f64>>(7)?,
-                "subtotal": row.get::<_, Option<f64>>(8)?,
-                "status": row.get::<_, String>(9)?,
-                "cancellationReason": row.get::<_, Option<String>>(10)?,
-                "orderType": row.get::<_, Option<String>>(11)?,
-                "tableNumber": row.get::<_, Option<String>>(12)?,
-                "deliveryAddress": row.get::<_, Option<String>>(13)?,
-                "deliveryNotes": row.get::<_, Option<String>>(14)?,
-                "nameOnRinger": row.get::<_, Option<String>>(15)?,
-                "specialInstructions": row.get::<_, Option<String>>(16)?,
-                "createdAt": row.get::<_, Option<String>>(17)?,
-                "updatedAt": row.get::<_, Option<String>>(18)?,
-                "estimatedTime": row.get::<_, Option<i64>>(19)?,
-                "supabaseId": row.get::<_, Option<String>>(20)?,
-                "syncStatus": row.get::<_, String>(21)?,
-                "paymentStatus": row.get::<_, Option<String>>(22)?,
-                "paymentMethod": row.get::<_, Option<String>>(23)?,
-                "paymentTransactionId": row.get::<_, Option<String>>(24)?,
-                "staffShiftId": row.get::<_, Option<String>>(25)?,
-                "staffId": row.get::<_, Option<String>>(26)?,
-                "discountPercentage": row.get::<_, Option<f64>>(27)?,
-                "discountAmount": row.get::<_, Option<f64>>(28)?,
-                "tipAmount": row.get::<_, Option<f64>>(29)?,
-                "version": row.get::<_, Option<i64>>(30)?,
-                "updatedBy": row.get::<_, Option<String>>(31)?,
-                "lastSyncedAt": row.get::<_, Option<String>>(32)?,
-                "remoteVersion": row.get::<_, Option<i64>>(33)?,
-                "terminalId": row.get::<_, Option<String>>(34)?,
-                "branchId": row.get::<_, Option<String>>(35)?,
-                "plugin": row.get::<_, Option<String>>(36)?,
-                "externalPluginOrderId": row.get::<_, Option<String>>(37)?,
-                "taxRate": row.get::<_, Option<f64>>(38)?,
-                "deliveryFee": row.get::<_, Option<f64>>(39)?,
+                "totalAmount": row.get::<_, f64>(7)?,
+                "taxAmount": row.get::<_, Option<f64>>(8)?,
+                "subtotal": row.get::<_, Option<f64>>(9)?,
+                "status": row.get::<_, String>(10)?,
+                "cancellationReason": row.get::<_, Option<String>>(11)?,
+                "orderType": row.get::<_, Option<String>>(12)?,
+                "tableNumber": row.get::<_, Option<String>>(13)?,
+                "deliveryAddress": row.get::<_, Option<String>>(14)?,
+                "deliveryNotes": row.get::<_, Option<String>>(15)?,
+                "nameOnRinger": row.get::<_, Option<String>>(16)?,
+                "specialInstructions": row.get::<_, Option<String>>(17)?,
+                "createdAt": row.get::<_, Option<String>>(18)?,
+                "updatedAt": row.get::<_, Option<String>>(19)?,
+                "estimatedTime": row.get::<_, Option<i64>>(20)?,
+                "supabaseId": row.get::<_, Option<String>>(21)?,
+                "syncStatus": row.get::<_, String>(22)?,
+                "paymentStatus": row.get::<_, Option<String>>(23)?,
+                "paymentMethod": row.get::<_, Option<String>>(24)?,
+                "paymentTransactionId": row.get::<_, Option<String>>(25)?,
+                "staffShiftId": row.get::<_, Option<String>>(26)?,
+                "staffId": row.get::<_, Option<String>>(27)?,
+                "discountPercentage": row.get::<_, Option<f64>>(28)?,
+                "discountAmount": row.get::<_, Option<f64>>(29)?,
+                "tipAmount": row.get::<_, Option<f64>>(30)?,
+                "version": row.get::<_, Option<i64>>(31)?,
+                "updatedBy": row.get::<_, Option<String>>(32)?,
+                "lastSyncedAt": row.get::<_, Option<String>>(33)?,
+                "remoteVersion": row.get::<_, Option<i64>>(34)?,
+                "terminalId": row.get::<_, Option<String>>(35)?,
+                "branchId": row.get::<_, Option<String>>(36)?,
+                "plugin": row.get::<_, Option<String>>(37)?,
+                "externalPluginOrderId": row.get::<_, Option<String>>(38)?,
+                "taxRate": row.get::<_, Option<f64>>(39)?,
+                "deliveryFee": row.get::<_, Option<f64>>(40)?,
                 "is_ghost": is_ghost,
                 "isGhost": is_ghost,
-                "ghost_source": row.get::<_, Option<String>>(41)?,
-                "ghostSource": row.get::<_, Option<String>>(41)?,
+                "ghost_source": row.get::<_, Option<String>>(42)?,
+                "ghostSource": row.get::<_, Option<String>>(42)?,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
-                "deliveryCity": row.get::<_, Option<String>>(43)?,
-                "delivery_city": row.get::<_, Option<String>>(43)?,
-                "deliveryPostalCode": row.get::<_, Option<String>>(44)?,
-                "delivery_postal_code": row.get::<_, Option<String>>(44)?,
-                "deliveryFloor": row.get::<_, Option<String>>(45)?,
-                "delivery_floor": row.get::<_, Option<String>>(45)?,
-                "driverId": row.get::<_, Option<String>>(46)?,
-                "driver_id": row.get::<_, Option<String>>(46)?,
-                "driverName": row.get::<_, Option<String>>(47)?,
-                "driver_name": row.get::<_, Option<String>>(47)?,
+                "deliveryCity": row.get::<_, Option<String>>(44)?,
+                "delivery_city": row.get::<_, Option<String>>(44)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(45)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(45)?,
+                "deliveryFloor": row.get::<_, Option<String>>(46)?,
+                "delivery_floor": row.get::<_, Option<String>>(46)?,
+                "driverId": row.get::<_, Option<String>>(47)?,
+                "driver_id": row.get::<_, Option<String>>(47)?,
+                "driverName": row.get::<_, Option<String>>(48)?,
+                "driver_name": row.get::<_, Option<String>>(48)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -1187,7 +1192,7 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let result = conn.query_row(
-        "SELECT id, order_number, customer_name, customer_phone, customer_email,
+        "SELECT id, order_number, customer_name, customer_phone, customer_email, customer_id,
                 items, total_amount, tax_amount, subtotal, status,
                 cancellation_reason, order_type, table_number, delivery_address,
                 delivery_notes, name_on_ringer, special_instructions,
@@ -1199,15 +1204,15 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 terminal_id, branch_id, plugin, external_plugin_order_id,
                 tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata,
                 delivery_city, delivery_postal_code, delivery_floor, driver_id, driver_name
-         FROM orders WHERE id = ?1",
+        FROM orders WHERE id = ?1",
         params![id],
         |row| {
-            let items_str: String = row.get(5)?;
+            let items_str: String = row.get(6)?;
             let items: Value = serde_json::from_str(&items_str).unwrap_or_else(|e| {
                 warn!("JSON parse fallback (items): {e}");
                 Value::Array(vec![])
             });
-            let ghost_metadata_str: Option<String> = row.get(42)?;
+            let ghost_metadata_str: Option<String> = row.get(43)?;
             let ghost_metadata = ghost_metadata_str
                 .as_deref()
                 .map(|raw| {
@@ -1217,8 +1222,8 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                     })
                 })
                 .unwrap_or(Value::Null);
-            let is_ghost = row.get::<_, Option<i64>>(40)?.unwrap_or(0) != 0;
-            let ghost_source: Option<String> = row.get(41)?;
+            let is_ghost = row.get::<_, Option<i64>>(41)?.unwrap_or(0) != 0;
+            let ghost_source: Option<String> = row.get(42)?;
 
             Ok(serde_json::json!({
                 "id": row.get::<_, Option<String>>(0)?,
@@ -1226,57 +1231,59 @@ pub fn get_order_by_id(db: &DbState, id: &str) -> Result<Value, String> {
                 "customerName": row.get::<_, Option<String>>(2)?,
                 "customerPhone": row.get::<_, Option<String>>(3)?,
                 "customerEmail": row.get::<_, Option<String>>(4)?,
+                "customerId": row.get::<_, Option<String>>(5)?,
+                "customer_id": row.get::<_, Option<String>>(5)?,
                 "items": items,
-                "totalAmount": row.get::<_, f64>(6)?,
-                "taxAmount": row.get::<_, Option<f64>>(7)?,
-                "subtotal": row.get::<_, Option<f64>>(8)?,
-                "status": row.get::<_, String>(9)?,
-                "cancellationReason": row.get::<_, Option<String>>(10)?,
-                "orderType": row.get::<_, Option<String>>(11)?,
-                "tableNumber": row.get::<_, Option<String>>(12)?,
-                "deliveryAddress": row.get::<_, Option<String>>(13)?,
-                "deliveryNotes": row.get::<_, Option<String>>(14)?,
-                "nameOnRinger": row.get::<_, Option<String>>(15)?,
-                "specialInstructions": row.get::<_, Option<String>>(16)?,
-                "createdAt": row.get::<_, Option<String>>(17)?,
-                "updatedAt": row.get::<_, Option<String>>(18)?,
-                "estimatedTime": row.get::<_, Option<i64>>(19)?,
-                "supabaseId": row.get::<_, Option<String>>(20)?,
-                "syncStatus": row.get::<_, String>(21)?,
-                "paymentStatus": row.get::<_, Option<String>>(22)?,
-                "paymentMethod": row.get::<_, Option<String>>(23)?,
-                "paymentTransactionId": row.get::<_, Option<String>>(24)?,
-                "staffShiftId": row.get::<_, Option<String>>(25)?,
-                "staffId": row.get::<_, Option<String>>(26)?,
-                "discountPercentage": row.get::<_, Option<f64>>(27)?,
-                "discountAmount": row.get::<_, Option<f64>>(28)?,
-                "tipAmount": row.get::<_, Option<f64>>(29)?,
-                "version": row.get::<_, Option<i64>>(30)?,
-                "updatedBy": row.get::<_, Option<String>>(31)?,
-                "lastSyncedAt": row.get::<_, Option<String>>(32)?,
-                "remoteVersion": row.get::<_, Option<i64>>(33)?,
-                "terminalId": row.get::<_, Option<String>>(34)?,
-                "branchId": row.get::<_, Option<String>>(35)?,
-                "plugin": row.get::<_, Option<String>>(36)?,
-                "externalPluginOrderId": row.get::<_, Option<String>>(37)?,
-                "taxRate": row.get::<_, Option<f64>>(38)?,
-                "deliveryFee": row.get::<_, Option<f64>>(39)?,
+                "totalAmount": row.get::<_, f64>(7)?,
+                "taxAmount": row.get::<_, Option<f64>>(8)?,
+                "subtotal": row.get::<_, Option<f64>>(9)?,
+                "status": row.get::<_, String>(10)?,
+                "cancellationReason": row.get::<_, Option<String>>(11)?,
+                "orderType": row.get::<_, Option<String>>(12)?,
+                "tableNumber": row.get::<_, Option<String>>(13)?,
+                "deliveryAddress": row.get::<_, Option<String>>(14)?,
+                "deliveryNotes": row.get::<_, Option<String>>(15)?,
+                "nameOnRinger": row.get::<_, Option<String>>(16)?,
+                "specialInstructions": row.get::<_, Option<String>>(17)?,
+                "createdAt": row.get::<_, Option<String>>(18)?,
+                "updatedAt": row.get::<_, Option<String>>(19)?,
+                "estimatedTime": row.get::<_, Option<i64>>(20)?,
+                "supabaseId": row.get::<_, Option<String>>(21)?,
+                "syncStatus": row.get::<_, String>(22)?,
+                "paymentStatus": row.get::<_, Option<String>>(23)?,
+                "paymentMethod": row.get::<_, Option<String>>(24)?,
+                "paymentTransactionId": row.get::<_, Option<String>>(25)?,
+                "staffShiftId": row.get::<_, Option<String>>(26)?,
+                "staffId": row.get::<_, Option<String>>(27)?,
+                "discountPercentage": row.get::<_, Option<f64>>(28)?,
+                "discountAmount": row.get::<_, Option<f64>>(29)?,
+                "tipAmount": row.get::<_, Option<f64>>(30)?,
+                "version": row.get::<_, Option<i64>>(31)?,
+                "updatedBy": row.get::<_, Option<String>>(32)?,
+                "lastSyncedAt": row.get::<_, Option<String>>(33)?,
+                "remoteVersion": row.get::<_, Option<i64>>(34)?,
+                "terminalId": row.get::<_, Option<String>>(35)?,
+                "branchId": row.get::<_, Option<String>>(36)?,
+                "plugin": row.get::<_, Option<String>>(37)?,
+                "externalPluginOrderId": row.get::<_, Option<String>>(38)?,
+                "taxRate": row.get::<_, Option<f64>>(39)?,
+                "deliveryFee": row.get::<_, Option<f64>>(40)?,
                 "is_ghost": is_ghost,
                 "isGhost": is_ghost,
                 "ghost_source": ghost_source,
                 "ghostSource": ghost_source,
                 "ghost_metadata": ghost_metadata,
                 "ghostMetadata": ghost_metadata,
-                "deliveryCity": row.get::<_, Option<String>>(43)?,
-                "delivery_city": row.get::<_, Option<String>>(43)?,
-                "deliveryPostalCode": row.get::<_, Option<String>>(44)?,
-                "delivery_postal_code": row.get::<_, Option<String>>(44)?,
-                "deliveryFloor": row.get::<_, Option<String>>(45)?,
-                "delivery_floor": row.get::<_, Option<String>>(45)?,
-                "driverId": row.get::<_, Option<String>>(46)?,
-                "driver_id": row.get::<_, Option<String>>(46)?,
-                "driverName": row.get::<_, Option<String>>(47)?,
-                "driver_name": row.get::<_, Option<String>>(47)?,
+                "deliveryCity": row.get::<_, Option<String>>(44)?,
+                "delivery_city": row.get::<_, Option<String>>(44)?,
+                "deliveryPostalCode": row.get::<_, Option<String>>(45)?,
+                "delivery_postal_code": row.get::<_, Option<String>>(45)?,
+                "deliveryFloor": row.get::<_, Option<String>>(46)?,
+                "delivery_floor": row.get::<_, Option<String>>(46)?,
+                "driverId": row.get::<_, Option<String>>(47)?,
+                "driver_id": row.get::<_, Option<String>>(47)?,
+                "driverName": row.get::<_, Option<String>>(48)?,
+                "driver_name": row.get::<_, Option<String>>(48)?,
             }))
         },
     );
@@ -1941,6 +1948,16 @@ pub async fn force_sync(
 ) -> Result<(), String> {
     if !storage::is_configured() {
         return Err("Terminal not configured".into());
+    }
+
+    if let Err(e) = reconcile_deferred_payments(db) {
+        warn!("Payment reconciliation failed during force sync: {e}");
+    }
+    if let Err(e) = reconcile_deferred_adjustments(db) {
+        warn!("Adjustment reconciliation failed during force sync: {e}");
+    }
+    if let Err(e) = reconcile_deferred_financials(db) {
+        warn!("Financial reconciliation failed during force sync: {e}");
     }
 
     let synced = run_sync_cycle(db, app).await?;
@@ -3408,6 +3425,7 @@ fn materialize_remote_order(
     let customer_name = str_any(remote_order, &["customer_name", "customerName"]);
     let customer_phone = str_any(remote_order, &["customer_phone", "customerPhone"]);
     let customer_email = str_any(remote_order, &["customer_email", "customerEmail"]);
+    let customer_id = str_any(remote_order, &["customer_id", "customerId"]);
     let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]).unwrap_or(0.0);
     let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]).unwrap_or(0.0);
     let subtotal = num_any(remote_order, &["subtotal"]).unwrap_or(total_amount);
@@ -3489,7 +3507,7 @@ fn materialize_remote_order(
 
     conn.execute(
         "INSERT INTO orders (
-            id, order_number, customer_name, customer_phone, customer_email,
+            id, order_number, customer_name, customer_phone, customer_email, customer_id,
             items, total_amount, tax_amount, subtotal, status,
             order_type, table_number, delivery_address, delivery_city, delivery_postal_code,
             delivery_floor, delivery_notes, name_on_ringer, special_instructions,
@@ -3499,16 +3517,16 @@ fn materialize_remote_order(
             tip_amount, version, terminal_id, branch_id, plugin, external_plugin_order_id,
             tax_rate, delivery_fee, is_ghost, ghost_source, ghost_metadata
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5,
-            ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18, ?19,
-            ?20, ?21, ?22, ?23, 'synced',
-            ?24, ?25, ?26, ?27,
-            ?28, ?29, ?30, ?31, ?32,
-            ?33, ?34, ?35, ?36, ?37,
-            ?38, ?39, ?40, ?41,
-            ?42, ?43
+            ?1, ?2, ?3, ?4, ?5, ?6,
+            ?7, ?8, ?9, ?10, ?11,
+            ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23, ?24, 'synced',
+            ?25, ?26, ?27, ?28,
+            ?29, ?30, ?31, ?32, ?33,
+            ?34, ?35, ?36, ?37, ?38,
+            ?39, ?40, ?41, ?42,
+            ?43, ?44
         )",
         params![
             local_id,
@@ -3516,6 +3534,7 @@ fn materialize_remote_order(
             customer_name,
             customer_phone,
             customer_email,
+            customer_id,
             items_json,
             total_amount,
             tax_amount,

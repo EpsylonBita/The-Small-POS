@@ -548,6 +548,22 @@ export interface OrderCustomerInfoUpdateParams {
   deliveryNotes?: string | null;
 }
 
+export interface PickupToDeliveryConversionParams {
+  orderId: string;
+  customerId?: string | null;
+  customerName: string;
+  customerPhone: string;
+  customerEmail?: string | null;
+  deliveryAddress: string;
+  deliveryCity?: string | null;
+  deliveryPostalCode?: string | null;
+  deliveryFloor?: string | null;
+  deliveryNotes?: string | null;
+  nameOnRinger?: string | null;
+  deliveryFee: number;
+  totalAmount: number;
+}
+
 // -- Sync --------------------------------------------------------------------
 
 export interface SyncStatus {
@@ -727,6 +743,12 @@ export interface CloseShiftParams {
   paymentAmount?: number;
 }
 
+export interface ShiftCheckInEligibility {
+  requiresCashierFirst: boolean;
+  hasCashierForBusinessDay: boolean;
+  businessDayStartAt?: string | null;
+}
+
 export interface RecordExpenseParams {
   shiftId: string;
   amount: number;
@@ -902,6 +924,7 @@ export interface PlatformBridge {
       action: OrderEditSettlementAction;
     }): Promise<IpcResult>;
     updateCustomerInfo(payload: OrderCustomerInfoUpdateParams): Promise<IpcResult>;
+    convertPickupToDelivery(payload: PickupToDeliveryConversionParams): Promise<IpcResult>;
     updateFinancials(payload: OrderFinancialsUpdateParams): Promise<IpcResult>;
     delete(orderId: string): Promise<IpcResult>;
     saveFromRemote(order: any): Promise<IpcResult>;
@@ -1081,6 +1104,7 @@ export interface PlatformBridge {
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
     getActiveByTerminalLoose(terminalId: string): Promise<any>;
     getActiveCashierByTerminal(branchId: string, terminalId: string): Promise<any>;
+    getCheckInEligibility(branchId: string, terminalId: string): Promise<ShiftCheckInEligibility>;
     getActiveCashierByTerminalLoose(terminalId: string): Promise<any>;
     getSummary(shiftId: string, options?: { skipBackfill?: boolean }): Promise<any>;
     recordExpense(params: RecordExpenseParams): Promise<IpcResult>;
@@ -1413,6 +1437,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'order:update-status': 'orders.updateStatus',
   'order:update-items': 'orders.updateItems',
   'order:update-customer-info': 'orders.updateCustomerInfo',
+  'order:convert-pickup-to-delivery': 'orders.convertPickupToDelivery',
   'order:update-financials': 'orders.updateFinancials',
   'order:delete': 'orders.delete',
   'order:save-from-remote': 'orders.saveFromRemote',
@@ -1529,6 +1554,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   'shift:get-active-by-terminal': 'shifts.getActiveByTerminal',
   'shift:get-active-by-terminal-loose': 'shifts.getActiveByTerminalLoose',
   'shift:get-active-cashier-by-terminal': 'shifts.getActiveCashierByTerminal',
+  'shift:get-check-in-eligibility': 'shifts.getCheckInEligibility',
   'shift:get-active-cashier-by-terminal-loose': 'shifts.getActiveCashierByTerminalLoose',
   'shift:get-summary': 'shifts.getSummary',
   'shift:record-expense': 'shifts.recordExpense',
@@ -1882,6 +1908,8 @@ export class TauriBridge implements PlatformBridge {
     }) => this.inv('orders:apply-edit-settlement', payload),
     updateCustomerInfo: (payload: OrderCustomerInfoUpdateParams) =>
       this.inv('order:update-customer-info', payload),
+    convertPickupToDelivery: (payload: PickupToDeliveryConversionParams) =>
+      this.inv('order:convert-pickup-to-delivery', payload),
     updateFinancials: (payload: OrderFinancialsUpdateParams) => this.inv('order:update-financials', payload),
     delete: (id: string) => this.inv('order:delete', id),
     saveFromRemote: (o: any) => this.inv('order:save-from-remote', o),
@@ -2080,6 +2108,8 @@ export class TauriBridge implements PlatformBridge {
     getActiveByTerminal: (b: string, t: string) => this.inv('shift:get-active-by-terminal', b, t),
     getActiveByTerminalLoose: (t: string) => this.inv('shift:get-active-by-terminal-loose', t),
     getActiveCashierByTerminal: (b: string, t: string) => this.inv('shift:get-active-cashier-by-terminal', b, t),
+    getCheckInEligibility: (b: string, t: string) =>
+      this.inv('shift:get-check-in-eligibility', b, t) as Promise<ShiftCheckInEligibility>,
     getActiveCashierByTerminalLoose: (t: string) =>
       this.inv('shift:get-active-cashier-by-terminal-loose', t),
     getSummary: (id: string, opts?: { skipBackfill?: boolean }) => this.inv('shift:get-summary', id, opts),

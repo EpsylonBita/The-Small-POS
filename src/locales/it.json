@@ -3418,6 +3418,7 @@
   },
   "bulkActions": {
     "driver": "Fattorino",
+    "delivery": "Consegna",
     "pickup": "Asporto",
     "edit": "Modifica",
     "cancel": "Annulla",

@@ -13,7 +13,7 @@ use chrono::{Local, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -48,6 +48,112 @@ struct EffectiveZReportWindow {
     period_start_at: String,
     cutoff_at: Option<String>,
     lower_bound_mode: LowerBoundMode,
+}
+
+#[derive(Default)]
+struct RolloverProtection {
+    shift_ids: HashSet<String>,
+    shift_expense_ids: HashSet<String>,
+    staff_payment_ids: HashSet<String>,
+}
+
+fn collect_rollover_protection(conn: &Connection) -> Result<RolloverProtection, String> {
+    let mut protection = RolloverProtection::default();
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_type, entity_id, COALESCE(payload, '')
+             FROM sync_queue
+             WHERE status != 'synced'
+               AND entity_type IN ('shift', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+        )
+        .map_err(|e| format!("prepare rollover protection selector: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query rollover protection selector: {e}"))?;
+
+    for row in rows {
+        let (entity_type, entity_id, payload) =
+            row.map_err(|e| format!("collect rollover protection selector: {e}"))?;
+
+        match entity_type.as_str() {
+            "shift" => {
+                protection.shift_ids.insert(entity_id);
+            }
+            "shift_expense" => {
+                protection.shift_expense_ids.insert(entity_id);
+            }
+            "staff_payment" => {
+                protection.staff_payment_ids.insert(entity_id);
+            }
+            _ => {}
+        }
+
+        if let Some(dependency) =
+            crate::sync::resolve_financial_parent_shift_dependency(conn, &entity_type, &payload)
+        {
+            protection.shift_ids.insert(dependency.parent_shift_id);
+        }
+    }
+
+    Ok(protection)
+}
+
+fn stage_rollover_protection(conn: &Connection, protection: &RolloverProtection) -> Result<(), String> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp_rollover_protected_shift_ids;
+         CREATE TEMP TABLE temp_rollover_protected_shift_ids (
+             id TEXT PRIMARY KEY
+         );
+         DROP TABLE IF EXISTS temp_rollover_protected_shift_expense_ids;
+         CREATE TEMP TABLE temp_rollover_protected_shift_expense_ids (
+             id TEXT PRIMARY KEY
+         );
+         DROP TABLE IF EXISTS temp_rollover_protected_staff_payment_ids;
+         CREATE TEMP TABLE temp_rollover_protected_staff_payment_ids (
+             id TEXT PRIMARY KEY
+         );",
+    )
+    .map_err(|e| format!("prepare rollover protection temp tables: {e}"))?;
+
+    for shift_id in &protection.shift_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_rollover_protected_shift_ids (id) VALUES (?1)",
+            params![shift_id],
+        )
+        .map_err(|e| format!("stage protected shift id: {e}"))?;
+    }
+
+    for expense_id in &protection.shift_expense_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_rollover_protected_shift_expense_ids (id) VALUES (?1)",
+            params![expense_id],
+        )
+        .map_err(|e| format!("stage protected shift expense id: {e}"))?;
+    }
+
+    for payment_id in &protection.staff_payment_ids {
+        conn.execute(
+            "INSERT OR IGNORE INTO temp_rollover_protected_staff_payment_ids (id) VALUES (?1)",
+            params![payment_id],
+        )
+        .map_err(|e| format!("stage protected staff payment id: {e}"))?;
+    }
+
+    Ok(())
+}
+
+pub(crate) struct PreparedZReportSubmission {
+    pub generated: Value,
+    pub z_report_id: Option<String>,
+    pub created_new_z_report: bool,
+    pub report_date: String,
+    pub rollover_timestamp: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2976,10 +3082,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
 // Submit Z-report + finalize end-of-day (Gap 8)
 // ---------------------------------------------------------------------------
 
-/// Submit a Z-report: generate (or return existing), perform the local
-/// business-day rollover, and return the local close result plus queued
-/// sync state for the admin submission.
-pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
+pub(crate) fn prepare_z_report_submission(
+    db: &DbState,
+    payload: &Value,
+) -> Result<PreparedZReportSubmission, String> {
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
@@ -3109,8 +3215,6 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     let z_report_id = extract_z_report_id(&generated);
     let created_new_z_report = z_report_id.is_some() && !z_report_result_is_existing(&generated);
 
-    // Step 2: Atomically advance the business-day cutoff, reset counters, and
-    // clear the local operational day tables.
     let rollover_timestamp = window
         .cutoff_at
         .clone()
@@ -3122,13 +3226,30 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         "Starting local Z-report day rollover"
     );
 
-    // Step 3: Finalize end-of-day (clear operational data)
-    let report_date = window.report_date.clone();
-    let cleanup = match apply_local_day_rollover(db, &report_date, &rollover_timestamp) {
+    Ok(PreparedZReportSubmission {
+        generated,
+        z_report_id,
+        created_new_z_report,
+        report_date: window.report_date,
+        rollover_timestamp,
+    })
+}
+
+pub(crate) fn finalize_prepared_z_report_submission(
+    db: &DbState,
+    prepared: &PreparedZReportSubmission,
+) -> Result<Value, String> {
+    // Step 2: Atomically advance the business-day cutoff, reset counters, and
+    // clear the local operational day tables.
+    let cleanup = match apply_local_day_rollover(
+        db,
+        &prepared.report_date,
+        &prepared.rollover_timestamp,
+    ) {
         Ok(cleanup) => cleanup,
         Err(error) => {
-            if created_new_z_report {
-                if let Some(ref generated_id) = z_report_id {
+            if prepared.created_new_z_report {
+                if let Some(ref generated_id) = prepared.z_report_id {
                     match db.conn.lock() {
                         Ok(conn) => {
                             if let Err(discard_error) =
@@ -3156,7 +3277,7 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
         }
     };
 
-    let sync_state = if let Some(ref generated_id) = z_report_id {
+    let sync_state = if let Some(ref generated_id) = prepared.z_report_id {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         current_z_report_sync_state(&conn, generated_id)
     } else {
@@ -3165,14 +3286,22 @@ pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
 
     Ok(serde_json::json!({
         "success": true,
-        "data": generated,
+        "data": prepared.generated.clone(),
         "cleanup": cleanup,
-        "lastZReportTimestamp": rollover_timestamp,
-        "zReportId": z_report_id,
+        "lastZReportTimestamp": prepared.rollover_timestamp,
+        "zReportId": prepared.z_report_id.clone(),
         "localDayClosed": true,
-        "syncQueued": z_report_id.is_some(),
+        "syncQueued": prepared.z_report_id.is_some(),
         "syncState": sync_state,
     }))
+}
+
+/// Submit a Z-report: generate (or return existing), perform the local
+/// business-day rollover, and return the local close result plus queued
+/// sync state for the admin submission.
+pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let prepared = prepare_z_report_submission(db, payload)?;
+    finalize_prepared_z_report_submission(db, &prepared)
 }
 
 /// Finalize end-of-day: clear ALL operational data up to and including the
@@ -3214,6 +3343,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("collect cleanup order selector: {e}"))?;
 
+    let rollover_protection = collect_rollover_protection(conn)?;
+
     conn.execute_batch(
         "DROP TABLE IF EXISTS temp_z_report_order_ids;
          CREATE TEMP TABLE temp_z_report_order_ids (
@@ -3229,6 +3360,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         )
         .map_err(|e| format!("stage cleanup order id: {e}"))?;
     }
+
+    stage_rollover_protection(conn, &rollover_protection)?;
 
     let mut cleared = serde_json::Map::new();
 
@@ -3278,7 +3411,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "shift_expenses",
         "DELETE FROM shift_expenses
-         WHERE datetime(created_at) <= datetime(?1)",
+         WHERE datetime(created_at) <= datetime(?1)
+           AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_expense_ids)",
         Some(cutoff_at),
     );
     cleared.insert("shift_expenses".into(), serde_json::json!(c));
@@ -3288,7 +3422,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "staff_payments",
         "DELETE FROM staff_payments
-         WHERE datetime(created_at) <= datetime(?1)",
+         WHERE datetime(created_at) <= datetime(?1)
+           AND id NOT IN (SELECT id FROM temp_rollover_protected_staff_payment_ids)",
         Some(cutoff_at),
     );
     cleared.insert("staff_payments".into(), serde_json::json!(c));
@@ -3308,7 +3443,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "cash_drawer_sessions",
         "DELETE FROM cash_drawer_sessions
-         WHERE datetime(COALESCE(closed_at, opened_at, created_at)) <= datetime(?1)",
+         WHERE datetime(COALESCE(closed_at, opened_at, created_at)) <= datetime(?1)
+           AND staff_shift_id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
     );
     cleared.insert("cash_drawer_sessions".into(), serde_json::json!(c));
@@ -3318,7 +3454,8 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
         conn,
         "staff_shifts",
         "DELETE FROM staff_shifts
-         WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)",
+         WHERE datetime(COALESCE(check_out_time, check_in_time, created_at)) <= datetime(?1)
+           AND id NOT IN (SELECT id FROM temp_rollover_protected_shift_ids)",
         Some(cutoff_at),
     );
     cleared.insert("staff_shifts".into(), serde_json::json!(c));
@@ -3333,8 +3470,13 @@ fn finalize_end_of_day_counts(conn: &Connection, cutoff_at: &str) -> Result<Valu
     );
     cleared.insert("orders".into(), serde_json::json!(c));
 
-    conn.execute_batch("DROP TABLE IF EXISTS temp_z_report_order_ids")
-        .map_err(|e| format!("cleanup temp order ids: {e}"))?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp_z_report_order_ids;
+         DROP TABLE IF EXISTS temp_rollover_protected_shift_ids;
+         DROP TABLE IF EXISTS temp_rollover_protected_shift_expense_ids;
+         DROP TABLE IF EXISTS temp_rollover_protected_staff_payment_ids;",
+    )
+    .map_err(|e| format!("cleanup temp tables: {e}"))?;
 
     Ok(Value::Object(cleared))
 }
@@ -4762,6 +4904,94 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending, 1, "pending sync_queue entry should be preserved");
+    }
+
+    #[test]
+    fn test_local_day_rollover_preserves_parent_shift_for_unsynced_staff_payment() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            ensure_staff_payments_table(&conn);
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at
+                 ) VALUES (
+                    'payment-orphan-risk', ?1, 'staff-2', 15.0, 'wage', 'late wage', '2026-02-16T18:30:38Z'
+                 )",
+                params![shift_id.clone()],
+            )
+            .expect("insert staff payment");
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status, created_at)
+                 VALUES (
+                    'staff_payment',
+                    'payment-orphan-risk',
+                    'insert',
+                    ?1,
+                    'staff-payment-pending',
+                    'pending',
+                    '2026-02-16T18:30:38Z'
+                 )",
+                params![serde_json::json!({
+                    "id": "payment-orphan-risk",
+                    "cashierShiftId": shift_id.clone(),
+                    "paidByCashierShiftId": shift_id.clone(),
+                    "paidToStaffId": "staff-2",
+                    "amount": 15.0,
+                    "paymentType": "wage",
+                    "createdAt": "2026-02-16T18:30:38Z",
+                    "updatedAt": "2026-02-16T18:30:38Z"
+                })
+                .to_string()],
+            )
+            .expect("insert pending staff payment sync row");
+        }
+
+        let result = apply_local_day_rollover(&db, "2026-02-16", "2026-02-16T23:59:59Z")
+            .expect("cleanup should succeed");
+
+        assert_eq!(
+            result["staff_payments"], 0,
+            "unsynced staff payment should remain locally"
+        );
+        assert_eq!(
+            result["staff_shifts"], 0,
+            "parent cashier shift should remain locally while payment is unsynced"
+        );
+        assert_eq!(
+            result["cash_drawer_sessions"], 0,
+            "cash drawer should remain locally while parent shift is protected"
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let remaining_payment: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_payments WHERE id = 'payment-orphan-risk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_payment, 1, "staff payment should remain");
+
+        let remaining_shift: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE id = ?1",
+                params![shift_id.clone()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_shift, 1, "parent shift should remain");
+
+        let remaining_drawer: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cash_drawer_sessions WHERE staff_shift_id = ?1",
+                params![shift_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_drawer, 1, "parent drawer should remain");
     }
 
     // ---------------------------------------------------------------

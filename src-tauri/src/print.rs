@@ -2931,6 +2931,9 @@ fn build_shift_checkout_doc(
         total_delivery_fees: 0.0,
         total_tips: 0.0,
         amount_to_return: 0.0,
+        total_sells: 0.0,
+        cancelled_or_refunded_total: 0.0,
+        cancelled_or_refunded_count: 0,
     });
 
     // Populate driver-specific fields
@@ -2955,6 +2958,8 @@ fn build_shift_checkout_doc(
         let mut lines = Vec::new();
         let mut fees_total = 0.0_f64;
         let mut tips_total = 0.0_f64;
+        let mut cancelled_or_refunded_total = 0.0_f64;
+        let mut cancelled_or_refunded_count = 0_i64;
 
         if let Some(deliveries) = summary.get("driverDeliveries").and_then(Value::as_array) {
             let mut delivery_cash_total = 0.0_f64;
@@ -2969,11 +2974,18 @@ fn build_shift_checkout_doc(
                 let fee = d.get("delivery_fee").and_then(Value::as_f64).unwrap_or(0.0);
                 let tip = d.get("tip_amount").and_then(Value::as_f64).unwrap_or(0.0);
                 let total = d.get("total_amount").and_then(Value::as_f64).unwrap_or(0.0);
+                let status = d.get("status").and_then(Value::as_str).unwrap_or("");
+                let is_cancelled_or_refunded = is_cancelled_or_refunded_status(status);
 
-                delivery_cash_total += cash;
-                delivery_card_total += card;
-                fees_total += fee;
-                tips_total += tip;
+                if is_cancelled_or_refunded {
+                    cancelled_or_refunded_total += total;
+                    cancelled_or_refunded_count += 1;
+                } else {
+                    delivery_cash_total += cash;
+                    delivery_card_total += card;
+                    fees_total += fee;
+                    tips_total += tip;
+                }
 
                 lines.push(crate::receipt_renderer::DriverDeliveryLine {
                     order_number: d
@@ -2990,11 +3002,7 @@ fn build_shift_checkout_doc(
                     cash_collected: cash,
                     delivery_fee: fee,
                     tip_amount: tip,
-                    status: d
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
+                    status: status.to_string(),
                 });
             }
             if !lines.is_empty() {
@@ -3011,13 +3019,21 @@ fn build_shift_checkout_doc(
             doc.total_card_collected = card_total;
             doc.total_delivery_fees = fees_total;
             doc.total_tips = tips_total;
-            doc.amount_to_return = doc
-                .expected_amount
-                .unwrap_or(opening + cash_total - expenses);
+            doc.total_sells = cash_total + card_total;
+            doc.cancelled_or_refunded_total = cancelled_or_refunded_total;
+            doc.cancelled_or_refunded_count = cancelled_or_refunded_count;
+            doc.amount_to_return = opening + cash_total - expenses;
         }
     }
 
     doc
+}
+
+fn is_cancelled_or_refunded_status(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "cancelled" | "canceled" | "refunded"
+    )
 }
 
 fn number_from_paths(payload: &Value, paths: &[&str]) -> Option<f64> {
@@ -4757,9 +4773,150 @@ mod tests {
                 assert_eq!(doc.opening_amount, 25.0);
                 assert_eq!(doc.total_cash_collected, 0.0);
                 assert_eq!(doc.expected_amount, Some(25.0));
+                assert_eq!(doc.total_sells, 0.0);
+                assert_eq!(doc.cancelled_or_refunded_total, 0.0);
                 assert_eq!(doc.amount_to_return, 25.0);
                 assert_eq!(doc.closing_amount, Some(20.0));
                 assert_eq!(doc.variance_amount, Some(-5.0));
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_driver_shift_checkout_uses_driver_totals_instead_of_shift_expected(
+    ) {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cashier-shift-1", "drawer-shift-1");
+            db::set_setting(&conn, "terminal", "name", "Front Counter")
+                .expect("set terminal display name");
+        }
+
+        let open_result = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "driver-1",
+                "staffName": "Driver One",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "driver",
+                "openingCash": 20.0,
+            }),
+        )
+        .expect("open driver shift");
+        let driver_shift_id = open_result["shiftId"]
+            .as_str()
+            .expect("driver shift id")
+            .to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        {
+            let conn = db.conn.lock().unwrap();
+
+            conn.execute(
+                "INSERT INTO shift_expenses (
+                    id, staff_shift_id, staff_id, branch_id, expense_type,
+                    amount, description, receipt_number, status, sync_status,
+                    created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, 'other', ?5, 'Fuel', NULL, 'pending', 'pending', ?6, ?6)",
+                params![
+                    "expense-driver-1",
+                    driver_shift_id.as_str(),
+                    "driver-1",
+                    "branch-1",
+                    5.0,
+                    now.as_str()
+                ],
+            )
+            .expect("insert driver expense");
+
+            for (order_id, order_number, total_amount, status, payment_method) in [
+                ("order-driver-cash", "#D1", 67.75, "completed", "cash"),
+                ("order-driver-card", "#D2", 83.85, "completed", "card"),
+                ("order-driver-refund", "#D3", 9.0, "refunded", "cash"),
+            ] {
+                conn.execute(
+                    "INSERT INTO orders (
+                        id, order_number, items, total_amount, status, order_type,
+                        payment_status, payment_method, staff_shift_id, sync_status, created_at, updated_at
+                    ) VALUES (?1, ?2, '[]', ?3, ?4, 'delivery',
+                        'paid', ?5, ?6, 'pending', ?7, ?7)",
+                    params![
+                        order_id,
+                        order_number,
+                        total_amount,
+                        status,
+                        payment_method,
+                        driver_shift_id.as_str(),
+                        now.as_str()
+                    ],
+                )
+                .expect("insert driver order");
+            }
+
+            for (
+                earning_id,
+                order_id,
+                payment_method,
+                cash_collected,
+                card_amount,
+                tip_amount,
+            ) in [
+                ("earning-driver-cash", "order-driver-cash", "cash", 67.75, 0.0, 2.5),
+                ("earning-driver-card", "order-driver-card", "card", 0.0, 83.85, 0.0),
+                ("earning-driver-refund", "order-driver-refund", "cash", 9.0, 0.0, 1.0),
+            ] {
+                conn.execute(
+                    "INSERT INTO driver_earnings (
+                        id, driver_id, staff_shift_id, order_id, branch_id,
+                        delivery_fee, tip_amount, total_earning, payment_method,
+                        cash_collected, card_amount, cash_to_return, settled, created_at, updated_at
+                    ) VALUES (
+                        ?1, 'driver-1', ?2, ?3, 'branch-1',
+                        0.0, ?4, ?4, ?5,
+                        ?6, ?7, ?6, 0, ?8, ?8
+                    )",
+                    params![
+                        earning_id,
+                        driver_shift_id.as_str(),
+                        order_id,
+                        tip_amount,
+                        payment_method,
+                        cash_collected,
+                        card_amount,
+                        now.as_str()
+                    ],
+                )
+                .expect("insert driver earnings");
+            }
+
+            conn.execute(
+                "UPDATE staff_shifts
+                 SET status = 'closed',
+                     check_out_time = ?2,
+                     closing_cash_amount = 87.75,
+                     expected_cash_amount = 26.60,
+                     cash_variance = 61.15
+                 WHERE id = ?1",
+                params![driver_shift_id.as_str(), now.as_str()],
+            )
+            .expect("close driver shift snapshot");
+        }
+
+        let doc = build_document_for_job(&db, "shift_checkout", &driver_shift_id, None).unwrap();
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.role_type, "driver");
+                assert_eq!(doc.expected_amount, Some(26.60));
+                assert!((doc.total_cash_collected - 67.75).abs() < f64::EPSILON);
+                assert!((doc.total_card_collected - 83.85).abs() < f64::EPSILON);
+                assert!((doc.total_tips - 2.5).abs() < f64::EPSILON);
+                assert!((doc.total_sells - 151.60).abs() < 0.0001);
+                assert_eq!(doc.cancelled_or_refunded_count, 1);
+                assert!((doc.cancelled_or_refunded_total - 9.0).abs() < f64::EPSILON);
+                assert!((doc.amount_to_return - 82.75).abs() < 0.0001);
             }
             _ => panic!("expected shift checkout document"),
         }

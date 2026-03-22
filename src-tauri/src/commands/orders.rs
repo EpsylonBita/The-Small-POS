@@ -101,6 +101,43 @@ struct OrderUpdateCustomerInfoPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PickupToDeliveryConversionPayload {
+    #[serde(alias = "order_id")]
+    #[serde(alias = "id")]
+    #[serde(alias = "supabaseId")]
+    #[serde(alias = "supabase_id")]
+    order_id: String,
+    #[serde(default, alias = "customer_id")]
+    customer_id: Option<String>,
+    #[serde(alias = "customer_name")]
+    customer_name: String,
+    #[serde(alias = "customer_phone")]
+    customer_phone: String,
+    #[serde(default, alias = "customer_email")]
+    customer_email: Option<String>,
+    #[serde(alias = "delivery_address")]
+    delivery_address: String,
+    #[serde(default, alias = "delivery_city")]
+    delivery_city: Option<String>,
+    #[serde(default, alias = "delivery_postal_code")]
+    #[serde(alias = "postal_code")]
+    #[serde(alias = "postalCode")]
+    delivery_postal_code: Option<String>,
+    #[serde(default, alias = "delivery_floor")]
+    delivery_floor: Option<String>,
+    #[serde(default, alias = "delivery_notes")]
+    #[serde(alias = "notes")]
+    delivery_notes: Option<String>,
+    #[serde(default, alias = "name_on_ringer")]
+    name_on_ringer: Option<String>,
+    #[serde(alias = "delivery_fee")]
+    delivery_fee: f64,
+    #[serde(alias = "total_amount")]
+    total_amount: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OrderDeletePayload {
     #[serde(alias = "order_id")]
     #[serde(alias = "id")]
@@ -862,6 +899,47 @@ fn parse_order_update_customer_info_payload(
     Ok(parsed)
 }
 
+fn parse_pickup_to_delivery_conversion_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<PickupToDeliveryConversionPayload, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let mut parsed: PickupToDeliveryConversionPayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid pickup to delivery payload: {e}"))?;
+
+    parsed.order_id = parsed.order_id.trim().to_string();
+    parsed.customer_id = normalize_optional_text(parsed.customer_id);
+    parsed.customer_name = parsed.customer_name.trim().to_string();
+    parsed.customer_phone = parsed.customer_phone.trim().to_string();
+    parsed.customer_email = normalize_optional_text(parsed.customer_email);
+    parsed.delivery_address = parsed.delivery_address.trim().to_string();
+    parsed.delivery_city = normalize_optional_text(parsed.delivery_city);
+    parsed.delivery_postal_code = normalize_optional_text(parsed.delivery_postal_code);
+    parsed.delivery_floor = normalize_optional_text(parsed.delivery_floor);
+    parsed.delivery_notes = normalize_optional_text(parsed.delivery_notes);
+    parsed.name_on_ringer = normalize_optional_text(parsed.name_on_ringer);
+
+    if parsed.order_id.is_empty() {
+        return Err("Missing orderId".into());
+    }
+    if parsed.customer_name.is_empty() {
+        return Err("Missing customerName".into());
+    }
+    if parsed.customer_phone.is_empty() {
+        return Err("Missing customerPhone".into());
+    }
+    if parsed.delivery_address.is_empty() {
+        return Err("Missing deliveryAddress".into());
+    }
+    if !parsed.delivery_fee.is_finite() || parsed.delivery_fee < 0.0 {
+        return Err("Invalid deliveryFee".into());
+    }
+    if !parsed.total_amount.is_finite() || parsed.total_amount < 0.0 {
+        return Err("Invalid totalAmount".into());
+    }
+
+    Ok(parsed)
+}
+
 fn resolve_driver_display_name(conn: &rusqlite::Connection, driver_id: &str) -> Option<String> {
     let driver_id = driver_id.trim();
     if driver_id.is_empty() {
@@ -1039,6 +1117,111 @@ pub async fn order_update_status(
     }))
 }
 
+fn convert_pickup_order_to_delivery_inner(
+    db: &db::DbState,
+    payload: PickupToDeliveryConversionPayload,
+) -> Result<(String, serde_json::Value), String> {
+    let PickupToDeliveryConversionPayload {
+        order_id,
+        customer_id,
+        customer_name,
+        customer_phone,
+        customer_email,
+        delivery_address,
+        delivery_city,
+        delivery_postal_code,
+        delivery_floor,
+        delivery_notes,
+        name_on_ringer,
+        delivery_fee,
+        total_amount,
+    } = payload;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actual_order_id = resolve_order_id(&conn, &order_id).ok_or("Order not found")?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("begin pickup to delivery transaction: {e}"))?;
+
+    tx.execute(
+        "UPDATE orders
+         SET customer_id = ?1,
+             customer_name = ?2,
+             customer_phone = ?3,
+             customer_email = ?4,
+             order_type = 'delivery',
+             delivery_address = ?5,
+             delivery_city = ?6,
+             delivery_postal_code = ?7,
+             delivery_floor = ?8,
+             delivery_notes = ?9,
+             name_on_ringer = ?10,
+             delivery_fee = ?11,
+             total_amount = ?12,
+             driver_id = NULL,
+             driver_name = NULL,
+             sync_status = 'pending',
+             updated_at = ?13
+         WHERE id = ?14",
+        rusqlite::params![
+            customer_id.as_deref(),
+            &customer_name,
+            &customer_phone,
+            customer_email.as_deref(),
+            &delivery_address,
+            delivery_city.as_deref(),
+            delivery_postal_code.as_deref(),
+            delivery_floor.as_deref(),
+            delivery_notes.as_deref(),
+            name_on_ringer.as_deref(),
+            delivery_fee,
+            total_amount,
+            &now,
+            &actual_order_id,
+        ],
+    )
+    .map_err(|e| format!("convert pickup order to delivery: {e}"))?;
+
+    let sync_payload = serde_json::json!({
+        "orderId": actual_order_id.clone(),
+        "customerId": customer_id,
+        "customer_id": customer_id,
+        "customerName": customer_name,
+        "customerEmail": customer_email,
+        "customerPhone": customer_phone,
+        "orderType": "delivery",
+        "deliveryAddress": delivery_address,
+        "deliveryCity": delivery_city,
+        "deliveryPostalCode": delivery_postal_code,
+        "deliveryFloor": delivery_floor,
+        "deliveryNotes": delivery_notes,
+        "nameOnRinger": name_on_ringer,
+        "deliveryFee": delivery_fee,
+        "totalAmount": total_amount,
+        "driverId": serde_json::Value::Null,
+        "driverName": serde_json::Value::Null
+    });
+    let idem = format!(
+        "order:convert-pickup-to-delivery:{}:{}",
+        actual_order_id,
+        uuid::Uuid::new_v4()
+    );
+    tx.execute(
+        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
+         VALUES ('order', ?1, 'update', ?2, ?3)",
+        rusqlite::params![&actual_order_id, sync_payload.to_string(), idem],
+    )
+    .map_err(|e| format!("enqueue pickup to delivery sync row: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("commit pickup to delivery transaction: {e}"))?;
+
+    drop(conn);
+    let order_json = sync::get_order_by_id(db, &actual_order_id)?;
+    Ok((actual_order_id, order_json))
+}
+
 #[tauri::command]
 pub async fn order_update_customer_info(
     arg0: Option<serde_json::Value>,
@@ -1117,6 +1300,24 @@ pub async fn order_update_customer_info(
     Ok(serde_json::json!({
         "success": true,
         "orderId": actual_order_id
+    }))
+}
+
+#[tauri::command]
+pub async fn order_convert_pickup_to_delivery(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_pickup_to_delivery_conversion_payload(arg0)?;
+    let (actual_order_id, order_json) = convert_pickup_order_to_delivery_inner(&db, payload)?;
+
+    let _ = app.emit("order_realtime_update", order_json.clone());
+
+    Ok(serde_json::json!({
+        "success": true,
+        "orderId": actual_order_id,
+        "data": order_json
     }))
 }
 
@@ -2784,6 +2985,40 @@ mod dto_tests {
         assert_eq!(parsed.delivery_postal_code.as_deref(), Some("10558"));
         assert_eq!(parsed.delivery_notes.as_deref(), Some("Ring once"));
     }
+
+    #[test]
+    fn parse_pickup_to_delivery_payload_trims_and_normalizes_fields() {
+        let parsed = parse_pickup_to_delivery_conversion_payload(Some(serde_json::json!({
+            "orderId": " order-7 ",
+            "customerId": " customer-1 ",
+            "customerName": "  Test Customer  ",
+            "customerPhone": "  12345  ",
+            "customerEmail": "  test@example.com  ",
+            "deliveryAddress": "  Main St 42  ",
+            "deliveryCity": "  Athens  ",
+            "deliveryPostalCode": "  10558  ",
+            "deliveryFloor": "  3  ",
+            "deliveryNotes": "  Ring once  ",
+            "nameOnRinger": "  Doorbell  ",
+            "deliveryFee": 4.5,
+            "totalAmount": 19.5
+        })))
+        .expect("pickup to delivery payload should parse");
+
+        assert_eq!(parsed.order_id, "order-7");
+        assert_eq!(parsed.customer_id.as_deref(), Some("customer-1"));
+        assert_eq!(parsed.customer_name, "Test Customer");
+        assert_eq!(parsed.customer_phone, "12345");
+        assert_eq!(parsed.customer_email.as_deref(), Some("test@example.com"));
+        assert_eq!(parsed.delivery_address, "Main St 42");
+        assert_eq!(parsed.delivery_city.as_deref(), Some("Athens"));
+        assert_eq!(parsed.delivery_postal_code.as_deref(), Some("10558"));
+        assert_eq!(parsed.delivery_floor.as_deref(), Some("3"));
+        assert_eq!(parsed.delivery_notes.as_deref(), Some("Ring once"));
+        assert_eq!(parsed.name_on_ringer.as_deref(), Some("Doorbell"));
+        assert!((parsed.delivery_fee - 4.5).abs() < 0.001);
+        assert!((parsed.total_amount - 19.5).abs() < 0.001);
+    }
 }
 
 #[cfg(test)]
@@ -2842,6 +3077,21 @@ mod transition_tests {
                 payment_method,
                 payment_status
             ],
+        )
+        .unwrap();
+    }
+
+    fn insert_pickup_order_for_conversion(db: &db::DbState, order_id: &str) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, order_number, items, subtotal, total_amount, status, order_type,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, '00001', '[]', 15.0, 15.0, 'pending', 'pickup',
+                 'synced', datetime('now'), datetime('now')
+             )",
+            params![order_id],
         )
         .unwrap();
     }
@@ -3139,5 +3389,145 @@ mod transition_tests {
         assert_eq!(payment_status, "partially_paid");
         assert_eq!(payment_method, "split");
         assert!((total_paid - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn convert_pickup_order_to_delivery_updates_order_and_enqueues_single_sync_row() {
+        let db = test_db();
+        insert_pickup_order_for_conversion(&db, "order-convert");
+
+        let (order_id, order_json) = convert_pickup_order_to_delivery_inner(
+            &db,
+            PickupToDeliveryConversionPayload {
+                order_id: "order-convert".into(),
+                customer_id: Some("customer-1".into()),
+                customer_name: "Alice".into(),
+                customer_phone: "123456".into(),
+                customer_email: Some("alice@example.com".into()),
+                delivery_address: "Main St 42".into(),
+                delivery_city: Some("Athens".into()),
+                delivery_postal_code: Some("10558".into()),
+                delivery_floor: Some("3".into()),
+                delivery_notes: Some("Side door".into()),
+                name_on_ringer: Some("Alice".into()),
+                delivery_fee: 4.0,
+                total_amount: 19.0,
+            },
+        )
+        .expect("convert pickup order to delivery");
+
+        assert_eq!(order_id, "order-convert");
+        assert_eq!(order_json.get("orderType").and_then(|value| value.as_str()), Some("delivery"));
+        assert_eq!(order_json.get("customerId").and_then(|value| value.as_str()), Some("customer-1"));
+        assert_eq!(order_json.get("deliveryAddress").and_then(|value| value.as_str()), Some("Main St 42"));
+        assert_eq!(order_json.get("deliveryCity").and_then(|value| value.as_str()), Some("Athens"));
+        assert_eq!(order_json.get("deliveryFloor").and_then(|value| value.as_str()), Some("3"));
+
+        let conn = db.conn.lock().unwrap();
+        let (
+            order_type,
+            customer_id,
+            delivery_address,
+            delivery_city,
+            delivery_floor,
+            delivery_fee,
+            total_amount,
+            sync_status,
+        ): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            f64,
+            f64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT
+                     order_type,
+                     customer_id,
+                     delivery_address,
+                     delivery_city,
+                     delivery_floor,
+                     delivery_fee,
+                     total_amount,
+                     sync_status
+                 FROM orders
+                 WHERE id = 'order-convert'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(order_type, "delivery");
+        assert_eq!(customer_id.as_deref(), Some("customer-1"));
+        assert_eq!(delivery_address.as_deref(), Some("Main St 42"));
+        assert_eq!(delivery_city.as_deref(), Some("Athens"));
+        assert_eq!(delivery_floor.as_deref(), Some("3"));
+        assert!((delivery_fee - 4.0).abs() < 0.001);
+        assert!((total_amount - 19.0).abs() < 0.001);
+        assert_eq!(sync_status, "pending");
+
+        let (queue_count, payload_text): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(payload)
+                 FROM sync_queue
+                 WHERE entity_type = 'order'
+                   AND entity_id = 'order-convert'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(queue_count, 1);
+        assert!(payload_text.contains("\"customerId\":\"customer-1\""));
+        assert!(payload_text.contains("\"orderType\":\"delivery\""));
+    }
+
+    #[test]
+    fn invalid_pickup_to_delivery_payload_does_not_mutate_order() {
+        let db = test_db();
+        insert_pickup_order_for_conversion(&db, "order-unchanged");
+
+        let err = parse_pickup_to_delivery_conversion_payload(Some(serde_json::json!({
+            "orderId": "order-unchanged",
+            "customerName": "Alice",
+            "customerPhone": "123456",
+            "deliveryAddress": "Main St 42",
+            "deliveryFee": -1,
+            "totalAmount": 19.0
+        })))
+        .expect_err("negative delivery fee should be rejected");
+        assert!(err.contains("Invalid deliveryFee"));
+
+        let conn = db.conn.lock().unwrap();
+        let (order_type, total_amount, queue_count): (String, f64, i64) = conn
+            .query_row(
+                "SELECT
+                     order_type,
+                     total_amount,
+                     (SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'order' AND entity_id = 'order-unchanged')
+                 FROM orders
+                 WHERE id = 'order-unchanged'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(order_type, "pickup");
+        assert!((total_amount - 15.0).abs() < 0.001);
+        assert_eq!(queue_count, 0);
     }
 }

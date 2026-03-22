@@ -32,6 +32,12 @@ interface ShiftIpcResult {
   data?: { shiftId?: string; id?: string; variance?: number };
 }
 
+interface ShiftCheckInEligibility {
+  requiresCashierFirst: boolean;
+  hasCashierForBusinessDay?: boolean;
+  businessDayStartAt?: string | null;
+}
+
 interface StaffShiftModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -406,6 +412,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [openingCash, setOpeningCash] = useState(''); // For cashiers: drawer count
   const [driverStartingAmount, setDriverStartingAmount] = useState(''); // For drivers: amount taken from cashier
   const [activeCashierExists, setActiveCashierExists] = useState<boolean>(true); // Default to true, updated on driver role select
+  const [checkInEligibility, setCheckInEligibility] = useState<ShiftCheckInEligibility | null>(null);
   const [showZeroCashConfirm, setShowZeroCashConfirm] = useState(false); // Confirmation dialog for cashier zero opening cash
 
   // Check-out state
@@ -743,6 +750,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   );
   const selectedStaffRoles = React.useMemo(() => getStaffRoles(selectedStaff), [selectedStaff]);
   const selectedPrimaryRole = selectedStaffRoles[0];
+  const cashierFirstGateActive = Boolean(checkInEligibility?.requiresCashierFirst);
+  const selectedStaffHasCashierRole = React.useMemo(
+    () =>
+      selectedStaffRoles.some(
+        (role) => (role.role_name || '').trim().toLowerCase() === 'cashier',
+      ),
+    [selectedStaffRoles],
+  );
   const contentPaneKey =
     effectiveMode === 'checkin'
       ? `checkin-${checkInStep}`
@@ -856,6 +871,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setRoleType('cashier');
       setOpeningCash('');
       setDriverStartingAmount(''); // Reset driver starting amount
+      setCheckInEligibility(null);
       setShowZeroCashConfirm(false); // Reset zero cash confirmation
       // Reset any previous checkout override/session
       setLocalMode(null);
@@ -1336,6 +1352,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setSelectedStaff(staffMember);
     setEnteredPin('');
     setError('');
+    setCheckInEligibility(null);
 
     // If this staff already has an active shift, jump to checkout view for that shift
     const existingShift = staffActiveShifts.get(staffMember.id);
@@ -1473,6 +1490,34 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  const loadCheckInEligibility = async (
+    branchId?: string,
+    terminalId?: string,
+  ): Promise<ShiftCheckInEligibility | null> => {
+    if (!branchId || !terminalId) {
+      return null;
+    }
+
+    try {
+      return await bridge.shifts.getCheckInEligibility(branchId, terminalId);
+    } catch (eligibilityError) {
+      console.warn('[StaffShiftModal] Failed to load check-in eligibility:', eligibilityError);
+      return null;
+    }
+  };
+
+  const finishPinVerification = async (
+    branchId: string,
+    terminalId: string | undefined,
+    staffRole: StaffShiftRole,
+  ) => {
+    const eligibility = await loadCheckInEligibility(branchId, terminalId);
+    setCheckInEligibility(eligibility);
+    setRoleType(staffRole);
+    navigateCheckInStep('select-role');
+    setError('');
+  };
+
   const handlePinSubmit = async () => {
     if (!selectedStaff) return;
 
@@ -1526,9 +1571,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
         if (legacyProbe.success) {
           const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
-          setRoleType(staffRole);
-          navigateCheckInStep('select-role');
-          setError('');
+          await finishPinVerification(branchId, terminalId, staffRole);
           return;
         }
 
@@ -1563,9 +1606,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
         if (authSucceeded) {
           const staffRole = selectedStaff.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server';
-          setRoleType(staffRole);
-          navigateCheckInStep('select-role');
-          setError('');
+          await finishPinVerification(branchId, terminalId, staffRole);
           return; // done
         }
 
@@ -1600,6 +1641,16 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   };
 
   const handleRoleSelect = async (role: StaffShiftRole) => {
+    if (cashierFirstGateActive && role !== 'cashier') {
+      setError(
+        t(
+          'modals.staffShift.cashierFirstCheckInRequired',
+          'The first check-in for this business day must be a cashier.',
+        ),
+      );
+      return;
+    }
+
     setRoleType(role);
     setError('');
     setSuccess('');
@@ -4147,20 +4198,61 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               </h3>
               <p className={`mt-2 ${checkInMutedTextClass}`}>{t('modals.staffShift.roleSelectionHelper')}</p>
 
+              {cashierFirstGateActive && (
+                <div className="mt-6 rounded-[22px] border border-amber-300/70 bg-amber-50/90 p-4 text-sm text-amber-900 shadow-[0_12px_24px_rgba(245,158,11,0.12)] dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-200" />
+                    <div className="space-y-1">
+                      <p className="font-semibold">
+                        {t(
+                          'modals.staffShift.cashierFirstCheckInRequired',
+                          'The first check-in for this business day must be a cashier.',
+                        )}
+                      </p>
+                      <p className="text-amber-800/90 dark:text-amber-100/80">
+                        {selectedStaffHasCashierRole
+                          ? t(
+                              'modals.staffShift.cashierFirstCheckInHelper',
+                              'Start a cashier shift first. The other roles unlock after the cashier checks in.',
+                            )
+                          : t(
+                              'modals.staffShift.cashierFirstCheckInBlocked',
+                              'This staff member does not have a cashier role. Go back and choose a cashier first.',
+                            )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="mt-6 space-y-3">
                 {selectedStaffRoles.map((role) => {
                   const rolePresentation = getRolePresentation(role.role_name);
+                  const isRoleLockedByCashierFirstGate =
+                    cashierFirstGateActive &&
+                    (role.role_name || '').trim().toLowerCase() !== 'cashier';
+                  const roleHelper = isRoleLockedByCashierFirstGate
+                    ? t(
+                        'modals.staffShift.cashierFirstRoleLockedHelper',
+                        'Cashier must start the current business day before this role can check in.',
+                      )
+                    : getCheckInRoleHelper(role.role_name);
 
                   return (
                     <motion.button
                       layout
                       key={role.role_id}
+                      disabled={isRoleLockedByCashierFirstGate}
                       onClick={() => {
                         void handleRoleSelect(
                           role.role_name as 'cashier' | 'manager' | 'driver' | 'kitchen' | 'server',
                         );
                       }}
-                      className="group w-full rounded-[24px] border border-slate-200/90 bg-white/95 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-[0_16px_32px_rgba(15,23,42,0.10)] dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/[0.05] dark:hover:shadow-[0_16px_32px_rgba(2,6,23,0.28)]"
+                      className={`group w-full rounded-[24px] border p-4 text-left transition-all ${
+                        isRoleLockedByCashierFirstGate
+                          ? 'cursor-not-allowed border-slate-200/70 bg-slate-100/80 opacity-65 dark:border-white/10 dark:bg-white/[0.03]'
+                          : 'border-slate-200/90 bg-white/95 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-[0_16px_32px_rgba(15,23,42,0.10)] dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/[0.05] dark:hover:shadow-[0_16px_32px_rgba(2,6,23,0.28)]'
+                      }`}
                       {...getInteractiveMotion('card')}
                     >
                       <div className="flex items-start gap-4">
@@ -4186,9 +4278,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                                 ? t('modals.staffShift.primaryRole')
                                 : t('modals.staffShift.secondaryRole')}
                             </span>
+                            {isRoleLockedByCashierFirstGate && (
+                              <span className="inline-flex items-center rounded-full border border-amber-300/80 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
+                                {t('modals.staffShift.roleLockedUntilCashier', 'Locked until cashier starts')}
+                              </span>
+                            )}
                           </div>
 
-                          <p className={`mt-2 ${checkInMutedTextClass}`}>{getCheckInRoleHelper(role.role_name)}</p>
+                          <p className={`mt-2 ${checkInMutedTextClass}`}>{roleHelper}</p>
                         </div>
 
                         <ChevronRight className={`mt-1 h-5 w-5 shrink-0 ${rolePresentation.iconColor}`} />

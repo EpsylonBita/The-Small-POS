@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 37;
+const CURRENT_SCHEMA_VERSION: i32 = 38;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -249,6 +249,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current < 37 {
         migrate_v37(conn)?;
     }
+    if current < 38 {
+        migrate_v38(conn)?;
+    }
 
     Ok(())
 }
@@ -276,6 +279,7 @@ fn migrate_v1(conn: &Connection) -> Result<(), String> {
             customer_name TEXT,
             customer_phone TEXT,
             customer_email TEXT,
+            customer_id TEXT,
             items TEXT NOT NULL DEFAULT '[]',
             total_amount REAL NOT NULL DEFAULT 0,
             tax_amount REAL DEFAULT 0,
@@ -2510,6 +2514,24 @@ fn migrate_v37(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v37 mark schema version: {e}"))?;
 
     info!("Applied migration v37 (payment adjustment settlement attribution)");
+    Ok(())
+}
+
+fn migrate_v38(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "orders", "customer_id")? {
+        conn.execute_batch("ALTER TABLE orders ADD COLUMN customer_id TEXT;")
+            .map_err(|e| format!("migration v38 add orders.customer_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
+        INSERT INTO schema_version (version) VALUES (38);
+        ",
+    )
+    .map_err(|e| format!("migration v38 mark schema version: {e}"))?;
+
+    info!("Applied migration v38 (orders.customer_id)");
     Ok(())
 }
 

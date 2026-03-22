@@ -101,6 +101,7 @@ export interface Order {
   customer_phone?: string;
   customerPhone?: string; // For backward compatibility
   customer_email?: string | null; // Allow null for compatibility
+  customerId?: string | null; // For backward compatibility
   customer_id?: string | null; // Allow null for compatibility
 
   // Order details
@@ -214,6 +215,7 @@ export interface OrderRow {
   customer_name?: string;
   customer_phone?: string;
   customer_email?: string;
+  customer_id?: string;
   items: string; // JSON string
   total_amount: number;
   tax_amount?: number;

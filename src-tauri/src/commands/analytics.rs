@@ -467,6 +467,65 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
     report_data
 }
 
+fn count_unsynced_sync_queue_items(db: &db::DbState) -> Result<i64, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM sync_queue
+         WHERE status NOT IN ('synced', 'applied')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("count unsynced sync queue items: {e}"))
+}
+
+fn summarize_unsynced_sync_queue_items(db: &db::DbState, limit: i64) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_type, status, COUNT(*) AS total
+             FROM sync_queue
+             WHERE status NOT IN ('synced', 'applied')
+             GROUP BY entity_type, status
+             ORDER BY total DESC, entity_type ASC, status ASC
+             LIMIT ?1",
+        )
+        .map_err(|e| format!("prepare unsynced sync queue summary: {e}"))?;
+    let rows = stmt
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query unsynced sync queue summary: {e}"))?;
+
+    Ok(rows
+        .filter_map(Result::ok)
+        .map(|(entity_type, status, total)| format!("{entity_type}:{status} x{total}"))
+        .collect::<Vec<_>>()
+        .join(", "))
+}
+
+fn ensure_sync_queue_clear_for_z_report(db: &db::DbState, stage: &str) -> Result<(), String> {
+    let pending = count_unsynced_sync_queue_items(db)?;
+    if pending == 0 {
+        return Ok(());
+    }
+
+    let summary = summarize_unsynced_sync_queue_items(db, 5)?;
+    let detail = if summary.is_empty() {
+        String::new()
+    } else {
+        format!(" Blocking items: {summary}.")
+    };
+
+    Err(format!(
+        "Cannot close day during {stage}: {pending} sync item(s) are still pending or failed.{detail}"
+    ))
+}
+
 fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_json::Value {
     match arg0 {
         Some(serde_json::Value::String(shift_id)) => serde_json::json!({
@@ -1221,10 +1280,23 @@ pub async fn report_get_end_of_day_status(
 pub async fn report_submit_z_report(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    sync_state: tauri::State<'_, std::sync::Arc<crate::sync::SyncState>>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.unwrap_or(serde_json::json!({}));
-    let mut result = zreport::submit_z_report(&db, &payload)?;
+    crate::sync::force_sync(&db, &sync_state, &app)
+        .await
+        .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
+    ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
+
+    let prepared = zreport::prepare_z_report_submission(&db, &payload)?;
+
+    crate::sync::force_sync(&db, &sync_state, &app)
+        .await
+        .map_err(|error| format!("Cannot close day: Z-report sync failed: {error}"))?;
+    ensure_sync_queue_clear_for_z_report(&db, "Z-report submission")?;
+
+    let mut result = zreport::finalize_prepared_z_report_submission(&db, &prepared)?;
 
     let z_report_id = extract_z_report_id_from_payload(&result)
         .or_else(|| {

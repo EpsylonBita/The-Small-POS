@@ -1,11 +1,109 @@
 use chrono::{Datelike, Local, TimeZone, Utc};
 use rusqlite::params;
 use serde::Deserialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing::{info, warn};
 
 use crate::shifts as shift_service;
 use crate::{db, fetch_supabase_rows, print, value_f64, value_str};
+
+async fn emit_sync_status_snapshot(
+    app: &tauri::AppHandle,
+    sync_state: &std::sync::Arc<crate::sync::SyncState>,
+) {
+    let network_status = crate::sync::check_network_status().await;
+    let network_is_online = network_status
+        .get("isOnline")
+        .and_then(serde_json::Value::as_bool);
+    let _ = app.emit("network_status", &network_status);
+
+    let db = app.state::<db::DbState>();
+    if let Ok(mut status) = crate::sync::get_sync_status(&db, sync_state) {
+        if let Some(is_online) = network_is_online {
+            if let Some(status_obj) = status.as_object_mut() {
+                status_obj.insert("isOnline".to_string(), serde_json::json!(is_online));
+            }
+        }
+        let _ = app.emit("sync_status", &status);
+        let _ = app.emit("sync-status-changed", &status);
+    }
+}
+
+fn schedule_immediate_financial_sync(
+    app: tauri::AppHandle,
+    entity_type: &'static str,
+    entity_id: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let sync_state = {
+            let state = app.state::<std::sync::Arc<crate::sync::SyncState>>();
+            state.inner().clone()
+        };
+
+        if !crate::storage::is_configured() {
+            emit_sync_status_snapshot(&app, &sync_state).await;
+            return;
+        }
+
+        let network_status = crate::sync::check_network_status().await;
+        let network_is_online = network_status
+            .get("isOnline")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !network_is_online {
+            emit_sync_status_snapshot(&app, &sync_state).await;
+            return;
+        }
+
+        let db_dir = {
+            let state = app.state::<db::DbState>();
+            state.db_path.parent().map(|value| value.to_path_buf())
+        };
+
+        let Some(db_dir) = db_dir else {
+            warn!(entity_type, entity_id = %entity_id, "Skipping immediate financial sync: missing database directory");
+            emit_sync_status_snapshot(&app, &sync_state).await;
+            return;
+        };
+
+        let background_db = match db::init(&db_dir) {
+            Ok(db) => db,
+            Err(error) => {
+                warn!(
+                    entity_type,
+                    entity_id = %entity_id,
+                    %error,
+                    "Failed to open background database for immediate financial sync"
+                );
+                emit_sync_status_snapshot(&app, &sync_state).await;
+                return;
+            }
+        };
+
+        match crate::sync::force_sync(&background_db, sync_state.as_ref(), &app).await {
+            Ok(()) => {
+                let _ = app.emit(
+                    "sync_complete",
+                    serde_json::json!({
+                        "trigger": "financial_auto",
+                        "entityType": entity_type,
+                        "entityId": entity_id,
+                    }),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    entity_type,
+                    entity_id = %entity_id,
+                    %error,
+                    "Immediate financial sync attempt failed"
+                );
+            }
+        }
+
+        emit_sync_status_snapshot(&app, &sync_state).await;
+    });
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -523,6 +621,16 @@ pub async fn shift_get_active_cashier_by_terminal(
 }
 
 #[tauri::command]
+pub async fn shift_get_check_in_eligibility(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_shift_branch_terminal_payload(arg0, arg1)?;
+    shift_service::get_check_in_eligibility(&db, &payload.branch_id, &payload.terminal_id)
+}
+
+#[tauri::command]
 pub async fn shift_get_active_cashier_by_terminal_loose(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
@@ -624,9 +732,14 @@ pub async fn shift_print_checkout(
 pub async fn shift_record_expense(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing expense payload")?;
-    shift_service::record_expense(&db, &payload)
+    let result = shift_service::record_expense(&db, &payload)?;
+    if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_financial_sync(app, "shift_expense", expense_id.to_string());
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -642,6 +755,7 @@ pub async fn shift_get_expenses(
 pub async fn shift_record_staff_payment(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing staff payment payload")?;
     let cashier_shift_id = value_str(&payload, &["cashierShiftId", "cashier_shift_id"])
@@ -710,10 +824,12 @@ pub async fn shift_record_staff_payment(
         rusqlite::params![payment_id, sync_payload.to_string(), idem],
     );
 
-    Ok(serde_json::json!({
+    let result = serde_json::json!({
         "success": true,
         "paymentId": payment_id
-    }))
+    });
+    schedule_immediate_financial_sync(app, "staff_payment", payment_id);
+    Ok(result)
 }
 
 #[tauri::command]

@@ -217,7 +217,7 @@ function locationToMapsValue(location: { address: string | null; coordinates: { 
 }
 
 export function buildGoogleMapsDirectionsUrl(
-  origin: StoreMapOrigin,
+  origin: StoreMapOrigin | null | undefined,
   stop: DeliveryRouteStopPayload,
 ): string | null {
   const destination = stop.coordinates
@@ -228,17 +228,16 @@ export function buildGoogleMapsDirectionsUrl(
     return null
   }
 
-  const originValue = locationToMapsValue(origin)
-  if (!originValue) {
-    return null
-  }
-
   const params = new URLSearchParams({
     api: '1',
-    origin: originValue,
     destination,
     travelmode: 'driving',
   })
+
+  const originValue = origin ? locationToMapsValue(origin) : ''
+  if (originValue) {
+    params.set('origin', originValue)
+  }
 
   return `https://www.google.com/maps/dir/?${params.toString()}`
 }

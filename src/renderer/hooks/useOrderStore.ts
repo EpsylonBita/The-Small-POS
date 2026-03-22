@@ -9,6 +9,7 @@ import type { Order } from '../../shared/types/orders';
 import { OrderService } from '../../services/OrderService';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import { pollFiscalReceiptStatus } from '../services/fiscal-status';
+import { sortOrdersOldestFirst } from '../utils/order-sorting';
 
 // Track self-created order IDs to suppress "new order received" toasts for own orders.
 // Since Rust no longer emits order_created for self-created orders, this is a safety net
@@ -291,7 +292,7 @@ const splitOrdersForQueue = (orders: Order[]): { visible: Order[]; pendingExtern
     return aTime - bTime;
   });
 
-  return { visible, pendingExternal };
+  return { visible: sortOrdersOldestFirst(visible), pendingExternal };
 };
 
 const splitOrdersForState = (orders: Order[]): { orders: Order[]; pendingExternalOrders: Order[] } => {
@@ -501,7 +502,7 @@ export const useOrderStore = create<OrderStore>()((set, get) => ({
             return splitOrdersForState(updatedOrders as Order[]);
           }
 
-          return splitOrdersForState([orderData, ...combined] as Order[]);
+          return splitOrdersForState([...combined, orderData] as Order[]);
         });
 
         get()._invalidateCache();

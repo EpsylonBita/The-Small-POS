@@ -20,6 +20,7 @@ import {
 import {
   getResolvedTerminalCredentials,
 } from '../../services/terminal-credentials';
+import { parseSpecialAddressInput } from '../../utils/specialAddress';
 
 import { inputBase } from '../../styles/designSystem';
 
@@ -158,13 +159,23 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
+    const parsedAddressInput = parseSpecialAddressInput(newValue);
     onChange(newValue);
-    setShowSuggestions(true);
 
     // Debounce the search
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
     }
+
+    if (parsedAddressInput.isSpecialLabelInput) {
+      searchRequestRef.current += 1;
+      setIsLoading(false);
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    setShowSuggestions(true);
 
     if (newValue.length < 2) {
       searchRequestRef.current += 1;
@@ -465,6 +476,12 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   const [validationSnapshot, setValidationSnapshot] = useState<string | null>(null);
   const [overrideApplied, setOverrideApplied] = useState(false);
   const [overrideReason, setOverrideReason] = useState('');
+  const parsedAddressInput = React.useMemo(
+    () => parseSpecialAddressInput(formData.address),
+    [formData.address],
+  );
+  const isSpecialAddressMode = parsedAddressInput.shouldSkipZoneValidation;
+  const normalizedStreetAddress = parsedAddressInput.normalizedAddress;
 
   const handleInputChange = (field: string, value: string) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -475,6 +492,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   };
 
   const clearAddressValidation = (addressValue: string) => {
+    const parsedAddress = parseSpecialAddressInput(addressValue);
     setSelectedAddressDetails(null);
     setAddressCoordinates(null);
     setDeliveryValidationResult(null);
@@ -482,7 +500,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     setOverrideApplied(false);
     setOverrideReason('');
 
-    if (!addressValue.trim()) {
+    if (!parsedAddress.normalizedAddress) {
+      setShowDeliveryValidation(false);
+      setDeliveryValidationStatus('idle');
+      return;
+    }
+
+    if (parsedAddress.shouldSkipZoneValidation) {
       setShowDeliveryValidation(false);
       setDeliveryValidationStatus('idle');
       return;
@@ -505,8 +529,15 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
     address: string,
     details?: AddressSelectionDetails | null
   ): Promise<DeliveryValidationResult | null> => {
-    const trimmedAddress = address.trim();
+    const parsedAddress = parseSpecialAddressInput(address);
+    const trimmedAddress = parsedAddress.normalizedAddress;
     if (!trimmedAddress) {
+      return null;
+    }
+
+    if (parsedAddress.shouldSkipZoneValidation) {
+      setShowDeliveryValidation(false);
+      setDeliveryValidationStatus('idle');
       return null;
     }
 
@@ -563,8 +594,12 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
   };
 
   const ensureAddressValidationForSubmit = async (): Promise<DeliveryValidationResult | null> => {
-    const address = formData.address.trim();
+    const address = normalizedStreetAddress;
     if (!address) {
+      return null;
+    }
+
+    if (isSpecialAddressMode) {
       return null;
     }
 
@@ -666,7 +701,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.name = t('modals.addCustomer.nameRequired');
     }
 
-    if (!formData.address.trim()) {
+    if (!normalizedStreetAddress) {
       newErrors.address = t('modals.addCustomer.streetRequired');
     }
 
@@ -674,11 +709,11 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       newErrors.overrideReason = t('modals.addCustomer.overrideReasonRequired', 'Override reason must be at least 6 characters.');
     }
 
-    if (!formData.nameOnRinger.trim()) {
+    if (!isSpecialAddressMode && !formData.nameOnRinger.trim()) {
       newErrors.nameOnRinger = t('modals.addCustomer.nameOnRingerRequired', 'Name on ringer is required');
     }
 
-    if (!formData.floorNumber.trim()) {
+    if (!isSpecialAddressMode && !formData.floorNumber.trim()) {
       newErrors.floorNumber = t('modals.addCustomer.floorRequired', 'Floor number is required');
     }
 
@@ -700,18 +735,21 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       return;
     }
 
-    const validationForSubmit = await ensureAddressValidationForSubmit();
-    const validationDecisionError = evaluateValidationDecision(validationForSubmit);
-    if (validationDecisionError) {
-      const nextErrors: Record<string, string> = {};
-      const status = validationForSubmit?.validation_status;
-      if ((status === 'out_of_zone' || status === 'unverified_offline') && overrideApplied) {
-        nextErrors.overrideReason = validationDecisionError;
-      } else {
-        nextErrors.address = validationDecisionError;
+    let validationForSubmit: DeliveryValidationResult | null = null;
+    if (!isSpecialAddressMode) {
+      validationForSubmit = await ensureAddressValidationForSubmit();
+      const validationDecisionError = evaluateValidationDecision(validationForSubmit);
+      if (validationDecisionError) {
+        const nextErrors: Record<string, string> = {};
+        const status = validationForSubmit?.validation_status;
+        if ((status === 'out_of_zone' || status === 'unverified_offline') && overrideApplied) {
+          nextErrors.overrideReason = validationDecisionError;
+        } else {
+          nextErrors.address = validationDecisionError;
+        }
+        setErrors((prev) => ({ ...prev, ...nextErrors }));
+        return;
       }
-      setErrors((prev) => ({ ...prev, ...nextErrors }));
-      return;
     }
 
     setIsSubmitting(true);
@@ -721,28 +759,33 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
       const refreshed = await getResolvedTerminalCredentials().catch(() => ({
         branchId: terminalBranchId || undefined,
       } as any));
-      const activeValidation = validationForSubmit || deliveryValidationResult;
+      const activeValidation = isSpecialAddressMode
+        ? null
+        : (validationForSubmit || deliveryValidationResult);
       // Persist the exact selected suggestion point first (Google/OSM details), then fallback.
-      const persistedCoords =
-        selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null;
-      const validatedAt = activeValidation ? new Date().toISOString() : null;
+      const persistedCoords = isSpecialAddressMode
+        ? null
+        : (selectedAddressDetails?.coordinates || addressCoordinates || activeValidation?.coordinates || null);
+      const validatedAt = !isSpecialAddressMode && activeValidation ? new Date().toISOString() : null;
       const normalizedOverrideReason = overrideApplied ? overrideReason.trim() : '';
-      const validationMetadata = {
-        override_applied: overrideApplied,
-        override_reason: normalizedOverrideReason || null,
-        validation_status: activeValidation?.validation_status || null,
-        zone_id: activeValidation?.selectedZone?.id || null,
-        validated_at: validatedAt,
-        validation_source: activeValidation?.validation_source || null,
-        address_fingerprint:
-          activeValidation?.address_fingerprint
-          || validationSnapshot
-          || buildAddressFingerprint(formData.address.trim(), persistedCoords || undefined),
-        place_id: selectedAddressDetails?.placeId || null,
-        input_street_number: extractStreetNumber(formData.address.trim()) || null,
-        resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
-        house_number_match: activeValidation?.house_number_match ?? true,
-      };
+      const validationMetadata = isSpecialAddressMode
+        ? null
+        : {
+            override_applied: overrideApplied,
+            override_reason: normalizedOverrideReason || null,
+            validation_status: activeValidation?.validation_status || null,
+            zone_id: activeValidation?.selectedZone?.id || null,
+            validated_at: validatedAt,
+            validation_source: activeValidation?.validation_source || null,
+            address_fingerprint:
+              activeValidation?.address_fingerprint
+              || validationSnapshot
+              || buildAddressFingerprint(normalizedStreetAddress, persistedCoords || undefined),
+            place_id: selectedAddressDetails?.placeId || null,
+            input_street_number: extractStreetNumber(normalizedStreetAddress) || null,
+            resolved_street_number: selectedAddressDetails?.resolvedStreetNumber || null,
+            house_number_match: activeValidation?.house_number_match ?? true,
+          };
 
       // Handle ADD ADDRESS mode - save new address to existing customer via IPC
       if (mode === 'addAddress' && initialCustomer?.id) {
@@ -751,17 +794,17 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         try {
           // Use IPC service to avoid CORS
           const addressData = {
-            street_address: formData.address.trim(), // Map to DB column name
+            street_address: normalizedStreetAddress, // Map to DB column name
             city: formData.city ? formData.city.trim() : 'Athens',
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
             address_type: 'delivery',
             is_default: false,
-            coordinates: persistedCoords,
+            coordinates: isSpecialAddressMode ? null : persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
-            ...validationMetadata,
+            ...(validationMetadata ?? {}),
           };
 
           // Result from IPC is { success: boolean, data?: any, error?: string }
@@ -775,7 +818,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
               ...initialCustomer,
               // Update legacy fields for immediate UI feedback if needed,
               // though proper selection should use selected_address_id
-              address: formData.address.trim(),
+              address: normalizedStreetAddress,
               postal_code: formData.postalCode ? formData.postalCode.trim() : initialCustomer.postal_code,
               floor_number: formData.floorNumber ? formData.floorNumber.trim() : initialCustomer.floor_number,
               notes: formData.notes ? formData.notes.trim() : initialCustomer.notes,
@@ -809,17 +852,17 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
 
         try {
           const addressData = {
-            street_address: formData.address.trim(),
+            street_address: normalizedStreetAddress,
             city: formData.city ? formData.city.trim() : null,
             postal_code: formData.postalCode ? formData.postalCode.trim() : null,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
             notes: formData.notes ? formData.notes.trim() : null,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : null,
-            coordinates: persistedCoords,
+            coordinates: isSpecialAddressMode ? null : persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             customer_id: initialCustomer.id,
-            ...validationMetadata,
+            ...(validationMetadata ?? {}),
           };
 
           // Find the address to get its current version
@@ -872,14 +915,14 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             phone: formData.phone.trim(),
             name: formData.name.trim(),
             email: formData.email ? formData.email.trim() : undefined,
-            address: formData.address.trim(),
+            address: normalizedStreetAddress,
             city: formData.city ? formData.city.trim() : undefined,
             postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
             floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
             notes: formData.notes ? formData.notes.trim() : undefined,
             name_on_ringer: formData.nameOnRinger ? formData.nameOnRinger.trim() : undefined,
             // Pass coordinates if available
-            coordinates: persistedCoords,
+            coordinates: isSpecialAddressMode ? null : persistedCoords,
             latitude: persistedCoords?.lat ?? null,
             longitude: persistedCoords?.lng ?? null,
             delivery_validation: validationMetadata,
@@ -928,7 +971,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
             const updatedCustomer = {
               ...result.data,
               // Include address data from form for immediate use
-              address: formData.address.trim(),
+              address: normalizedStreetAddress,
               city: formData.city ? formData.city.trim() : undefined,
               postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
               floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
@@ -967,7 +1010,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         phone: formData.phone.trim(),
         name: formData.name.trim(),
         email: formData.email ? formData.email.trim() : undefined,
-        address: formData.address.trim(),
+        address: normalizedStreetAddress,
         city: formData.city ? formData.city.trim() : undefined,
         postal_code: formData.postalCode ? formData.postalCode.trim() : undefined,
         floor_number: formData.floorNumber ? formData.floorNumber.trim() : undefined,
@@ -976,16 +1019,16 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // Branch association - assign customer to the terminal's branch
         branch_id: terminalBranchId || refreshed.branchId || undefined,
         // Include delivery validation data and coordinates
-        coordinates: persistedCoords,
+        coordinates: isSpecialAddressMode ? null : persistedCoords,
         latitude: persistedCoords?.lat ?? null,
         longitude: persistedCoords?.lng ?? null,
-        delivery_validation: activeValidation ? {
+        delivery_validation: !isSpecialAddressMode && activeValidation ? {
           validated: true,
           delivery_available: activeValidation.deliveryAvailable,
           zone_name: activeValidation.selectedZone?.name ?? null,
           delivery_fee: activeValidation.selectedZone?.delivery_fee ?? null,
           minimum_order_amount: activeValidation.selectedZone?.minimum_order_amount ?? null,
-          ...validationMetadata,
+          ...(validationMetadata ?? {}),
         } : null,
       };
 
@@ -996,7 +1039,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         // Enrich with form data to ensure city/floor are immediately available
         // (matches the enrichment pattern used by EDIT mode at lines 928-940)
         const enrichedAddressFields = {
-          street_address: formData.address.trim(),
+          street_address: normalizedStreetAddress,
           city: formData.city ? formData.city.trim() : '',
           postal_code: formData.postalCode ? formData.postalCode.trim() : null,
           floor_number: formData.floorNumber ? formData.floorNumber.trim() : null,
@@ -1011,13 +1054,13 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           ? existingAddresses.map((addr: any, i: number) =>
               i === 0 ? { ...addr, ...enrichedAddressFields } : addr
             )
-          : formData.address.trim()
+          : normalizedStreetAddress
             ? [{ id: 'local-new', customer_id: createdCustomer.id, ...enrichedAddressFields }]
             : [];
 
         const enrichedCustomer = {
           ...createdCustomer,
-          address: formData.address.trim(),
+          address: normalizedStreetAddress,
           city: formData.city ? formData.city.trim() : createdCustomer.city,
           postal_code: formData.postalCode ? formData.postalCode.trim() : createdCustomer.postal_code,
           floor_number: formData.floorNumber ? formData.floorNumber.trim() : createdCustomer.floor_number,
@@ -1125,10 +1168,39 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
           {errors.address && (
             <p className="mt-1 text-sm text-red-600 dark:text-red-400">{errors.address}</p>
           )}
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {t(
+              'modals.addCustomer.specialAddressHint',
+              'Use #E-food to save a special address label and skip delivery zone validation.',
+            )}
+          </p>
         </div>
 
+        {isSpecialAddressMode && (
+          <div className="liquid-glass-modal-card">
+            <div className="flex items-start gap-3 text-sm text-emerald-800 dark:text-emerald-100">
+              <Hash className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
+              <div className="space-y-1">
+                <p className="font-medium">
+                  {t('modals.addCustomer.specialAddressModeTitle', 'Special address label detected')}
+                </p>
+                <p className="text-emerald-700/90 dark:text-emerald-100/80">
+                  {t(
+                    'modals.addCustomer.specialAddressModeDescription',
+                    {
+                      address: normalizedStreetAddress,
+                      defaultValue:
+                        'This address will be saved as "{{address}}". Delivery zone validation is skipped for this entry.',
+                    },
+                  )}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Delivery Validation */}
-        {showDeliveryValidation && (
+        {showDeliveryValidation && !isSpecialAddressMode && (
           <div className="liquid-glass-modal-card">
             <div className="space-y-3">
               <div className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -1312,7 +1384,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Name on Ringer */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.nameOnRingerLabel')} <span className="text-red-500">*</span>
+            {t('modals.addCustomer.nameOnRingerLabel')} {!isSpecialAddressMode && <span className="text-red-500">*</span>}
           </label>
           <div className="relative">
             <Users className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />
@@ -1332,7 +1404,7 @@ export const AddCustomerModal: React.FC<AddCustomerModalProps> = ({
         {/* Floor Number */}
         <div>
           <label className="block text-sm font-medium liquid-glass-modal-text mb-2">
-            {t('modals.addCustomer.floorLabel')} <span className="text-red-500">*</span>
+            {t('modals.addCustomer.floorLabel')} {!isSpecialAddressMode && <span className="text-red-500">*</span>}
           </label>
           <div className="relative">
             <Building className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-blue-500 dark:text-blue-400" />

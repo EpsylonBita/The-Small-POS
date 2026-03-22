@@ -3418,6 +3418,7 @@
   },
   "bulkActions": {
     "driver": "Driver",
+    "delivery": "Delivery",
     "pickup": "Pickup",
     "edit": "Edit",
     "cancel": "Cancel",
