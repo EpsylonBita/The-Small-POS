@@ -194,6 +194,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   const pendingReportDate = isPendingLocalSubmit
     ? endOfDayStatus.pendingReportDate || undefined
     : undefined;
+  const defaultZReportDate = pendingReportDate || endOfDayStatus.activeReportDate || undefined;
 
   // Use useModuleAccess hook for checking current view access
   // This provides centralized access checking for the current view
@@ -478,13 +479,13 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       {/* Expenses Modal */}
       <ExpenseModal isOpen={showExpenses} onClose={() => setShowExpenses(false)} />
       {/* Z Report Modal */}
-      <ZReportModal
-        isOpen={showZReport}
-        onClose={() => setShowZReport(false)}
-        branchId={staff?.branchId || ''}
-        date={pendingReportDate}
-        lockDate={!!pendingReportDate}
-      />
+        <ZReportModal
+          isOpen={showZReport}
+          onClose={() => setShowZReport(false)}
+          branchId={staff?.branchId || ''}
+          date={defaultZReportDate}
+          lockDate={!!pendingReportDate}
+        />
       {/* Connection Settings Modal */}
       <ConnectionSettingsModal isOpen={showConnectionSettings} onClose={() => setShowConnectionSettings(false)} />
 

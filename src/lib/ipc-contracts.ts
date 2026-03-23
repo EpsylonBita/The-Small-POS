@@ -198,6 +198,8 @@ export interface EndOfDayStatusResponse {
   pendingReportDate?: string | null;
   cutoffAt?: string | null;
   periodStartAt?: string | null;
+  activeReportDate?: string | null;
+  activePeriodStartAt?: string | null;
   latestZReportId?: string | null;
   latestZReportSyncState?: string | null;
   canOpenPendingZReport?: boolean;

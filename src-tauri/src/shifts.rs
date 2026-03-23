@@ -24,6 +24,12 @@ struct CheckInEligibility {
     has_cashier_for_business_day: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ShiftBusinessDayContext {
+    report_date: String,
+    period_start_at: String,
+}
+
 impl CheckInEligibility {
     fn requires_cashier_first(&self) -> bool {
         !self.has_cashier_for_business_day
@@ -35,6 +41,33 @@ impl CheckInEligibility {
             "hasCashierForBusinessDay": self.has_cashier_for_business_day,
             "requiresCashierFirst": self.requires_cashier_first(),
         })
+    }
+}
+
+fn resolve_shift_business_day_context(
+    conn: &Connection,
+    branch_id: &str,
+    fallback_at: &str,
+    stored_report_date: Option<&str>,
+    stored_period_start_at: Option<&str>,
+) -> ShiftBusinessDayContext {
+    let period_start_at = stored_period_start_at
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| business_day::resolve_period_start(conn, branch_id, Some(fallback_at)));
+
+    let report_date = stored_report_date
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            business_day::report_date_for_business_window(&period_start_at, fallback_at)
+        });
+
+    ShiftBusinessDayContext {
+        report_date,
+        period_start_at,
     }
 }
 
@@ -97,8 +130,7 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<(), String> {
-        let check_in_eligibility =
-            resolve_check_in_eligibility(&conn, &branch_id, &terminal_id)?;
+        let check_in_eligibility = resolve_check_in_eligibility(&conn, &branch_id, &terminal_id)?;
         if role_type.trim().to_ascii_lowercase() != "cashier"
             && check_in_eligibility.requires_cashier_first()
         {
@@ -116,13 +148,21 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         let responsible_cashier_shift_id = responsible_cashier_assignment
             .as_ref()
             .map(|(cashier_shift_id, _)| cashier_shift_id.clone());
+        let shift_business_day = ShiftBusinessDayContext {
+            report_date: business_day::report_date_for_business_window(
+                &check_in_eligibility.business_day_start_at,
+                &now,
+            ),
+            period_start_at: check_in_eligibility.business_day_start_at.clone(),
+        };
 
         conn.execute(
             "INSERT INTO staff_shifts (
                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
-                check_in_time, opening_cash_amount, status, calculation_version,
-                transferred_to_cashier_shift_id, sync_status, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', 2, ?9, 'pending', ?10, ?10)",
+                check_in_time, report_date, period_start_at, opening_cash_amount,
+                status, calculation_version, transferred_to_cashier_shift_id,
+                sync_status, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', 2, ?11, 'pending', ?12, ?12)",
             params![
                 shift_id,
                 staff_id,
@@ -131,6 +171,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 terminal_id,
                 role_type,
                 now,
+                shift_business_day.report_date.as_str(),
+                shift_business_day.period_start_at.as_str(),
                 opening_cash,
                 responsible_cashier_shift_id,
                 now,
@@ -212,6 +254,8 @@ pub fn open_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             &role_type,
             opening_cash,
             &now,
+            shift_business_day.report_date.as_str(),
+            shift_business_day.period_start_at.as_str(),
             2,
             responsible_cashier_assignment
                 .as_ref()
@@ -261,6 +305,8 @@ fn build_shift_open_sync_payload(
     role_type: &str,
     opening_cash: f64,
     check_in_time: &str,
+    report_date: &str,
+    period_start_at: &str,
     calculation_version: i64,
     responsible_cashier_shift_id: Option<&str>,
     responsible_cashier_drawer_id: Option<&str>,
@@ -274,6 +320,8 @@ fn build_shift_open_sync_payload(
         "roleType": role_type,
         "openingCash": opening_cash,
         "checkInTime": check_in_time,
+        "reportDate": report_date,
+        "periodStartAt": period_start_at,
         "calculationVersion": calculation_version,
     });
 
@@ -367,11 +415,13 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         );
     }
 
+    let now = Utc::now().to_rfc3339();
+
     // Fetch the active shift (include branch_id/terminal_id for driver return + transfer logic)
     let shift = conn
         .query_row(
             "SELECT id, staff_id, staff_name, role_type, opening_cash_amount, calculation_version,
-                    branch_id, terminal_id, check_in_time
+                    branch_id, terminal_id, check_in_time, report_date, period_start_at
              FROM staff_shifts WHERE id = ?1 AND status = 'active'",
             params![shift_id],
             |row| {
@@ -385,6 +435,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
@@ -400,10 +452,19 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         shift_branch_id,
         shift_terminal_id,
         shift_check_in_time,
+        stored_report_date,
+        stored_period_start_at,
     ) = shift;
     let calc_version = calc_version.unwrap_or(1);
     let shift_branch_id = shift_branch_id.unwrap_or_default();
     let shift_terminal_id = shift_terminal_id.unwrap_or_default();
+    let shift_business_day = resolve_shift_business_day_context(
+        &conn,
+        &shift_branch_id,
+        &now,
+        stored_report_date.as_deref(),
+        stored_period_start_at.as_deref(),
+    );
     let is_non_financial_role = is_non_financial_shift_role(&role_type);
     let closing_cash_to_persist = if is_non_financial_role {
         0.0
@@ -411,7 +472,6 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
         closing_cash
     };
 
-    let now = Utc::now().to_rfc3339();
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
     let persisted_payment_amount =
         if role_type == "cashier" || role_type == "manager" || is_non_financial_role {
@@ -754,7 +814,9 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 cash_variance = ?4, status = 'closed', payment_amount = ?5,
                 closed_by = ?6, sync_status = 'pending', updated_at = ?1,
                 total_orders_count = ?8, total_sales_amount = ?9,
-                total_cash_sales = ?10, total_card_sales = ?11
+                total_cash_sales = ?10, total_card_sales = ?11,
+                report_date = COALESCE(report_date, ?12),
+                period_start_at = COALESCE(period_start_at, ?13)
              WHERE id = ?7",
             params![
                 now,
@@ -768,6 +830,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 total_sales,
                 shift_cash_sales,
                 shift_card_sales,
+                shift_business_day.report_date.as_str(),
+                shift_business_day.period_start_at.as_str(),
             ],
         )
         .map_err(|e| format!("close shift: {e}"))?;
@@ -785,6 +849,8 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
             "openingCash": opening_cash,
             "checkInTime": shift_check_in_time,
             "checkOutTime": now,
+            "reportDate": shift_business_day.report_date.as_str(),
+            "periodStartAt": shift_business_day.period_start_at.as_str(),
             "calculationVersion": calc_version,
             "totalOrdersCount": order_count,
             "totalSalesAmount": total_sales,
@@ -2919,11 +2985,17 @@ mod tests {
             .to_string();
 
         let conn = db.conn.lock().unwrap();
-        let actual_check_in: String = conn
+        let (actual_check_in, actual_report_date, actual_period_start_at): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT check_in_time FROM staff_shifts WHERE id = ?1",
+                "SELECT check_in_time, report_date, period_start_at
+                 FROM staff_shifts
+                 WHERE id = ?1",
                 params![driver_shift_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         drop(conn);
@@ -2940,6 +3012,8 @@ mod tests {
             "cashier-sync-open"
         );
         assert_eq!(payload["borrowedStartingAmount"], 40.0);
+        assert_eq!(payload["reportDate"], actual_report_date.unwrap());
+        assert_eq!(payload["periodStartAt"], actual_period_start_at.unwrap());
     }
 
     #[test]
@@ -3465,6 +3539,18 @@ mod tests {
         )
         .expect("driver close should succeed");
 
+        let conn = db.conn.lock().unwrap();
+        let (report_date, period_start_at): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT report_date, period_start_at
+                 FROM staff_shifts
+                 WHERE id = 'driver-sync-target'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+
         let payload = load_latest_shift_sync_payload(&db, "update", "driver-sync-target");
         assert_eq!(payload["staffId"], "driver-1");
         assert_eq!(payload["staffName"], "Driver One");
@@ -3476,6 +3562,8 @@ mod tests {
         assert_eq!(payload["returnedCashAmount"], 80.0);
         assert_eq!(payload["resolvedCashierShiftId"], "cashier-sync-target");
         assert_eq!(payload["resolvedCashierDrawerId"], "drawer-sync-target");
+        assert_eq!(payload["reportDate"], report_date.unwrap());
+        assert_eq!(payload["periodStartAt"], period_start_at.unwrap());
     }
 
     #[test]

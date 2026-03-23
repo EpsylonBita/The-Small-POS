@@ -66,6 +66,7 @@ use zeroize::Zeroizing;
 use serde::Deserialize;
 
 use crate::api;
+use crate::business_day;
 use crate::can_transition_locally;
 use crate::db;
 use crate::db::DbState;
@@ -4935,6 +4936,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 );
             }
         }
+        if let Ok(repaired) = backfill_active_shift_business_day_context(db) {
+            if repaired > 0 {
+                info!(
+                    repaired,
+                    "Backfilled active shift business-day metadata and requeued live shift inserts"
+                );
+            }
+        }
     }
 
     // Poll queued remote receipts first and reconcile remote-assigned IDs
@@ -6722,6 +6731,8 @@ fn build_shift_requeue_payload(
                 'openingCash', COALESCE(ss.opening_cash_amount, 0),
                 'checkInTime', ss.check_in_time,
                 'checkOutTime', ss.check_out_time,
+                'reportDate', ss.report_date,
+                'periodStartAt', ss.period_start_at,
                 'calculationVersion', COALESCE(ss.calculation_version, 2),
                 'totalOrdersCount', COALESCE(ss.total_orders_count, 0),
                 'totalSalesAmount', COALESCE(ss.total_sales_amount, 0),
@@ -6805,6 +6816,8 @@ fn build_shift_requeue_payload(
                 'roleType', ss.role_type,
                 'openingCash', COALESCE(ss.opening_cash_amount, 0),
                 'checkInTime', ss.check_in_time,
+                'reportDate', ss.report_date,
+                'periodStartAt', ss.period_start_at,
                 'calculationVersion', COALESCE(ss.calculation_version, 2),
                 'responsibleCashierShiftId', ss.transferred_to_cashier_shift_id,
                 'responsibleCashierDrawerId', (
@@ -6826,6 +6839,118 @@ fn build_shift_requeue_payload(
         )
         .ok()
     }
+}
+
+fn upsert_active_shift_insert_sync_row(
+    conn: &rusqlite::Connection,
+    shift_id: &str,
+    payload: &str,
+    now: &str,
+) -> Result<(), String> {
+    let existing_queue_id: Option<i64> = conn
+        .query_row(
+            "SELECT id
+             FROM sync_queue
+             WHERE entity_type = 'shift'
+               AND entity_id = ?1
+               AND operation = 'insert'
+             ORDER BY CASE status
+                 WHEN 'in_progress' THEN 0
+                 WHEN 'pending' THEN 1
+                 WHEN 'deferred' THEN 2
+                 WHEN 'failed' THEN 3
+                 ELSE 4
+             END, id DESC
+             LIMIT 1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load active shift queue row: {e}"))?;
+
+    if let Some(queue_id) = existing_queue_id {
+        conn.execute(
+            "UPDATE sync_queue
+             SET payload = ?1,
+                 status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?2
+             WHERE id = ?3",
+            params![payload, now, queue_id],
+        )
+        .map_err(|e| format!("update active shift queue row: {e}"))?;
+    } else {
+        let idem_key = format!("shift:business-day-repair:{}:{}", shift_id, Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('shift', ?1, 'insert', ?2, ?3, 'pending')",
+            params![shift_id, payload, idem_key],
+        )
+        .map_err(|e| format!("insert active shift repair queue row: {e}"))?;
+    }
+
+    conn.execute(
+        "UPDATE staff_shifts
+         SET sync_status = 'pending',
+             updated_at = ?1
+         WHERE id = ?2",
+        params![now, shift_id],
+    )
+    .map_err(|e| format!("mark active shift pending after business-day repair: {e}"))?;
+
+    Ok(())
+}
+
+fn backfill_active_shift_business_day_context(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, COALESCE(branch_id, '')
+             FROM staff_shifts
+             WHERE status = 'active'
+               AND (
+                    report_date IS NULL OR trim(report_date) = ''
+                    OR period_start_at IS NULL OR trim(period_start_at) = ''
+               )",
+        )
+        .map_err(|e| format!("prepare active shift business-day repair selector: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("query active shift business-day repair selector: {e}"))?;
+
+    let shifts: Vec<(String, String)> = rows.filter_map(Result::ok).collect();
+    drop(stmt);
+
+    let mut repaired = 0usize;
+    for (shift_id, branch_id) in shifts {
+        let period_start_at =
+            business_day::resolve_period_start(&conn, &branch_id, Some(now.as_str()));
+        let report_date = business_day::report_date_for_business_window(&period_start_at, &now);
+
+        conn.execute(
+            "UPDATE staff_shifts
+             SET report_date = ?1,
+                 period_start_at = ?2,
+                 updated_at = ?3
+             WHERE id = ?4",
+            params![report_date, period_start_at, now, shift_id],
+        )
+        .map_err(|e| format!("repair active shift business-day fields: {e}"))?;
+
+        let Some(payload) = build_shift_requeue_payload(&conn, &shift_id, "insert") else {
+            continue;
+        };
+        upsert_active_shift_insert_sync_row(&conn, &shift_id, &payload, &now)?;
+        repaired += 1;
+    }
+
+    Ok(repaired)
 }
 
 fn enqueue_reconstructed_shift_sync_row(
@@ -10163,6 +10288,63 @@ mod tests {
         assert_eq!(retry_count, 0);
         assert_eq!(last_error, None);
         assert_eq!(shift_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_backfill_active_shift_business_day_context_repairs_shift_and_requeues_insert() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                 check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-business-day-repair', 'staff-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                 '2026-03-22T16:00:00Z', 'active', 'synced', '2026-03-22T16:00:00Z', '2026-03-22T16:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let repaired = backfill_active_shift_business_day_context(&db).unwrap();
+        assert_eq!(repaired, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (report_date, period_start_at, sync_status): (Option<String>, Option<String>, String) =
+            conn.query_row(
+                "SELECT report_date, period_start_at, sync_status
+                 FROM staff_shifts
+                 WHERE id = 'shift-business-day-repair'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let queue_payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND entity_id = 'shift-business-day-repair'
+                   AND operation = 'insert'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        let parsed_payload: Value = serde_json::from_str(&queue_payload).unwrap();
+        let report_date = report_date.expect("report_date should be populated");
+        let period_start_at = period_start_at.expect("period_start_at should be populated");
+
+        assert!(!report_date.trim().is_empty());
+        assert!(!period_start_at.trim().is_empty());
+        assert_eq!(sync_status, "pending");
+        assert_eq!(parsed_payload["reportDate"], report_date);
+        assert_eq!(parsed_payload["periodStartAt"], period_start_at);
     }
 
     #[test]

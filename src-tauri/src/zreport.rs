@@ -104,7 +104,10 @@ fn collect_rollover_protection(conn: &Connection) -> Result<RolloverProtection, 
     Ok(protection)
 }
 
-fn stage_rollover_protection(conn: &Connection, protection: &RolloverProtection) -> Result<(), String> {
+fn stage_rollover_protection(
+    conn: &Connection,
+    protection: &RolloverProtection,
+) -> Result<(), String> {
     conn.execute_batch(
         "DROP TABLE IF EXISTS temp_rollover_protected_shift_ids;
          CREATE TEMP TABLE temp_rollover_protected_shift_ids (
@@ -193,18 +196,8 @@ fn default_report_date() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
 
-fn local_report_date_from_timestamp(value: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
-}
-
 fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> String {
-    if !period_start_at.trim().is_empty() && !business_day::is_epoch_timestamp(period_start_at) {
-        return local_report_date_from_timestamp(period_start_at);
-    }
-
-    local_report_date_from_timestamp(cutoff_at)
+    business_day::report_date_for_business_window(period_start_at, cutoff_at)
 }
 
 fn resolve_period_start_at(conn: &Connection, branch_id: &str, cutoff_at: Option<&str>) -> String {
@@ -1622,7 +1615,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
             "SELECT id, staff_id, staff_name, role_type, status,
                     opening_cash_amount, closing_cash_amount,
                     expected_cash_amount, cash_variance,
-                    check_in_time, check_out_time, branch_id, terminal_id
+                    check_in_time, check_out_time, branch_id, terminal_id,
+                    report_date, period_start_at
              FROM staff_shifts WHERE id = ?1",
             params![shift_id],
             |row| {
@@ -1640,6 +1634,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
                     row.get::<_, Option<String>>(10)?, // check_out_time
                     row.get::<_, Option<String>>(11)?, // branch_id
                     row.get::<_, Option<String>>(12)?, // terminal_id
+                    row.get::<_, Option<String>>(13)?, // report_date
+                    row.get::<_, Option<String>>(14)?, // period_start_at
                 ))
             },
         )
@@ -1659,6 +1655,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         check_out_time,
         shift_branch_id,
         shift_terminal_id,
+        stored_report_date,
+        stored_period_start_at,
     ) = shift;
 
     if status != "closed" {
@@ -2012,11 +2010,26 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let expected = expected_cash.unwrap_or(0.0);
     let variance = cash_variance.unwrap_or(0.0);
 
-    // report_date = date portion of check_in_time
-    let report_date = check_in_time
-        .as_deref()
-        .and_then(|t| t.get(..10))
-        .map(|s| s.to_string())
+    let report_date = stored_report_date
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let period_start_at = stored_period_start_at
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    check_in_time.as_deref().map(|timestamp| {
+                        resolve_period_start_at(&conn, &branch_id, Some(timestamp))
+                    })
+                });
+
+            period_start_at.as_deref().map(|period_start_at| {
+                report_date_for_business_window(
+                    period_start_at,
+                    check_out_time.as_deref().unwrap_or_else(|| {
+                        check_in_time.as_deref().unwrap_or("1970-01-01T00:00:00Z")
+                    }),
+                )
+            })
+        })
         .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
 
     // Build payments breakdown JSON
@@ -2344,6 +2357,9 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         branch_id.as_str(),
         &Utc::now().to_rfc3339(),
     )?;
+    let now = Utc::now().to_rfc3339();
+    let active_period_start_at = resolve_period_start_at(&conn, &branch_id, Some(now.as_str()));
+    let active_report_date = report_date_for_business_window(&active_period_start_at, &now);
 
     let latest_z_report = conn
         .query_row(
@@ -2370,6 +2386,8 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
             "pendingReportDate": context.report_date,
             "cutoffAt": context.cutoff_at,
             "periodStartAt": context.period_start_at,
+            "activeReportDate": Value::Null,
+            "activePeriodStartAt": Value::Null,
             "latestZReportId": latest_z_report.as_ref().map(|row| row.0.clone()),
             "latestZReportSyncState": latest_z_report.as_ref().map(|row| row.1.clone()),
             "canOpenPendingZReport": true,
@@ -2383,6 +2401,8 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
                 "pendingReportDate": latest_report_date,
                 "cutoffAt": Value::Null,
                 "periodStartAt": Value::Null,
+                "activeReportDate": Value::Null,
+                "activePeriodStartAt": Value::Null,
                 "latestZReportId": latest_id,
                 "latestZReportSyncState": latest_sync_state,
                 "canOpenPendingZReport": false,
@@ -2395,6 +2415,8 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         "pendingReportDate": Value::Null,
         "cutoffAt": Value::Null,
         "periodStartAt": Value::Null,
+        "activeReportDate": active_report_date,
+        "activePeriodStartAt": active_period_start_at,
         "latestZReportId": Value::Null,
         "latestZReportSyncState": Value::Null,
         "canOpenPendingZReport": false,
@@ -3964,6 +3986,7 @@ mod tests {
         assert_eq!(report["cashVariance"], 0.0);
         assert_eq!(report["openingCash"], 200.0);
         assert_eq!(report["closingCash"], 235.0);
+        assert_eq!(report["reportDate"], "2026-02-16");
         assert_eq!(report["syncState"], "pending");
 
         let report_json = report["reportJson"].as_object().expect("reportJson object");
@@ -4002,6 +4025,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sq_count, 1);
+    }
+
+    #[test]
+    fn test_generate_z_report_prefers_stored_shift_report_date() {
+        let db = test_db();
+        let shift_id = seed_closed_shift(&db);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE staff_shifts
+                 SET report_date = '2026-02-15',
+                     period_start_at = '2026-02-15T16:00:00Z'
+                 WHERE id = ?1",
+                params![shift_id],
+            )
+            .expect("store business-day metadata");
+        }
+
+        let result = generate_z_report(&db, &serde_json::json!({ "shiftId": shift_id }))
+            .expect("generate should succeed");
+
+        let report = &result["report"];
+        assert_eq!(report["reportDate"], "2026-02-15");
+        assert_eq!(report["reportJson"]["date"], "2026-02-15");
+        assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
     }
 
     #[test]
@@ -5183,6 +5232,52 @@ mod tests {
 
         assert_eq!(status["status"], "pending_local_submit");
         assert_eq!(status["pendingReportDate"], expected_report_date);
+    }
+
+    #[test]
+    fn test_get_end_of_day_status_idle_exposes_active_business_window() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let today = Local::now().date_naive();
+        let previous_day = today
+            .checked_sub_days(chrono::Days::new(1))
+            .expect("previous day");
+        let check_in_local = Local
+            .from_local_datetime(&previous_day.and_hms_opt(15, 0, 0).expect("15:00"))
+            .single()
+            .expect("local 15:00");
+        let check_in = check_in_local
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expected_report_date = previous_day.format("%Y-%m-%d").to_string();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, check_in_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-active-overnight', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
+                200.0, ?1, 'active', 2,
+                'pending', ?1, ?1
+             )",
+            params![check_in],
+        )
+        .expect("insert active overnight shift");
+        drop(conn);
+
+        let status = get_end_of_day_status(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+        )
+        .expect("status should load");
+
+        assert_eq!(status["status"], "idle");
+        assert_eq!(status["activeReportDate"], expected_report_date);
+        assert_eq!(status["activePeriodStartAt"], check_in);
     }
 
     #[test]

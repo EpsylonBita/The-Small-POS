@@ -55,6 +55,7 @@ const ReportsPage: React.FC = () => {
   const pendingReportDate = isPendingLocalSubmit
     ? endOfDayStatus.pendingReportDate || undefined
     : undefined;
+  const defaultZReportDate = pendingReportDate || endOfDayStatus.activeReportDate || undefined;
 
   // Locale-aware currency formatter
   const formatMoney = (amount: number) => formatCurrency(amount);
@@ -397,7 +398,7 @@ const ReportsPage: React.FC = () => {
             isOpen={showZReport}
             onClose={() => setShowZReport(false)}
             branchId={staff?.branchId || ''}
-            date={pendingReportDate}
+            date={defaultZReportDate}
             lockDate={!!pendingReportDate}
           />
         )}

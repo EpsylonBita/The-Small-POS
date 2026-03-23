@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 38;
+const CURRENT_SCHEMA_VERSION: i32 = 39;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -252,6 +252,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current < 38 {
         migrate_v38(conn)?;
     }
+    if current < 39 {
+        migrate_v39(conn)?;
+    }
 
     Ok(())
 }
@@ -388,6 +391,8 @@ fn migrate_v2(conn: &Connection) -> Result<(), String> {
             role_type TEXT NOT NULL CHECK (role_type IN ('cashier', 'manager', 'driver', 'kitchen', 'server')),
             check_in_time TEXT NOT NULL,
             check_out_time TEXT,
+            report_date TEXT,
+            period_start_at TEXT,
             scheduled_start TEXT,
             scheduled_end TEXT,
             opening_cash_amount REAL DEFAULT 0,
@@ -2532,6 +2537,23 @@ fn migrate_v38(conn: &Connection) -> Result<(), String> {
     .map_err(|e| format!("migration v38 mark schema version: {e}"))?;
 
     info!("Applied migration v38 (orders.customer_id)");
+    Ok(())
+}
+
+fn migrate_v39(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "staff_shifts", "report_date")? {
+        conn.execute_batch("ALTER TABLE staff_shifts ADD COLUMN report_date TEXT;")
+            .map_err(|e| format!("migration v39 add staff_shifts.report_date: {e}"))?;
+    }
+    if !column_exists(conn, "staff_shifts", "period_start_at")? {
+        conn.execute_batch("ALTER TABLE staff_shifts ADD COLUMN period_start_at TEXT;")
+            .map_err(|e| format!("migration v39 add staff_shifts.period_start_at: {e}"))?;
+    }
+
+    conn.execute("INSERT INTO schema_version (version) VALUES (39)", [])
+        .map_err(|e| format!("migration v39 mark schema version: {e}"))?;
+
+    info!("Applied migration v39 (staff_shifts business-day sync metadata)");
     Ok(())
 }
 

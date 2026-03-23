@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{DateTime, Local};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db;
@@ -66,6 +66,20 @@ pub(crate) fn load_shift_time_bounds(
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
+}
+
+pub(crate) fn local_report_date_from_timestamp(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| value.get(..10).unwrap_or("").to_string())
+}
+
+pub(crate) fn report_date_for_business_window(period_start_at: &str, fallback_at: &str) -> String {
+    if !period_start_at.trim().is_empty() && !is_epoch_timestamp(period_start_at) {
+        return local_report_date_from_timestamp(period_start_at);
+    }
+
+    local_report_date_from_timestamp(fallback_at)
 }
 
 pub(crate) fn timestamp_within_bounds(

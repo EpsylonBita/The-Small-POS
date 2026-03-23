@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import type { EndOfDayStatusResponse } from '../../lib/ipc-contracts';
+import { toLocalDateString } from '../utils/date';
+import { useSystemClock } from './useSystemClock';
 
 const IDLE_END_OF_DAY_STATUS: EndOfDayStatusResponse = {
   status: 'idle',
   pendingReportDate: null,
   cutoffAt: null,
   periodStartAt: null,
+  activeReportDate: null,
+  activePeriodStartAt: null,
   latestZReportId: null,
   latestZReportSyncState: null,
   canOpenPendingZReport: false,
@@ -14,6 +18,8 @@ const IDLE_END_OF_DAY_STATUS: EndOfDayStatusResponse = {
 
 export function useEndOfDayStatus(branchId?: string | null) {
   const bridge = getBridge();
+  const now = useSystemClock();
+  const currentDate = toLocalDateString(now);
   const [endOfDayStatus, setEndOfDayStatus] = useState<EndOfDayStatusResponse>(
     IDLE_END_OF_DAY_STATUS
   );
@@ -45,7 +51,7 @@ export function useEndOfDayStatus(branchId?: string | null) {
 
   useEffect(() => {
     void refreshEndOfDayStatus();
-  }, [refreshEndOfDayStatus]);
+  }, [currentDate, refreshEndOfDayStatus]);
 
   useEffect(() => {
     const handleShiftUpdated = () => {

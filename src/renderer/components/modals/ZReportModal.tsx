@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { useFeatures } from '../../hooks/useFeatures';
-import { useSystemClock } from '../../hooks/useSystemClock';
 import type { ZReportData } from '../../types/reports';
 import { exportZReportToCSV, exportArrayToCSV, exportStaffOrdersToCSV } from '../../utils/reportExport';
 import { formatDate, formatTime } from '../../utils/format';
@@ -13,7 +12,7 @@ import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { Banknote, CheckCircle, Circle, CreditCard, XCircle } from 'lucide-react';
-import { getBridge } from '../../../lib';
+import { getBridge, offEvent, onEvent } from '../../../lib';
 import type { ZReportSubmitResponse } from '../../../lib/ipc-contracts';
 
 interface ZReportModalProps {
@@ -54,17 +53,15 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const bridge = getBridge();
   const { clearShift } = useShift();
   const { t } = useTranslation();
-  const now = useSystemClock();
   const { isFeatureEnabled, isMainTerminal, isMobileWaiter, loading: featuresLoading, parentTerminalId } = useFeatures();
   const canExecuteZReport =
     isFeatureEnabled('zReportExecution') ||
     (!featuresLoading && (isMainTerminal || (!isMobileWaiter && !parentTerminalId)));
   const showMainTerminalWarning = !featuresLoading && !canExecuteZReport;
   const isPendingLocalSubmit = lockDate;
-  const currentDate = toLocalDateString(now);
   const [activeTab, setActiveTab] = useState<'summary' | 'details'>('summary');
   const [selectedDate, setSelectedDate] = useState<string>(() => date || toLocalDateString(new Date()));
-  const [isUsingLiveDefaultDate, setIsUsingLiveDefaultDate] = useState(() => !date);
+  const [isUsingLiveDefaultDate, setIsUsingLiveDefaultDate] = useState(() => !lockDate);
   const [zReport, setZReport] = useState<ZReportData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +70,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [printing, setPrinting] = useState(false);
 
   const [staffSortBy, setStaffSortBy] = useState<'name' | 'role' | 'orders' | 'sales'>('role');
+  const wasOpenRef = useRef(false);
 
   // NEW: State for expandable orders
   const [expandedStaff, setExpandedStaff] = useState<Set<string>>(new Set());
@@ -179,41 +177,79 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
-    setSelectedDate(date || toLocalDateString(new Date()));
-    setIsUsingLiveDefaultDate(!date);
-  }, [date, isOpen]);
+    if (isOpen && !wasOpenRef.current) {
+      setSelectedDate(date || toLocalDateString(new Date()));
+      setIsUsingLiveDefaultDate(!lockDate);
+    }
+
+    wasOpenRef.current = isOpen;
+  }, [date, isOpen, lockDate]);
 
   useEffect(() => {
-    if (!isOpen || date || !isUsingLiveDefaultDate || !currentDate) return;
-    setSelectedDate((prev) => (prev === currentDate ? prev : currentDate));
-  }, [currentDate, date, isOpen, isUsingLiveDefaultDate]);
+    if (!isOpen || !branchId || !selectedDate) return;
 
+    let active = true;
+    const shouldAutoRefresh = isUsingLiveDefaultDate && !lockDate;
 
+    const load = async (silent = false) => {
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
 
-  useEffect(() => {
-    if (!isOpen || !branchId) return;
-    let mounted = true;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
       try {
         const result = await bridge.reports.generateZReport({ branchId, date: selectedDate });
-        if (!mounted) return;
-        // IPC handlers wrap response in { success: true, data: ... }
+        if (!active) return;
+
         const report = result?.data || result;
         setZReport(report || null);
+
+        if (shouldAutoRefresh && typeof report?.date === 'string' && report.date.trim()) {
+          setSelectedDate((prev) => (prev === report.date ? prev : report.date));
+        }
+
+        if (!silent) {
+          setError(null);
+        }
       } catch (e: unknown) {
-        if (!mounted) return;
+        if (!active) return;
+
+        if (silent) {
+          console.warn('[ZReportModal] Silent live refresh failed:', e);
+          return;
+        }
+
         setError(extractErrorMessage(e, t('modals.zReport.loadFailed')));
       } finally {
-        if (!mounted) return;
+        if (!active || silent) return;
         setLoading(false);
       }
     };
-    load();
-    return () => { mounted = false; };
-  }, [isOpen, branchId, selectedDate]);
+
+    void load(false);
+
+    if (!shouldAutoRefresh) {
+      return () => {
+        active = false;
+      };
+    }
+
+    const handleShiftUpdated = () => {
+      void load(true);
+    };
+
+    const intervalId = setInterval(() => {
+      void load(true);
+    }, 30000);
+
+    onEvent('shift-updated', handleShiftUpdated);
+
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+      offEvent('shift-updated', handleShiftUpdated);
+    };
+  }, [bridge, branchId, isOpen, isUsingLiveDefaultDate, lockDate, selectedDate, t]);
 
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
   const submitButtonLabel = isPendingLocalSubmit
@@ -901,7 +937,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           {t('modals.zReport.exportCSV')}
         </button>
         <button
-          onClick={() => zReport?.staffReports && exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${currentDate}`)}
+          onClick={() => zReport?.staffReports && exportStaffOrdersToCSV(zReport.staffReports, `z-report-orders-${selectedDate}`)}
           className={liquidGlassModalButton('secondary', 'sm') + ' text-sm'}
           disabled={!zReport}
         >
