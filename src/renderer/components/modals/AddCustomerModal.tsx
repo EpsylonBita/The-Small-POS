@@ -10,10 +10,12 @@ import {
   buildAddressFingerprint,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
+  getSuggestionStreetLabel,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
   validateAddressForDelivery,
+  type AddressSuggestion,
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
@@ -102,7 +104,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
   const { t } = useTranslation();
   const placeholderText = placeholder ?? t('modals.addNewAddress.addressPlaceholder');
   const { resolvedTheme } = useTheme();
-  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -191,7 +193,7 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     }, 200);
   };
 
-  const handleSuggestionClick = async (suggestion: any) => {
+  const handleSuggestionClick = async (suggestion: AddressSuggestion) => {
     try {
       const resolved = await resolveAddressSuggestion(suggestion, value, {
         branchId: terminalBranchId || undefined,
@@ -225,9 +227,9 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
     } catch (error) {
       console.error('Error getting place details:', error);
       const streetAddress =
-        suggestion?.name ||
-        String(suggestion?.formatted_address || '').split(',')[0] ||
-        String(suggestion?.formatted_address || '');
+        getSuggestionStreetLabel(suggestion)
+        || String(suggestion?.formatted_address || '').split(',')[0]
+        || String(suggestion?.formatted_address || '');
       onChange(streetAddress, { fromSuggestion: false });
       setSuggestions([]);
       setShowSuggestions(false);
@@ -279,10 +281,10 @@ const AddressAutocomplete: React.FC<AddressAutocompleteProps> = ({
                 <MapPin className="w-4 h-4 text-blue-500 dark:text-blue-400 mt-1 flex-shrink-0" />
                 <div>
                   <p className="text-sm font-medium text-gray-900 dark:text-white">
-                    {suggestion.name}
+                    {getSuggestionStreetLabel(suggestion)}
                   </p>
                   <p className="text-xs text-gray-600 dark:text-gray-400">
-                    {suggestion.formatted_address}
+                    {suggestion.secondary_text || suggestion.formatted_address}
                   </p>
                 </div>
               </div>

@@ -7,10 +7,12 @@ import {
   buildAddressFingerprint,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
+  getSuggestionStreetLabel,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
   validateAddressForDelivery,
+  type AddressSuggestion,
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
@@ -54,7 +56,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
   const [customerInfo, setCustomerInfo] = useState<EditCustomerInfoFormData>(initialCustomerInfo);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
-  const [addressSuggestions, setAddressSuggestions] = useState<any[]>([]);
+  const [addressSuggestions, setAddressSuggestions] = useState<AddressSuggestion[]>([]);
   const [selectedAddressDetails, setSelectedAddressDetails] = useState<AddressSelectionDetails | null>(null);
   const [addressCoordinates, setAddressCoordinates] = useState<{ lat: number; lng: number } | null>(null);
   const [validationResult, setValidationResult] = useState<DeliveryValidationResult | null>(null);
@@ -260,7 +262,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     }, 200);
   };
 
-  const handleAddressSuggestionClick = async (suggestion: any) => {
+  const handleAddressSuggestionClick = async (suggestion: AddressSuggestion) => {
     try {
       const creds = await getResolvedTerminalCredentials();
       const resolved = await resolveAddressSuggestion(suggestion, customerInfo.address, {
@@ -306,7 +308,7 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
     } catch (error) {
       console.error('Error getting place details:', error);
       const fallback =
-        suggestion?.name ||
+        getSuggestionStreetLabel(suggestion) ||
         String(suggestion?.formatted_address || '').split(',')[0] ||
         String(suggestion?.formatted_address || '');
 
@@ -460,10 +462,10 @@ export const EditCustomerInfoModal: React.FC<EditCustomerInfoModalProps> = ({
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
                       <div>
                         <p className="text-sm font-medium text-gray-900 dark:text-white">
-                          {suggestion.name}
+                          {getSuggestionStreetLabel(suggestion)}
                         </p>
                         <p className="text-xs text-gray-600 dark:text-gray-400">
-                          {suggestion.formatted_address}
+                          {suggestion.secondary_text || suggestion.formatted_address}
                         </p>
                       </div>
                     </div>

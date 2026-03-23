@@ -110,6 +110,7 @@ export function buildSavedAddressQuery(address?: SavedAddressLike | null): strin
 function scoreSuggestion(
   address: SavedAddressLike,
   suggestion: {
+    displayLabel?: string;
     name?: string;
     main_text?: string;
     formatted_address?: string;
@@ -124,7 +125,7 @@ function scoreSuggestion(
   const streetNumber = extractStreetNumber(address.street_address || address.street || '') || '';
 
   const haystack = normalizeText(
-    [suggestion.main_text, suggestion.name, suggestion.formatted_address].filter(Boolean).join(' ')
+    [suggestion.displayLabel, suggestion.main_text, suggestion.name, suggestion.formatted_address].filter(Boolean).join(' ')
   );
 
   let score = 0;
@@ -146,7 +147,7 @@ function scoreSuggestion(
   if (streetNumber) {
     const candidateStreetNumber =
       suggestion.resolved_street_number
-      || extractStreetNumber(suggestion.main_text || suggestion.name || suggestion.formatted_address || '')
+      || extractStreetNumber(suggestion.displayLabel || suggestion.main_text || suggestion.name || suggestion.formatted_address || '')
       || '';
     if (candidateStreetNumber && houseNumbersMatch(streetNumber, candidateStreetNumber)) {
       score += 4;

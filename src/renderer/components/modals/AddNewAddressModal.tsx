@@ -7,10 +7,12 @@ import {
   buildAddressFingerprint,
   ensureAddressOfflineRuntime,
   extractStreetNumber,
+  getSuggestionStreetLabel,
   resolveAddressSuggestion,
   searchAddressSuggestions,
   upsertVerifiedLocalCandidate,
   validateAddressForDelivery,
+  type AddressSuggestion,
   type DeliveryValidationResult,
   type ValidationStatus,
 } from '../../services/address-workflow';
@@ -67,7 +69,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoadingAddresses, setIsLoadingAddresses] = useState(false);
-  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [selectedAddressDetails, setSelectedAddressDetails] = useState<AddressSelectionDetails | null>(null);
   const [addressCoordinates, setAddressCoordinates] = useState<{ lat: number; lng: number } | null>(null);
   const [validationResult, setValidationResult] = useState<DeliveryValidationResult | null>(null);
@@ -295,7 +297,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     }, 200);
   };
 
-  const handleSuggestionClick = async (suggestion: any) => {
+  const handleSuggestionClick = async (suggestion: AddressSuggestion) => {
     try {
       const creds = await getResolvedTerminalCredentials();
       const resolved = await resolveAddressSuggestion(suggestion, formData.address, {
@@ -340,7 +342,7 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
     } catch (error) {
       console.error('[AddNewAddressModal] details error:', error);
       const fallback =
-        suggestion?.name ||
+        getSuggestionStreetLabel(suggestion) ||
         String(suggestion?.formatted_address || '').split(',')[0] ||
         String(suggestion?.formatted_address || '');
 
@@ -507,10 +509,10 @@ export const AddNewAddressModal: React.FC<AddNewAddressModalProps> = ({
                       <MapPin className="w-4 h-4 text-gray-400 mt-1 flex-shrink-0" />
                       <div>
                         <p className="text-sm font-medium liquid-glass-modal-text">
-                          {suggestion.name}
+                          {getSuggestionStreetLabel(suggestion)}
                         </p>
                         <p className="text-xs liquid-glass-modal-text-muted">
-                          {suggestion.formatted_address}
+                          {suggestion.secondary_text || suggestion.formatted_address}
                         </p>
                       </div>
                     </div>

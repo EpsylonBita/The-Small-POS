@@ -11,10 +11,17 @@ import {
   getHealthSupportExplanation,
 } from '../../src/renderer/support';
 import {
+  buildSingleDeliveryRouteStop,
   buildGoogleMapsDirectionsUrl,
   resolveSyncedBranchOriginFallback,
 } from '../../src/renderer/utils/delivery-routing';
 import { sortOrdersOldestFirst } from '../../src/renderer/utils/order-sorting';
+import {
+  buildResolvedAddressDetails,
+  getSuggestionStreetLabel,
+  selectPrimaryOnlineSuggestions,
+  type AddressSuggestion,
+} from '../../src/renderer/services/address-workflow';
 import {
   calculatePickupToDeliveryTotal,
   getPickupToDeliveryValidationAmount,
@@ -327,6 +334,60 @@ test('buildGoogleMapsDirectionsUrl includes store origin when configured', () =>
   );
 });
 
+test('buildSingleDeliveryRouteStop appends persisted city and postal code to the destination', () => {
+  const stop = buildSingleDeliveryRouteStop({
+    id: 'order-1',
+    delivery_address: 'Γρ. Λαμπράκη 30',
+    delivery_city: 'Θεσσαλονίκη',
+    delivery_postal_code: '546 38',
+  });
+
+  assert.deepEqual(stop, {
+    orderId: 'order-1',
+    orderNumber: null,
+    label: 'Delivery stop',
+    address: 'Γρ. Λαμπράκη 30, Θεσσαλονίκη, 546 38',
+    coordinates: null,
+    createdAt: null,
+  });
+});
+
+test('buildSingleDeliveryRouteStop does not duplicate city or postal code already present in the saved address', () => {
+  const stop = buildSingleDeliveryRouteStop({
+    id: 'order-2',
+    delivery_address: 'Γρ. Λαμπράκη 30, Θεσσαλονίκη 546 38',
+    delivery_city: 'Θεσσαλονίκη',
+    delivery_postal_code: '546 38',
+  });
+
+  assert.equal(stop?.address, 'Γρ. Λαμπράκη 30, Θεσσαλονίκη 546 38');
+});
+
+test('buildGoogleMapsDirectionsUrl uses the full persisted destination for ambiguous saved addresses', () => {
+  const stop = buildSingleDeliveryRouteStop({
+    id: 'order-3',
+    delivery_address: 'Γρ. Λαμπράκη 30',
+    delivery_city: 'Θεσσαλονίκη',
+    delivery_postal_code: '546 38',
+  });
+
+  assert.equal(stop?.address, 'Γρ. Λαμπράκη 30, Θεσσαλονίκη, 546 38');
+
+  const url = buildGoogleMapsDirectionsUrl(
+    {
+      label: 'Store',
+      address: 'Κωνσταντινουπόλεως 62, Θεσσαλονίκη',
+      coordinates: null,
+    },
+    stop!,
+  );
+
+  assert.equal(
+    url,
+    'https://www.google.com/maps/dir/?api=1&destination=%CE%93%CF%81.+%CE%9B%CE%B1%CE%BC%CF%80%CF%81%CE%AC%CE%BA%CE%B7+30%2C+%CE%98%CE%B5%CF%83%CF%83%CE%B1%CE%BB%CE%BF%CE%BD%CE%AF%CE%BA%CE%B7%2C+546+38&travelmode=driving&origin=%CE%9A%CF%89%CE%BD%CF%83%CF%84%CE%B1%CE%BD%CF%84%CE%B9%CE%BD%CE%BF%CF%85%CF%80%CF%8C%CE%BB%CE%B5%CF%89%CF%82+62%2C+%CE%98%CE%B5%CF%83%CF%83%CE%B1%CE%BB%CE%BF%CE%BD%CE%AF%CE%BA%CE%B7',
+  );
+});
+
 test('resolveSyncedBranchOriginFallback uses terminal branch settings even without restaurant name', () => {
   const settings = new Map<string, unknown>([
     ['terminal.branch_id', 'branch-123'],
@@ -345,6 +406,96 @@ test('resolveSyncedBranchOriginFallback uses terminal branch settings even witho
     address: '1 Store Road',
     coordinates: null,
   });
+});
+
+test('getSuggestionStreetLabel prefers the clicked google main text', () => {
+  const label = getSuggestionStreetLabel({
+    displayLabel: 'Κωνσταντινουπόλεως 37',
+    main_text: 'Κωνσταντινουπόλεως 37',
+    name: 'Γιάννη Χαλκίδη 37',
+    formatted_address: 'Κωνσταντινουπόλεως 37, Θεσσαλονίκη, Ελλάδα',
+  });
+
+  assert.equal(label, 'Κωνσταντινουπόλεως 37');
+});
+
+test('selectPrimaryOnlineSuggestions keeps autocomplete predictions ahead of richer place results', () => {
+  const suggestions = selectPrimaryOnlineSuggestions({
+    predictions: [
+      {
+        place_id: 'place-1',
+        description: 'Κωνσταντινουπόλεως 37, Θεσσαλονίκη, Ελλάδα',
+        structured_formatting: {
+          main_text: 'Κωνσταντινουπόλεως 37',
+          secondary_text: 'Θεσσαλονίκη, Ελλάδα',
+        },
+      },
+    ],
+    places: [
+      {
+        place_id: 'place-1',
+        name: 'Γιάννη Χαλκίδη 37',
+        formatted_address: 'Γιάννη Χαλκίδη 37, Θεσσαλονίκη, Ελλάδα',
+      },
+    ],
+  });
+
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0]?.name, 'Κωνσταντινουπόλεως 37');
+  assert.equal(suggestions[0]?.secondary_text, 'Θεσσαλονίκη, Ελλάδα');
+});
+
+test('selectPrimaryOnlineSuggestions falls back to places when autocomplete has no predictions', () => {
+  const suggestions = selectPrimaryOnlineSuggestions({
+    predictions: [],
+    places: [
+      {
+        place_id: 'place-2',
+        name: 'Κωνσταντινουπόλεως 37',
+        formatted_address: 'Κωνσταντινουπόλεως 37, Θεσσαλονίκη, Ελλάδα',
+        location: { lat: 40.6401, lng: 22.9444 },
+      },
+    ],
+  });
+
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0]?.name, 'Κωνσταντινουπόλεως 37');
+  assert.deepEqual(suggestions[0]?.location, { lat: 40.6401, lng: 22.9444 });
+});
+
+test('buildResolvedAddressDetails preserves the clicked street label while using google metadata', () => {
+  const suggestion: AddressSuggestion = {
+    place_id: 'place-3',
+    name: 'Κωνσταντινουπόλεως 37',
+    displayLabel: 'Κωνσταντινουπόλεως 37',
+    main_text: 'Κωνσταντινουπόλεως 37',
+    secondary_text: 'Θεσσαλονίκη, Ελλάδα',
+    formatted_address: 'Κωνσταντινουπόλεως 37, Θεσσαλονίκη, Ελλάδα',
+    source: 'online',
+  };
+
+  const resolved = buildResolvedAddressDetails(suggestion, {
+    place_id: 'place-3',
+    formatted_address: 'Γιάννη Χαλκίδη 37, Θεσσαλονίκη 542 49, Ελλάδα',
+    address_components: [
+      { long_name: 'Γιάννη Χαλκίδη', short_name: 'Γιάννη Χαλκίδη', types: ['route'] },
+      { long_name: '37', short_name: '37', types: ['street_number'] },
+      { long_name: 'Θεσσαλονίκη', short_name: 'Θεσσαλονίκη', types: ['locality'] },
+      { long_name: '542 49', short_name: '542 49', types: ['postal_code'] },
+    ],
+    geometry: {
+      location: {
+        lat: 40.6401,
+        lng: 22.9444,
+      },
+    },
+  });
+
+  assert.equal(resolved.streetAddress, 'Κωνσταντινουπόλεως 37');
+  assert.equal(resolved.city, 'Θεσσαλονίκη');
+  assert.equal(resolved.postalCode, '542 49');
+  assert.equal(resolved.resolvedStreetNumber, '37');
+  assert.deepEqual(resolved.coordinates, { lat: 40.6401, lng: 22.9444 });
 });
 
 test('resolvePickupToDeliveryAddress prefers the selected customer address', () => {

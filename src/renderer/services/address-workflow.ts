@@ -27,6 +27,7 @@ export interface AddressSuggestion {
   place_id: string;
   name: string;
   formatted_address: string;
+  displayLabel?: string;
   main_text?: string;
   secondary_text?: string;
   location?: { lat: number; lng: number };
@@ -112,9 +113,41 @@ function sanitizeString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function extractPrimaryStreetText(value: unknown): string {
+  const sanitized = sanitizeString(value);
+  if (!sanitized) {
+    return '';
+  }
+  const [firstSegment] = sanitized.split(',');
+  return sanitizeString(firstSegment);
+}
+
+function normalizeSuggestionLocation(value: any): { lat: number; lng: number } | undefined {
+  const lat = value?.lat ?? value?.latitude;
+  const lng = value?.lng ?? value?.longitude;
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    return {
+      lat: Number(lat),
+      lng: Number(lng),
+    };
+  }
+  return undefined;
+}
+
+export function getSuggestionStreetLabel(
+  suggestion?: Partial<Pick<AddressSuggestion, 'displayLabel' | 'main_text' | 'name' | 'formatted_address'>> | null
+): string {
+  return (
+    sanitizeString(suggestion?.displayLabel)
+    || sanitizeString(suggestion?.main_text)
+    || sanitizeString(suggestion?.name)
+    || extractPrimaryStreetText(suggestion?.formatted_address)
+  );
+}
+
 function isAddressLikeSuggestion(candidate: AddressSuggestion): boolean {
   const types = Array.isArray(candidate.types) ? candidate.types.map((t) => String(t).toLowerCase()) : [];
-  const formatted = `${candidate.name} ${candidate.formatted_address}`.toLowerCase();
+  const formatted = `${getSuggestionStreetLabel(candidate)} ${candidate.formatted_address}`.toLowerCase();
 
   if (types.some((t) => ['street_address', 'route', 'premise', 'subpremise', 'geocode', 'address'].includes(t))) {
     return true;
@@ -131,7 +164,7 @@ function isAddressLikeSuggestion(candidate: AddressSuggestion): boolean {
 function scoreSuggestion(query: string, candidate: AddressSuggestion): number {
   const q = query.trim().toLowerCase();
   if (!q) return 0;
-  const name = candidate.name.toLowerCase();
+  const name = getSuggestionStreetLabel(candidate).toLowerCase();
   const formatted = candidate.formatted_address.toLowerCase();
   let score = 0;
   if (name.startsWith(q)) score += 100;
@@ -194,78 +227,119 @@ export async function ensureAddressOfflineRuntime(branchId?: string): Promise<vo
   await refreshDeliveryZoneCache(branchId || activeBranchId);
 }
 
-function normalizeOnlinePlaces(raw: any): AddressSuggestion[] {
-  const placeEntries = Array.isArray(raw?.places) ? raw.places : [];
-  const predictionEntries = Array.isArray(raw?.predictions)
-    ? raw.predictions.map((pred: any) => ({
-        place_id: pred.place_id,
-        name: pred.structured_formatting?.main_text || pred.main_text || pred.description,
-        main_text: pred.structured_formatting?.main_text || pred.main_text || pred.description,
-        secondary_text: pred.structured_formatting?.secondary_text || pred.secondary_text || pred.description,
-        formatted_address: pred.description || pred.formatted_address || '',
-        location: pred.location,
-        types: pred.types,
-      }))
-    : [];
-
-  const merged = [...placeEntries, ...predictionEntries];
+function dedupeSuggestions(candidates: AddressSuggestion[]): AddressSuggestion[] {
   const deduped = new Map<string, AddressSuggestion>();
 
-  for (const place of merged) {
-    const normalized: AddressSuggestion = {
-      place_id: normalizePlaceId(place),
-      name:
-        sanitizeString(place.name)
-        || sanitizeString(place.formatted_address).split(',')[0]
-        || 'Address',
-      main_text:
-        sanitizeString(place.main_text)
-        || sanitizeString(place.structured_formatting?.main_text)
-        || sanitizeString(place.name)
-        || sanitizeString(place.formatted_address).split(',')[0]
-        || 'Address',
-      secondary_text:
-        sanitizeString(place.secondary_text)
-        || sanitizeString(place.structured_formatting?.secondary_text)
-        || sanitizeString(place.formatted_address || place.description || place.name),
-      formatted_address: sanitizeString(place.formatted_address || place.description || place.name),
-      location:
-        place.location &&
-        Number.isFinite(place.location.lat) &&
-        Number.isFinite(place.location.lng)
-          ? { lat: Number(place.location.lat), lng: Number(place.location.lng) }
-          : undefined,
-      types: Array.isArray(place.types) ? place.types : [],
-      source: 'online',
-      validation_source: 'online',
-    };
-
-    const key = normalized.place_id;
+  for (const candidate of candidates) {
+    const key = candidate.place_id;
     if (!deduped.has(key)) {
-      deduped.set(key, normalized);
+      deduped.set(key, candidate);
       continue;
     }
 
     const existing = deduped.get(key)!;
-    // Prefer the richer shape (coordinates / explicit types / fuller address text).
     const existingScore =
       (existing.location ? 2 : 0)
       + ((existing.types?.length || 0) > 0 ? 1 : 0)
       + (existing.formatted_address.length > 0 ? 1 : 0)
+      + (existing.displayLabel ? 1 : 0)
       + (existing.main_text ? 1 : 0)
       + (existing.secondary_text ? 1 : 0);
     const nextScore =
-      (normalized.location ? 2 : 0)
-      + ((normalized.types?.length || 0) > 0 ? 1 : 0)
-      + (normalized.formatted_address.length > 0 ? 1 : 0)
-      + (normalized.main_text ? 1 : 0)
-      + (normalized.secondary_text ? 1 : 0);
+      (candidate.location ? 2 : 0)
+      + ((candidate.types?.length || 0) > 0 ? 1 : 0)
+      + (candidate.formatted_address.length > 0 ? 1 : 0)
+      + (candidate.displayLabel ? 1 : 0)
+      + (candidate.main_text ? 1 : 0)
+      + (candidate.secondary_text ? 1 : 0);
     if (nextScore > existingScore) {
-      deduped.set(key, normalized);
+      deduped.set(key, candidate);
     }
   }
 
   return Array.from(deduped.values());
+}
+
+function normalizeOnlinePredictionSuggestions(raw: any): AddressSuggestion[] {
+  const predictions = Array.isArray(raw?.predictions) ? raw.predictions : [];
+
+  return dedupeSuggestions(
+    predictions.map((prediction: any) => {
+      const formattedAddress = sanitizeString(
+        prediction.description || prediction.formatted_address || prediction.main_text
+      );
+      const displayLabel =
+        sanitizeString(prediction.structured_formatting?.main_text)
+        || sanitizeString(prediction.main_text)
+        || extractPrimaryStreetText(formattedAddress)
+        || 'Address';
+
+      return {
+        place_id: normalizePlaceId(prediction),
+        name: displayLabel,
+        displayLabel,
+        main_text: displayLabel,
+        secondary_text:
+          sanitizeString(prediction.structured_formatting?.secondary_text)
+          || sanitizeString(prediction.secondary_text)
+          || formattedAddress,
+        formatted_address: formattedAddress,
+        location: normalizeSuggestionLocation(prediction.location),
+        types: Array.isArray(prediction.types) ? prediction.types : [],
+        source: 'online',
+        validation_source: 'online',
+      };
+    })
+  );
+}
+
+function normalizeOnlinePlaceSuggestions(raw: any): AddressSuggestion[] {
+  const places = Array.isArray(raw?.places) ? raw.places : [];
+
+  return dedupeSuggestions(
+    places.map((place: any) => {
+      const formattedAddress = sanitizeString(place.formatted_address || place.description || place.name);
+      const displayLabel =
+        sanitizeString(place.main_text)
+        || sanitizeString(place.structured_formatting?.main_text)
+        || sanitizeString(place.name)
+        || extractPrimaryStreetText(formattedAddress)
+        || 'Address';
+
+      return {
+        place_id: normalizePlaceId(place),
+        name: displayLabel,
+        displayLabel,
+        main_text: displayLabel,
+        secondary_text:
+          sanitizeString(place.secondary_text)
+          || sanitizeString(place.structured_formatting?.secondary_text)
+          || formattedAddress,
+        formatted_address: formattedAddress,
+        location: normalizeSuggestionLocation(place.location),
+        types: Array.isArray(place.types) ? place.types : [],
+        source: 'online',
+        validation_source: 'online',
+      };
+    })
+  );
+}
+
+export function selectPrimaryOnlineSuggestions(
+  autocompleteRaw: any,
+  searchPlacesRaw?: any
+): AddressSuggestion[] {
+  const predictions = normalizeOnlinePredictionSuggestions(autocompleteRaw);
+  if (predictions.length > 0) {
+    return predictions;
+  }
+
+  const autocompletePlaces = normalizeOnlinePlaceSuggestions(autocompleteRaw);
+  if (autocompletePlaces.length > 0) {
+    return autocompletePlaces;
+  }
+
+  return normalizeOnlinePlaceSuggestions(searchPlacesRaw);
 }
 
 function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
@@ -278,6 +352,7 @@ function normalizeLocalPlaces(raw: any): AddressSuggestion[] {
   return places.map((place: any) => ({
     place_id: normalizePlaceId(place),
     name: sanitizeString(place.name || place.street_address || place.address) || 'Address',
+    displayLabel: sanitizeString(place.name || place.street_address || place.address) || 'Address',
     main_text: sanitizeString(place.name || place.street_address || place.address) || 'Address',
     secondary_text: sanitizeString(place.formatted_address || place.city || place.postal_code || ''),
     formatted_address: sanitizeString(place.formatted_address || place.name || place.street_address),
@@ -313,29 +388,32 @@ async function fetchOnlineSuggestions(
     language,
   };
 
-  const merged = new Map<string, AddressSuggestion>();
-  for (const path of ['pos/address/autocomplete', 'pos/google-maps/search-places']) {
-    try {
-      const response = await posApiPost<any>(path, payload);
-      if (!response.success) {
-        continue;
+  try {
+    const response = await posApiPost<any>('pos/address/autocomplete', payload);
+    if (response.success) {
+      const normalized = selectPrimaryOnlineSuggestions(response.data);
+      if (normalized.length > 0) {
+        return normalized
+          .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
+          .slice(0, options.limit || 5);
       }
-      const normalized = normalizeOnlinePlaces(response.data);
-      if (normalized.length === 0) {
-        continue;
-      }
-      for (const candidate of normalized) {
-        if (!merged.has(candidate.place_id)) {
-          merged.set(candidate.place_id, candidate);
-        }
-      }
-    } catch {
-      // Continue fallback chain.
     }
+  } catch {
+    // Continue to search-places fallback.
   }
-  return Array.from(merged.values())
-    .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
-    .slice(0, options.limit || 5);
+
+  try {
+    const response = await posApiPost<any>('pos/google-maps/search-places', payload);
+    if (response.success) {
+      return selectPrimaryOnlineSuggestions(null, response.data)
+        .sort((a, b) => scoreSuggestion(query, b) - scoreSuggestion(query, a))
+        .slice(0, options.limit || 5);
+    }
+  } catch {
+    // Continue to offline fallback.
+  }
+
+  return [];
 }
 
 async function fetchLocalSuggestions(
@@ -395,13 +473,54 @@ function extractFromAddressComponents(components: any[]): {
   return { route, streetNumber, city, postalCode };
 }
 
+export function buildResolvedAddressDetails(
+  suggestion: AddressSuggestion,
+  result: any
+): ResolvedAddressDetails {
+  const components = Array.isArray(result?.address_components) ? result.address_components : [];
+  const extracted = extractFromAddressComponents(components);
+  const geometry = result?.geometry?.location;
+  const coordinates =
+    geometry && Number.isFinite(geometry.lat) && Number.isFinite(geometry.lng)
+      ? { lat: Number(geometry.lat), lng: Number(geometry.lng) }
+      : suggestion.location;
+  const selectedStreet = getSuggestionStreetLabel(suggestion);
+  const formattedAddress = sanitizeString(result?.formatted_address || suggestion.formatted_address);
+  const resolvedStreetNumber = selectResolvedStreetNumber(
+    extracted.streetNumber,
+    selectedStreet || extracted.route || formattedAddress,
+    formattedAddress
+  );
+  const canonicalStreet =
+    extracted.route && resolvedStreetNumber
+      ? `${extracted.route} ${resolvedStreetNumber}`
+      : extracted.route;
+  const streetAddress =
+    selectedStreet
+    || canonicalStreet
+    || extractPrimaryStreetText(formattedAddress)
+    || 'Address';
+
+  return {
+    streetAddress,
+    city: extracted.city,
+    postalCode: extracted.postalCode,
+    coordinates,
+    placeId: sanitizeString(result?.place_id) || suggestion.place_id,
+    formattedAddress,
+    resolvedStreetNumber,
+    addressFingerprint: buildAddressFingerprint(streetAddress, coordinates),
+    validationSource: 'online',
+  };
+}
+
 export async function resolveAddressSuggestion(
   suggestion: AddressSuggestion,
   input: string,
   options: ResolveOptions = {}
 ): Promise<ResolvedAddressDetails> {
   const coords = suggestion.location;
-  const fallbackStreet = sanitizeString(suggestion.name) || sanitizeString(suggestion.formatted_address).split(',')[0];
+  const fallbackStreet = getSuggestionStreetLabel(suggestion) || extractPrimaryStreetText(suggestion.formatted_address);
 
   if (suggestion.source === 'offline_cache') {
     const street = fallbackStreet;
@@ -423,7 +542,7 @@ export async function resolveAddressSuggestion(
     };
   }
 
-  const language = resolveAddressLanguage(input, suggestion.formatted_address, suggestion.name);
+  const language = resolveAddressLanguage(input, suggestion.formatted_address, getSuggestionStreetLabel(suggestion));
   const payload = {
     place_id: suggestion.place_id,
     location: suggestion.location || undefined,
@@ -439,37 +558,7 @@ export async function resolveAddressSuggestion(
       }
 
       const result = response.data?.result || response.data;
-      const components = Array.isArray(result?.address_components) ? result.address_components : [];
-      const extracted = extractFromAddressComponents(components);
-      const geometry = result?.geometry?.location;
-      const coordinates =
-        geometry && Number.isFinite(geometry.lat) && Number.isFinite(geometry.lng)
-          ? { lat: Number(geometry.lat), lng: Number(geometry.lng) }
-          : suggestion.location;
-
-      const formattedAddress = sanitizeString(result?.formatted_address || suggestion.formatted_address);
-      const resolvedStreetNumber = selectResolvedStreetNumber(
-        extracted.streetNumber,
-        fallbackStreet,
-        formattedAddress
-      );
-      const streetAddress =
-        extracted.route && resolvedStreetNumber
-          ? `${extracted.route} ${resolvedStreetNumber}`
-          : extracted.route || fallbackStreet;
-      const fingerprint = buildAddressFingerprint(streetAddress, coordinates);
-
-      return {
-        streetAddress,
-        city: extracted.city,
-        postalCode: extracted.postalCode,
-        coordinates,
-        placeId: suggestion.place_id,
-        formattedAddress,
-        resolvedStreetNumber,
-        addressFingerprint: fingerprint,
-        validationSource: 'online',
-      };
+      return buildResolvedAddressDetails(suggestion, result);
     } catch {
       // continue
     }

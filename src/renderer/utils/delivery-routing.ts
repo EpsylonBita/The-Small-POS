@@ -98,36 +98,129 @@ function formatAddressParts(parts: Array<string | null | undefined>): string | n
   return filtered.join(', ')
 }
 
-function resolveAddressFromObject(value: Record<string, unknown>): string | null {
+function normalizeComparableText(value: string | null | undefined): string {
+  if (!value) {
+    return ''
+  }
+
+  return value
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[.,;|/\\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function normalizeCompactText(value: string | null | undefined): string {
+  return normalizeComparableText(value).replace(/\s+/g, '')
+}
+
+function addressAlreadyContainsPart(address: string | null | undefined, part: string | null | undefined): boolean {
+  const normalizedAddress = normalizeComparableText(address)
+  const normalizedPart = normalizeComparableText(part)
+  if (!normalizedAddress || !normalizedPart) {
+    return false
+  }
+
   return (
-    normalizeText(value.formatted)
-    || formatAddressParts([
-      normalizeText(value.street),
-      normalizeText(value.city),
-      normalizeText(value.postalCode),
-      normalizeText(value.postal_code),
-      normalizeText(value.floor),
-    ])
-    || normalizeText(value.address)
+    normalizedAddress.includes(normalizedPart)
+    || normalizeCompactText(address).includes(normalizeCompactText(part))
   )
 }
 
+function buildFullDeliveryAddress(
+  address: string | null | undefined,
+  city: string | null | undefined,
+  postalCode: string | null | undefined,
+): string | null {
+  const baseAddress = normalizeText(address)
+  const resolvedCity = normalizeText(city)
+  const resolvedPostalCode = normalizeText(postalCode)
+  const parts: string[] = []
+
+  if (baseAddress) {
+    parts.push(baseAddress)
+  }
+  if (resolvedCity && !addressAlreadyContainsPart(baseAddress, resolvedCity)) {
+    parts.push(resolvedCity)
+  }
+  if (resolvedPostalCode && !addressAlreadyContainsPart(baseAddress, resolvedPostalCode)) {
+    parts.push(resolvedPostalCode)
+  }
+
+  return formatAddressParts(parts)
+}
+
+function resolveAddressFromObject(value: Record<string, unknown>): string | null {
+  const objectAddress =
+    normalizeText(value.formatted)
+    || buildFullDeliveryAddress(
+      normalizeText(value.street) || normalizeText(value.street_address) || normalizeText(value.address),
+      normalizeText(value.city),
+      normalizeText(value.postalCode) || normalizeText(value.postal_code),
+    )
+
+  return objectAddress || normalizeText(value.address)
+}
+
 function resolveCoordinatesFromObject(value: Record<string, unknown>): { lat: number; lng: number } | null {
-  const lat = normalizeNumber(value.lat)
-  const lng = normalizeNumber(value.lng)
-  if (lat === null || lng === null) {
-    return null
+  const coordinatePairs = [
+    { lat: normalizeNumber(value.lat), lng: normalizeNumber(value.lng) },
+    { lat: normalizeNumber(value.latitude), lng: normalizeNumber(value.longitude) },
+  ]
+
+  for (const pair of coordinatePairs) {
+    if (pair.lat === null || pair.lng === null) {
+      continue
+    }
+
+    if (pair.lat < -90 || pair.lat > 90 || pair.lng < -180 || pair.lng > 180) {
+      continue
+    }
+
+    if (!hasUsableCoordinates(pair.lat, pair.lng)) {
+      continue
+    }
+
+    return { lat: pair.lat, lng: pair.lng }
   }
 
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    return null
+  const nestedCoordinates = value.coordinates
+  if (nestedCoordinates && typeof nestedCoordinates === 'object' && !Array.isArray(nestedCoordinates)) {
+    const resolvedNestedCoordinates = resolveCoordinatesFromObject(nestedCoordinates as Record<string, unknown>)
+    if (resolvedNestedCoordinates) {
+      return resolvedNestedCoordinates
+    }
   }
 
-  if (!hasUsableCoordinates(lat, lng)) {
-    return null
+  const nestedLocation = value.location
+  if (nestedLocation && typeof nestedLocation === 'object' && !Array.isArray(nestedLocation)) {
+    const resolvedLocationCoordinates = resolveCoordinatesFromObject(nestedLocation as Record<string, unknown>)
+    if (resolvedLocationCoordinates) {
+      return resolvedLocationCoordinates
+    }
   }
 
-  return { lat, lng }
+  if (
+    Array.isArray(nestedCoordinates)
+    && nestedCoordinates.length >= 2
+  ) {
+    const lng = normalizeNumber(nestedCoordinates[0])
+    const lat = normalizeNumber(nestedCoordinates[1])
+    if (
+      lat !== null
+      && lng !== null
+      && lat >= -90
+      && lat <= 90
+      && lng >= -180
+      && lng <= 180
+      && hasUsableCoordinates(lat, lng)
+    ) {
+      return { lat, lng }
+    }
+  }
+
+  return null
 }
 
 export function resolveStoreMapOrigin(getSetting: TerminalSettingGetter): StoreMapOrigin | null {
@@ -189,9 +282,12 @@ export function resolveOrderDeliveryAddress(order: unknown): string | null {
   }
 
   const record = order as Record<string, unknown>
-  const directAddress =
+  const directAddress = buildFullDeliveryAddress(
     normalizeText(record.delivery_address)
-    || normalizeText(record.deliveryAddress)
+      || normalizeText(record.deliveryAddress),
+    normalizeText(record.delivery_city) || normalizeText(record.deliveryCity),
+    normalizeText(record.delivery_postal_code) || normalizeText(record.deliveryPostalCode),
+  )
 
   if (directAddress) {
     return directAddress
@@ -208,7 +304,11 @@ export function resolveOrderDeliveryAddress(order: unknown): string | null {
       continue
     }
 
-    const resolved = resolveAddressFromObject(candidate as Record<string, unknown>)
+    const resolved = buildFullDeliveryAddress(
+      resolveAddressFromObject(candidate as Record<string, unknown>),
+      normalizeText(record.delivery_city) || normalizeText(record.deliveryCity),
+      normalizeText(record.delivery_postal_code) || normalizeText(record.deliveryPostalCode),
+    )
     if (resolved) {
       return resolved
     }
@@ -229,6 +329,7 @@ export function buildSingleDeliveryRouteStop(order: unknown): DeliveryRouteStopP
     record.deliveryCoordinates,
     record.coordinates,
     record.delivery_address,
+    record.deliveryAddress,
     record.address,
   ]
 
