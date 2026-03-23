@@ -10,7 +10,10 @@ import {
   evaluatePrinterSupportRules,
   getHealthSupportExplanation,
 } from '../../src/renderer/support';
-import { buildGoogleMapsDirectionsUrl } from '../../src/renderer/utils/delivery-routing';
+import {
+  buildGoogleMapsDirectionsUrl,
+  resolveSyncedBranchOriginFallback,
+} from '../../src/renderer/utils/delivery-routing';
 import { sortOrdersOldestFirst } from '../../src/renderer/utils/order-sorting';
 import {
   calculatePickupToDeliveryTotal,
@@ -322,6 +325,26 @@ test('buildGoogleMapsDirectionsUrl includes store origin when configured', () =>
     url,
     'https://www.google.com/maps/dir/?api=1&destination=12+Main+Street&travelmode=driving&origin=1+Store+Road',
   );
+});
+
+test('resolveSyncedBranchOriginFallback uses terminal branch settings even without restaurant name', () => {
+  const settings = new Map<string, unknown>([
+    ['terminal.branch_id', 'branch-123'],
+    ['terminal.store_address', '1 Store Road'],
+  ]);
+  const getSetting = <T = unknown>(category: string, key: string, defaultValue?: T): T | undefined => {
+    const settingKey = `${category}.${key}`;
+    return (settings.has(settingKey) ? settings.get(settingKey) : defaultValue) as T | undefined;
+  };
+
+  const origin = resolveSyncedBranchOriginFallback(getSetting, null);
+
+  assert.deepEqual(origin, {
+    branchId: 'branch-123',
+    label: 'Store',
+    address: '1 Store Road',
+    coordinates: null,
+  });
 });
 
 test('resolvePickupToDeliveryAddress prefers the selected customer address', () => {

@@ -50,7 +50,9 @@ import { useTerminalSettings } from '../hooks/useTerminalSettings';
 import { openExternalUrl } from '../utils/electron-api';
 import {
   buildSingleDeliveryRouteStop,
+  createTerminalSettingGetter,
   requestOptimizedDeliveryRoute,
+  resolveSyncedBranchOriginFallback,
   resolveStoreMapOrigin,
 } from '../utils/delivery-routing';
 import { resolveDeliveryFee } from '../utils/delivery-fee';
@@ -198,7 +200,7 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const bridge = getBridge();
   const { t } = useI18n();
   const { resolvedTheme } = useTheme();
-  const { getSetting } = useTerminalSettings();
+  const { getSetting, refresh: refreshTerminalSettings } = useTerminalSettings();
   const {
     orders,
     pendingExternalOrders,
@@ -457,6 +459,10 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
   const storeMapOrigin = React.useMemo(
     () => resolveStoreMapOrigin(getSetting),
     [getSetting]
+  );
+  const syncedBranchOriginFallback = React.useMemo(
+    () => resolveSyncedBranchOriginFallback(getSetting, effectiveBranchId),
+    [effectiveBranchId, getSetting]
   );
 
   const deliverySelectionCanBeCompleted = React.useMemo(() => (
@@ -2511,20 +2517,38 @@ export const OrderDashboard = memo<OrderDashboardProps>(({ className = '', order
           .filter((stop): stop is NonNullable<typeof stop> => Boolean(stop));
         const skippedMissingAddress = deliveryOrders.length - routeStops.length;
 
-        if (!storeMapOrigin) {
-          toast.error(
-            t('orderDashboard.storeLocationMissing', {
-              defaultValue: 'Store location is not configured for this terminal.',
-            })
-          );
-        } else if (routeStops.length === 0) {
+        if (routeStops.length === 0) {
           toast.error(
             t('orderDashboard.noAddressesForMap', {
               defaultValue: 'Select at least one delivery order with a valid address.',
             })
           );
         } else {
-          const optimizationResult = await requestOptimizedDeliveryRoute(routeStops);
+          let optimizationResult = await requestOptimizedDeliveryRoute({
+            stops: routeStops,
+            originFallback: syncedBranchOriginFallback,
+          });
+
+          if (
+            !optimizationResult.success
+            && optimizationResult.error.includes('Store location is not configured')
+          ) {
+            const refreshResult = await refreshTerminalSettings();
+            const refreshedGetter = createTerminalSettingGetter(
+              refreshResult && typeof refreshResult === 'object' && 'settings' in refreshResult
+                ? (refreshResult.settings as Record<string, unknown> | undefined)
+                : undefined
+            );
+            const refreshedOriginFallback = resolveSyncedBranchOriginFallback(
+              refreshedGetter,
+              effectiveBranchId,
+            );
+
+            optimizationResult = await requestOptimizedDeliveryRoute({
+              stops: routeStops,
+              originFallback: refreshedOriginFallback,
+            });
+          }
 
           if (!optimizationResult.success) {
             toast.error(optimizationResult.error || t('orderDashboard.mapOpenFailed'));

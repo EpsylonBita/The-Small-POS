@@ -6,12 +6,17 @@ export interface StoreMapOrigin {
   coordinates: { lat: number; lng: number } | null
 }
 
+export interface BranchOriginFallbackPayload extends StoreMapOrigin {
+  branchId: string
+}
+
 export interface DeliveryRouteStopPayload {
   orderId?: string | null
   orderNumber?: string | null
   label?: string | null
   address?: string | null
   coordinates?: { lat: number; lng: number } | null
+  createdAt?: string | null
 }
 
 export interface OptimizedRouteLaunch {
@@ -30,11 +35,38 @@ export interface OptimizedDeliveryRoutePlan {
   launches: OptimizedRouteLaunch[]
   chunked: boolean
   chunkCount: number
+  originSource: 'branch-db' | 'synced-branch-fallback'
   optimizationMethod: string
   warnings: string[]
 }
 
 type TerminalSettingGetter = <T = unknown>(category: string, key: string, defaultValue?: T) => T | undefined
+type TerminalSettingsSource = Record<string, unknown> | null | undefined
+
+export function createTerminalSettingGetter(settings: TerminalSettingsSource): TerminalSettingGetter {
+  return <T = unknown>(category: string, key: string, defaultValue?: T): T | undefined => {
+    if (!settings) {
+      return defaultValue
+    }
+
+    const flatKey = `${category}.${key}`
+    if (Object.prototype.hasOwnProperty.call(settings, flatKey)) {
+      return settings[flatKey] as T
+    }
+
+    const categoryValue = settings[category]
+    if (
+      categoryValue
+      && typeof categoryValue === 'object'
+      && !Array.isArray(categoryValue)
+      && Object.prototype.hasOwnProperty.call(categoryValue, key)
+    ) {
+      return (categoryValue as Record<string, unknown>)[key] as T
+    }
+
+    return defaultValue
+  }
+}
 
 function normalizeText(value: unknown): string | null {
   if (typeof value !== 'string') {
@@ -129,6 +161,28 @@ export function resolveStoreMapOrigin(getSetting: TerminalSettingGetter): StoreM
   }
 }
 
+export function resolveSyncedBranchOriginFallback(
+  getSetting: TerminalSettingGetter,
+  branchId: string | null | undefined,
+): BranchOriginFallbackPayload | null {
+  const normalizedBranchId = (
+    normalizeText(branchId)
+    || normalizeText(getSetting('terminal', 'branch_id', ''))
+  )
+  const origin = resolveStoreMapOrigin(getSetting)
+
+  if (!normalizedBranchId || !origin) {
+    return null
+  }
+
+  return {
+    branchId: normalizedBranchId,
+    label: origin.label,
+    address: origin.address,
+    coordinates: origin.coordinates,
+  }
+}
+
 export function resolveOrderDeliveryAddress(order: unknown): string | null {
   if (!order || typeof order !== 'object') {
     return null
@@ -205,6 +259,7 @@ export function buildSingleDeliveryRouteStop(order: unknown): DeliveryRouteStopP
       || 'Delivery stop',
     address,
     coordinates,
+    createdAt: normalizeText(record.created_at) || normalizeText(record.createdAt),
   }
 }
 
@@ -243,11 +298,17 @@ export function buildGoogleMapsDirectionsUrl(
 }
 
 export async function requestOptimizedDeliveryRoute(
-  stops: DeliveryRouteStopPayload[],
+  args: {
+    stops: DeliveryRouteStopPayload[]
+    originFallback?: BranchOriginFallbackPayload | null
+  },
 ): Promise<{ success: true; route: OptimizedDeliveryRoutePlan } | { success: false; error: string }> {
   const response = await posApiPost<{ success: boolean; route?: OptimizedDeliveryRoutePlan; error?: string }>(
     '/api/pos/delivery/optimize-route',
-    { stops },
+    {
+      stops: args.stops,
+      originFallback: args.originFallback ?? undefined,
+    },
   )
 
   if (!response.success) {
