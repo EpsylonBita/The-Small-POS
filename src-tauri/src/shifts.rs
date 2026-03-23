@@ -935,7 +935,8 @@ pub fn get_active(db: &DbState, staff_id: &str) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     query_shift(
         &conn,
-        "SELECT * FROM staff_shifts WHERE staff_id = ?1 AND status = 'active' LIMIT 1",
+        "SELECT * FROM staff_shifts WHERE staff_id = ?1 AND status = 'active'
+         ORDER BY check_in_time DESC LIMIT 1",
         params![staff_id],
     )
 }
