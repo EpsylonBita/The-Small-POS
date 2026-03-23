@@ -24,6 +24,10 @@ import type {
   DiagnosticsOpenExportDirResponse,
   DiagnosticsSystemHealth,
   EndOfDayStatusResponse,
+  RecoveryExportResponse,
+  RecoveryListResponse,
+  RecoveryPoint,
+  RecoveryRestoreResponse,
   ScreenCaptureGetSourcesRequest,
   ScreenCaptureGetSourcesResponse,
   ScreenCaptureSignalPollingResponse,
@@ -1174,6 +1178,7 @@ export interface PlatformBridge {
 
   // -- Printer ---------------------------------------------------------------
   printer: {
+    listJobs(params?: { status?: string; printerProfileId?: string }): Promise<any>;
     listSystemPrinters(): Promise<any[]>;
     scanNetwork(): Promise<any[]>;
     scanBluetooth(): Promise<any[]>;
@@ -1187,7 +1192,10 @@ export interface PlatformBridge {
     getAllStatuses(): Promise<any>;
     submitJob(job: any): Promise<IpcResult>;
     cancelJob(jobId: string): Promise<IpcResult>;
+    cancelAllJobs(params?: { printerProfileId?: string; statuses?: string[] }): Promise<IpcResult>;
+    pauseQueue(params?: { printerProfileId?: string }): Promise<IpcResult>;
     retryJob(jobId: string): Promise<IpcResult>;
+    resumeQueue(params?: { printerProfileId?: string }): Promise<IpcResult>;
     test(printerId: string): Promise<IpcResult>;
     testDraft(profileDraftOrPayload: any, sampleKind?: string): Promise<IpcResult>;
     testGreekDirect(printerId: string): Promise<IpcResult>;
@@ -1279,6 +1287,15 @@ export interface PlatformBridge {
     fetchFromAdmin(): Promise<IpcResult>;
     getCached(): Promise<IpcResult>;
     saveCache(modules: any[]): Promise<IpcResult>;
+  };
+
+  branchData: {
+    getTables(params?: TableBridgeListParams): Promise<AdminApiBridgeResponse<any>>;
+    getStaffSchedule(params: StaffScheduleListParams): Promise<AdminApiBridgeResponse<any>>;
+    getDeliveryZones(params?: { branchId?: string; branch_id?: string }): Promise<AdminApiBridgeResponse<any>>;
+    getCatalogOffers(params?: { branchId?: string; branch_id?: string; catalogType?: string; catalog_type?: string }): Promise<AdminApiBridgeResponse<any>>;
+    validateCoupon(params: { code: string; order_total?: number; orderTotal?: number; branchId?: string; branch_id?: string }): Promise<AdminApiBridgeResponse<any>>;
+    getBundleStatus(params?: { branchId?: string; branch_id?: string }): Promise<AdminApiBridgeResponse<any>>;
   };
 
   // -- Updates ---------------------------------------------------------------
@@ -1381,6 +1398,15 @@ export interface PlatformBridge {
     openExportDir(path: string): Promise<DiagnosticsOpenExportDirResponse>;
     checkDeliveredOrders(): Promise<any>;
     fixMissingDriverIds(driverId: string): Promise<any>;
+  };
+
+  recovery: {
+    listPoints(): Promise<RecoveryListResponse>;
+    createSnapshot(): Promise<RecoveryPoint>;
+    exportCurrent(): Promise<RecoveryExportResponse>;
+    exportPoint(pointId: string): Promise<RecoveryExportResponse>;
+    restorePoint(pointId: string): Promise<RecoveryRestoreResponse>;
+    openDir(path?: string): Promise<{ success: boolean; path: string }>;
   };
 
   /**
@@ -1622,9 +1648,13 @@ export const CHANNEL_MAP: Record<string, string> = {
   'printer:get': 'printer.get',
   'printer:get-status': 'printer.getStatus',
   'printer:get-all-statuses': 'printer.getAllStatuses',
+  'printer:list-jobs': 'printer.listJobs',
   'printer:submit-job': 'printer.submitJob',
+  'printer:cancel-all-jobs': 'printer.cancelAllJobs',
   'printer:cancel-job': 'printer.cancelJob',
+  'printer:pause-queue': 'printer.pauseQueue',
   'printer:retry-job': 'printer.retryJob',
+  'printer:resume-queue': 'printer.resumeQueue',
   'printer:test': 'printer.test',
   'printer:test-draft': 'printer.testDraft',
   'printer:test-greek-direct': 'printer.testGreekDirect',
@@ -1704,6 +1734,12 @@ export const CHANNEL_MAP: Record<string, string> = {
   'modules:fetch-from-admin': 'modules.fetchFromAdmin',
   'modules:get-cached': 'modules.getCached',
   'modules:save-cache': 'modules.saveCache',
+  'branch-data:get-bundle-status': 'branchData.getBundleStatus',
+  'branch-data:get-catalog-offers': 'branchData.getCatalogOffers',
+  'branch-data:get-delivery-zones': 'branchData.getDeliveryZones',
+  'branch-data:get-staff-schedule': 'branchData.getStaffSchedule',
+  'branch-data:get-tables': 'branchData.getTables',
+  'branch-data:validate-coupon': 'branchData.validateCoupon',
 
   // Updates
   'update:check': 'updates.check',
@@ -1760,6 +1796,12 @@ export const CHANNEL_MAP: Record<string, string> = {
   'diagnostics:open-export-dir': 'diagnostics.openExportDir',
   'diagnostic:check-delivered-orders': 'diagnostics.checkDeliveredOrders',
   'diagnostic:fix-missing-driver-ids': 'diagnostics.fixMissingDriverIds',
+  'recovery:list-points': 'recovery.listPoints',
+  'recovery:create-snapshot': 'recovery.createSnapshot',
+  'recovery:export-current': 'recovery.exportCurrent',
+  'recovery:export-point': 'recovery.exportPoint',
+  'recovery:restore-point': 'recovery.restorePoint',
+  'recovery:open-dir': 'recovery.openDir',
 
   // Service dashboard metrics
   'rooms:get-availability': 'rooms.getAvailability',
@@ -2080,8 +2122,7 @@ export class TauriBridge implements PlatformBridge {
   };
 
   tables = {
-    list: (params?: TableBridgeListParams) =>
-      this.adminFetch(`/api/pos/tables${buildQueryString(params)}`),
+    list: (params?: TableBridgeListParams) => this.inv('branch-data:get-tables', params || {}),
     get: (tableId: string) => this.adminFetch(`/api/pos/tables/${tableId}`),
     updateStatus: (tableId: string, status: string) =>
       this.adminFetch(`/api/pos/tables/${tableId}`, {
@@ -2091,8 +2132,7 @@ export class TauriBridge implements PlatformBridge {
   };
 
   staffSchedule = {
-    list: (params: StaffScheduleListParams) =>
-      this.adminFetch(`/api/pos/staff-schedule${buildQueryString(params)}`),
+    list: (params: StaffScheduleListParams) => this.inv('branch-data:get-staff-schedule', params),
     checkAvailability: (params: StaffScheduleCheckAvailabilityParams) =>
       this.adminFetch(`/api/pos/staff-schedule/check${buildQueryString(params)}`),
     clock: (payload: StaffScheduleClockPayload) =>
@@ -2177,6 +2217,8 @@ export class TauriBridge implements PlatformBridge {
   };
 
   printer = {
+    listJobs: (params?: { status?: string; printerProfileId?: string }) =>
+      this.inv('printer:list-jobs', params || {}),
     listSystemPrinters: () => this.inv('printer:list-system-printers'),
     scanNetwork: () => this.inv('printer:scan-network'),
     scanBluetooth: () => this.inv('printer:scan-bluetooth'),
@@ -2189,8 +2231,14 @@ export class TauriBridge implements PlatformBridge {
     getStatus: (id: string) => this.inv('printer:get-status', id),
     getAllStatuses: () => this.inv('printer:get-all-statuses'),
     submitJob: (j: any) => this.inv('printer:submit-job', j),
+    cancelAllJobs: (params?: { printerProfileId?: string; statuses?: string[] }) =>
+      this.inv('printer:cancel-all-jobs', params || {}),
     cancelJob: (id: string) => this.inv('printer:cancel-job', id),
+    pauseQueue: (params?: { printerProfileId?: string }) =>
+      this.inv('printer:pause-queue', params || {}),
     retryJob: (id: string) => this.inv('printer:retry-job', id),
+    resumeQueue: (params?: { printerProfileId?: string }) =>
+      this.inv('printer:resume-queue', params || {}),
     test: (id: string) => this.inv('printer:test', id),
     testDraft: (profileDraftOrPayload: any, sampleKind?: string) => {
       const payload =
@@ -2293,6 +2341,30 @@ export class TauriBridge implements PlatformBridge {
     saveCache: (m: any[]) => this.inv('modules:save-cache', m),
   };
 
+  branchData = {
+    getTables: (params?: TableBridgeListParams) =>
+      this.inv('branch-data:get-tables', params || {}),
+    getStaffSchedule: (params: StaffScheduleListParams) =>
+      this.inv('branch-data:get-staff-schedule', params),
+    getDeliveryZones: (params?: { branchId?: string; branch_id?: string }) =>
+      this.inv('branch-data:get-delivery-zones', params || {}),
+    getCatalogOffers: (params?: {
+      branchId?: string;
+      branch_id?: string;
+      catalogType?: string;
+      catalog_type?: string;
+    }) => this.inv('branch-data:get-catalog-offers', params || {}),
+    validateCoupon: (params: {
+      code: string;
+      order_total?: number;
+      orderTotal?: number;
+      branchId?: string;
+      branch_id?: string;
+    }) => this.inv('branch-data:validate-coupon', params),
+    getBundleStatus: (params?: { branchId?: string; branch_id?: string }) =>
+      this.inv('branch-data:get-bundle-status', params || {}),
+  };
+
   updates = {
     check: () => this.inv('update:check'),
     download: () => this.inv('update:download'),
@@ -2383,6 +2455,16 @@ export class TauriBridge implements PlatformBridge {
     openExportDir: (path: string) => this.inv('diagnostics:open-export-dir', { path }),
     checkDeliveredOrders: () => this.inv('diagnostic:check-delivered-orders'),
     fixMissingDriverIds: (driverId: string) => this.inv('diagnostic:fix-missing-driver-ids', driverId),
+  };
+
+  recovery = {
+    listPoints: () => this.inv('recovery:list-points'),
+    createSnapshot: () => this.inv('recovery:create-snapshot'),
+    exportCurrent: () => this.inv('recovery:export-current'),
+    exportPoint: (pointId: string) => this.inv('recovery:export-point', { pointId }),
+    restorePoint: (pointId: string) => this.inv('recovery:restore-point', { pointId }),
+    openDir: (path?: string) =>
+      path ? this.inv('recovery:open-dir', { path }) : this.inv('recovery:open-dir'),
   };
 }
 

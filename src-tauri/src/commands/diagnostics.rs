@@ -201,6 +201,10 @@ pub async fn database_get_stats(db: tauri::State<'_, db::DbState>) -> Result<Val
 
 #[tauri::command]
 pub async fn database_reset(db: tauri::State<'_, db::DbState>) -> Result<Value, String> {
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     crate::clear_operational_data_inner(&db)
 }
 
@@ -208,6 +212,10 @@ pub async fn database_reset(db: tauri::State<'_, db::DbState>) -> Result<Value, 
 pub async fn database_clear_operational_data(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<Value, String> {
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreClearOperationalData,
+    )?;
     crate::clear_operational_data_inner(&db)
 }
 

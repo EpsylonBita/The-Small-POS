@@ -270,6 +270,66 @@ export interface ScreenCaptureSignalBatchPayload {
   lastSignalTimestamp?: string | null;
 }
 
+// -- Recovery ----------------------------------------------------------------
+
+export type RecoveryPointKind =
+  | 'scheduled'
+  | 'manual'
+  | 'pre_factory_reset'
+  | 'pre_emergency_reset'
+  | 'pre_clear_operational_data'
+  | 'pre_restore'
+  | 'pre_migration'
+  | 'quarantined_open_failure';
+
+export interface RecoveryPoint {
+  id: string;
+  kind: RecoveryPointKind;
+  createdAt: string;
+  path: string;
+  snapshotPath: string;
+  walPath?: string | null;
+  shmPath?: string | null;
+  schemaVersion: number;
+  terminalId?: string | null;
+  branchId?: string | null;
+  organizationId?: string | null;
+  dbSizeBytes: number;
+  snapshotSizeBytes: number;
+  fingerprint: string;
+  tableCounts: Record<string, number>;
+  syncBacklog: Record<string, Record<string, number>>;
+  activePeriodStartAt?: string | null;
+  activeReportDate?: string | null;
+  latestZReportId?: string | null;
+  latestZReportDate?: string | null;
+  latestZReportGeneratedAt?: string | null;
+  latestZReportSyncState?: string | null;
+  lastZReportTimestamp?: string | null;
+  error?: string | null;
+}
+
+export interface RecoveryListResponse {
+  success: boolean;
+  points: RecoveryPoint[];
+}
+
+export interface RecoveryExportResponse {
+  success: boolean;
+  path: string;
+  exportKind: string;
+  pointId?: string | null;
+}
+
+export interface RecoveryRestoreResponse {
+  success: boolean;
+  staged: boolean;
+  restartRequired: boolean;
+  pointId: string;
+  preRestorePointId?: string | null;
+  message: string;
+}
+
 // -- Diagnostics --------------------------------------------------------------
 
 export interface DiagnosticsAboutInfo {

@@ -6,7 +6,7 @@
 //! via the `printers` module. Missing/unavailable hardware profile resolution
 //! is treated as a non-retryable failure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -38,6 +38,9 @@ use crate::receipt_renderer::{
 const RECEIPTS_DIR: &str = "receipts";
 const AUTO_PRINT_RECEIPT_ONLY: &[&str] = &["order_receipt"];
 const AUTO_PRINT_DELIVERY_ONLY: &[&str] = &["delivery_slip"];
+const PRINT_QUEUE_SETTINGS_CATEGORY: &str = "printing";
+const PRINT_QUEUE_PAUSED_GLOBAL_KEY: &str = "queue_paused";
+const PRINT_QUEUE_PAUSED_PROFILE_PREFIX: &str = "queue_paused_profile::";
 
 fn is_receipt_like_entity_type(entity_type: &str) -> bool {
     matches!(
@@ -229,7 +232,16 @@ pub fn enqueue_print_job_with_payload(
 // ---------------------------------------------------------------------------
 
 /// List print jobs, optionally filtered by status.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn list_print_jobs(db: &DbState, status_filter: Option<&str>) -> Result<Value, String> {
+    list_print_jobs_with_filters(db, status_filter, None)
+}
+
+pub fn list_print_jobs_with_filters(
+    db: &DbState,
+    status_filter: Option<&str>,
+    printer_profile_filter: Option<&str>,
+) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let row_mapper = |row: &rusqlite::Row<'_>| {
@@ -271,22 +283,187 @@ pub fn list_print_jobs(db: &DbState, status_filter: Option<&str>) -> Result<Valu
         .collect()
     };
 
-    let jobs: Vec<Value> = if let Some(s) = status_filter {
-        let sql =
-            format!("SELECT {cols} FROM print_jobs WHERE status = ?1 ORDER BY created_at ASC");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![s], row_mapper)
-            .map_err(|e| e.to_string())?;
-        collect_rows(rows)
-    } else {
-        let sql = format!("SELECT {cols} FROM print_jobs ORDER BY created_at ASC");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], row_mapper).map_err(|e| e.to_string())?;
-        collect_rows(rows)
+    let jobs: Vec<Value> = match (status_filter, printer_profile_filter) {
+        (Some(status), Some(printer_profile_id)) => {
+            let sql = format!(
+                "SELECT {cols} FROM print_jobs
+                 WHERE status = ?1 AND COALESCE(printer_profile_id, '') = COALESCE(?2, '')
+                 ORDER BY created_at ASC"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![status, printer_profile_id], row_mapper)
+                .map_err(|e| e.to_string())?;
+            collect_rows(rows)
+        }
+        (Some(status), None) => {
+            let sql =
+                format!("SELECT {cols} FROM print_jobs WHERE status = ?1 ORDER BY created_at ASC");
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![status], row_mapper)
+                .map_err(|e| e.to_string())?;
+            collect_rows(rows)
+        }
+        (None, Some(printer_profile_id)) => {
+            let sql = format!(
+                "SELECT {cols} FROM print_jobs
+                 WHERE COALESCE(printer_profile_id, '') = COALESCE(?1, '')
+                 ORDER BY created_at ASC"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![printer_profile_id], row_mapper)
+                .map_err(|e| e.to_string())?;
+            collect_rows(rows)
+        }
+        (None, None) => {
+            let sql = format!("SELECT {cols} FROM print_jobs ORDER BY created_at ASC");
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], row_mapper).map_err(|e| e.to_string())?;
+            collect_rows(rows)
+        }
     };
 
     Ok(serde_json::json!(jobs))
+}
+
+pub fn print_queue_status(db: &DbState) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let paused_profiles: Vec<String> = paused_printer_profiles(&conn).into_iter().collect();
+    Ok(serde_json::json!({
+        "success": true,
+        "queuePaused": is_print_queue_paused_with_conn(&conn, None),
+        "pausedPrinterProfileIds": paused_profiles,
+    }))
+}
+
+pub fn set_print_queue_paused(
+    db: &DbState,
+    printer_profile_id: Option<&str>,
+    paused: bool,
+) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let key = print_queue_pause_key(printer_profile_id);
+    db::set_setting(
+        &conn,
+        PRINT_QUEUE_SETTINGS_CATEGORY,
+        &key,
+        if paused { "true" } else { "false" },
+    )?;
+    let paused_profiles: Vec<String> = paused_printer_profiles(&conn).into_iter().collect();
+    Ok(serde_json::json!({
+        "success": true,
+        "queuePaused": is_print_queue_paused_with_conn(&conn, None),
+        "pausedPrinterProfileIds": paused_profiles,
+        "printerProfileId": printer_profile_id,
+    }))
+}
+
+pub fn cancel_print_job(db: &DbState, job_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let affected = conn
+        .execute(
+            "UPDATE print_jobs
+             SET status = 'cancelled',
+                 warning_code = 'operator_cancelled',
+                 warning_message = 'Print job cancelled from the print queue',
+                 updated_at = datetime('now')
+             WHERE id = ?1 AND status IN ('pending', 'printing')",
+            params![job_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "success": affected > 0, "affected": affected }))
+}
+
+pub fn cancel_print_jobs(
+    db: &DbState,
+    printer_profile_id: Option<&str>,
+    requested_statuses: Option<&[String]>,
+) -> Result<Value, String> {
+    let statuses: Vec<String> = requested_statuses
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| matches!(value.as_str(), "pending" | "printing"))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["pending".to_string(), "printing".to_string()]);
+
+    if statuses.is_empty() {
+        return Err("No cancellable print job statuses were provided".into());
+    }
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut affected = 0usize;
+
+    match printer_profile_id {
+        Some(profile_id) => {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM print_jobs
+                     WHERE COALESCE(printer_profile_id, '') = COALESCE(?1, '')
+                       AND status IN ('pending', 'printing')",
+                )
+                .map_err(|e| e.to_string())?;
+            let job_ids: Vec<String> = stmt
+                .query_map(params![profile_id], |row| row.get(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|row| row.ok())
+                .collect();
+            drop(stmt);
+            for job_id in job_ids {
+                let status: Option<String> = conn
+                    .query_row(
+                        "SELECT status FROM print_jobs WHERE id = ?1",
+                        params![job_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                if status
+                    .as_deref()
+                    .map(|value| statuses.iter().any(|candidate| candidate == value))
+                    .unwrap_or(false)
+                {
+                    affected += conn
+                        .execute(
+                            "UPDATE print_jobs
+                             SET status = 'cancelled',
+                                 warning_code = 'operator_cancelled',
+                                 warning_message = 'Print jobs cancelled from the print queue',
+                                 updated_at = ?1
+                             WHERE id = ?2 AND status IN ('pending', 'printing')",
+                            params![now, job_id],
+                        )
+                        .map_err(|e| e.to_string())? as usize;
+                }
+            }
+        }
+        None => {
+            for status in &statuses {
+                affected += conn
+                    .execute(
+                        "UPDATE print_jobs
+                         SET status = 'cancelled',
+                             warning_code = 'operator_cancelled',
+                             warning_message = 'Print jobs cancelled from the print queue',
+                             updated_at = ?1
+                         WHERE status = ?2",
+                        params![now, status],
+                    )
+                    .map_err(|e| e.to_string())? as usize;
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "affected": affected,
+        "statuses": statuses,
+        "printerProfileId": printer_profile_id,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -421,12 +598,97 @@ fn setting_text(conn: &rusqlite::Connection, category: &str, key: &str) -> Optio
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool {
-    let raw = setting_text(conn, category, key).unwrap_or_default();
+fn parse_setting_bool(raw: Option<&str>) -> bool {
     matches!(
-        raw.to_ascii_lowercase().as_str(),
+        raw.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+pub(crate) fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &str) -> bool {
+    parse_setting_bool(setting_text(conn, category, key).as_deref())
+}
+
+fn print_queue_pause_key(printer_profile_id: Option<&str>) -> String {
+    match printer_profile_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(printer_profile_id) => {
+            format!("{PRINT_QUEUE_PAUSED_PROFILE_PREFIX}{printer_profile_id}")
+        }
+        None => PRINT_QUEUE_PAUSED_GLOBAL_KEY.to_string(),
+    }
+}
+
+fn paused_printer_profiles(conn: &rusqlite::Connection) -> HashSet<String> {
+    let mut paused = HashSet::new();
+    let mut stmt = match conn.prepare(
+        "SELECT setting_key, setting_value
+         FROM local_settings
+         WHERE setting_category = ?1
+           AND setting_key LIKE ?2",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return paused,
+    };
+
+    let rows = match stmt.query_map(
+        params![
+            PRINT_QUEUE_SETTINGS_CATEGORY,
+            format!("{PRINT_QUEUE_PAUSED_PROFILE_PREFIX}%")
+        ],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return paused,
+    };
+
+    for row in rows.flatten() {
+        if !parse_setting_bool(row.1.as_deref()) {
+            continue;
+        }
+        if let Some(profile_id) = row.0.strip_prefix(PRINT_QUEUE_PAUSED_PROFILE_PREFIX) {
+            let profile_id = profile_id.trim();
+            if !profile_id.is_empty() {
+                paused.insert(profile_id.to_string());
+            }
+        }
+    }
+
+    paused
+}
+
+fn is_print_queue_paused_with_conn(
+    conn: &rusqlite::Connection,
+    printer_profile_id: Option<&str>,
+) -> bool {
+    if setting_bool(
+        conn,
+        PRINT_QUEUE_SETTINGS_CATEGORY,
+        PRINT_QUEUE_PAUSED_GLOBAL_KEY,
+    ) {
+        return true;
+    }
+
+    match printer_profile_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(printer_profile_id) => setting_bool(
+            conn,
+            PRINT_QUEUE_SETTINGS_CATEGORY,
+            &print_queue_pause_key(Some(printer_profile_id)),
+        ),
+        None => false,
+    }
+}
+
+pub fn is_print_queue_paused(
+    db: &DbState,
+    printer_profile_id: Option<&str>,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    Ok(is_print_queue_paused_with_conn(&conn, printer_profile_id))
 }
 
 fn resolve_header_sources(conn: &rusqlite::Connection) -> (String, String, String, String) {
@@ -3912,16 +4174,44 @@ fn dispatch_to_printer(
 /// reset to `pending` so the worker can re-attempt it.
 pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if is_print_queue_paused_with_conn(&conn, None) {
+        return Ok(0);
+    }
+
+    let paused_profiles = paused_printer_profiles(&conn);
     let now = Utc::now().to_rfc3339();
-    let affected = conn
-        .execute(
-            "UPDATE print_jobs
-             SET status = 'pending', updated_at = ?1
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, printer_profile_id
+             FROM print_jobs
              WHERE status = 'printing'
                AND julianday(?1) - julianday(updated_at) > (30.0 / 86400.0)",
-            params![now],
         )
-        .map_err(|e| format!("recover stale printing jobs: {e}"))?;
+        .map_err(|e| format!("prepare stale print jobs query: {e}"))?;
+    let recoverable: Vec<(String, Option<String>)> = stmt
+        .query_map(params![now], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("query stale print jobs: {e}"))?
+        .filter_map(|row| row.ok())
+        .filter(|(_, printer_profile_id): &(String, Option<String>)| {
+            printer_profile_id
+                .as_deref()
+                .map(|value| !paused_profiles.contains(value))
+                .unwrap_or(true)
+        })
+        .collect();
+    drop(stmt);
+
+    let mut affected = 0usize;
+    for (job_id, _) in recoverable {
+        affected += conn
+            .execute(
+                "UPDATE print_jobs
+                 SET status = 'pending', updated_at = ?1
+                 WHERE id = ?2 AND status = 'printing'",
+                params![now, job_id],
+            )
+            .map_err(|e| format!("recover stale printing jobs: {e}"))? as usize;
+    }
 
     if affected > 0 {
         warn!(
@@ -3934,7 +4224,7 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
     let purged = conn
         .execute(
             "DELETE FROM print_jobs
-             WHERE status IN ('failed', 'printed', 'dispatched')
+             WHERE status IN ('failed', 'printed', 'dispatched', 'cancelled')
                AND julianday(?1) - julianday(updated_at) > 1.0",
             params![now],
         )
@@ -3955,11 +4245,17 @@ pub fn recover_stale_printing_jobs(db: &DbState) -> Result<usize, String> {
 /// This is called by the background worker loop.  It processes one batch of
 /// pending jobs each tick.  Returns the number of jobs processed.
 pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, String> {
-    // Recover any stale 'printing' jobs from previous crashes/errors
-    let _ = recover_stale_printing_jobs(db);
-
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if is_print_queue_paused_with_conn(&conn, None) {
+        return Ok(0);
+    }
+    let paused_profiles = paused_printer_profiles(&conn);
     let now_str = Utc::now().to_rfc3339();
+
+    // Recover any stale 'printing' jobs from previous crashes/errors
+    drop(conn);
+    let _ = recover_stale_printing_jobs(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Fetch pending jobs that are ready (no next_retry_at or it's in the past)
     let mut stmt = conn
@@ -3976,15 +4272,21 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     let jobs: Vec<PrintJob> = stmt
         .query_map(params![now_str], |row| {
             Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
+        .filter(|(_, _, _, _, profile_id)| {
+            profile_id
+                .as_deref()
+                .map(|value| !paused_profiles.contains(value))
+                .unwrap_or(true)
+        })
         .collect();
 
     drop(stmt);
@@ -3995,13 +4297,24 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
     for (job_id, entity_type, entity_id, payload_json, profile_id) in jobs {
         let process_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<(), String> {
+                if is_print_queue_paused(db, profile_id.as_deref())? {
+                    return Ok(());
+                }
+
                 // Mark as printing
                 {
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    let _ = conn.execute(
-                        "UPDATE print_jobs SET status = 'printing', updated_at = ?1 WHERE id = ?2",
+                    let affected = conn
+                        .execute(
+                        "UPDATE print_jobs
+                         SET status = 'printing', updated_at = ?1
+                         WHERE id = ?2 AND status = 'pending'",
                         params![now_str, job_id],
-                    );
+                    )
+                    .map_err(|e| format!("mark print job as printing: {e}"))?;
+                    if affected == 0 {
+                        return Ok(());
+                    }
                 }
 
                 let document = match build_document_for_job(

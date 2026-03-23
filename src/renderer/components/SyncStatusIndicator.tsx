@@ -709,6 +709,10 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     }
   };
 
+  const handleOpenRecovery = () => {
+    window.dispatchEvent(new CustomEvent('pos:open-recovery'));
+  };
+
   const handleRemoveInvalidOrders = async () => {
     if (!systemHealth?.invalidOrders?.details?.length) return;
     try {
@@ -960,6 +964,14 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             className="w-full"
             buttonClassName="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08]"
           />
+          <button
+            type="button"
+            onClick={handleOpenRecovery}
+            className="w-full justify-center rounded-[18px] border border-slate-200/90 bg-white/88 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:text-slate-100 dark:hover:bg-white/[0.08] inline-flex items-center gap-2"
+          >
+            <Database className="h-4 w-4" />
+            {t('sync.dashboard.openRecovery', { defaultValue: 'Open Local Recovery' })}
+          </button>
         </div>
       </div>
     </section>

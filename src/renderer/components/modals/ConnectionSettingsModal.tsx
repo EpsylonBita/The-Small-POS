@@ -15,6 +15,8 @@ import { useHardwareManager } from '../../hooks/useHardwareManager';
 import { usePrivilegedActionConfirmation } from '../../hooks/usePrivilegedActionConfirmation';
 import { useFeatures } from '../../hooks/useFeatures';
 import { useModules } from '../../contexts/module-context';
+import RecoveryPanel from '../recovery/RecoveryPanel';
+import PrintQueuePanel from '../printing/PrintQueuePanel';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -31,6 +33,7 @@ import { getErrorMessage } from '../../utils/privileged-actions';
 interface Props {
   isOpen: boolean
   onClose: () => void
+  initialSection?: 'recovery' | null
 }
 
 const parseBooleanSetting = (value: unknown): boolean => {
@@ -75,7 +78,7 @@ const getNestedSetting = (
   return source?.[`${category}.${key}`]
 }
 
-const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
+const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSection = null }) => {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
   const { language: currentLanguage, setLanguage } = useI18n()
@@ -330,6 +333,13 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     void loadSecuritySettings()
     void loadLocalTerminalSettings()
   }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen) return
+    if (initialSection === 'recovery') {
+      setShowDatabaseSettings(true)
+    }
+  }, [initialSection, isOpen])
 
   useEffect(() => {
     if (!isOpen) return
@@ -1415,6 +1425,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           {showDatabaseSettings && (
             <div className={`px-4 pb-4 space-y-3 border-t liquid-glass-modal-border pt-4`}>
               <div className="flex flex-col gap-3">
+                <RecoveryPanel />
+
                 {/* Clear Sync Queue - Less destructive */}
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -1906,6 +1918,8 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </div>
 
+        <PrintQueuePanel />
+
         {/* Payment Terminals Settings trigger */}
         <div className={`rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-white/5 dark:bg-gray-800/10 px-4 py-3 transition-all`}>
           <div className="flex items-center justify-between">
@@ -2020,7 +2034,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         }
       }}
       title={t('settings.database.confirmClearOperationalTitle', 'Clear Operational Data')}
-      message={t('settings.database.confirmClearOperationalMessage', 'This action cannot be undone. All operational data will be permanently deleted.')}
+      message={t('settings.database.confirmClearOperationalMessage', 'This action cannot be undone. A local recovery snapshot will be created first, then all operational data will be permanently deleted.')}
       variant="warning"
       confirmText={t('settings.database.clearOperationalButton', 'Clear')}
       cancelText={t('common.actions.cancel', 'Cancel')}
@@ -2043,13 +2057,13 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onClose={() => setShowFactoryResetWarning(false)}
       onConfirm={handleFactoryResetWarningConfirm}
       title={t('settings.database.factoryResetWarningTitle', 'Factory Reset Warning')}
-      message={t('settings.database.factoryResetWarningMessage', 'This will completely restore the POS terminal to factory settings.')}
+      message={t('settings.database.factoryResetWarningMessage', 'This will create a local recovery snapshot first and then restore the POS terminal to factory settings.')}
       variant="warning"
       confirmText={t('common.actions.continue', 'Continue')}
       cancelText={t('common.actions.cancel', 'Cancel')}
       details={
         <ul className="list-disc list-inside space-y-1 text-white/70">
-          <li>{t('settings.database.factoryResetItem.orders', 'All local orders will be deleted')}</li>
+          <li>{t('settings.database.factoryResetItem.orders', 'A local recovery snapshot will be created before data is cleared')}</li>
           <li>{t('settings.database.factoryResetItem.settings', 'All settings will be cleared')}</li>
           <li>{t('settings.database.factoryResetItem.terminal', 'Terminal configuration will be removed')}</li>
           <li>{t('settings.database.factoryResetItem.reconnect', 'You will need to reconnect with connection string')}</li>
@@ -2063,15 +2077,15 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
       onClose={() => setShowFactoryResetFinal(false)}
       onConfirm={handleFactoryResetFinalConfirm}
       title={t('settings.database.factoryResetFinalTitle', 'Final Confirmation')}
-      message={t('settings.database.factoryResetFinalMessage', 'This is your last chance to cancel.')}
+      message={t('settings.database.factoryResetFinalMessage', 'This is your last chance to cancel before the POS creates a recovery snapshot and resets the terminal.')}
       variant="error"
       confirmText={t('settings.database.factoryResetConfirmButton', 'Reset')}
       cancelText={t('common.actions.cancel', 'Cancel')}
       isLoading={isResetting}
-      requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that all data will be permanently deleted and the app will restart')}
+      requireCheckbox={t('settings.database.factoryResetCheckbox', 'I understand that a local recovery snapshot will be created, all data will be cleared, and the app will restart')}
       details={
         <div className="text-red-300 font-medium">
-          {t('settings.database.factoryResetFinalWarning', 'All data will be permanently deleted and the app will restart.')}
+          {t('settings.database.factoryResetFinalWarning', 'The POS will create a local recovery snapshot, clear terminal data, and restart.')}
         </div>
       }
     />

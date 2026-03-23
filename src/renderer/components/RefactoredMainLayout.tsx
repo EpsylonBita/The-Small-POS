@@ -181,6 +181,12 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
   const [currentView, setCurrentView] = React.useState<string>('dashboard');
   const [showZReport, setShowZReport] = React.useState(false);
   const [showConnectionSettings, setShowConnectionSettings] = React.useState(false);
+  const [connectionSettingsInitialSection, setConnectionSettingsInitialSection] =
+    React.useState<'recovery' | null>(null);
+  const [isOffline, setIsOffline] = React.useState(
+    typeof navigator !== 'undefined' ? !navigator.onLine : false,
+  );
+  const [offlineBundleStatus, setOfflineBundleStatus] = React.useState<any>(null);
   const { staff, isShiftActive } = useShift();
   const { endOfDayStatus, isPendingLocalSubmit } = useEndOfDayStatus(staff?.branchId || null);
 
@@ -252,6 +258,57 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
       setCurrentView(pendingView);
     }
   }, [currentView, isShiftActive]);
+
+  useEffect(() => {
+    const handler = () => {
+      setConnectionSettingsInitialSection('recovery');
+      setShowConnectionSettings(true);
+    };
+
+    window.addEventListener('pos:open-recovery', handler as EventListener);
+    return () => {
+      window.removeEventListener('pos:open-recovery', handler as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleNetworkState = () => {
+      setIsOffline(!navigator.onLine);
+    };
+
+    window.addEventListener('online', handleNetworkState);
+    window.addEventListener('offline', handleNetworkState);
+    return () => {
+      window.removeEventListener('online', handleNetworkState);
+      window.removeEventListener('offline', handleNetworkState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!staff?.branchId) {
+      setOfflineBundleStatus(null);
+      return;
+    }
+
+    let cancelled = false;
+    bridge.branchData
+      .getBundleStatus({ branch_id: staff.branchId })
+      .then((result) => {
+        if (cancelled || !result?.success) {
+          return;
+        }
+        setOfflineBundleStatus(result.data ?? null);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn('[RefactoredMainLayout] Failed to load offline bundle status:', error);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge.branchData, staff?.branchId, isOffline]);
 
   // Handle logout
   const handleLogout = () => {
@@ -381,6 +438,7 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
             bridge.terminalConfig.refresh().catch(() => {
               // Ignore refresh errors and continue to settings modal.
             });
+            setConnectionSettingsInitialSection(null)
             setShowConnectionSettings(true)
           }}
         />
@@ -388,6 +446,32 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
         {/* Main Content Area with Container */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0 ml-16 sm:ml-20">
           <ContentContainer className="flex-1 min-h-0 overflow-auto relative touch-scroll">
+            {isOffline && offlineBundleStatus && (
+              <div
+                className={`mx-3 mt-3 rounded-xl border px-4 py-3 text-sm ${
+                  offlineBundleStatus.hasRequiredCoreData !== false
+                    ? resolvedTheme === 'dark'
+                      ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                      : 'border-amber-500/30 bg-amber-50 text-amber-900'
+                    : resolvedTheme === 'dark'
+                      ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                      : 'border-red-500/30 bg-red-50 text-red-900'
+                }`}
+              >
+                {offlineBundleStatus.hasRequiredCoreData !== false ? (
+                  <span>
+                    Offline mode is using the last locally cached branch data. Reconnect to refresh
+                    staff, tables, delivery rules, coupons, and offers.
+                  </span>
+                ) : (
+                  <span>
+                    Offline mode is missing required branch data for this terminal. Connect once to
+                    download the local branch bundle before continuing. Missing datasets:{' '}
+                    {(offlineBundleStatus.missingRequiredDatasets ?? []).join(', ')}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="h-full min-h-[400px] sm:min-h-[500px] md:min-h-[600px]">
               {renderCurrentView()}
             </div>
@@ -487,7 +571,14 @@ export const RefactoredMainLayout = memo<RefactoredMainLayoutProps>(({ className
           lockDate={!!pendingReportDate}
         />
       {/* Connection Settings Modal */}
-      <ConnectionSettingsModal isOpen={showConnectionSettings} onClose={() => setShowConnectionSettings(false)} />
+      <ConnectionSettingsModal
+        isOpen={showConnectionSettings}
+        initialSection={connectionSettingsInitialSection}
+        onClose={() => {
+          setShowConnectionSettings(false);
+          setConnectionSettingsInitialSection(null);
+        }}
+      />
 
 
       {/* Shift Manager - Auto-prompts check-in and handles checkout */}

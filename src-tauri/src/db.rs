@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 39;
+const CURRENT_SCHEMA_VERSION: i32 = 40;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -63,18 +63,9 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
     let conn = match open_and_configure(&db_path) {
         Ok(c) => c,
         Err(first_err) => {
-            warn!(
-                "Database open failed ({}), deleting and retrying once",
-                first_err
-            );
-            if db_path.exists() {
-                let _ = fs::remove_file(&db_path);
-                // Also remove WAL/SHM files if present
-                let wal = db_path.with_extension("db-wal");
-                let shm = db_path.with_extension("db-shm");
-                let _ = fs::remove_file(&wal);
-                let _ = fs::remove_file(&shm);
-            }
+            warn!("Database open failed ({}), quarantining and retrying once", first_err);
+            crate::recovery::quarantine_database_files(app_data_dir, &db_path, &first_err)
+                .map_err(|error| format!("Database open failed and quarantine failed: {error}"))?;
             open_and_configure(&db_path)
                 .map_err(|e| format!("Database open failed after retry: {e}"))?
         }
@@ -134,6 +125,19 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     if current == CURRENT_SCHEMA_VERSION {
         info!("Database schema up to date (v{current})");
         return Ok(());
+    }
+
+    if current > 0 {
+        if let Ok(db_path_value) = conn.query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main' LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            let db_path = PathBuf::from(db_path_value);
+            if let Err(error) = crate::recovery::create_pre_migration_snapshot(&db_path, conn) {
+                return Err(format!("pre-migration recovery snapshot failed: {error}"));
+            }
+        }
     }
 
     info!("Migrating database from v{current} to v{CURRENT_SCHEMA_VERSION}");
@@ -254,6 +258,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 39 {
         migrate_v39(conn)?;
+    }
+    if current < 40 {
+        migrate_v40(conn)?;
     }
 
     Ok(())
@@ -2554,6 +2561,74 @@ fn migrate_v39(conn: &Connection) -> Result<(), String> {
         .map_err(|e| format!("migration v39 mark schema version: {e}"))?;
 
     info!("Applied migration v39 (staff_shifts business-day sync metadata)");
+    Ok(())
+}
+
+fn migrate_v40(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        BEGIN;
+
+        CREATE TABLE IF NOT EXISTS branch_ops_cache (
+            branch_id TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            version TEXT,
+            synced_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (branch_id, cache_key, scope_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_branch_ops_cache_synced_at
+            ON branch_ops_cache(synced_at);
+        CREATE INDEX IF NOT EXISTS idx_branch_ops_cache_cache_key
+            ON branch_ops_cache(cache_key, branch_id);
+
+        CREATE TABLE print_jobs_v40 (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            printer_profile_id TEXT,
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'printing', 'printed', 'dispatched', 'failed', 'cancelled')),
+            output_path TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            next_retry_at TEXT,
+            last_error TEXT,
+            warning_code TEXT,
+            warning_message TEXT,
+            last_attempt_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            entity_payload_json TEXT
+        );
+
+        INSERT INTO print_jobs_v40
+            SELECT id, entity_type, entity_id, printer_profile_id, status,
+                   output_path, retry_count, max_retries, next_retry_at, last_error,
+                   warning_code, warning_message, last_attempt_at, created_at, updated_at,
+                   entity_payload_json
+            FROM print_jobs;
+
+        DROP TABLE print_jobs;
+        ALTER TABLE print_jobs_v40 RENAME TO print_jobs;
+
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_status
+            ON print_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_created_at
+            ON print_jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_print_jobs_entity
+            ON print_jobs(entity_type, entity_id);
+
+        INSERT INTO schema_version (version) VALUES (40);
+
+        COMMIT;
+        ",
+    )
+    .map_err(|e| format!("migration v40 branch ops cache + print_jobs cancel status: {e}"))?;
+
+    info!("Applied migration v40 (branch_ops_cache + cancelled print_jobs status)");
     Ok(())
 }
 

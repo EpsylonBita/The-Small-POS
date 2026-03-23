@@ -3,6 +3,7 @@ import { Toaster, toast } from 'react-hot-toast';
 import { Check } from 'lucide-react';
 import { useI18n } from '../contexts/i18n-context';
 import { getBridge } from '../../lib';
+import RecoveryPanel from '../components/recovery/RecoveryPanel';
 import {
     decodeConnectionString,
     looksLikeRawApiKey,
@@ -198,6 +199,10 @@ const OnboardingPage: React.FC = () => {
                         </div>
                     </form>
                 )}
+            </div>
+
+            <div className="w-full max-w-md mt-4 bg-slate-800 rounded-2xl shadow-2xl p-6 border border-slate-700">
+                <RecoveryPanel compact />
             </div>
 
             <Toaster position="top-center" />

@@ -707,6 +707,10 @@ pub async fn settings_factory_reset(
         &db,
         &auth_state,
     )?;
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreFactoryReset,
+    )?;
     let _ = crate::clear_operational_data_inner(&db);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -740,6 +744,10 @@ pub async fn settings_emergency_reset(
     app: tauri::AppHandle,
 ) -> Result<Value, String> {
     tracing::warn!("emergency reset initiated — clearing all terminal data");
+    crate::recovery::snapshot_before_destructive_action(
+        &db,
+        crate::recovery::RecoveryPointKind::PreEmergencyReset,
+    )?;
     let _ = crate::clear_operational_data_inner(&db);
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;

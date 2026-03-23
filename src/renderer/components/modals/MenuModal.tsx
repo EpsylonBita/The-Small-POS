@@ -39,7 +39,7 @@ import {
   resolveSavedAddressCoordinates,
 } from '../../utils/saved-address-geolocation';
 import { posApiPost } from '../../utils/api-helpers';
-import { getBridge } from '../../../lib';
+import { getBridge, isBrowser } from '../../../lib';
 import { getCachedTerminalCredentials, refreshTerminalCredentialCache } from '../../services/terminal-credentials';
 import type { CatalogOfferEvaluationResult, MatchedCatalogOffer, OfferEvaluationCartItem } from '../../../../../shared/types/catalog-offer';
 import type { CartItem as MenuCartItem } from '../menu/MenuCart';
@@ -495,8 +495,11 @@ export const MenuModal: React.FC<MenuModalProps> = ({
       }
 
       try {
-        const { posApiGet } = await import('../../utils/api-helpers');
-        const result = await posApiGet<any[]>(`pos/delivery-zones?branch_id=${branchId}`);
+        const result = isBrowser()
+          ? await import('../../utils/api-helpers').then(({ posApiGet }) =>
+              posApiGet<any[]>(`pos/delivery-zones?branch_id=${branchId}`),
+            )
+          : await bridge.branchData.getDeliveryZones({ branch_id: branchId });
 
         if (result.success && result.data) {
           const zones = Array.isArray(result.data) ? result.data : (result.data as any).zones || [];
@@ -827,23 +830,37 @@ export const MenuModal: React.FC<MenuModalProps> = ({
     setIsValidatingCoupon(true);
     setCouponError(null);
     try {
-      const result = await posApiPost<{
+      const orderTotal = cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
+      const branchId = staff?.branchId || getCachedTerminalCredentials().branchId || undefined;
+      const result = isBrowser()
+        ? await posApiPost<{
+            valid: boolean;
+            coupon?: AppliedCoupon;
+            error?: string;
+          }>('pos/coupons/validate', { code, order_total: orderTotal })
+        : await bridge.branchData.validateCoupon({
+            code,
+            order_total: orderTotal,
+            ...(branchId ? { branch_id: branchId } : {}),
+          });
+
+      const couponPayload = (result.data ?? null) as {
         valid: boolean;
         coupon?: AppliedCoupon;
         error?: string;
-      }>('pos/coupons/validate', { code, order_total: cartItems.reduce((sum, item) => sum + (item.totalPrice || 0), 0) });
+      } | null;
 
       if (!result.success) {
         setCouponError(result.error || t('menu.cart.couponError', 'Failed to validate coupon'));
         return;
       }
 
-      if (result.data?.valid && result.data?.coupon) {
-        setAppliedCoupon(result.data.coupon);
+      if (couponPayload?.valid && couponPayload?.coupon) {
+        setAppliedCoupon(couponPayload.coupon);
         setCouponError(null);
         toast.success(t('menu.cart.couponApplied', 'Coupon applied!'));
       } else {
-        setCouponError(result.data?.error || t('menu.cart.couponInvalid', 'Invalid coupon code'));
+        setCouponError(couponPayload?.error || t('menu.cart.couponInvalid', 'Invalid coupon code'));
       }
     } catch (error) {
       console.error('Error validating coupon:', error);

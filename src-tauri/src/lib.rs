@@ -39,6 +39,7 @@ mod order_ownership;
 mod payments;
 mod print;
 mod printers;
+mod recovery;
 mod receipt_renderer;
 mod refunds;
 mod scale;
@@ -447,6 +448,13 @@ pub fn run() {
                 e
             })?;
 
+            if let Err(error) = recovery::ensure_recovery_dirs(&app_data_dir) {
+                warn!(error = %error, "Failed to ensure recovery directories");
+            }
+            if let Err(error) = recovery::maybe_apply_pending_restore(&app_data_dir) {
+                error!(error = %error, "Failed to apply pending recovery restore");
+            }
+
             // Main DB connection for Tauri commands
             let db_state = db::init(&app_data_dir).map_err(|e| {
                 error!("Failed to initialize database: {e}");
@@ -557,6 +565,15 @@ pub fn run() {
                 }
                 Err(e) => {
                     error!("Failed to init system health database: {e} — system health monitor disabled");
+                }
+            }
+
+            match db::init(&app_data_dir) {
+                Ok(db) => {
+                    recovery::start_snapshot_monitor(Arc::new(db), 15 * 60, cancel_token.clone());
+                }
+                Err(e) => {
+                    error!("Failed to init recovery database: {e} — recovery snapshot monitor disabled");
                 }
             }
 
@@ -900,7 +917,10 @@ pub fn run() {
             commands::print::printer_get_all_statuses,
             commands::print::printer_submit_job,
             commands::print::printer_cancel_job,
+            commands::print::printer_cancel_all_jobs,
+            commands::print::printer_pause_queue,
             commands::print::printer_retry_job,
+            commands::print::printer_resume_queue,
             commands::print::printer_test,
             commands::print::printer_test_draft,
             commands::print::printer_test_greek_direct,
@@ -1034,6 +1054,12 @@ pub fn run() {
             commands::modules::modules_fetch_from_admin,
             commands::modules::modules_get_cached,
             commands::modules::modules_save_cache,
+            commands::branch_data::branch_data_get_bundle_status,
+            commands::branch_data::branch_data_get_catalog_offers,
+            commands::branch_data::branch_data_get_delivery_zones,
+            commands::branch_data::branch_data_get_staff_schedule,
+            commands::branch_data::branch_data_get_tables,
+            commands::branch_data::branch_data_validate_coupon,
             // Utility compatibility
             commands::system_ui::clipboard_read_text,
             commands::system_ui::clipboard_write_text,
@@ -1062,6 +1088,13 @@ pub fn run() {
             commands::diagnostics::diagnostics_get_system_health,
             commands::diagnostics::diagnostics_export,
             commands::diagnostics::diagnostics_open_export_dir,
+            // Recovery
+            commands::recovery::recovery_list_points,
+            commands::recovery::recovery_create_snapshot,
+            commands::recovery::recovery_export_current,
+            commands::recovery::recovery_export_point,
+            commands::recovery::recovery_restore_point,
+            commands::recovery::recovery_open_dir,
             // Updates
             commands::updates::update_get_state,
             commands::updates::update_check,

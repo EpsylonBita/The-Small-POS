@@ -246,6 +246,11 @@ static SHIFT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_RETRY_DELAY_MS: i64 = 5_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
+const SYNC_BOOTSTRAP_CATEGORY: &str = "sync";
+const SYNC_BOOTSTRAP_MODE_KEY: &str = "bootstrap_mode";
+const SYNC_BOOTSTRAP_MODE_LIVE: &str = "live";
+const SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD: &str = "bootstrap_remote_rebuild";
+const SYNC_BOOTSTRAP_MODE_EMPTY_DB: &str = "bootstrap_empty_db";
 #[allow(dead_code)]
 const ORDER_DIRECT_FALLBACK_QUEUE_AGE_SEC: i64 = 600;
 const SYNC_LOG_DEDUPE_COOLDOWN_SECS: i64 = 120;
@@ -2665,6 +2670,51 @@ fn local_setting_set(db: &DbState, category: &str, key: &str, value: &str) -> Re
     Ok(())
 }
 
+pub(crate) fn get_sync_bootstrap_mode(db: &DbState) -> String {
+    local_setting_get(db, SYNC_BOOTSTRAP_CATEGORY, SYNC_BOOTSTRAP_MODE_KEY)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                SYNC_BOOTSTRAP_MODE_LIVE
+                    | SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD
+                    | SYNC_BOOTSTRAP_MODE_EMPTY_DB
+            )
+        })
+        .unwrap_or_else(|| SYNC_BOOTSTRAP_MODE_LIVE.to_string())
+}
+
+pub(crate) fn set_sync_bootstrap_mode(db: &DbState, mode: &str) -> Result<(), String> {
+    local_setting_set(db, SYNC_BOOTSTRAP_CATEGORY, SYNC_BOOTSTRAP_MODE_KEY, mode)
+}
+
+fn ensure_sync_bootstrap_mode(db: &DbState) -> Result<String, String> {
+    let current = get_sync_bootstrap_mode(db);
+    if current != SYNC_BOOTSTRAP_MODE_LIVE {
+        return Ok(current);
+    }
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let order_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
+        .unwrap_or(0);
+    drop(conn);
+
+    if order_count == 0 {
+        set_sync_bootstrap_mode(db, SYNC_BOOTSTRAP_MODE_EMPTY_DB)?;
+        return Ok(SYNC_BOOTSTRAP_MODE_EMPTY_DB.to_string());
+    }
+
+    Ok(current)
+}
+
+#[derive(Debug, Clone)]
+struct RemoteOrderReconcileOutcome {
+    reconciled: usize,
+    history_complete: bool,
+    bootstrap_mode: String,
+}
+
 fn sanitize_orders_since_cursor(raw: Option<String>) -> String {
     let candidate = raw.map(|v| v.trim().to_string()).unwrap_or_default();
     if candidate.is_empty()
@@ -4130,11 +4180,14 @@ async fn reconcile_remote_orders(
     admin_url: &str,
     api_key: &str,
     app: &AppHandle,
-) -> Result<usize, String> {
+) -> Result<RemoteOrderReconcileOutcome, String> {
     let mut since_cursor =
         sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
     let _ = local_setting_set(db, "sync", "orders_since", &since_cursor);
+    let bootstrap_mode = ensure_sync_bootstrap_mode(db)?;
+    let bootstrap_active = bootstrap_mode != SYNC_BOOTSTRAP_MODE_LIVE;
     let mut reconciled = 0usize;
+    let mut history_complete = false;
 
     for _page in 0..4 {
         let mut path = "/api/pos/orders/sync?limit=200&include_deleted=true&since=".to_string();
@@ -4145,7 +4198,11 @@ async fn reconcile_remote_orders(
             Err(e) => {
                 if is_backpressure_error(&e) {
                     warn!(error = %e, "Remote order reconciliation deferred due to backpressure");
-                    return Ok(reconciled);
+                    return Ok(RemoteOrderReconcileOutcome {
+                        reconciled,
+                        history_complete: false,
+                        bootstrap_mode,
+                    });
                 }
                 return Err(format!("reconcile remote orders: {e}"));
             }
@@ -4460,7 +4517,8 @@ async fn reconcile_remote_orders(
                 );
 
                 // on_complete trigger — enqueue completed/delivered receipt
-                if matches!(new_status.as_str(), "completed" | "delivered")
+                if !bootstrap_active
+                    && matches!(new_status.as_str(), "completed" | "delivered")
                     && crate::print::is_print_action_enabled(db, "on_complete")
                 {
                     if let Err(e) =
@@ -4475,7 +4533,8 @@ async fn reconcile_remote_orders(
                 }
 
                 // on_cancel trigger — re-read reason after UPDATE to get server-provided value
-                if matches!(new_status.as_str(), "cancelled" | "canceled")
+                if !bootstrap_active
+                    && matches!(new_status.as_str(), "cancelled" | "canceled")
                     && crate::print::is_print_action_enabled(db, "on_cancel")
                 {
                     let reason: Option<String> = {
@@ -4537,7 +4596,10 @@ async fn reconcile_remote_orders(
                 );
             }
 
-            if !skip_auto_print && crate::print::is_print_action_enabled(db, "after_order") {
+            if !bootstrap_active
+                && !skip_auto_print
+                && crate::print::is_print_action_enabled(db, "after_order")
+            {
                 for entity_type in auto_print_types {
                     if let Err(error) = print::enqueue_print_job(db, entity_type, &local_id, None) {
                         warn!(
@@ -4569,11 +4631,16 @@ async fn reconcile_remote_orders(
         }
 
         if !has_more {
+            history_complete = true;
             break;
         }
     }
 
-    Ok(reconciled)
+    Ok(RemoteOrderReconcileOutcome {
+        reconciled,
+        history_complete,
+        bootstrap_mode,
+    })
 }
 
 async fn reconcile_remote_payments(
@@ -4928,7 +4995,19 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     total_progress += receipt_updates;
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
-    total_progress += reconciled_orders;
+    total_progress += reconciled_orders.reconciled;
+    if reconciled_orders.history_complete
+        && reconciled_orders.bootstrap_mode != SYNC_BOOTSTRAP_MODE_LIVE
+    {
+        if let Err(error) = set_sync_bootstrap_mode(db, SYNC_BOOTSTRAP_MODE_LIVE) {
+            warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
+        } else {
+            info!(
+                previous_mode = %reconciled_orders.bootstrap_mode,
+                "Remote order catch-up complete; sync bootstrap mode returned to live"
+            );
+        }
+    }
     let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
     total_progress += reconciled_payments;
     let recovered_payment_conflicts =

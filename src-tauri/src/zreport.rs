@@ -3321,6 +3321,7 @@ pub(crate) fn finalize_prepared_z_report_submission(
 /// Submit a Z-report: generate (or return existing), perform the local
 /// business-day rollover, and return the local close result plus queued
 /// sync state for the admin submission.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn submit_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     let prepared = prepare_z_report_submission(db, payload)?;
     finalize_prepared_z_report_submission(db, &prepared)

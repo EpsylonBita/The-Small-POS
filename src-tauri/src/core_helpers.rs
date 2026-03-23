@@ -226,6 +226,14 @@ pub(crate) fn clear_operational_data_inner(db: &db::DbState) -> Result<serde_jso
         ",
     )
     .map_err(|e| format!("clear operational data: {e}"))?;
+    db::set_setting(
+        &conn,
+        "sync",
+        "bootstrap_mode",
+        "bootstrap_remote_rebuild",
+    )?;
+    db::set_setting(&conn, "sync", "orders_since", "1970-01-01T00:00:00.000Z")?;
+    db::set_setting(&conn, "sync", "payments_since", "1970-01-01T00:00:00.000Z")?;
 
     Ok(serde_json::json!({
         "success": true

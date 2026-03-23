@@ -148,6 +148,59 @@ fn parse_print_list_jobs_status(arg0: Option<serde_json::Value>) -> Option<Strin
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrintListJobsPayload {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, alias = "printer_profile_id")]
+    printer_profile_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrintQueueControlPayload {
+    #[serde(default, alias = "printer_profile_id")]
+    printer_profile_id: Option<String>,
+    #[serde(default)]
+    statuses: Vec<String>,
+}
+
+fn parse_print_list_jobs_payload(
+    arg0: Option<serde_json::Value>,
+) -> (Option<String>, Option<String>) {
+    match arg0 {
+        Some(serde_json::Value::Object(obj)) => {
+            let payload = serde_json::Value::Object(obj.clone());
+            let parsed: PrintListJobsPayload =
+                serde_json::from_value(payload).unwrap_or_default();
+            (
+                parsed.status.or(parsed.state),
+                parsed
+                    .printer_profile_id
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            )
+        }
+        other => (parse_print_list_jobs_status(other), None),
+    }
+}
+
+fn parse_print_queue_control_payload(arg0: Option<serde_json::Value>) -> PrintQueueControlPayload {
+    match arg0 {
+        Some(serde_json::Value::Object(obj)) => {
+            serde_json::from_value(serde_json::Value::Object(obj)).unwrap_or_default()
+        }
+        Some(value) => PrintQueueControlPayload {
+            printer_profile_id: value_to_string(value),
+            statuses: Vec::new(),
+        },
+        None => PrintQueueControlPayload::default(),
+    }
+}
+
 fn parse_printer_discover_types(arg0: Option<serde_json::Value>) -> Vec<String> {
     let values: Vec<String> = match arg0 {
         Some(serde_json::Value::Array(arr)) => {
@@ -603,8 +656,16 @@ pub async fn print_list_jobs(
     arg0: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let status = parse_print_list_jobs_status(arg0);
-    print::list_print_jobs(&db, status.as_deref())
+    let (status, printer_profile_id) = parse_print_list_jobs_payload(arg0);
+    let jobs =
+        print::list_print_jobs_with_filters(&db, status.as_deref(), printer_profile_id.as_deref())?;
+    let queue_status = print::print_queue_status(&db)?;
+    Ok(serde_json::json!({
+        "success": true,
+        "jobs": jobs,
+        "queuePaused": queue_status.get("queuePaused").cloned().unwrap_or(serde_json::Value::Bool(false)),
+        "pausedPrinterProfileIds": queue_status.get("pausedPrinterProfileIds").cloned().unwrap_or_else(|| serde_json::json!([])),
+    }))
 }
 
 #[tauri::command]
@@ -2395,15 +2456,38 @@ pub async fn printer_cancel_job(
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
     let job_id = parse_job_id_payload(arg0)?;
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let affected = conn
-        .execute(
-            "UPDATE print_jobs SET status = 'cancelled', updated_at = datetime('now')
-             WHERE id = ?1 AND status IN ('pending', 'printing')",
-            rusqlite::params![job_id],
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "success": affected > 0, "affected": affected }))
+    print::cancel_print_job(&db, &job_id)
+}
+
+#[tauri::command]
+pub async fn printer_pause_queue(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_print_queue_control_payload(arg0);
+    print::set_print_queue_paused(&db, payload.printer_profile_id.as_deref(), true)
+}
+
+#[tauri::command]
+pub async fn printer_resume_queue(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_print_queue_control_payload(arg0);
+    print::set_print_queue_paused(&db, payload.printer_profile_id.as_deref(), false)
+}
+
+#[tauri::command]
+pub async fn printer_cancel_all_jobs(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_print_queue_control_payload(arg0);
+    print::cancel_print_jobs(
+        &db,
+        payload.printer_profile_id.as_deref(),
+        Some(payload.statuses.as_slice()),
+    )
 }
 
 #[tauri::command]
