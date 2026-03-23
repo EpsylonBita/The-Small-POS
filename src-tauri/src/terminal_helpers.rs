@@ -674,6 +674,15 @@ pub(crate) fn is_terminal_auth_failure(error: &str) -> bool {
         || lower.contains("terminal not found")
 }
 
+pub(crate) fn terminal_access_reset_reason(error: &str) -> &'static str {
+    let lower = error.to_lowercase();
+    if lower.contains("terminal not found or inactive") || lower.contains("terminal not found") {
+        "terminal_deleted"
+    } else {
+        "invalid_terminal_credentials"
+    }
+}
+
 fn clear_terminal_api_key(db: Option<&db::DbState>) {
     let _ = storage::delete_credential("pos_api_key");
     if let Some(db_state) = db {
@@ -694,17 +703,28 @@ pub(crate) fn handle_invalid_terminal_credentials(
     source: &str,
     error: &str,
 ) {
+    let reason = terminal_access_reset_reason(error);
     warn!(
         source = %source,
         error = %error,
-        "Invalid terminal credentials detected; clearing stored API key and forcing onboarding reset"
+        reason = %reason,
+        "Terminal access revoked; clearing stored API key and forcing onboarding reset without deleting local data"
     );
     clear_terminal_api_key(db);
     let _ = app.emit(
         "app_reset",
         serde_json::json!({
-            "reason": "invalid_terminal_credentials",
-            "source": source
+            "reason": reason,
+            "source": source,
+            "error": error,
+        }),
+    );
+    let _ = app.emit(
+        "terminal_disabled",
+        serde_json::json!({
+            "reason": reason,
+            "source": source,
+            "error": error,
         }),
     );
 }
@@ -858,6 +878,30 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "terminal", "store_name").as_deref(),
             Some("Downtown Branch")
+        );
+    }
+
+    #[test]
+    fn terminal_access_reset_reason_maps_missing_terminal_to_terminal_deleted() {
+        assert_eq!(
+            terminal_access_reset_reason("Terminal not found or inactive (HTTP 401)"),
+            "terminal_deleted"
+        );
+        assert_eq!(
+            terminal_access_reset_reason("Terminal not found (HTTP 404)"),
+            "terminal_deleted"
+        );
+    }
+
+    #[test]
+    fn terminal_access_reset_reason_keeps_key_mismatch_non_destructive() {
+        assert_eq!(
+            terminal_access_reset_reason("Invalid API key for terminal (HTTP 401)"),
+            "invalid_terminal_credentials"
+        );
+        assert_eq!(
+            terminal_access_reset_reason("Terminal identity mismatch (HTTP 403)"),
+            "invalid_terminal_credentials"
         );
     }
 }

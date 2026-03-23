@@ -207,42 +207,17 @@ fn load_zeroized_pos_api_key_optional() -> Option<Zeroizing<String>> {
     ))
 }
 
-/// Perform a full factory reset triggered by terminal deletion detection.
-/// Clears all operational data, local settings, menu cache, and credentials,
-/// then emits events so the frontend redirects to onboarding.
-fn factory_reset_from_sync(db: &DbState, app: &AppHandle) {
-    warn!("Terminal deleted or deactivated — performing automatic factory reset");
-
-    if let Ok(conn) = db.conn.lock() {
-        let _ = conn.execute_batch(
-            "BEGIN IMMEDIATE;
-             DELETE FROM loyalty_transactions;
-             DELETE FROM loyalty_customers;
-             DELETE FROM loyalty_settings;
-             DELETE FROM payment_adjustments;
-             DELETE FROM order_payments;
-             DELETE FROM shift_expenses;
-             DELETE FROM cash_drawer_sessions;
-             DELETE FROM staff_shifts;
-             DELETE FROM print_jobs;
-             DELETE FROM z_reports;
-             DELETE FROM sync_queue;
-             DELETE FROM orders;
-             DELETE FROM local_settings WHERE setting_category != 'staff';
-             DELETE FROM menu_cache;
-             COMMIT;",
-        );
-    }
-
-    let _ = storage::factory_reset();
-    let _ = app.emit(
-        "app_reset",
-        serde_json::json!({ "reason": "terminal_deleted" }),
+/// Handle terminal auth failures discovered inside the sync loop.
+/// This preserves local operational data and only revokes credentials so the
+/// terminal can be reconfigured without destroying recoverable state.
+fn handle_terminal_auth_failure_from_sync(db: &DbState, app: &AppHandle, error: &str) {
+    let reason = crate::terminal_access_reset_reason(error);
+    warn!(
+        reason = %reason,
+        error = %error,
+        "Sync loop detected terminal access revocation; preserving local data and forcing re-onboarding"
     );
-    let _ = app.emit(
-        "terminal_disabled",
-        serde_json::json!({ "reason": "terminal_deleted" }),
-    );
+    crate::handle_invalid_terminal_credentials(Some(db), app, "sync_loop", error);
 }
 
 // ---------------------------------------------------------------------------
@@ -1922,9 +1897,9 @@ pub fn start_sync_loop(
                 }
                 Err(e) => {
                     if is_terminal_auth_failure(&e) {
-                        factory_reset_from_sync(&db, &app);
+                        handle_terminal_auth_failure_from_sync(&db, &app, &e);
                         is_running.store(false, Ordering::SeqCst);
-                        info!("Sync loop stopped — terminal deleted");
+                        info!("Sync loop stopped — terminal access revoked");
                         break;
                     }
                     log_sync_cycle_failure_with_context(&db, &e);
