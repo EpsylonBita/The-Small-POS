@@ -174,8 +174,7 @@ fn parse_print_list_jobs_payload(
     match arg0 {
         Some(serde_json::Value::Object(obj)) => {
             let payload = serde_json::Value::Object(obj.clone());
-            let parsed: PrintListJobsPayload =
-                serde_json::from_value(payload).unwrap_or_default();
+            let parsed: PrintListJobsPayload = serde_json::from_value(payload).unwrap_or_default();
             (
                 parsed.status.or(parsed.state),
                 parsed

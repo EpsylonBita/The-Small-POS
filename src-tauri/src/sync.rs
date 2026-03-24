@@ -53,7 +53,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1880,7 +1880,7 @@ pub fn start_sync_loop(
             }
 
             // Run adjustment reconciliation: promote waiting_parent adjustments
-            // whose parent payment has synced (sync_state = 'applied').
+            // whose parent payment has synced and has a canonical remote id.
             if let Err(e) = reconcile_deferred_adjustments(&db) {
                 warn!("Adjustment reconciliation failed: {e}");
             }
@@ -4954,6 +4954,14 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 );
             }
         }
+        if let Ok(requeued) = requeue_failed_adjustment_legacy_validation_rows(db) {
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Requeued failed payment adjustments blocked by the old validation payload shape"
+                );
+            }
+        }
     }
 
     // One-time recovery: re-enqueue shifts that were wrongly marked as synced
@@ -5015,6 +5023,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
     total_progress += recovered_payment_conflicts;
     let reconciled_applied_payments = reconcile_applied_payment_queue_rows(db)?;
     total_progress += reconciled_applied_payments;
+    let reconciled_adjustments = reconcile_deferred_adjustments(db)?;
+    total_progress += reconciled_adjustments;
 
     cleanup_order_update_queue_rows_for_order(db, None)?;
 
@@ -5303,6 +5313,154 @@ fn str_any(v: &Value, keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn normalize_optional_uuid_str(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            if Uuid::parse_str(value).is_ok() {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn lookup_staff_id_for_shift(conn: &Connection, staff_shift_id: &str) -> Option<String> {
+    let normalized_shift_id = normalize_optional_uuid_str(Some(staff_shift_id))?;
+    conn.query_row(
+        "SELECT staff_id
+         FROM staff_shifts
+         WHERE id = ?1
+         LIMIT 1",
+        params![normalized_shift_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .and_then(|candidate| normalize_optional_uuid_str(Some(candidate.as_str())))
+}
+
+fn normalize_adjustment_staff_ids(
+    conn: &Connection,
+    payload: &Value,
+) -> (Option<String>, Option<String>) {
+    let staff_shift_id = normalize_optional_uuid_str(
+        str_any(payload, &["staffShiftId", "staff_shift_id"]).as_deref(),
+    );
+    let staff_id = normalize_optional_uuid_str(
+        str_any(payload, &["staffId", "staff_id"]).as_deref(),
+    )
+    .or_else(|| {
+        staff_shift_id
+            .as_deref()
+            .and_then(|staff_shift_id| lookup_staff_id_for_shift(conn, staff_shift_id))
+    });
+
+    (staff_id, staff_shift_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_adjustment_sync_body(
+    adjustment_id: &str,
+    payment_id: &str,
+    order_id: Option<&str>,
+    adjustment_type: Option<&str>,
+    amount: Option<f64>,
+    reason: Option<&str>,
+    staff_id: Option<&str>,
+    staff_shift_id: Option<&str>,
+    terminal_id: &str,
+    branch_id: &str,
+    idempotency_key: &str,
+    refund_method: Option<&str>,
+    cash_handler: Option<&str>,
+    adjustment_context: Option<&str>,
+    remote_payment_id: Option<&str>,
+    canonical_payment_id: Option<&str>,
+) -> Value {
+    let mut body = Map::new();
+    body.insert(
+        "adjustment_id".to_string(),
+        Value::String(adjustment_id.to_string()),
+    );
+    body.insert(
+        "payment_id".to_string(),
+        Value::String(payment_id.to_string()),
+    );
+    if let Some(order_id) = order_id {
+        body.insert("order_id".to_string(), Value::String(order_id.to_string()));
+    }
+    if let Some(adjustment_type) = adjustment_type {
+        body.insert(
+            "adjustment_type".to_string(),
+            Value::String(adjustment_type.to_string()),
+        );
+    }
+    if let Some(amount) = amount {
+        body.insert("amount".to_string(), Value::from(amount));
+    }
+    if let Some(reason) = reason {
+        body.insert("reason".to_string(), Value::String(reason.to_string()));
+    }
+    body.insert(
+        "terminal_id".to_string(),
+        Value::String(terminal_id.to_string()),
+    );
+    body.insert(
+        "branch_id".to_string(),
+        Value::String(branch_id.to_string()),
+    );
+    body.insert(
+        "idempotency_key".to_string(),
+        Value::String(idempotency_key.to_string()),
+    );
+
+    if let Some(staff_id) = staff_id {
+        body.insert("staff_id".to_string(), Value::String(staff_id.to_string()));
+    }
+    if let Some(staff_shift_id) = staff_shift_id {
+        body.insert(
+            "staff_shift_id".to_string(),
+            Value::String(staff_shift_id.to_string()),
+        );
+    }
+    if let Some(refund_method) = refund_method {
+        body.insert(
+            "refund_method".to_string(),
+            Value::String(refund_method.to_string()),
+        );
+    }
+    if let Some(cash_handler) = cash_handler {
+        body.insert(
+            "cash_handler".to_string(),
+            Value::String(cash_handler.to_string()),
+        );
+    }
+    if let Some(adjustment_context) = adjustment_context {
+        body.insert(
+            "adjustment_context".to_string(),
+            Value::String(adjustment_context.to_string()),
+        );
+    }
+    if let Some(remote_payment_id) = remote_payment_id {
+        body.insert(
+            "remote_payment_id".to_string(),
+            Value::String(remote_payment_id.to_string()),
+        );
+    }
+    if let Some(canonical_payment_id) = canonical_payment_id {
+        body.insert(
+            "canonical_payment_id".to_string(),
+            Value::String(canonical_payment_id.to_string()),
+        );
+    }
+
+    Value::Object(body)
 }
 
 fn num_any(v: &Value, keys: &[&str]) -> Option<f64> {
@@ -7233,6 +7391,21 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
     )
     .map_err(|e| format!("retry financial queue row: {e}"))?;
 
+    if entity_type == "payment_adjustment" {
+        let _ = conn.execute(
+            "UPDATE payment_adjustments
+             SET sync_state = ?1,
+                 sync_retry_count = 0,
+                 sync_last_error = NULL,
+                 sync_next_retry_at = NULL,
+                 updated_at = ?2
+             WHERE id = (
+                 SELECT entity_id FROM sync_queue WHERE id = ?3
+             )",
+            params![status, now, queue_id],
+        );
+    }
+
     Ok(())
 }
 
@@ -7774,10 +7947,14 @@ async fn sync_adjustment_items(
         }
 
         // Check if the parent payment has synced and capture the canonical remote payment id.
-        let (pay_synced, remote_payment_id): (bool, Option<String>) = match db.conn.lock() {
+        let (pay_synced, mut remote_payment_id, parent_order_id): (
+            bool,
+            Option<String>,
+            Option<String>,
+        ) = match db.conn.lock() {
             Ok(conn) => conn
                 .query_row(
-                    "SELECT sync_state, remote_payment_id
+                    "SELECT sync_state, remote_payment_id, order_id
                      FROM order_payments
                      WHERE id = ?1",
                     params![payment_id],
@@ -7785,11 +7962,12 @@ async fn sync_adjustment_items(
                         Ok((
                             row.get::<_, String>(0)? == "applied",
                             row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
                         ))
                     },
                 )
-                .unwrap_or((false, None)),
-            Err(_) => (false, None),
+                .unwrap_or((false, None, None)),
+            Err(_) => (false, None, None),
         };
 
         if !pay_synced {
@@ -7811,6 +7989,69 @@ async fn sync_adjustment_items(
             continue;
         }
 
+        remote_payment_id = normalize_optional_uuid_str(remote_payment_id.as_deref());
+        if remote_payment_id.is_none() {
+            if let Some(parent_order_id) = parent_order_id.as_deref() {
+                if let Err(recovery_error) = reconcile_remote_payments_for_local_order(
+                    db,
+                    admin_url,
+                    api_key,
+                    parent_order_id,
+                )
+                .await
+                {
+                    warn!(
+                        adjustment_id = %entity_id,
+                        payment_id = %payment_id,
+                        order_id = %parent_order_id,
+                        error = %recovery_error,
+                        "Adjustment parent payment recovery failed"
+                    );
+                }
+            }
+
+            remote_payment_id = match db.conn.lock() {
+                Ok(conn) => conn
+                    .query_row(
+                        "SELECT remote_payment_id
+                         FROM order_payments
+                         WHERE id = ?1",
+                        params![payment_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .flatten()
+                    .and_then(|value| normalize_optional_uuid_str(Some(value.as_str()))),
+                Err(_) => None,
+            };
+        }
+
+        let Some(canonical_payment_id) = remote_payment_id.clone() else {
+            info!(
+                adjustment_id = %entity_id,
+                payment_id = %payment_id,
+                "Adjustment sync deferred: parent payment missing canonical remote id"
+            );
+            if let Ok(conn) = db.conn.lock() {
+                let _ = conn.execute(
+                    "UPDATE sync_queue SET status = 'deferred', last_error = 'Parent payment missing canonical remote id', updated_at = datetime('now') WHERE id = ?1",
+                    params![id],
+                );
+                let _ = conn.execute(
+                    "UPDATE payment_adjustments SET sync_state = 'waiting_parent', sync_last_error = 'Parent payment missing canonical remote id', updated_at = datetime('now') WHERE id = ?1",
+                    params![entity_id],
+                );
+            }
+            continue;
+        };
+
+        let (staff_id, staff_shift_id) = match db.conn.lock() {
+            Ok(conn) => normalize_adjustment_staff_ids(&conn, &data),
+            Err(_) => (None, None),
+        };
+
         // Mark as syncing
         if let Ok(conn) = db.conn.lock() {
             let _ = conn.execute(
@@ -7819,25 +8060,25 @@ async fn sync_adjustment_items(
             );
         }
 
-        // Build the POST body
-        let body = serde_json::json!({
-            "adjustment_id": entity_id,
-            "payment_id": payment_id,
-            "remote_payment_id": remote_payment_id.clone(),
-            "canonical_payment_id": remote_payment_id,
-            "order_id": data.get("orderId").or_else(|| data.get("order_id")).and_then(Value::as_str),
-            "adjustment_type": data.get("adjustmentType").or_else(|| data.get("adjustment_type")).and_then(Value::as_str),
-            "amount": data.get("amount").and_then(Value::as_f64),
-            "reason": data.get("reason").and_then(Value::as_str),
-            "staff_id": data.get("staffId").or_else(|| data.get("staff_id")).and_then(Value::as_str),
-            "staff_shift_id": data.get("staffShiftId").or_else(|| data.get("staff_shift_id")).and_then(Value::as_str),
-            "terminal_id": terminal_id,
-            "branch_id": branch_id,
-            "idempotency_key": idem_key,
-            "refund_method": data.get("refundMethod").or_else(|| data.get("refund_method")).and_then(Value::as_str),
-            "cash_handler": data.get("cashHandler").or_else(|| data.get("cash_handler")).and_then(Value::as_str),
-            "adjustment_context": data.get("adjustmentContext").or_else(|| data.get("adjustment_context")).and_then(Value::as_str),
-        });
+        // Build the POST body without serializing absent optional fields as null.
+        let body = build_adjustment_sync_body(
+            entity_id,
+            payment_id,
+            str_any(&data, &["orderId", "order_id"]).as_deref(),
+            str_any(&data, &["adjustmentType", "adjustment_type"]).as_deref(),
+            num_any(&data, &["amount"]),
+            str_any(&data, &["reason"]).as_deref(),
+            staff_id.as_deref(),
+            staff_shift_id.as_deref(),
+            terminal_id,
+            branch_id,
+            idem_key,
+            str_any(&data, &["refundMethod", "refund_method"]).as_deref(),
+            str_any(&data, &["cashHandler", "cash_handler"]).as_deref(),
+            str_any(&data, &["adjustmentContext", "adjustment_context"]).as_deref(),
+            Some(canonical_payment_id.as_str()),
+            Some(canonical_payment_id.as_str()),
+        );
 
         match api::fetch_from_admin(
             admin_url,
@@ -8771,6 +9012,88 @@ fn requeue_failed_adjustment_missing_endpoint_rows(db: &DbState) -> Result<usize
     Ok(requeued)
 }
 
+fn is_legacy_adjustment_validation_failure(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("validation failed")
+        && normalized.contains("staff_id")
+        && normalized.contains("invalid uuid")
+        && normalized.contains("remote_payment_id")
+        && normalized.contains("expected string, received null")
+        && normalized.contains("canonical_payment_id")
+}
+
+fn requeue_failed_adjustment_legacy_validation_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_id, last_error
+             FROM sync_queue
+             WHERE entity_type = 'payment_adjustment'
+               AND status = 'failed'",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows: Vec<(i64, String, Option<String>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .filter_map(|row| row.ok())
+        .collect();
+    drop(stmt);
+
+    let target_adjustments: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(_, entity_id, last_error)| {
+            last_error
+                .as_deref()
+                .filter(|error| is_legacy_adjustment_validation_failure(error))
+                .map(|_| entity_id)
+        })
+        .collect();
+
+    if target_adjustments.is_empty() {
+        return Ok(0);
+    }
+
+    let mut requeued = 0;
+    for adjustment_id in &target_adjustments {
+        requeued += conn
+            .execute(
+                "UPDATE sync_queue
+                 SET status = 'pending',
+                     retry_count = 0,
+                     last_error = NULL,
+                     next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id = ?2
+                   AND status = 'failed'",
+                params![now, adjustment_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+
+    if requeued > 0 {
+        let mut adjustment_stmt = conn
+            .prepare(
+                "UPDATE payment_adjustments
+                 SET sync_state = 'pending',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     sync_next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE id = ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        for adjustment_id in &target_adjustments {
+            let _ = adjustment_stmt.execute(params![now, adjustment_id]);
+        }
+    }
+
+    Ok(requeued)
+}
+
 /// Inline reconciliation: after successfully syncing an order that received
 /// a supabase_id, immediately promote any waiting_parent payments for that
 /// order. This provides low-latency sync for the common case (order + payment
@@ -8814,14 +9137,14 @@ fn promote_payments_for_order(conn: &rusqlite::Connection, order_id: &str) {
 /// Promote deferred adjustments whose parent payment has synced.
 ///
 /// Finds `payment_adjustments` with `sync_state = 'waiting_parent'` whose
-/// parent `order_payments` has `sync_state = 'applied'`, and transitions
-/// them to `sync_state = 'pending'`.
+/// parent `order_payments` has `sync_state = 'applied'` and a canonical
+/// `remote_payment_id`, and transitions them to `sync_state = 'pending'`.
 fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let mut stmt = conn
         .prepare(
-            "SELECT pa.id, pa.payment_id
+            "SELECT pa.id, pa.payment_id, op.remote_payment_id
              FROM payment_adjustments pa
              JOIN order_payments op ON op.id = pa.payment_id
              WHERE pa.sync_state = 'waiting_parent'
@@ -8829,8 +9152,8 @@ fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
         )
         .map_err(|e| e.to_string())?;
 
-    let rows: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    let rows: Vec<(String, String, Option<String>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -8842,7 +9165,11 @@ fn reconcile_deferred_adjustments(db: &DbState) -> Result<usize, String> {
     let now = Utc::now().to_rfc3339();
     let mut promoted = 0;
 
-    for (adj_id, payment_id) in &rows {
+    for (adj_id, payment_id, remote_payment_id) in &rows {
+        if normalize_optional_uuid_str(remote_payment_id.as_deref()).is_none() {
+            continue;
+        }
+
         let _ = conn.execute(
             "UPDATE payment_adjustments SET sync_state = 'pending', updated_at = ?1
              WHERE id = ?2 AND sync_state = 'waiting_parent'",
@@ -10152,8 +10479,18 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
-             VALUES ('pay-adj', 'ord-adj', 'cash', 50.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, remote_payment_id, created_at, updated_at)
+             VALUES (
+                'pay-adj',
+                'ord-adj',
+                'cash',
+                50.0,
+                'synced',
+                'applied',
+                '51d7c864-772e-40ea-a440-55dbce8108f0',
+                datetime('now'),
+                datetime('now')
+             )",
             [],
         )
         .unwrap();
@@ -10252,6 +10589,115 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "waiting_parent");
+    }
+
+    #[test]
+    fn test_reconcile_keeps_adjustment_waiting_when_parent_payment_missing_canonical_remote_id() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, supabase_id, created_at, updated_at)
+             VALUES ('ord-adj-missing-remote', '[]', 40.0, 'completed', 'synced', 'sup-adj-missing-remote', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adj-missing-remote', 'ord-adj-missing-remote', 'cash', 40.0, 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (id, payment_id, order_id, adjustment_type, amount, reason, sync_state, created_at, updated_at)
+             VALUES ('adj-missing-remote', 'pay-adj-missing-remote', 'ord-adj-missing-remote', 'refund', 8.0, 'Test', 'waiting_parent', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, status)
+             VALUES ('payment_adjustment', 'adj-missing-remote', 'insert', '{}', 'adjustment:adj-missing-remote', 'deferred')",
+            [],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        let promoted = reconcile_deferred_adjustments(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let adjustment_state: String = conn
+            .query_row(
+                "SELECT sync_state FROM payment_adjustments WHERE id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_state: String = conn
+            .query_row(
+                "SELECT status FROM sync_queue WHERE entity_id = 'adj-missing-remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(adjustment_state, "waiting_parent");
+        assert_eq!(queue_state, "deferred");
+    }
+
+    #[test]
+    fn test_build_adjustment_sync_body_omits_missing_optional_identifiers() {
+        let body = build_adjustment_sync_body(
+            "adj-1",
+            "pay-1",
+            Some("4c78393f-2fc0-4c35-ac85-f5f09917e3e6"),
+            Some("refund"),
+            Some(14.0),
+            Some("Operator correction"),
+            None,
+            None,
+            "terminal-1",
+            "2279137a-1a9f-4ef9-85ec-6ebfc126e1dd",
+            "adjustment:adj-1",
+            Some("cash"),
+            Some("cashier_drawer"),
+            Some("manual"),
+            None,
+            None,
+        );
+
+        let object = body.as_object().expect("body should be an object");
+        assert!(!object.contains_key("staff_id"));
+        assert!(!object.contains_key("staff_shift_id"));
+        assert!(!object.contains_key("remote_payment_id"));
+        assert!(!object.contains_key("canonical_payment_id"));
+    }
+
+    #[test]
+    fn test_normalize_adjustment_staff_ids_prefers_shift_resolved_database_staff_uuid() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let staff_shift_id = "8576c26a-c6bc-4d8c-bf6a-1f58f903081f";
+        let database_staff_id = "159496f0-f218-4d08-bca8-1d8c8d28f7ef";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            params![staff_shift_id, database_staff_id],
+        )
+        .unwrap();
+
+        let payload = serde_json::json!({
+            "staffId": "STF0008",
+            "staffShiftId": staff_shift_id,
+        });
+        let (staff_id, normalized_staff_shift_id) = normalize_adjustment_staff_ids(&conn, &payload);
+
+        assert_eq!(staff_id.as_deref(), Some(database_staff_id));
+        assert_eq!(normalized_staff_shift_id.as_deref(), Some(staff_shift_id));
     }
 
     #[test]
@@ -10475,6 +10921,174 @@ mod tests {
         assert_eq!(queue_status, "pending");
         assert_eq!(queue_retry_count, 0);
         assert_eq!(queue_error, None);
+        assert_eq!(adjustment_state, "pending");
+        assert_eq!(adjustment_retry_count, 0);
+        assert_eq!(adjustment_error, None);
+    }
+
+    #[test]
+    fn test_requeue_failed_payment_adjustments_blocked_by_legacy_validation_payload() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-legacy', '[]', 12.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-adj-legacy', 'ord-adj-legacy', 'card', 12.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, reason,
+                sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
+             ) VALUES (
+                'adj-legacy', 'pay-adj-legacy', 'ord-adj-legacy', 'refund', 10.9, 'Legacy payload',
+                'failed', 5, 'Validation failed (HTTP 400): [{\"field\":\"staff_id\",\"message\":\"Invalid uuid\"},{\"field\":\"remote_payment_id\",\"message\":\"Expected string, received null\"},{\"field\":\"canonical_payment_id\",\"message\":\"Expected string, received null\"}]', datetime('now', '+10 minutes'), datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error, next_retry_at
+             ) VALUES (
+                'payment_adjustment', 'adj-legacy', 'insert',
+                '{\"staffId\":\"admin-user\",\"staffShiftId\":\"a027f49e-ebe2-45f4-b444-eff5ecc10cce\"}',
+                'adjustment:adj-legacy',
+                'failed', 5, 5,
+                'Validation failed (HTTP 400): [{\"field\":\"staff_id\",\"message\":\"Invalid uuid\"},{\"field\":\"remote_payment_id\",\"message\":\"Expected string, received null\"},{\"field\":\"canonical_payment_id\",\"message\":\"Expected string, received null\"}]',
+                datetime('now', '+10 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_failed_adjustment_legacy_validation_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, queue_retry_count, queue_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment' AND entity_id = 'adj-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let (adjustment_state, adjustment_retry_count, adjustment_error): (
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT sync_state, sync_retry_count, sync_last_error
+                 FROM payment_adjustments
+                 WHERE id = 'adj-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
+        assert_eq!(queue_error, None);
+        assert_eq!(adjustment_state, "pending");
+        assert_eq!(adjustment_retry_count, 0);
+        assert_eq!(adjustment_error, None);
+    }
+
+    #[test]
+    fn test_retry_financial_queue_item_resets_adjustment_sync_state() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-adj-retry', '[]', 8.0, 'completed', 'synced', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                'pay-adj-retry', 'ord-adj-retry', 'cash', 8.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, reason,
+                sync_state, sync_retry_count, sync_last_error, sync_next_retry_at, created_at, updated_at
+             ) VALUES (
+                'adj-retry', 'pay-adj-retry', 'ord-adj-retry', 'refund', 2.0, 'Retry me',
+                'failed', 4, 'Validation failed', datetime('now', '+5 minutes'), datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error, next_retry_at
+             ) VALUES (
+                'payment_adjustment', 'adj-retry', 'insert', '{}', 'adjustment:adj-retry',
+                'failed', 4, 5, 'Validation failed', datetime('now', '+5 minutes')
+             )",
+            [],
+        )
+        .unwrap();
+        let queue_id: i64 = conn
+            .query_row(
+                "SELECT id FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment' AND entity_id = 'adj-retry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        retry_financial_queue_item(&db, queue_id).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, queue_retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM sync_queue
+                 WHERE id = ?1",
+                params![queue_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (adjustment_state, adjustment_retry_count, adjustment_error): (
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT sync_state, sync_retry_count, sync_last_error
+                 FROM payment_adjustments
+                 WHERE id = 'adj-retry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(queue_retry_count, 0);
         assert_eq!(adjustment_state, "pending");
         assert_eq!(adjustment_retry_count, 0);
         assert_eq!(adjustment_error, None);

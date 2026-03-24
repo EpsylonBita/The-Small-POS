@@ -104,7 +104,7 @@ fn parse_failed_financial_items_limit(arg0: Option<serde_json::Value>) -> i64 {
 const ACTIONABLE_FINANCIAL_QUEUE_STATUSES_SQL: &str =
     "'failed', 'pending', 'in_progress', 'deferred', 'queued_remote'";
 const ACTIONABLE_FINANCIAL_ENTITY_TYPES_SQL: &str =
-    "'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings'";
+    "'payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings'";
 
 fn parse_retry_financial_queue_id(value: &serde_json::Value) -> Option<i64> {
     match value {
@@ -443,13 +443,38 @@ pub async fn sync_retry_all_failed_financial(
 ) -> Result<serde_json::Value, String> {
     let count = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE sync_queue SET status = 'pending', retry_count = 0, last_error = NULL
+        let now = chrono::Utc::now().to_rfc3339();
+        let count = conn.execute(
+            "UPDATE sync_queue
+             SET status = 'pending',
+                 retry_count = 0,
+                 last_error = NULL,
+                 next_retry_at = NULL,
+                 updated_at = ?1
              WHERE status = 'failed'
-               AND entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
-            [],
+               AND entity_type IN ('payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+            rusqlite::params![now],
         )
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if count > 0 {
+            let _ = conn.execute(
+                "UPDATE payment_adjustments
+                 SET sync_state = 'pending',
+                     sync_retry_count = 0,
+                     sync_last_error = NULL,
+                     sync_next_retry_at = NULL,
+                     updated_at = ?1
+                 WHERE id IN (
+                     SELECT entity_id
+                     FROM sync_queue
+                     WHERE entity_type = 'payment_adjustment'
+                       AND status = 'pending'
+                       AND updated_at = ?1
+                 )",
+                rusqlite::params![now],
+            );
+        }
+        count
     };
 
     let _ = app.emit(
@@ -469,7 +494,7 @@ pub async fn sync_get_unsynced_financial_summary(
         .query_row(
             "SELECT COUNT(*) FROM sync_queue
              WHERE status != 'synced'
-               AND entity_type IN ('shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
+               AND entity_type IN ('payment_adjustment', 'shift_expense', 'staff_payment', 'driver_earning', 'driver_earnings')",
             [],
             |row| row.get(0),
         )
@@ -926,6 +951,53 @@ mod dto_tests {
             .expect("numeric queue id");
 
         assert!(queue_id > 0, "queue id should remain numeric");
+    }
+
+    #[test]
+    fn query_financial_queue_items_includes_payment_adjustments() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .expect("pragma setup");
+        db::run_migrations_for_test(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'payment_adjustment',
+                'adj-include',
+                'insert',
+                '{\"paymentId\":\"pay-include\"}',
+                'adjustment:adj-include',
+                'failed',
+                'Validation failed'
+             )",
+            [],
+        )
+        .expect("insert failed payment adjustment");
+        let db = db::DbState {
+            conn: std::sync::Mutex::new(conn),
+            db_path: std::path::PathBuf::from(":memory:"),
+        };
+
+        let response = query_financial_queue_items(10, &db).expect("query financial queue");
+        let items = response
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("items array");
+        let item = items.first().expect("payment adjustment item");
+
+        assert_eq!(
+            item.get("entityType").and_then(serde_json::Value::as_str),
+            Some("payment_adjustment")
+        );
+        assert_eq!(
+            item.get("entityId").and_then(serde_json::Value::as_str),
+            Some("adj-include")
+        );
     }
 
     #[test]

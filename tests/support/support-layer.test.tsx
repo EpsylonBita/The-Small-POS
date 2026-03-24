@@ -28,6 +28,12 @@ import {
   resolvePickupToDeliveryAddress,
 } from '../../src/renderer/utils/pickup-to-delivery';
 import { parseSpecialAddressInput } from '../../src/renderer/utils/specialAddress';
+import { StaffShiftCheckoutFooterActions } from '../../src/renderer/components/modals/StaffShiftCheckoutFooterActions';
+import {
+  buildShiftCheckoutPrintSnapshot,
+  canPrintShiftCheckoutSnapshot,
+  queueShiftCheckoutPrint,
+} from '../../src/renderer/utils/staffShiftCheckoutPrint';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
@@ -589,4 +595,199 @@ test('sortOrdersOldestFirst keeps new realtime orders at the bottom', () => {
     sorted.map((order) => order.id),
     ['order-oldest', 'order-middle', 'order-new'],
   );
+});
+
+test('staff shift checkout footer actions render print beside checkout', () => {
+  const html = renderToStaticMarkup(
+    <StaffShiftCheckoutFooterActions
+      onPrint={() => {}}
+      onCheckout={() => {}}
+      printLabel="Print"
+      checkoutLabel="Check Out"
+    />,
+  );
+
+  assert.match(html, /staff-checkout-print-button/);
+  assert.match(html, /staff-checkout-confirm-button/);
+  assert.match(html, />Print</);
+  assert.match(html, />Check Out</);
+});
+
+test('staff shift checkout footer actions respect disabled print state', () => {
+  const html = renderToStaticMarkup(
+    <StaffShiftCheckoutFooterActions
+      onPrint={() => {}}
+      onCheckout={() => {}}
+      printLabel="Print"
+      checkoutLabel="Check Out"
+      isPrintDisabled
+    />,
+  );
+
+  assert.match(html, /staff-checkout-print-button/);
+  assert.match(html, /disabled=""/);
+});
+
+test('cashier checkout print snapshot stays available before counted cash is entered', () => {
+  const summary = {
+    breakdown: {
+      instore: {
+        cashTotal: 80,
+      },
+    },
+    totalExpenses: 10,
+    cashRefunds: 0,
+    cashDrawer: {},
+  };
+  const shift = {
+    role_type: 'cashier',
+    opening_cash_amount: 100,
+    calculation_version: 2,
+  };
+
+  assert.equal(
+    canPrintShiftCheckoutSnapshot({
+      shift,
+      shiftSummary: summary,
+      closingCash: '',
+      driverActualCash: '',
+      isNonFinancialCheckoutRole: false,
+    }),
+    true,
+  );
+
+  const previewSnapshot = buildShiftCheckoutPrintSnapshot({
+    shift,
+    shiftSummary: summary,
+    closingCash: '',
+    driverActualCash: '',
+    isNonFinancialCheckoutRole: false,
+    snapshotCheckOutTime: '2026-03-24T09:20:00.000Z',
+  });
+
+  assert.deepEqual(previewSnapshot, {
+    snapshotCheckOutTime: '2026-03-24T09:20:00.000Z',
+    expectedAmount: 170,
+  });
+
+  const snapshot = buildShiftCheckoutPrintSnapshot({
+    shift,
+    shiftSummary: summary,
+    closingCash: '172.00',
+    driverActualCash: '',
+    isNonFinancialCheckoutRole: false,
+    snapshotCheckOutTime: '2026-03-24T09:30:00.000Z',
+  });
+
+  assert.deepEqual(snapshot, {
+    snapshotCheckOutTime: '2026-03-24T09:30:00.000Z',
+    expectedAmount: 170,
+    closingAmount: 172,
+    varianceAmount: 2,
+  });
+});
+
+test('driver checkout print snapshot works before and after actual cash is entered', () => {
+  const previewSnapshot = buildShiftCheckoutPrintSnapshot({
+    shift: {
+      role_type: 'driver',
+      opening_cash_amount: 25,
+    },
+    shiftSummary: {
+      totalExpenses: 7,
+      driverDeliveries: [
+        { status: 'delivered', cash_collected: 42 },
+        { status: 'cancelled', cash_collected: 1000 },
+      ],
+    },
+    closingCash: '',
+    driverActualCash: '',
+    isNonFinancialCheckoutRole: false,
+    snapshotCheckOutTime: '2026-03-24T09:50:00.000Z',
+  });
+
+  assert.deepEqual(previewSnapshot, {
+    snapshotCheckOutTime: '2026-03-24T09:50:00.000Z',
+    expectedAmount: 60,
+  });
+
+  const snapshot = buildShiftCheckoutPrintSnapshot({
+    shift: {
+      role_type: 'driver',
+      opening_cash_amount: 25,
+    },
+    shiftSummary: {
+      totalExpenses: 7,
+      driverDeliveries: [
+        { status: 'delivered', cash_collected: 42 },
+        { status: 'cancelled', cash_collected: 1000 },
+      ],
+    },
+    closingCash: '',
+    driverActualCash: '62.00',
+    isNonFinancialCheckoutRole: false,
+    snapshotCheckOutTime: '2026-03-24T10:00:00.000Z',
+  });
+
+  assert.deepEqual(snapshot, {
+    snapshotCheckOutTime: '2026-03-24T10:00:00.000Z',
+    expectedAmount: 60,
+    closingAmount: 62,
+    varianceAmount: 2,
+  });
+});
+
+test('non-financial checkout print snapshot only uses the snapshot timestamp', () => {
+  const snapshot = buildShiftCheckoutPrintSnapshot({
+    shift: {
+      role_type: 'kitchen',
+      opening_cash_amount: 0,
+    },
+    shiftSummary: {},
+    closingCash: '',
+    driverActualCash: '',
+    isNonFinancialCheckoutRole: true,
+    snapshotCheckOutTime: '2026-03-24T11:00:00.000Z',
+  });
+
+  assert.deepEqual(snapshot, {
+    snapshotCheckOutTime: '2026-03-24T11:00:00.000Z',
+  });
+});
+
+test('queueShiftCheckoutPrint sends snapshot overrides through the bridge', async () => {
+  let capturedPayload: Record<string, unknown> | null = null;
+  const bridge = {
+    terminalConfig: {
+      getSetting: async () => 'Front Counter',
+    },
+    shifts: {
+      printCheckout: async (params: Record<string, unknown>) => {
+        capturedPayload = params;
+        return { success: true };
+      },
+    },
+  };
+
+  await queueShiftCheckoutPrint({
+    bridge,
+    shiftId: 'shift-1',
+    roleType: 'cashier',
+    snapshot: {
+      snapshotCheckOutTime: '2026-03-24T12:00:00.000Z',
+      expectedAmount: 170,
+      closingAmount: 172,
+      varianceAmount: 2,
+    },
+  });
+
+  assert.deepEqual(capturedPayload, {
+    shiftId: 'shift-1',
+    roleType: 'cashier',
+    terminalName: 'Front Counter',
+    snapshotCheckOutTime: '2026-03-24T12:00:00.000Z',
+    expectedAmount: 170,
+    closingAmount: 172,
+    varianceAmount: 2,
+  });
 });

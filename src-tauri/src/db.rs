@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 40;
+const CURRENT_SCHEMA_VERSION: i32 = 41;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -63,7 +63,10 @@ pub fn init(app_data_dir: &Path) -> Result<DbState, String> {
     let conn = match open_and_configure(&db_path) {
         Ok(c) => c,
         Err(first_err) => {
-            warn!("Database open failed ({}), quarantining and retrying once", first_err);
+            warn!(
+                "Database open failed ({}), quarantining and retrying once",
+                first_err
+            );
             crate::recovery::quarantine_database_files(app_data_dir, &db_path, &first_err)
                 .map_err(|error| format!("Database open failed and quarantine failed: {error}"))?;
             open_and_configure(&db_path)
@@ -261,6 +264,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 40 {
         migrate_v40(conn)?;
+    }
+    if current < 41 {
+        migrate_v41(conn)?;
     }
 
     Ok(())
@@ -2632,6 +2638,25 @@ fn migrate_v40(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v41(conn: &Connection) -> Result<(), String> {
+    if !column_exists(conn, "payment_adjustments", "staff_shift_id")? {
+        conn.execute_batch("ALTER TABLE payment_adjustments ADD COLUMN staff_shift_id TEXT;")
+            .map_err(|e| format!("migration v41 add payment_adjustments.staff_shift_id: {e}"))?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_payment_adjustments_staff_shift_id
+            ON payment_adjustments(staff_shift_id);
+        INSERT INTO schema_version (version) VALUES (41);
+        ",
+    )
+    .map_err(|e| format!("migration v41 mark schema version: {e}"))?;
+
+    info!("Applied migration v41 (payment_adjustments.staff_shift_id)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -4375,6 +4400,71 @@ mod tests {
             )
             .expect("read open drawer");
         assert_eq!(open_reconciled, 0, "open drawers should stay unreconciled");
+    }
+
+    #[test]
+    fn test_migration_v41_adds_adjustment_staff_shift_id_without_losing_rows() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT DEFAULT (datetime('now'))
+            );
+            INSERT INTO schema_version (version) VALUES (40);
+
+            CREATE TABLE payment_adjustments (
+                id TEXT PRIMARY KEY,
+                payment_id TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                adjustment_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                reason TEXT NOT NULL,
+                staff_id TEXT,
+                sync_state TEXT NOT NULL DEFAULT 'pending',
+                sync_last_error TEXT,
+                sync_retry_count INTEGER NOT NULL DEFAULT 0,
+                sync_next_retry_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                refund_method TEXT,
+                cash_handler TEXT,
+                adjustment_context TEXT NOT NULL DEFAULT 'manual'
+            );
+            ",
+        )
+        .expect("create minimal v40 schema");
+
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                id, payment_id, order_id, adjustment_type, amount, reason, staff_id,
+                sync_state, created_at, updated_at, refund_method, cash_handler, adjustment_context
+             ) VALUES (
+                'adj-migrate-41', 'pay-41', 'ord-41', 'refund', 4.5, 'Legacy row', 'staff-41',
+                'failed', datetime('now'), datetime('now'), 'cash', 'cashier_drawer', 'edit_settlement'
+             )",
+            [],
+        )
+        .expect("insert legacy payment adjustment");
+
+        migrate_v41(&conn).expect("migration v41");
+
+        assert!(
+            column_exists(&conn, "payment_adjustments", "staff_shift_id").expect("column lookup"),
+            "migration should add payment_adjustments.staff_shift_id",
+        );
+
+        let (reason, staff_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT reason, staff_id
+                 FROM payment_adjustments
+                 WHERE id = 'adj-migrate-41'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated adjustment row");
+        assert_eq!(reason, "Legacy row");
+        assert_eq!(staff_id.as_deref(), Some("staff-41"));
     }
 
     #[test]

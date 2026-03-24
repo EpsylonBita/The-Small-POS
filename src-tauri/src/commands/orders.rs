@@ -660,6 +660,30 @@ fn update_order_items_in_connection(
     Ok(())
 }
 
+fn net_paid_amount_from_edit_payment(payment: &serde_json::Value) -> f64 {
+    payment
+        .get("remainingRefundable")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| {
+            let gross = payment
+                .get("amount")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let refunded = payment
+                .get("refundedAmount")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            (gross - refunded).max(0.0)
+        })
+}
+
+fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Result<f64, String> {
+    Ok(list_completed_payments_for_edit(conn, order_id)?
+        .iter()
+        .map(net_paid_amount_from_edit_payment)
+        .sum())
+}
+
 fn refresh_order_payment_snapshot(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -675,16 +699,7 @@ fn refresh_order_payment_snapshot(
         )
         .map_err(|e| format!("load order payment snapshot: {e}"))?;
 
-    let total_paid: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(amount), 0)
-             FROM order_payments
-             WHERE order_id = ?1
-               AND status = 'completed'",
-            rusqlite::params![order_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
+    let total_paid = load_net_paid_for_order(conn, order_id)?;
 
     let completed_payment_count: i64 = conn
         .query_row(
@@ -1463,12 +1478,7 @@ pub async fn orders_preview_edit_settlement(
     let completed_payments = list_completed_payments_for_edit(&conn, &actual_order_id)?;
     let paid_total = completed_payments
         .iter()
-        .map(|payment| {
-            payment
-                .get("amount")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(0.0)
-        })
+        .map(net_paid_amount_from_edit_payment)
         .sum::<f64>();
     let delta = next_total - current_total;
     let required_action = if paid_total + 0.01 < next_total {
@@ -1526,16 +1536,7 @@ pub async fn orders_apply_edit_settlement(
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<serde_json::Value, String> {
-        let paid_total_before: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(amount), 0)
-                 FROM order_payments
-                 WHERE order_id = ?1
-                   AND status = 'completed'",
-                rusqlite::params![actual_order_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
+        let paid_total_before = load_net_paid_for_order(&conn, &actual_order_id)?;
 
         update_order_items_in_connection(
             &conn,
@@ -3081,6 +3082,26 @@ mod transition_tests {
         .unwrap();
     }
 
+    fn insert_payment_adjustment_refund(
+        conn: &Connection,
+        adjustment_id: &str,
+        payment_id: &str,
+        order_id: &str,
+        amount: f64,
+    ) {
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount,
+                 reason, staff_id, sync_state, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, 'refund', ?4,
+                 'edit settlement test', NULL, 'pending', datetime('now'), datetime('now')
+             )",
+            params![adjustment_id, payment_id, order_id, amount],
+        )
+        .unwrap();
+    }
+
     fn insert_pickup_order_for_conversion(db: &db::DbState, order_id: &str) {
         let conn = db.conn.lock().unwrap();
         conn.execute(
@@ -3392,6 +3413,92 @@ mod transition_tests {
     }
 
     #[test]
+    fn load_net_paid_for_order_subtracts_prior_refunds() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-net-paid",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":12.8,"total_price":12.8}]"#,
+            12.8,
+            12.8,
+            "card",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-net-paid', 'order-net-paid', 'card', 12.8, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        insert_payment_adjustment_refund(
+            &conn,
+            "adjustment-net-paid",
+            "payment-net-paid",
+            "order-net-paid",
+            10.9,
+        );
+
+        let completed_payments =
+            list_completed_payments_for_edit(&conn, "order-net-paid").expect("completed payments");
+        assert_eq!(completed_payments.len(), 1);
+        let remaining_refundable = completed_payments[0]
+            .get("remainingRefundable")
+            .and_then(serde_json::Value::as_f64)
+            .expect("remaining refundable");
+        assert!((remaining_refundable - 1.9).abs() < 0.001);
+
+        let net_paid = load_net_paid_for_order(&conn, "order-net-paid").expect("net paid");
+        assert!((net_paid - 1.9).abs() < 0.001);
+    }
+
+    #[test]
+    fn refresh_order_payment_snapshot_uses_net_paid_after_prior_refunds() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-edit-refunded",
+            r#"[{"name":"Crepe","quantity":1,"unit_price":4.7,"total_price":4.7}]"#,
+            4.7,
+            4.7,
+            "card",
+            "paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, created_at, updated_at
+             ) VALUES (
+                 'payment-edit-refunded', 'order-edit-refunded', 'card', 12.8, 'completed',
+                 datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        insert_payment_adjustment_refund(
+            &conn,
+            "adjustment-edit-refunded",
+            "payment-edit-refunded",
+            "order-edit-refunded",
+            10.9,
+        );
+
+        let (payment_status, payment_method, total_paid) =
+            refresh_order_payment_snapshot(&conn, "order-edit-refunded", "2026-03-24T16:55:00Z")
+                .expect("refresh payment snapshot");
+
+        assert_eq!(payment_status, "partially_paid");
+        assert_eq!(payment_method, "split");
+        assert!((total_paid - 1.9).abs() < 0.001);
+    }
+
+    #[test]
     fn convert_pickup_order_to_delivery_updates_order_and_enqueues_single_sync_row() {
         let db = test_db();
         insert_pickup_order_for_conversion(&db, "order-convert");
@@ -3417,11 +3524,34 @@ mod transition_tests {
         .expect("convert pickup order to delivery");
 
         assert_eq!(order_id, "order-convert");
-        assert_eq!(order_json.get("orderType").and_then(|value| value.as_str()), Some("delivery"));
-        assert_eq!(order_json.get("customerId").and_then(|value| value.as_str()), Some("customer-1"));
-        assert_eq!(order_json.get("deliveryAddress").and_then(|value| value.as_str()), Some("Main St 42"));
-        assert_eq!(order_json.get("deliveryCity").and_then(|value| value.as_str()), Some("Athens"));
-        assert_eq!(order_json.get("deliveryFloor").and_then(|value| value.as_str()), Some("3"));
+        assert_eq!(
+            order_json.get("orderType").and_then(|value| value.as_str()),
+            Some("delivery")
+        );
+        assert_eq!(
+            order_json
+                .get("customerId")
+                .and_then(|value| value.as_str()),
+            Some("customer-1")
+        );
+        assert_eq!(
+            order_json
+                .get("deliveryAddress")
+                .and_then(|value| value.as_str()),
+            Some("Main St 42")
+        );
+        assert_eq!(
+            order_json
+                .get("deliveryCity")
+                .and_then(|value| value.as_str()),
+            Some("Athens")
+        );
+        assert_eq!(
+            order_json
+                .get("deliveryFloor")
+                .and_then(|value| value.as_str()),
+            Some("3")
+        );
 
         let conn = db.conn.lock().unwrap();
         let (

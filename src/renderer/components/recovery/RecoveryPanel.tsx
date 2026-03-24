@@ -40,6 +40,13 @@ const kindLabel = (kind: RecoveryPoint['kind']) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
 
+const VISIBLE_RECOVERY_POINTS = 5;
+const RECOVERY_POINT_CARD_HEIGHT = 108;
+const RECOVERY_POINT_GAP = 8;
+const RECOVERY_PANEL_MAX_HEIGHT =
+  VISIBLE_RECOVERY_POINTS * RECOVERY_POINT_CARD_HEIGHT +
+  (VISIBLE_RECOVERY_POINTS - 1) * RECOVERY_POINT_GAP;
+
 export function RecoveryPanel({ className = '', compact = false }: RecoveryPanelProps) {
   const { t } = useTranslation();
   const bridge = getBridge();
@@ -208,7 +215,7 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
 
   return (
     <>
-      <div className={`space-y-3 ${className}`}>
+      <div className={className}>
         <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-3 py-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-2">
@@ -274,123 +281,130 @@ export function RecoveryPanel({ className = '', compact = false }: RecoveryPanel
               </button>
             </div>
           </div>
-        </div>
-
-        <div className={`grid gap-3 ${compact ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]'}`}>
-          <div className="space-y-2">
-            {points.length === 0 ? (
-              <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-4 py-5 text-sm liquid-glass-modal-text-muted">
-                {t('settings.recovery.noPoints', 'No local recovery points are available yet.')}
+          <div className="mt-3 border-t liquid-glass-modal-border pt-3">
+            <div className={`grid gap-3 ${compact ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]'}`}>
+              <div
+                className={`space-y-2 ${points.length > VISIBLE_RECOVERY_POINTS ? 'overflow-y-auto pr-1 scrollbar-hide' : ''}`}
+                style={{ maxHeight: `${RECOVERY_PANEL_MAX_HEIGHT}px` }}
+              >
+                {points.length === 0 ? (
+                  <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-4 py-5 text-sm liquid-glass-modal-text-muted">
+                    {t('settings.recovery.noPoints', 'No local recovery points are available yet.')}
+                  </div>
+                ) : (
+                  points.map((point) => {
+                    const isSelected = point.id === selectedPointId;
+                    return (
+                      <button
+                        key={point.id}
+                        onClick={() => setSelectedPointId(point.id)}
+                        className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${
+                          isSelected
+                            ? 'border-cyan-400/60 bg-cyan-500/10'
+                            : 'liquid-glass-modal-border bg-white/5 hover:bg-white/10'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="font-medium liquid-glass-modal-text">
+                              {kindLabel(point.kind)}
+                            </div>
+                            <div className="mt-1 flex items-center gap-2 text-xs liquid-glass-modal-text-muted">
+                              <Clock3 className="h-3.5 w-3.5" />
+                              {formatWhen(point.createdAt)}
+                            </div>
+                          </div>
+                          <div className="text-xs liquid-glass-modal-text-muted">
+                            {formatBytes(point.snapshotSizeBytes)}
+                          </div>
+                        </div>
+                        <div className="mt-2 text-xs liquid-glass-modal-text-muted">
+                          {`${point.tableCounts.orders ?? 0} orders • ${point.tableCounts.staff_shifts ?? 0} shifts • ${point.tableCounts.cash_drawer_sessions ?? 0} drawers`}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
               </div>
-            ) : (
-              points.map((point) => {
-                const isSelected = point.id === selectedPointId;
-                return (
-                  <button
-                    key={point.id}
-                    onClick={() => setSelectedPointId(point.id)}
-                    className={`w-full rounded-lg border px-4 py-3 text-left transition-colors ${
-                      isSelected
-                        ? 'border-cyan-400/60 bg-cyan-500/10'
-                        : 'liquid-glass-modal-border bg-white/5 hover:bg-white/10'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium liquid-glass-modal-text">
-                          {kindLabel(point.kind)}
-                        </div>
-                        <div className="mt-1 flex items-center gap-2 text-xs liquid-glass-modal-text-muted">
-                          <Clock3 className="h-3.5 w-3.5" />
-                          {formatWhen(point.createdAt)}
-                        </div>
+
+              <div
+                className="rounded-lg border liquid-glass-modal-border bg-white/5 px-4 py-4 overflow-y-auto scrollbar-hide"
+                style={{ maxHeight: `${RECOVERY_PANEL_MAX_HEIGHT}px` }}
+              >
+                {selectedPoint ? (
+                  <div className="space-y-3">
+                    <div>
+                      <div className="font-medium liquid-glass-modal-text">
+                        {kindLabel(selectedPoint.kind)}
                       </div>
-                      <div className="text-xs liquid-glass-modal-text-muted">
-                        {formatBytes(point.snapshotSizeBytes)}
+                      <div className="mt-1 text-xs liquid-glass-modal-text-muted">
+                        {selectedPoint.id}
                       </div>
                     </div>
-                    <div className="mt-2 text-xs liquid-glass-modal-text-muted">
-                      {`${point.tableCounts.orders ?? 0} orders • ${point.tableCounts.staff_shifts ?? 0} shifts • ${point.tableCounts.cash_drawer_sessions ?? 0} drawers`}
+
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Orders</div>
+                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.orders ?? 0}</div>
+                      </div>
+                      <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Shifts</div>
+                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.staff_shifts ?? 0}</div>
+                      </div>
+                      <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Drawers</div>
+                        <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.cash_drawer_sessions ?? 0}</div>
+                      </div>
+                      <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Snapshot</div>
+                        <div className="mt-1 liquid-glass-modal-text">{formatBytes(selectedPoint.snapshotSizeBytes)}</div>
+                      </div>
                     </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
 
-          <div className="rounded-lg border liquid-glass-modal-border bg-white/5 px-4 py-4">
-            {selectedPoint ? (
-              <div className="space-y-3">
-                <div>
-                  <div className="font-medium liquid-glass-modal-text">
-                    {kindLabel(selectedPoint.kind)}
-                  </div>
-                  <div className="mt-1 text-xs liquid-glass-modal-text-muted">
-                    {selectedPoint.id}
-                  </div>
-                </div>
+                    <div className="space-y-1 text-xs liquid-glass-modal-text-muted">
+                      <div>{`Terminal: ${selectedPoint.terminalId || 'Unknown'}`}</div>
+                      <div>{`Branch: ${selectedPoint.branchId || 'Unknown'}`}</div>
+                      <div>{`Business day: ${selectedPoint.activeReportDate || selectedPoint.latestZReportDate || 'Unknown'}`}</div>
+                    </div>
 
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                    <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Orders</div>
-                    <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.orders ?? 0}</div>
-                  </div>
-                  <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                    <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Shifts</div>
-                    <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.staff_shifts ?? 0}</div>
-                  </div>
-                  <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                    <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Drawers</div>
-                    <div className="mt-1 liquid-glass-modal-text">{selectedPoint.tableCounts.cash_drawer_sessions ?? 0}</div>
-                  </div>
-                  <div className="rounded-md border liquid-glass-modal-border bg-black/10 px-3 py-2">
-                    <div className="text-[11px] uppercase tracking-wide liquid-glass-modal-text-muted">Snapshot</div>
-                    <div className="mt-1 liquid-glass-modal-text">{formatBytes(selectedPoint.snapshotSizeBytes)}</div>
-                  </div>
-                </div>
+                    {selectedPoint.error ? (
+                      <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                        {selectedPoint.error}
+                      </div>
+                    ) : null}
 
-                <div className="space-y-1 text-xs liquid-glass-modal-text-muted">
-                  <div>{`Terminal: ${selectedPoint.terminalId || 'Unknown'}`}</div>
-                  <div>{`Branch: ${selectedPoint.branchId || 'Unknown'}`}</div>
-                  <div>{`Business day: ${selectedPoint.activeReportDate || selectedPoint.latestZReportDate || 'Unknown'}`}</div>
-                </div>
+                    <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
+                      Restored print jobs in <code>pending</code> or <code>printing</code> state will
+                      be cancelled during recovery so the POS does not replay historical tickets after
+                      restart.
+                    </div>
 
-                {selectedPoint.error ? (
-                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                    {selectedPoint.error}
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        onClick={handleExportPoint}
+                        disabled={!selectedPoint || busyAction !== null}
+                        className="inline-flex items-center gap-2 rounded-lg border liquid-glass-modal-border px-3 py-2 text-sm liquid-glass-modal-text hover:bg-white/10 disabled:opacity-60"
+                      >
+                        <Download className="h-4 w-4" />
+                        {t('settings.recovery.exportSelected', 'Export selected')}
+                      </button>
+                      <button
+                        onClick={handleRestorePoint}
+                        disabled={!selectedPoint || busyAction !== null}
+                        className="inline-flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 hover:bg-amber-500/20 disabled:opacity-60"
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        {t('settings.recovery.restoreSelected', 'Restore selected')}
+                      </button>
+                    </div>
                   </div>
-                ) : null}
-
-                <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
-                  Restored print jobs in <code>pending</code> or <code>printing</code> state will
-                  be cancelled during recovery so the POS does not replay historical tickets after
-                  restart.
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    onClick={handleExportPoint}
-                    disabled={!selectedPoint || busyAction !== null}
-                    className="inline-flex items-center gap-2 rounded-lg border liquid-glass-modal-border px-3 py-2 text-sm liquid-glass-modal-text hover:bg-white/10 disabled:opacity-60"
-                  >
-                    <Download className="h-4 w-4" />
-                    {t('settings.recovery.exportSelected', 'Export selected')}
-                  </button>
-                  <button
-                    onClick={handleRestorePoint}
-                    disabled={!selectedPoint || busyAction !== null}
-                    className="inline-flex items-center gap-2 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 hover:bg-amber-500/20 disabled:opacity-60"
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                    {t('settings.recovery.restoreSelected', 'Restore selected')}
-                  </button>
-                </div>
+                ) : (
+                  <div className="text-sm liquid-glass-modal-text-muted">
+                    {t('settings.recovery.selectPoint', 'Select a recovery point to inspect or restore it.')}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="text-sm liquid-glass-modal-text-muted">
-                {t('settings.recovery.selectPoint', 'Select a recovery point to inspect or restore it.')}
-              </div>
-            )}
+            </div>
           </div>
         </div>
       </div>

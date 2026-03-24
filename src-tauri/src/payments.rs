@@ -1216,8 +1216,15 @@ pub fn void_payment(
     payment_id: &str,
     reason: &str,
     voided_by: Option<&str>,
+    voided_by_shift_id: Option<&str>,
 ) -> Result<Value, String> {
-    crate::refunds::void_payment_with_adjustment(db, payment_id, reason, voided_by)
+    crate::refunds::void_payment_with_adjustment(
+        db,
+        payment_id,
+        reason,
+        voided_by,
+        voided_by_shift_id,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,20 +1256,27 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
         String,
         String,
         String,
+        f64,
     );
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, order_id, method, amount, currency, status,
-                    cash_received, change_given, transaction_ref,
-                    COALESCE(discount_amount, 0),
-                    COALESCE(payment_origin, 'manual'),
-                    terminal_device_id,
-                    staff_id, staff_shift_id, voided_at, voided_by,
-                    void_reason, sync_status, created_at, updated_at
-             FROM order_payments
-             WHERE order_id = ?1
-             ORDER BY created_at DESC",
+            "SELECT op.id, op.order_id, op.method, op.amount, op.currency, op.status,
+                    op.cash_received, op.change_given, op.transaction_ref,
+                    COALESCE(op.discount_amount, 0),
+                    COALESCE(op.payment_origin, 'manual'),
+                    op.terminal_device_id,
+                    op.staff_id, op.staff_shift_id, op.voided_at, op.voided_by,
+                    op.void_reason, op.sync_status, op.created_at, op.updated_at,
+                    COALESCE((
+                        SELECT SUM(pa.amount)
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1
+             ORDER BY op.created_at DESC",
         )
         .map_err(|e| e.to_string())?;
 
@@ -1289,6 +1303,7 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
                 row.get::<_, String>(17)?,
                 row.get::<_, String>(18)?,
                 row.get::<_, String>(19)?,
+                row.get::<_, f64>(20)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -1305,6 +1320,7 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
     let mut payments = Vec::new();
     for row in rows {
         let items = load_payment_items_for_payment(&conn, &row.0)?;
+        let remaining_refundable = ((row.3 - row.20).max(0.0) * 100.0).round() / 100.0;
         payments.push(serde_json::json!({
             "id": row.0,
             "orderId": row.1,
@@ -1327,6 +1343,8 @@ pub fn get_order_payments(db: &DbState, order_id: &str) -> Result<Value, String>
             "syncStatus": row.17,
             "createdAt": row.18,
             "updatedAt": row.19,
+            "refundedAmount": row.20,
+            "remainingRefundable": remaining_refundable,
             "items": items,
         }));
     }
@@ -1441,7 +1459,7 @@ fn escape_html(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::db;
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
 
     fn test_db() -> DbState {
         let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -1513,9 +1531,62 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["method"], "cash");
         assert_eq!(arr[0]["amount"], 25.0);
+        assert_eq!(arr[0]["refundedAmount"], 0.0);
+        assert_eq!(arr[0]["remainingRefundable"], 25.0);
         assert_eq!(arr[0]["cashReceived"], 30.0);
         assert_eq!(arr[0]["changeGiven"], 5.0);
         assert_eq!(arr[0]["id"], payment_id);
+    }
+
+    #[test]
+    fn test_get_order_payments_includes_refund_balances() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, created_at, updated_at)
+             VALUES ('ord-refund-balance', '[]', 12.8, 'pending', 'pending', datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("insert refund balance order");
+        drop(conn);
+
+        let payment = record_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-refund-balance",
+                "method": "card",
+                "amount": 12.8,
+                "transactionRef": "CARD-REFUND-BALANCE",
+            }),
+        )
+        .expect("record refund balance payment");
+        let payment_id = payment["paymentId"]
+            .as_str()
+            .expect("payment id")
+            .to_string();
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO payment_adjustments (
+                 id, payment_id, order_id, adjustment_type, amount,
+                 reason, staff_id, sync_state, created_at, updated_at
+             ) VALUES (
+                 'adj-refund-balance', ?1, 'ord-refund-balance', 'refund', 10.9,
+                 'test refund', NULL, 'pending', datetime('now'), datetime('now')
+             )",
+            params![payment_id],
+        )
+        .expect("insert refund adjustment");
+        drop(conn);
+
+        let payments =
+            get_order_payments(&db, "ord-refund-balance").expect("get refund balance payments");
+        let arr = payments.as_array().expect("payments array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["amount"], 12.8);
+        assert_eq!(arr[0]["refundedAmount"], 10.9);
+        assert_eq!(arr[0]["remainingRefundable"], 1.9);
     }
 
     #[test]
@@ -2051,8 +2122,14 @@ mod tests {
         let payment_id = result["paymentId"].as_str().unwrap().to_string();
 
         // Void it
-        let void_result =
-            void_payment(&db, &payment_id, "Customer changed mind", Some("staff-1")).unwrap();
+        let void_result = void_payment(
+            &db,
+            &payment_id,
+            "Customer changed mind",
+            Some("staff-1"),
+            None,
+        )
+        .unwrap();
         assert_eq!(void_result["success"], true);
 
         // Check order reverted

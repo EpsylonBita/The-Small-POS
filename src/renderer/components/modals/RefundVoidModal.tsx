@@ -1,12 +1,24 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { X, RotateCcw, XCircle, Banknote, CreditCard, Clock, AlertTriangle, ChevronDown, ChevronUp, Euro } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
-import { useShift } from '../../contexts/shift-context';
-import { LiquidGlassModal } from '../ui/pos-glass-components';
-import { RefundAttributionFields } from './RefundAttributionFields';
-import toast from 'react-hot-toast';
-import { formatCurrency } from '../../utils/format';
-import { getBridge } from '../../../lib';
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  X,
+  RotateCcw,
+  XCircle,
+  Banknote,
+  CreditCard,
+  Clock,
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Euro,
+} from "lucide-react";
+import { useTranslation } from "react-i18next";
+import { useShift } from "../../contexts/shift-context";
+import { LiquidGlassModal } from "../ui/pos-glass-components";
+import { RefundAttributionFields } from "./RefundAttributionFields";
+import toast from "react-hot-toast";
+import { formatCurrency } from "../../utils/format";
+import { resolveAdjustmentAttribution } from "../../utils/staffAttribution";
+import { getBridge } from "../../../lib";
 
 interface RefundVoidModalProps {
   isOpen: boolean;
@@ -35,12 +47,12 @@ interface PaymentBalance {
 interface Adjustment {
   id: string;
   payment_id: string;
-  adjustment_type: 'refund' | 'void';
+  adjustment_type: "refund" | "void";
   amount: number;
   reason: string;
   staff_id?: string;
-  refundMethod?: 'cash' | 'card' | null;
-  cashHandler?: 'cashier_drawer' | 'driver_shift' | null;
+  refundMethod?: "cash" | "card" | null;
+  cashHandler?: "cashier_drawer" | "driver_shift" | null;
   created_at: string;
 }
 
@@ -63,15 +75,17 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
   // Refund form state (per-payment)
   const [activeRefundId, setActiveRefundId] = useState<string | null>(null);
-  const [refundAmount, setRefundAmount] = useState('');
-  const [refundReason, setRefundReason] = useState('');
-  const [refundMethod, setRefundMethod] = useState<'cash' | 'card'>('cash');
-  const [cashHandler, setCashHandler] = useState<'cashier_drawer' | 'driver_shift'>('cashier_drawer');
+  const [refundAmount, setRefundAmount] = useState("");
+  const [refundReason, setRefundReason] = useState("");
+  const [refundMethod, setRefundMethod] = useState<"cash" | "card">("cash");
+  const [cashHandler, setCashHandler] = useState<
+    "cashier_drawer" | "driver_shift"
+  >("cashier_drawer");
   const [allowDriverCashHandler, setAllowDriverCashHandler] = useState(false);
 
   // Void confirm state
   const [activeVoidId, setActiveVoidId] = useState<string | null>(null);
-  const [voidReason, setVoidReason] = useState('');
+  const [voidReason, setVoidReason] = useState("");
 
   // Adjustment history visibility
   const [showHistory, setShowHistory] = useState(false);
@@ -82,12 +96,19 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
     try {
       // Load payments for this order
       const orderPayments = await bridge.payments.getOrderPayments(orderId);
-      const paymentList: PaymentRecord[] = Array.isArray(orderPayments) ? orderPayments : [];
+      const paymentList: PaymentRecord[] = Array.isArray(orderPayments)
+        ? orderPayments
+        : [];
       setPayments(paymentList);
       try {
         const order = await bridge.orders.getById(orderId);
-        const isDelivery = String((order as any)?.orderType || (order as any)?.order_type || '').toLowerCase() === 'delivery';
-        const hasDriver = Boolean((order as any)?.driverId || (order as any)?.driver_id);
+        const isDelivery =
+          String(
+            (order as any)?.orderType || (order as any)?.order_type || "",
+          ).toLowerCase() === "delivery";
+        const hasDriver = Boolean(
+          (order as any)?.driverId || (order as any)?.driver_id,
+        );
         setAllowDriverCashHandler(isDelivery && hasDriver);
       } catch {
         setAllowDriverCashHandler(false);
@@ -96,18 +117,22 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       // Load balance for each completed payment
       const balanceMap: Record<string, PaymentBalance> = {};
       for (const p of paymentList) {
-        if (p.status === 'completed') {
+        if (p.status === "completed") {
           try {
             const bal = await bridge.refunds.getPaymentBalance(p.id);
             if (bal) {
               balanceMap[p.id] = {
                 originalAmount: bal.originalAmount ?? p.amount,
                 totalRefunds: bal.totalRefunds ?? 0,
-                remaining: bal.remaining ?? (p.amount - (bal.totalRefunds ?? 0)),
+                remaining: bal.remaining ?? p.amount - (bal.totalRefunds ?? 0),
               };
             }
           } catch {
-            balanceMap[p.id] = { originalAmount: p.amount, totalRefunds: 0, remaining: p.amount };
+            balanceMap[p.id] = {
+              originalAmount: p.amount,
+              totalRefunds: 0,
+              remaining: p.amount,
+            };
           }
         }
       }
@@ -121,8 +146,12 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         setAdjustments([]);
       }
     } catch (err) {
-      console.error('Failed to load refund data:', err);
-      toast.error(t('modals.refund.loadFailed', { defaultValue: 'Failed to load payment data' }));
+      console.error("Failed to load refund data:", err);
+      toast.error(
+        t("modals.refund.loadFailed", {
+          defaultValue: "Failed to load payment data",
+        }),
+      );
     } finally {
       setLoading(false);
     }
@@ -134,11 +163,11 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       // Reset form state on open
       setActiveRefundId(null);
       setActiveVoidId(null);
-      setRefundAmount('');
-      setRefundReason('');
-      setRefundMethod('cash');
-      setCashHandler('cashier_drawer');
-      setVoidReason('');
+      setRefundAmount("");
+      setRefundReason("");
+      setRefundMethod("cash");
+      setCashHandler("cashier_drawer");
+      setVoidReason("");
       setShowHistory(false);
     }
   }, [isOpen, loadData]);
@@ -146,52 +175,75 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
   const handleRefund = async (paymentId: string) => {
     const amount = parseFloat(refundAmount);
     if (isNaN(amount) || amount <= 0) {
-      toast.error(t('modals.refund.invalidAmount', { defaultValue: 'Enter a valid refund amount' }));
+      toast.error(
+        t("modals.refund.invalidAmount", {
+          defaultValue: "Enter a valid refund amount",
+        }),
+      );
       return;
     }
     if (!refundReason.trim()) {
-      toast.error(t('modals.refund.reasonRequired', { defaultValue: 'A reason is required' }));
+      toast.error(
+        t("modals.refund.reasonRequired", {
+          defaultValue: "A reason is required",
+        }),
+      );
       return;
     }
 
     const balance = balances[paymentId];
     if (balance && amount > balance.remaining + 0.01) {
       toast.error(
-        t('modals.refund.exceedsBalance', {
-          defaultValue: 'Amount exceeds remaining balance',
-        })
+        t("modals.refund.exceedsBalance", {
+          defaultValue: "Amount exceeds remaining balance",
+        }),
       );
       return;
     }
 
     setProcessing(true);
     try {
+      const attribution = resolveAdjustmentAttribution({
+        databaseStaffId: staff?.databaseStaffId,
+        shiftStaffOwnerId: activeShift?.staff_id,
+        staffShiftId: activeShift?.id,
+        candidateStaffIds: [staff?.staffId],
+      });
       const result = await bridge.refunds.refundPayment({
         paymentId,
         amount,
         reason: refundReason.trim(),
-        staffId: staff?.staffId,
-        staffShiftId: activeShift?.id,
+        staffId: attribution.staffId,
+        staffShiftId: attribution.staffShiftId,
         orderId,
         refundMethod,
-        cashHandler: refundMethod === 'cash' ? cashHandler : undefined,
-        adjustmentContext: 'manual',
+        cashHandler: refundMethod === "cash" ? cashHandler : undefined,
+        adjustmentContext: "manual",
       });
 
       if (result?.success !== false && !result?.error) {
         toast.success(
-          t('modals.refund.refundSuccess', { defaultValue: 'Refund recorded successfully' })
+          t("modals.refund.refundSuccess", {
+            defaultValue: "Refund recorded successfully",
+          }),
         );
         setActiveRefundId(null);
-        setRefundAmount('');
-        setRefundReason('');
+        setRefundAmount("");
+        setRefundReason("");
         await loadData();
         onRefundComplete?.();
       } else {
-        toast.error(result?.error || t('modals.refund.refundFailed', { defaultValue: 'Refund failed' }));
+        toast.error(
+          result?.error ||
+            t("modals.refund.refundFailed", { defaultValue: "Refund failed" }),
+        );
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('modals.refund.refundFailed', { defaultValue: 'Refund failed' }));
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : t("modals.refund.refundFailed", { defaultValue: "Refund failed" }),
+      );
     } finally {
       setProcessing(false);
     }
@@ -199,27 +251,51 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
   const handleVoid = async (paymentId: string) => {
     if (!voidReason.trim()) {
-      toast.error(t('modals.refund.reasonRequired', { defaultValue: 'A reason is required' }));
+      toast.error(
+        t("modals.refund.reasonRequired", {
+          defaultValue: "A reason is required",
+        }),
+      );
       return;
     }
 
     setProcessing(true);
     try {
-      const result = await bridge.payments.voidPayment(paymentId, voidReason.trim(), staff?.staffId);
+      const attribution = resolveAdjustmentAttribution({
+        databaseStaffId: staff?.databaseStaffId,
+        shiftStaffOwnerId: activeShift?.staff_id,
+        staffShiftId: activeShift?.id,
+        candidateStaffIds: [staff?.staffId],
+      });
+      const result = await bridge.payments.voidPayment(
+        paymentId,
+        voidReason.trim(),
+        attribution.staffId,
+        attribution.staffShiftId,
+      );
 
       if (result?.success !== false && !result?.error) {
         toast.success(
-          t('modals.refund.voidSuccess', { defaultValue: 'Payment voided successfully' })
+          t("modals.refund.voidSuccess", {
+            defaultValue: "Payment voided successfully",
+          }),
         );
         setActiveVoidId(null);
-        setVoidReason('');
+        setVoidReason("");
         await loadData();
         onRefundComplete?.();
       } else {
-        toast.error(result?.error || t('modals.refund.voidFailed', { defaultValue: 'Void failed' }));
+        toast.error(
+          result?.error ||
+            t("modals.refund.voidFailed", { defaultValue: "Void failed" }),
+        );
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('modals.refund.voidFailed', { defaultValue: 'Void failed' }));
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : t("modals.refund.voidFailed", { defaultValue: "Void failed" }),
+      );
     } finally {
       setProcessing(false);
     }
@@ -227,45 +303,67 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
 
   const getMethodIcon = (method: string) => {
     switch (method?.toLowerCase()) {
-      case 'cash': return <Banknote className="w-5 h-5 text-green-400" />;
-      case 'card': return <CreditCard className="w-5 h-5 text-blue-400" />;
-      default: return <Clock className="w-5 h-5 text-gray-400" />;
+      case "cash":
+        return <Banknote className="w-5 h-5 text-green-400" />;
+      case "card":
+        return <CreditCard className="w-5 h-5 text-blue-400" />;
+      default:
+        return <Clock className="w-5 h-5 text-gray-400" />;
     }
   };
 
   const getStatusBadge = (status: string) => {
     switch (status?.toLowerCase()) {
-      case 'completed':
-        return <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30">Completed</span>;
-      case 'voided':
-        return <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">Voided</span>;
-      case 'refunded':
-        return <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">Refunded</span>;
+      case "completed":
+        return (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30">
+            Completed
+          </span>
+        );
+      case "voided":
+        return (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 border border-red-500/30">
+            Voided
+          </span>
+        );
+      case "refunded":
+        return (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400 border border-yellow-500/30">
+            Refunded
+          </span>
+        );
       default:
-        return <span className="text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400 border border-gray-500/30">{status}</span>;
+        return (
+          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400 border border-gray-500/30">
+            {status}
+          </span>
+        );
     }
   };
 
-  const completedPayments = payments.filter(p => p.status === 'completed');
-  const nonCompletedPayments = payments.filter(p => p.status !== 'completed');
+  const completedPayments = payments.filter((p) => p.status === "completed");
+  const nonCompletedPayments = payments.filter((p) => p.status !== "completed");
 
   const modalHeader = (
     <div className="flex-shrink-0 px-6 py-4 border-b liquid-glass-modal-border">
       <div className="flex justify-between items-start gap-4">
         <div className="flex-1">
           <h2 className="text-2xl font-bold liquid-glass-modal-text">
-            {t('modals.refund.title', { defaultValue: 'Void / Refund' })}
+            {t("modals.refund.title", { defaultValue: "Void / Refund" })}
           </h2>
           <p className="text-sm liquid-glass-modal-text-muted mt-1">
-            {t('modals.refund.subtitle', { defaultValue: 'Manage payment adjustments' })}
-            {' '}&middot;{' '}
-            {t('modals.refund.orderTotal', { defaultValue: 'Order total' })}: {formatCurrency(orderTotal)}
+            {t("modals.refund.subtitle", {
+              defaultValue: "Manage payment adjustments",
+            })}{" "}
+            &middot;{" "}
+            {t("modals.refund.orderTotal", { defaultValue: "Order total" })}:{" "}
+            {formatCurrency(orderTotal)}
           </p>
         </div>
         <button
           onClick={onClose}
           className="liquid-glass-modal-button p-2 min-h-0 min-w-0 shrink-0"
-          aria-label={t('common.actions.close')}
+          aria-label={t("common.actions.close")}
         >
           <X className="w-6 h-6" />
         </button>
@@ -279,7 +377,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
         onClick={onClose}
         className="w-full liquid-glass-modal-button bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30 gap-2"
       >
-        {t('common.actions.close', { defaultValue: 'Close' })}
+        {t("common.actions.close", { defaultValue: "Close" })}
       </button>
     </div>
   );
@@ -291,7 +389,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
       size="lg"
       className="!max-w-3xl"
       contentClassName="p-0 overflow-hidden"
-      ariaLabel={t('modals.refund.title', { defaultValue: 'Void / Refund' })}
+      ariaLabel={t("modals.refund.title", { defaultValue: "Void / Refund" })}
       header={modalHeader}
       footer={modalFooter}
     >
@@ -304,7 +402,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
           <div className="text-center py-12">
             <CreditCard className="w-12 h-12 mx-auto mb-3 liquid-glass-modal-text-muted opacity-50" />
             <p className="text-sm liquid-glass-modal-text-muted">
-              {t('modals.refund.noPayments', { defaultValue: 'No payments found for this order' })}
+              {t("modals.refund.noPayments", {
+                defaultValue: "No payments found for this order",
+              })}
             </p>
           </div>
         ) : (
@@ -313,7 +413,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
             {completedPayments.length > 0 && (
               <div className="space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                  {t('modals.refund.activePayments', { defaultValue: 'Active Payments' })}
+                  {t("modals.refund.activePayments", {
+                    defaultValue: "Active Payments",
+                  })}
                 </h3>
                 {completedPayments.map((payment) => {
                   const balance = balances[payment.id];
@@ -331,7 +433,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           {getMethodIcon(payment.method)}
                           <div>
                             <div className="font-semibold liquid-glass-modal-text capitalize">
-                              {payment.method || 'Unknown'}
+                              {payment.method || "Unknown"}
                             </div>
                             <div className="text-xs liquid-glass-modal-text-muted">
                               {new Date(payment.created_at).toLocaleString()}
@@ -344,9 +446,14 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           </div>
                           {balance && balance.totalRefunds > 0 && (
                             <div className="text-xs text-yellow-400">
-                              {t('modals.refund.refunded', { defaultValue: 'Refunded' })}: {formatCurrency(balance.totalRefunds)}
-                              {' '}&middot;{' '}
-                              {t('modals.refund.remaining', { defaultValue: 'Remaining' })}: {formatCurrency(balance.remaining)}
+                              {t("modals.refund.refunded", {
+                                defaultValue: "Refunded",
+                              })}
+                              : {formatCurrency(balance.totalRefunds)} &middot;{" "}
+                              {t("modals.refund.remaining", {
+                                defaultValue: "Remaining",
+                              })}
+                              : {formatCurrency(balance.remaining)}
                             </div>
                           )}
                           {getStatusBadge(payment.status)}
@@ -360,27 +467,37 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             onClick={() => {
                               setActiveVoidId(payment.id);
                               setActiveRefundId(null);
-                              setVoidReason('');
+                              setVoidReason("");
                             }}
                             disabled={processing}
                             className="flex-1 liquid-glass-modal-button bg-red-600/10 hover:bg-red-600/20 text-red-400 border-red-500/20 gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <XCircle className="w-4 h-4" />
-                            {t('modals.refund.voidButton', { defaultValue: 'Void' })}
+                            {t("modals.refund.voidButton", {
+                              defaultValue: "Void",
+                            })}
                           </button>
                           <button
                             onClick={() => {
                               setActiveRefundId(payment.id);
                               setActiveVoidId(null);
                               const bal = balances[payment.id];
-                              setRefundAmount(bal ? bal.remaining.toFixed(2) : payment.amount.toFixed(2));
-                              setRefundReason('');
+                              setRefundAmount(
+                                bal
+                                  ? bal.remaining.toFixed(2)
+                                  : payment.amount.toFixed(2),
+                              );
+                              setRefundReason("");
                             }}
-                            disabled={processing || (balance && balance.remaining <= 0)}
+                            disabled={
+                              processing || (balance && balance.remaining <= 0)
+                            }
                             className="flex-1 liquid-glass-modal-button bg-orange-600/10 hover:bg-orange-600/20 text-orange-400 border-orange-500/20 gap-2 text-sm py-2 disabled:opacity-50"
                           >
                             <RotateCcw className="w-4 h-4" />
-                            {t('modals.refund.refundButton', { defaultValue: 'Refund' })}
+                            {t("modals.refund.refundButton", {
+                              defaultValue: "Refund",
+                            })}
                           </button>
                         </div>
                       )}
@@ -391,16 +508,19 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           <div className="flex items-center gap-2 text-sm text-red-400">
                             <AlertTriangle className="w-4 h-4" />
                             <span className="font-medium">
-                              {t('modals.refund.voidWarning', {
-                                defaultValue: 'This will fully reverse the payment of',
-                              })}{' '}
+                              {t("modals.refund.voidWarning", {
+                                defaultValue:
+                                  "This will fully reverse the payment of",
+                              })}{" "}
                               {formatCurrency(payment.amount)}
                             </span>
                           </div>
                           <textarea
                             value={voidReason}
                             onChange={(e) => setVoidReason(e.target.value)}
-                            placeholder={t('modals.refund.reasonPlaceholder', { defaultValue: 'Enter reason for void...' })}
+                            placeholder={t("modals.refund.reasonPlaceholder", {
+                              defaultValue: "Enter reason for void...",
+                            })}
                             rows={2}
                             className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-red-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
                           />
@@ -412,15 +532,24 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             >
                               <XCircle className="w-4 h-4" />
                               {processing
-                                ? t('common.loading', { defaultValue: 'Processing...' })
-                                : t('modals.refund.confirmVoid', { defaultValue: 'Confirm Void' })}
+                                ? t("common.loading", {
+                                    defaultValue: "Processing...",
+                                  })
+                                : t("modals.refund.confirmVoid", {
+                                    defaultValue: "Confirm Void",
+                                  })}
                             </button>
                             <button
-                              onClick={() => { setActiveVoidId(null); setVoidReason(''); }}
+                              onClick={() => {
+                                setActiveVoidId(null);
+                                setVoidReason("");
+                              }}
                               disabled={processing}
                               className="liquid-glass-modal-button"
                             >
-                              {t('common.actions.cancel', { defaultValue: 'Cancel' })}
+                              {t("common.actions.cancel", {
+                                defaultValue: "Cancel",
+                              })}
                             </button>
                           </div>
                         </div>
@@ -432,7 +561,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           <div>
                             <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
                               <Euro className="w-4 h-4 inline mr-1" />
-                              {t('modals.refund.refundAmount', { defaultValue: 'Refund Amount' })}
+                              {t("modals.refund.refundAmount", {
+                                defaultValue: "Refund Amount",
+                              })}
                             </label>
                             <div className="relative">
                               <input
@@ -441,7 +572,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                                 min="0.01"
                                 max={balance?.remaining ?? payment.amount}
                                 value={refundAmount}
-                                onChange={(e) => setRefundAmount(e.target.value)}
+                                onChange={(e) =>
+                                  setRefundAmount(e.target.value)
+                                }
                                 placeholder="0.00"
                                 className="w-full p-3 pl-10 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted"
                               />
@@ -449,18 +582,27 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                             </div>
                             {balance && (
                               <p className="text-xs liquid-glass-modal-text-muted mt-1">
-                                {t('modals.refund.maxRefund', { defaultValue: 'Max refundable' })}: {formatCurrency(balance.remaining)}
+                                {t("modals.refund.maxRefund", {
+                                  defaultValue: "Max refundable",
+                                })}
+                                : {formatCurrency(balance.remaining)}
                               </p>
                             )}
                           </div>
                           <div>
                             <label className="block text-sm font-medium liquid-glass-modal-text-muted mb-2">
-                              {t('modals.refund.reason', { defaultValue: 'Reason' })} *
+                              {t("modals.refund.reason", {
+                                defaultValue: "Reason",
+                              })}{" "}
+                              *
                             </label>
                             <textarea
                               value={refundReason}
                               onChange={(e) => setRefundReason(e.target.value)}
-                              placeholder={t('modals.refund.reasonPlaceholder', { defaultValue: 'Enter reason for refund...' })}
+                              placeholder={t(
+                                "modals.refund.reasonPlaceholder",
+                                { defaultValue: "Enter reason for refund..." },
+                              )}
                               rows={2}
                               className="w-full p-3 rounded-lg liquid-glass-modal-card border liquid-glass-modal-border focus:ring-2 focus:ring-orange-500 transition-all text-sm liquid-glass-modal-text placeholder:liquid-glass-modal-text-muted resize-none"
                             />
@@ -476,26 +618,37 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                           <div className="flex gap-2">
                             <button
                               onClick={() => handleRefund(payment.id)}
-                              disabled={processing || !refundReason.trim() || !refundAmount || parseFloat(refundAmount) <= 0}
+                              disabled={
+                                processing ||
+                                !refundReason.trim() ||
+                                !refundAmount ||
+                                parseFloat(refundAmount) <= 0
+                              }
                               className="flex-1 liquid-glass-modal-button bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border-orange-500/30 gap-2 disabled:opacity-50"
                             >
                               <RotateCcw className="w-4 h-4" />
                               {processing
-                                ? t('common.loading', { defaultValue: 'Processing...' })
-                                : t('modals.refund.confirmRefund', { defaultValue: 'Confirm Refund' })}
+                                ? t("common.loading", {
+                                    defaultValue: "Processing...",
+                                  })
+                                : t("modals.refund.confirmRefund", {
+                                    defaultValue: "Confirm Refund",
+                                  })}
                             </button>
                             <button
                               onClick={() => {
                                 setActiveRefundId(null);
-                                setRefundAmount('');
-                                setRefundReason('');
-                                setRefundMethod('cash');
-                                setCashHandler('cashier_drawer');
+                                setRefundAmount("");
+                                setRefundReason("");
+                                setRefundMethod("cash");
+                                setCashHandler("cashier_drawer");
                               }}
                               disabled={processing}
                               className="liquid-glass-modal-button"
                             >
-                              {t('common.actions.cancel', { defaultValue: 'Cancel' })}
+                              {t("common.actions.cancel", {
+                                defaultValue: "Cancel",
+                              })}
                             </button>
                           </div>
                         </div>
@@ -510,7 +663,9 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
             {nonCompletedPayments.length > 0 && (
               <div className="space-y-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted">
-                  {t('modals.refund.closedPayments', { defaultValue: 'Voided / Refunded' })}
+                  {t("modals.refund.closedPayments", {
+                    defaultValue: "Voided / Refunded",
+                  })}
                 </h3>
                 {nonCompletedPayments.map((payment) => (
                   <div
@@ -522,7 +677,7 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                         {getMethodIcon(payment.method)}
                         <div>
                           <div className="font-semibold liquid-glass-modal-text capitalize">
-                            {payment.method || 'Unknown'}
+                            {payment.method || "Unknown"}
                           </div>
                           <div className="text-xs liquid-glass-modal-text-muted">
                             {new Date(payment.created_at).toLocaleString()}
@@ -548,8 +703,14 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                   onClick={() => setShowHistory(!showHistory)}
                   className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider liquid-glass-modal-text-muted hover:text-white transition-colors"
                 >
-                  {showHistory ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                  {t('modals.refund.adjustmentHistory', { defaultValue: 'Adjustment History' })}
+                  {showHistory ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                  {t("modals.refund.adjustmentHistory", {
+                    defaultValue: "Adjustment History",
+                  })}
                   <span className="text-xs liquid-glass-modal-badge ml-1">
                     {adjustments.length}
                   </span>
@@ -560,42 +721,60 @@ const RefundVoidModal: React.FC<RefundVoidModalProps> = ({
                       <div
                         key={adj.id}
                         className={`p-3 rounded-lg border ${
-                          adj.adjustment_type === 'void'
-                            ? 'bg-red-500/5 border-red-500/20'
-                            : 'bg-orange-500/5 border-orange-500/20'
+                          adj.adjustment_type === "void"
+                            ? "bg-red-500/5 border-red-500/20"
+                            : "bg-orange-500/5 border-orange-500/20"
                         }`}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            {adj.adjustment_type === 'void' ? (
+                            {adj.adjustment_type === "void" ? (
                               <XCircle className="w-4 h-4 text-red-400" />
                             ) : (
                               <RotateCcw className="w-4 h-4 text-orange-400" />
                             )}
-                            <span className={`text-sm font-medium ${
-                              adj.adjustment_type === 'void' ? 'text-red-400' : 'text-orange-400'
-                            }`}>
-                              {adj.adjustment_type === 'void'
-                                ? t('modals.refund.voidLabel', { defaultValue: 'VOID' })
-                                : t('modals.refund.refundLabel', { defaultValue: 'REFUND' })}
+                            <span
+                              className={`text-sm font-medium ${
+                                adj.adjustment_type === "void"
+                                  ? "text-red-400"
+                                  : "text-orange-400"
+                              }`}
+                            >
+                              {adj.adjustment_type === "void"
+                                ? t("modals.refund.voidLabel", {
+                                    defaultValue: "VOID",
+                                  })
+                                : t("modals.refund.refundLabel", {
+                                    defaultValue: "REFUND",
+                                  })}
                             </span>
                           </div>
-                          <span className={`font-bold ${
-                            adj.adjustment_type === 'void' ? 'text-red-400' : 'text-orange-400'
-                          }`}>
+                          <span
+                            className={`font-bold ${
+                              adj.adjustment_type === "void"
+                                ? "text-red-400"
+                                : "text-orange-400"
+                            }`}
+                          >
                             -{formatCurrency(adj.amount)}
                           </span>
                         </div>
                         <div className="mt-1 text-xs liquid-glass-modal-text-muted">
                           {adj.reason}
                         </div>
-                        {adj.adjustment_type === 'refund' && (
+                        {adj.adjustment_type === "refund" && (
                           <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-80">
-                            {adj.refundMethod === 'card'
-                              ? t('modals.refund.cardRefund', { defaultValue: 'Card Refund' })
-                              : adj.cashHandler === 'driver_shift'
-                                ? t('modals.refund.driverCash', { defaultValue: 'Driver Cash' })
-                                : t('modals.refund.cashierCash', { defaultValue: 'Cashier Cash' })}
+                            {adj.refundMethod === "card"
+                              ? t("modals.refund.cardRefund", {
+                                  defaultValue: "Card Refund",
+                                })
+                              : adj.cashHandler === "driver_shift"
+                                ? t("modals.refund.driverCash", {
+                                    defaultValue: "Driver Cash",
+                                  })
+                                : t("modals.refund.cashierCash", {
+                                    defaultValue: "Cashier Cash",
+                                  })}
                           </div>
                         )}
                         <div className="mt-1 text-xs liquid-glass-modal-text-muted opacity-60">

@@ -52,6 +52,13 @@ const clamp = (value: number, min: number, max: number) => Math.min(Math.max(val
 const nextPortionId = () => `portion-${nextGeneratedPortionId++}-${Date.now()}`;
 const unwrapBridgeArray = <T,>(result: any): T[] => Array.isArray(result) ? result : Array.isArray(result?.data) ? result.data : [];
 const isCompletedPaymentRecord = (payment: any) => ['completed', 'paid'].includes(String(payment?.status || '').toLowerCase());
+const getNetRecordedPaymentAmount = (payment: any) => round2(Math.max(
+  0,
+  Number(
+    payment?.remainingRefundable
+      ?? (Number(payment?.amount || 0) - Number(payment?.refundedAmount || 0)),
+  ) || 0,
+));
 const extractPaymentId = (result: any) => (typeof result?.paymentId === 'string' ? result.paymentId : typeof result?.data?.paymentId === 'string' ? result.data.paymentId : undefined);
 const extractTransactionDetails = (raw: any) => {
   const tx = raw?.transaction ?? raw?.data?.transaction ?? raw?.data ?? raw ?? {};
@@ -111,7 +118,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     return { ...item, quantity, itemIndex, price, totalPrice };
   }), [items]);
 
-  const alreadyPaidAmount = useMemo(() => round2(completedPayments.reduce((sum, payment) => sum + Number(payment?.amount || 0), 0)), [completedPayments]);
+  const alreadyPaidAmount = useMemo(
+    () => round2(completedPayments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0)),
+    [completedPayments],
+  );
   const paidItemIndexSet = useMemo(() => new Set(paidItemIndices), [paidItemIndices]);
   const availableItems = useMemo(() => {
     const unpaidItems = normalizedItems.filter((item) => !paidItemIndexSet.has(Number(item.itemIndex ?? 0)));
@@ -161,7 +171,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
         setOrderFinancials(financials);
         setCompletedPayments(payments);
         setPaidItemIndices(Array.from(new Set(paidIndices)));
-        initializePortions(initialMode, round2(Math.max(0, financials.totalAmount - payments.reduce((sum: number, payment: any) => sum + Number(payment?.amount || 0), 0))));
+        initializePortions(
+          initialMode,
+          round2(Math.max(0, financials.totalAmount - payments.reduce((sum: number, payment: any) => sum + getNetRecordedPaymentAmount(payment), 0))),
+        );
       } catch (error) {
         console.error('[SplitPaymentModal] Failed to load split state:', error);
         if (!cancelled) initializePortions(initialMode, round2(Math.max(0, orderTotal)));

@@ -391,8 +391,8 @@ fn load_cash_drawer_snapshot_for_shift(
 ///   - deducted_staff_payments - drops - driver_cash_given + driver_cash_returned
 ///     For driver/server: expected = opening + cash_collected - expenses
 ///
-/// Uses calculation_version to decide whether all staff_payments are deducted (V1)
-/// or only cashier self-payments are deducted (V2).
+/// For calculation_version >= 2, recorded staff payouts for the cashier shift are
+/// used as the source of truth, with the cash drawer aggregate as a fallback.
 pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -651,15 +651,21 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
                 staff_payments,
             ) = drawer;
             let deducted_staff_payments = if calc_version >= 2 {
-                conn.query_row(
-                    "SELECT COALESCE(SUM(amount), 0)
-                 FROM staff_payments
-                 WHERE cashier_shift_id = ?1
-                   AND paid_to_staff_id = ?2",
-                    params![shift_id, staff_id],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0.0)
+                let recorded_staff_payouts: f64 = conn
+                    .query_row(
+                        "SELECT COALESCE(SUM(amount), 0)
+                         FROM staff_payments
+                         WHERE cashier_shift_id = ?1",
+                        params![shift_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0.0);
+
+                if recorded_staff_payouts > 0.0 {
+                    recorded_staff_payouts
+                } else {
+                    staff_payments
+                }
             } else {
                 staff_payments
             };
@@ -3085,7 +3091,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cashier_close_v2_deducts_only_self_staff_payments() {
+    fn test_cashier_close_v2_deducts_all_staff_payouts_from_drawer() {
         let db = test_db();
 
         {
@@ -3150,11 +3156,11 @@ mod tests {
             &db,
             &serde_json::json!({
                 "shiftId": "cashier-self-pay",
-                "closingCash": 85.0,
+                "closingCash": 77.0,
                 "closedBy": TEST_MANAGER_UUID,
             }),
         )
-        .expect("cashier close should deduct only cashier self-payments");
+        .expect("cashier close should deduct all recorded staff payouts");
         assert_eq!(result["success"], true);
 
         let conn = db.conn.lock().unwrap();
@@ -3174,7 +3180,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!((expected_cash_amount - 85.0).abs() < f64::EPSILON);
+        assert!((expected_cash_amount - 77.0).abs() < f64::EPSILON);
         assert!(cash_variance.abs() < f64::EPSILON);
         assert_eq!(
             payment_amount, None,

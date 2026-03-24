@@ -16,6 +16,12 @@ import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
+import { StaffShiftCheckoutFooterActions } from './StaffShiftCheckoutFooterActions';
+import {
+  buildShiftCheckoutPrintSnapshot,
+  canPrintShiftCheckoutSnapshot,
+  queueShiftCheckoutPrint,
+} from '../../utils/staffShiftCheckoutPrint';
 import { getBridge } from '../../../lib';
 
 // IPC result shapes from bridge calls
@@ -30,6 +36,11 @@ interface ShiftIpcResult {
   variance?: number;
   error?: string;
   data?: { shiftId?: string; id?: string; variance?: number };
+}
+
+interface ShiftPrintCheckoutResult extends ShiftIpcResult {
+  skipped?: boolean;
+  queued?: boolean;
 }
 
 interface ShiftCheckInEligibility {
@@ -419,6 +430,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [closingCash, setClosingCash] = useState('');
   const [driverActualCash, setDriverActualCash] = useState('');
   const [staffPayment, setStaffPayment] = useState('');
+  const [isPrintCheckoutLoading, setIsPrintCheckoutLoading] = useState(false);
 
 
   // Track active shifts per staff
@@ -541,6 +553,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     return parseMoneyInputValue(trimmed);
   };
 
+  const hasManualCashInput = (value: string) => value.trim().length > 0;
+
   const getCurrentCashierIssuedFloat = (summary: any) => {
     const recordedGiven = Number(summary?.cashDrawer?.driver_cash_given || 0);
     if (recordedGiven > 0) return recordedGiven;
@@ -565,7 +579,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     shift: any,
     opening: number,
     expensesTotal?: number,
-    _cashierPayout = 0
   ) => {
     const calculationVersion = Number(shift?.calculation_version ?? 1);
     const sales = Number(summary?.breakdown?.instore?.cashTotal || 0);
@@ -579,20 +592,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const recordedStaffPayments = staffPayments.length > 0
       ? staffPayments.reduce((sum: number, payment: any) => sum + Number(payment?.amount || 0), 0)
       : Number(summary?.cashDrawer?.total_staff_payments || 0);
-    const cashierStaffId = String(shift?.staff_id || '').trim();
-    const cashierSelfPayments = staffPayments.reduce((sum: number, payment: any) => {
-      const paidToStaffId = String(
-        payment?.staff_id ??
-        payment?.paid_to_staff_id ??
-        payment?.paidToStaffId ??
-        '',
-      ).trim();
-
-      return paidToStaffId === cashierStaffId
-        ? sum + Number(payment?.amount || 0)
-        : sum;
-    }, 0);
-    const deductedStaffPayments = calculationVersion < 2 ? recordedStaffPayments : cashierSelfPayments;
+    const deductedStaffPayments = recordedStaffPayments;
     const expected =
       opening +
       sales -
@@ -616,7 +616,6 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       inheritedDriverExpectedReturns,
       recordedStaffPayments,
       deductedStaffPayments,
-      cashierPayout: deductedStaffPayments,
       expected,
     };
   };
@@ -667,6 +666,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const canRecordInlineExpenses =
     effectiveShift?.role_type === 'cashier' || effectiveShift?.role_type === 'manager';
   const isDriverRole = effectiveShift?.role_type === 'driver';
+  const isCheckoutAmountMissing = effectiveMode === 'checkout' && (
+    (isCashierCheckoutRole && !hasManualCashInput(closingCash)) ||
+    (effectiveShift?.role_type === 'driver' && !hasManualCashInput(driverActualCash)) ||
+    (effectiveShift?.role_type === 'server' && !hasManualCashInput(closingCash))
+  );
   const prefersReducedMotion = useReducedMotion();
   const [contentDirection, setContentDirection] = useState<MotionDirection>(1);
   const [supportsHoverMotion, setSupportsHoverMotion] = useState(false);
@@ -856,6 +860,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   }, [checkInStep, selectedStaff]);
   const [shiftSummary, setShiftSummary] = useState<any | null>(null);
+  const canPrintCheckoutSnapshot = React.useMemo(
+    () =>
+      effectiveMode === 'checkout' &&
+      canPrintShiftCheckoutSnapshot({
+        shift: effectiveShift,
+        shiftSummary,
+        closingCash,
+        driverActualCash,
+        isNonFinancialCheckoutRole,
+      }),
+    [
+      effectiveMode,
+      effectiveShift,
+      shiftSummary,
+      closingCash,
+      driverActualCash,
+      isNonFinancialCheckoutRole,
+    ],
+  );
 
 
   // Load staff when modal opens in checkin mode
@@ -1888,17 +1911,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const totalExpenses = freshSummary?.totalExpenses || 0;
       const expectedReturn = openingCash + totalCashCollected - totalExpenses - driverPayment;
 
-      // Use actual cash returned if entered, otherwise fall back to calculated expected
-      if (driverActualCash.trim() !== '') {
-        const actual = parseMoneyInputValue(driverActualCash);
-        if (actual < 0) {
-          setError(t('modals.staffShift.invalidClosingCash'));
-          return;
-        }
-        closingAmount = actual;
-      } else {
-        closingAmount = expectedReturn;
+      if (!hasManualCashInput(driverActualCash)) {
+        setError(t('modals.staffShift.actualCashReturnedRequired', {
+          defaultValue: 'Enter the actual cash returned before checkout.',
+        }));
+        return;
       }
+
+      const actual = parseMoneyInputValue(driverActualCash);
+      if (actual < 0) {
+        setError(t('modals.staffShift.invalidClosingCash'));
+        return;
+      }
+      closingAmount = actual;
 
       console.log('Driver closingAmount:', {
         totalDeliveries: deliveries.length,
@@ -1925,8 +1950,14 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         shiftSummary?.totalExpenses || 0
       ).expected;
 
-      // Use manually entered closing cash for actual
-      const actualAmount = closingCash === '' ? expectedAmount : parseMoneyInputValue(closingCash);
+      if (!hasManualCashInput(closingCash)) {
+        setError(t('modals.staffShift.countedCashRequired', {
+          defaultValue: 'Enter the counted cash before checkout.',
+        }));
+        return;
+      }
+
+      const actualAmount = parseMoneyInputValue(closingCash);
 
       if (actualAmount < 0) {
         setError(t('modals.staffShift.invalidClosingCash'));
@@ -1962,16 +1993,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       // Formula: Cash to Return = Starting Amount + Cash Collected - Expenses - Payments
       const expectedReturn = openingCash + cashCollected - totalExpenses - waiterPayment;
 
-      if (closingCash.trim() !== '') {
-        const actual = parseMoneyInputValue(closingCash);
-        if (actual < 0) {
-          setError(t('modals.staffShift.invalidClosingCash'));
-          return;
-        }
-        closingAmount = actual;
-      } else {
-        closingAmount = expectedReturn;
+      if (!hasManualCashInput(closingCash)) {
+        setError(t('modals.staffShift.actualCashReturnedRequired', {
+          defaultValue: 'Enter the actual cash returned before checkout.',
+        }));
+        return;
       }
+
+      const actual = parseMoneyInputValue(closingCash);
+      if (actual < 0) {
+        setError(t('modals.staffShift.invalidClosingCash'));
+        return;
+      }
+      closingAmount = actual;
 
       console.log('Server closingAmount calculated:', {
         expectedReturn,
@@ -2071,12 +2105,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         // Print staff check-out receipt (role-specific)
         try {
           console.log('[StaffShiftModal] Printing checkout for shift:', effectiveShift.id, 'role:', effectiveShift.role_type);
-          const terminalName = await bridge.terminalConfig.getSetting('terminal', 'name');
-          const printResult = await bridge.invoke('shift:print-checkout', {
+          const printResult = await queueShiftCheckoutPrint({
+            bridge,
             shiftId: effectiveShift.id,
             roleType: effectiveShift.role_type,
-            terminalName: terminalName || undefined
-          });
+          }) as ShiftPrintCheckoutResult;
           console.log('[StaffShiftModal] Print checkout result:', printResult);
           if (!printResult?.success) {
             console.warn('[StaffShiftModal] Checkout print failed:', printResult?.error);
@@ -2096,6 +2129,74 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       setError(err instanceof Error ? err.message : t('modals.staffShift.closeShiftFailed'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePrintCheckout = async () => {
+    if (!effectiveShift) {
+      setError(t('modals.staffShift.noActiveShift'));
+      return;
+    }
+
+    const snapshot = buildShiftCheckoutPrintSnapshot({
+      shift: effectiveShift,
+      shiftSummary,
+      closingCash,
+      driverActualCash,
+      isNonFinancialCheckoutRole,
+      snapshotCheckOutTime: new Date().toISOString(),
+    });
+
+    if (!snapshot) {
+      setError(
+        t('modals.staffShift.checkoutPrintUnavailable', {
+          defaultValue: 'Complete the checkout inputs before printing.',
+        }),
+      );
+      return;
+    }
+
+    setIsPrintCheckoutLoading(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const printResult = await queueShiftCheckoutPrint({
+        bridge,
+        shiftId: effectiveShift.id,
+        roleType: effectiveShift.role_type,
+        snapshot,
+      }) as ShiftPrintCheckoutResult;
+
+      if (printResult?.success) {
+        setSuccess(
+          printResult?.skipped
+            ? t('modals.staffShift.checkoutPrintSkipped', {
+                defaultValue: 'Checkout printing is disabled for this terminal.',
+              })
+            : t('modals.staffShift.checkoutPrintQueued', {
+                defaultValue: 'Checkout print queued.',
+              }),
+        );
+      } else {
+        setError(
+          printResult?.error ||
+            t('modals.staffShift.checkoutPrintFailed', {
+              defaultValue: 'Failed to print checkout summary.',
+            }),
+        );
+      }
+    } catch (err) {
+      setError(
+        extractErrorMessage(
+          err,
+          t('modals.staffShift.checkoutPrintFailed', {
+            defaultValue: 'Failed to print checkout summary.',
+          }),
+        ),
+      );
+    } finally {
+      setIsPrintCheckoutLoading(false);
     }
   };
 
@@ -2311,8 +2412,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         shiftSummary,
         effectiveShift,
         openingAmount,
-        shiftSummary.totalExpenses || 0,
-        parseOptionalAmount(staffPayment)
+        shiftSummary.totalExpenses || 0
       );
       primaryLabel = t('modals.staffShift.expectedInDrawer', { defaultValue: 'Expected In Drawer' });
       primaryAmount = breakdown.expected;
@@ -2398,11 +2498,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         shiftSummary,
         effectiveShift,
         opening,
-        shiftSummary.totalExpenses || 0,
-        parseOptionalAmount(staffPayment)
+        shiftSummary.totalExpenses || 0
       );
-      const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : breakdown.expected;
-      const variance = actual - breakdown.expected;
+      const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : null;
+      const variance = actual === null ? null : actual - breakdown.expected;
 
       return {
         label: t('modals.staffShift.expectedInDrawer', { defaultValue: 'Expected In Drawer' }),
@@ -2410,8 +2509,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         note: closingCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
             defaultValue: 'Counted {{counted}} · Variance {{variance}}',
-            counted: formatCurrency(actual),
-            variance: `${variance >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance))}`,
+            counted: formatCurrency(actual ?? 0),
+            variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
           })
           : t('modals.staffShift.countedCashPrompt', {
             defaultValue: 'Enter counted cash to confirm the final drawer amount.'
@@ -2430,8 +2529,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const expected = getEffectiveOpeningAmount(effectiveShift, shiftSummary)
         + completedDeliveries.reduce((sum: number, d: any) => sum + (d.cash_collected || 0), 0)
         - (shiftSummary.totalExpenses || 0);
-      const actual = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : expected;
-      const variance = actual - expected;
+      const actual = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : null;
+      const variance = actual === null ? null : actual - expected;
 
       return {
         label: t('modals.staffShift.amountToReturn', { defaultValue: 'Amount To Return' }),
@@ -2439,10 +2538,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         note: driverActualCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
             defaultValue: 'Returned {{counted}} · Variance {{variance}}',
-            counted: formatCurrency(actual),
-            variance: `${variance >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance))}`,
+            counted: formatCurrency(actual ?? 0),
+            variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
           })
-          : t('modals.staffShift.actualCashReturned', { defaultValue: 'Actual Cash Returned' }),
+          : t('modals.staffShift.actualCashReturnedRequired', {
+            defaultValue: 'Enter the actual cash returned before checkout.',
+          }),
         accentClass: expected >= 0 ? 'text-cyan-300' : 'text-red-300',
         minimal: false,
       };
@@ -2457,8 +2558,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       const expected = calculationVersion >= 2
         ? opening + cashFromTables - expensesTotal
         : opening + cashFromTables - expensesTotal - paymentAmount;
-      const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : expected;
-      const variance = actual - expected;
+      const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : null;
+      const variance = actual === null ? null : actual - expected;
 
       return {
         label: t('modals.staffShift.cashToReturn', { defaultValue: 'Cash To Return' }),
@@ -2466,10 +2567,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
         note: closingCash.trim()
           ? t('modals.staffShift.countedCashVariance', {
             defaultValue: 'Returned {{counted}} · Variance {{variance}}',
-            counted: formatCurrency(actual),
-            variance: `${variance >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance))}`,
+            counted: formatCurrency(actual ?? 0),
+            variance: `${(variance ?? 0) >= 0 ? '+' : '-'}${formatCurrency(Math.abs(variance ?? 0))}`,
           })
-          : t('modals.staffShift.actualCashReturned', { defaultValue: 'Actual Cash Returned' }),
+          : t('modals.staffShift.actualCashReturnedRequired', {
+            defaultValue: 'Enter the actual cash returned before checkout.',
+          }),
         accentClass: expected >= 0 ? 'text-cyan-300' : 'text-red-300',
         minimal: false,
       };
@@ -2869,10 +2972,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       effectiveShift,
       opening,
       shiftSummary.totalExpenses || 0,
-      parseOptionalAmount(staffPayment),
     );
-    const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : breakdown.expected;
-    const variance = actual - breakdown.expected;
+    const actual = closingCash.trim() ? parseMoneyInputValue(closingCash) : null;
+    const variance = actual === null ? null : actual - breakdown.expected;
     const transferredDrivers = Array.isArray(shiftSummary.transferredDrivers) ? shiftSummary.transferredDrivers : [];
     const transferredWaiters = Array.isArray(shiftSummary.transferredWaiters) ? shiftSummary.transferredWaiters : [];
     const transferredStaff = [...transferredDrivers, ...transferredWaiters];
@@ -2928,9 +3030,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <p className="mt-3 text-sm text-slate-600 dark:text-slate-300/75">
                     {t('modals.staffShift.closingCashHelper')}
                   </p>
-                  <div className="mt-4 flex justify-center">
-                    <VarianceBadge variance={variance} size="lg" showIcon />
-                  </div>
+                  {variance === null ? (
+                    <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
+                      {t('modals.staffShift.countedCashPrompt', {
+                        defaultValue: 'Enter counted cash to confirm the final drawer amount.',
+                      })}
+                    </p>
+                  ) : (
+                    <div className="mt-4 flex justify-center">
+                      <VarianceBadge variance={variance} size="lg" showIcon />
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2950,7 +3060,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {t('modals.staffShift.actualLabel', 'Actual')}
                   </div>
                   <div className="mt-1 text-2xl font-black text-slate-900 dark:text-white">
-                    {formatCurrency(actual)}
+                    {actual === null
+                      ? t('common.notEntered', { defaultValue: 'Not entered' })
+                      : formatCurrency(actual)}
                   </div>
                 </div>
               </div>
@@ -2965,7 +3077,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   { label: t('modals.staffShift.driverCashGivenLabel', 'Driver Cash Given'), amount: breakdown.driverGiven, tone: 'text-rose-600 dark:text-rose-300', prefix: '-' },
                   { label: t('modals.staffShift.driverCashReturnedLabel', 'Driver Cash Returned'), amount: breakdown.driverReturned, tone: 'text-emerald-600 dark:text-emerald-300', prefix: '+' },
                   { label: t('modals.staffShift.inheritedDriverReturnsLabel', 'Transferred Staff Returns'), amount: breakdown.inheritedDriverExpectedReturns, tone: 'text-cyan-600 dark:text-cyan-300', prefix: '+' },
-                  { label: t('modals.staffShift.staffPaymentsDeductedLabel', 'Self Payments Deducted'), amount: breakdown.deductedStaffPayments, tone: 'text-amber-600 dark:text-amber-300', prefix: '-' },
+                  { label: t('modals.staffShift.staffPaymentsDeductedLabel', 'Staff Payouts'), amount: breakdown.deductedStaffPayments, tone: 'text-amber-600 dark:text-amber-300', prefix: '-' },
                 ]
                   .filter((row) => row.amount > 0 || row.label === t('modals.staffShift.openingCashLabel') || row.label === t('modals.staffShift.cashOrdersLabel'))
                   .map((row) => (
@@ -3365,8 +3477,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
     const cashCollected = completedDeliveries.reduce((sum: number, delivery: any) => sum + Number(delivery.cash_collected || 0), 0);
     const amountToReturn = opening + cashCollected - (shiftSummary.totalExpenses || 0);
-    const actualReturned = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : amountToReturn;
-    const variance = actualReturned - amountToReturn;
+    const actualReturned = driverActualCash.trim() ? parseMoneyInputValue(driverActualCash) : null;
+    const variance = actualReturned === null ? null : actualReturned - amountToReturn;
 
     return (
       <div className="space-y-6" data-testid="staff-checkout-section">
@@ -3401,9 +3513,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                   autoFocus
                 />
-                <div className="mt-4 flex justify-center">
-                  <VarianceBadge variance={variance} size="lg" showIcon />
-                </div>
+                {variance === null ? (
+                  <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
+                    {t('modals.staffShift.actualCashReturnedRequired', {
+                      defaultValue: 'Enter the actual cash returned before checkout.',
+                    })}
+                  </p>
+                ) : (
+                  <div className="mt-4 flex justify-center">
+                    <VarianceBadge variance={variance} size="lg" showIcon />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -3526,8 +3646,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     const cashToReturn = calculationVersion >= 2
       ? opening + cashFromTables - expensesTotal
       : opening + cashFromTables - expensesTotal - paymentAmount;
-    const actualReturned = closingCash.trim() ? parseMoneyInputValue(closingCash) : cashToReturn;
-    const variance = actualReturned - cashToReturn;
+    const actualReturned = closingCash.trim() ? parseMoneyInputValue(closingCash) : null;
+    const variance = actualReturned === null ? null : actualReturned - cashToReturn;
 
     return (
       <div className="space-y-6" data-testid="staff-checkout-section">
@@ -3566,9 +3686,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   className="liquid-glass-modal-input mt-3 w-full text-3xl font-black text-center"
                   autoFocus
                 />
-                <div className="mt-4 flex justify-center">
-                  <VarianceBadge variance={variance} size="lg" showIcon />
-                </div>
+                {variance === null ? (
+                  <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
+                    {t('modals.staffShift.actualCashReturnedRequired', {
+                      defaultValue: 'Enter the actual cash returned before checkout.',
+                    })}
+                  </p>
+                ) : (
+                  <div className="mt-4 flex justify-center">
+                    <VarianceBadge variance={variance} size="lg" showIcon />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -4611,7 +4739,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   )}
                   {(lastShiftResult.breakdown.deductedStaffPayments || 0) > 0 && (
                     <div className="flex justify-between items-center p-2 rounded hover:bg-white/5">
-                      <span className="text-gray-400">{t('modals.staffShift.staffPaymentsDeductedLabel', 'Self Payments Deducted')}</span>
+                      <span className="text-gray-400">{t('modals.staffShift.staffPaymentsDeductedLabel', 'Staff Payouts')}</span>
                       <span className="font-medium text-red-300">-{formatCurrency(lastShiftResult.breakdown.deductedStaffPayments || 0)}</span>
                     </div>
                   )}
@@ -4783,13 +4911,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               {shiftSummary && effectiveShift?.role_type === 'cashier' && (
                 (() => {
                   const openingAmount = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
-                  const currentCashierPayout = parseOptionalAmount(staffPayment);
                   const cashierBreakdown = getCashierExpectedBreakdown(
                     shiftSummary,
                     effectiveShift,
                     openingAmount,
-                    shiftSummary.totalExpenses || 0,
-                    Number.isNaN(currentCashierPayout) ? 0 : currentCashierPayout
+                    shiftSummary.totalExpenses || 0
                   );
 
                   return (
@@ -4862,10 +4988,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
                     )}
 
-                    {(cashierBreakdown.cashierPayout || 0) > 0 && (
+                    {(cashierBreakdown.deductedStaffPayments || 0) > 0 && (
                       <div className="flex justify-between items-center p-3 bg-red-900/30 rounded-lg border border-red-600/40">
-                        <span className="text-sm text-red-200">{t('modals.staffShift.cashierPaymentLabel')}</span>
-                        <span className="font-bold text-red-300">-{formatCurrency(cashierBreakdown.cashierPayout || 0)}</span>
+                        <span className="text-sm text-red-200">{t('modals.staffShift.staffPaymentsDeductedLabel', 'Staff Payouts')}</span>
+                        <span className="font-bold text-red-300">-{formatCurrency(cashierBreakdown.deductedStaffPayments || 0)}</span>
                       </div>
                     )}
 
@@ -4962,13 +5088,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                     {/* Expected Amount */}
                     {(() => {
                       const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
-                      const cashierPayout = parseOptionalAmount(staffPayment);
                       const breakdown = getCashierExpectedBreakdown(
                         shiftSummary,
                         effectiveShift,
                         opening,
-                        shiftSummary.totalExpenses || 0,
-                        Number.isNaN(cashierPayout) ? 0 : cashierPayout
+                        shiftSummary.totalExpenses || 0
                       );
                       const expected = breakdown.expected;
                       return (
@@ -6042,13 +6166,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   {(() => {
                     const opening = getEffectiveOpeningAmount(effectiveShift, shiftSummary);
                     const expensesTotal = expenses.reduce((sum, exp) => sum + exp.amount, 0);
-                    const cashierPayout = parseOptionalAmount(staffPayment);
                     const breakdown = getCashierExpectedBreakdown(
                       shiftSummary,
                       effectiveShift,
                       opening,
-                      expensesTotal,
-                      Number.isNaN(cashierPayout) ? 0 : cashierPayout
+                      expensesTotal
                     );
                     const expected = breakdown.expected;
 
@@ -6219,26 +6341,25 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   </p>
                 </div>
 
-                <button
-                  onClick={() => {
+                <StaffShiftCheckoutFooterActions
+                  onPrint={() => {
+                    void handlePrintCheckout();
+                  }}
+                  onCheckout={() => {
                     console.log('🔴 BUTTON CLICKED!');
                     handleCheckOut();
                   }}
-                  disabled={loading}
-                  className="w-full px-6 py-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white rounded-xl font-bold text-lg shadow-[0_4px_16px_0_rgba(239,68,68,0.5)] hover:shadow-[0_6px_24px_0_rgba(239,68,68,0.7)] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none transition-all duration-300 flex items-center justify-center gap-3 sm:w-auto sm:min-w-[220px]"
-                >
-                  {loading ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
-                      {t('modals.staffShift.closingShift')}
-                    </>
-                  ) : (
-                    <>
-                      <Check className="w-5 h-5" />
-                      {t('modals.staffShift.checkOut')}
-                    </>
-                  )}
-                </button>
+                  printLabel={t('common.actions.print', 'Print')}
+                  checkoutLabel={
+                    loading
+                      ? t('modals.staffShift.closingShift')
+                      : t('modals.staffShift.checkOut')
+                  }
+                  isPrinting={isPrintCheckoutLoading}
+                  isPrintDisabled={loading || isPrintCheckoutLoading || !canPrintCheckoutSnapshot}
+                  isCheckoutLoading={loading}
+                  isCheckoutDisabled={loading || isCheckoutAmountMissing}
+                />
               </div>
             </div>
           )}

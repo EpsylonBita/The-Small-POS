@@ -37,6 +37,7 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const totalRequired = useMemo(() => round2(Math.max(0, (preview?.paidTotal || 0) - (preview?.nextTotal || 0))), [preview]);
+  const totalReduced = (preview?.nextTotal || 0) < (preview?.originalTotal || 0) - 0.01;
   const allowDriverCashHandler = preview?.deliverySettlement?.driverCashOwned === true;
 
   useEffect(() => {
@@ -202,9 +203,13 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
               <AlertTriangle className="mt-0.5 h-5 w-5 text-amber-300" />
               <div className="space-y-1">
                 <h3 className="text-sm font-semibold text-amber-200">
-                  {t('modals.refund.editSettlementRequired', {
-                    defaultValue: 'This edit reduces a paid order and requires a recorded refund',
-                  })}
+                  {totalReduced
+                    ? t('modals.refund.editSettlementReducedRequired', {
+                        defaultValue: 'This edit reduces a paid order and requires a recorded refund',
+                      })
+                    : t('modals.refund.editSettlementOverpaidRequired', {
+                        defaultValue: 'This edit leaves the order overpaid and requires a recorded refund',
+                      })}
                 </h3>
                 <p className="text-sm text-amber-100/80">
                   {orderNumber
@@ -219,6 +224,12 @@ export const EditOrderRefundSettlementModal: React.FC<EditOrderRefundSettlementM
                     defaultValue: 'Order total changed from €{{from}} to €{{to}}',
                     from: preview.originalTotal.toFixed(2),
                     to: preview.nextTotal.toFixed(2),
+                  })}
+                </p>
+                <p className="text-xs text-amber-100/70">
+                  {t('modals.refund.netPaidAfterRefunds', {
+                    defaultValue: 'Paid after previous refunds: €{{amount}}',
+                    amount: preview.paidTotal.toFixed(2),
                   })}
                 </p>
               </div>

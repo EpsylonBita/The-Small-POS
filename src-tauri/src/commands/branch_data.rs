@@ -77,7 +77,10 @@ fn resolve_branch_id(db: &db::DbState, explicit: Option<String>) -> Result<Strin
     trimmed(explicit)
         .or_else(|| storage::get_credential("branch_id"))
         .or_else(|| read_local_setting(db, "terminal", "branch_id"))
-        .ok_or_else(|| "Branch is not configured locally yet. Connect once to download local branch data.".to_string())
+        .ok_or_else(|| {
+            "Branch is not configured locally yet. Connect once to download local branch data."
+                .to_string()
+        })
 }
 
 fn normalize_scope_key(values: &[Option<&str>]) -> String {
@@ -118,8 +121,8 @@ fn cache_payload(
     payload: &Value,
 ) -> Result<String, String> {
     let synced_at = Utc::now().to_rfc3339();
-    let payload_json =
-        serde_json::to_string(payload).map_err(|error| format!("serialize cache payload: {error}"))?;
+    let payload_json = serde_json::to_string(payload)
+        .map_err(|error| format!("serialize cache payload: {error}"))?;
     conn.execute(
         "INSERT INTO branch_ops_cache (branch_id, cache_key, scope_key, version, synced_at, payload_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -168,8 +171,8 @@ fn read_cache_entry(
         return Ok(None);
     };
 
-    let payload: Value =
-        serde_json::from_str(&payload_json).map_err(|error| format!("parse cached payload: {error}"))?;
+    let payload: Value = serde_json::from_str(&payload_json)
+        .map_err(|error| format!("parse cached payload: {error}"))?;
 
     Ok(Some(CacheEntry {
         synced_at,
@@ -180,10 +183,19 @@ fn read_cache_entry(
 
 fn cache_age_ms(synced_at: &str) -> Option<i64> {
     let parsed = DateTime::parse_from_rfc3339(synced_at).ok()?;
-    Some((Utc::now() - parsed.with_timezone(&Utc)).num_milliseconds().max(0))
+    Some(
+        (Utc::now() - parsed.with_timezone(&Utc))
+            .num_milliseconds()
+            .max(0),
+    )
 }
 
-fn local_first_success(payload: Value, source: &str, synced_at: Option<String>, version: Option<String>) -> Value {
+fn local_first_success(
+    payload: Value,
+    source: &str,
+    synced_at: Option<String>,
+    version: Option<String>,
+) -> Value {
     json!({
         "success": true,
         "data": payload,
@@ -209,13 +221,17 @@ fn cached_dataset_status(
             synced_at: Some(entry.synced_at),
             available: true,
             source: "branch_ops_cache",
-            item_count: entry.payload.as_array().map(|items| items.len()).or_else(|| {
-                entry
-                    .payload
-                    .as_object()
-                    .and_then(|object| object.values().find_map(Value::as_array))
-                    .map(|items| items.len())
-            }),
+            item_count: entry
+                .payload
+                .as_array()
+                .map(|items| items.len())
+                .or_else(|| {
+                    entry
+                        .payload
+                        .as_object()
+                        .and_then(|object| object.values().find_map(Value::as_array))
+                        .map(|items| items.len())
+                }),
         },
         _ => DatasetStatus {
             cache_key: cache_key.to_string(),
@@ -418,10 +434,8 @@ pub async fn branch_data_get_staff_schedule(
         .unwrap_or_default()
         .unwrap_or_default();
     let branch_id = resolve_branch_id(&db, payload.branch_id)?;
-    let scope_key = normalize_scope_key(&[
-        payload.start_date.as_deref(),
-        payload.end_date.as_deref(),
-    ]);
+    let scope_key =
+        normalize_scope_key(&[payload.start_date.as_deref(), payload.end_date.as_deref()]);
     let mut query = vec![format!("branch_id={branch_id}")];
     if let Some(start_date) = trimmed(payload.start_date) {
         query.push(format!("start_date={start_date}"));
@@ -430,14 +444,7 @@ pub async fn branch_data_get_staff_schedule(
         query.push(format!("end_date={end_date}"));
     }
     let path = format!("/api/pos/staff-schedule?{}", query.join("&"));
-    fetch_branch_scoped_payload(
-        &db,
-        &branch_id,
-        CACHE_KEY_STAFF_SCHEDULE,
-        &scope_key,
-        path,
-    )
-    .await
+    fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_STAFF_SCHEDULE, &scope_key, path).await
 }
 
 #[tauri::command]
@@ -469,20 +476,10 @@ pub async fn branch_data_get_catalog_offers(
     let catalog_type = trimmed(payload.catalog_type).unwrap_or_else(|| "menu".to_string());
     let scope_key = normalize_scope_key(&[Some(catalog_type.as_str())]);
     let path = format!("/api/pos/offers?branch_id={branch_id}&catalog_type={catalog_type}");
-    fetch_branch_scoped_payload(
-        &db,
-        &branch_id,
-        CACHE_KEY_CATALOG_OFFERS,
-        &scope_key,
-        path,
-    )
-    .await
+    fetch_branch_scoped_payload(&db, &branch_id, CACHE_KEY_CATALOG_OFFERS, &scope_key, path).await
 }
 
-async fn get_coupons_local_first(
-    db: &db::DbState,
-    branch_id: &str,
-) -> Result<Value, String> {
+async fn get_coupons_local_first(db: &db::DbState, branch_id: &str) -> Result<Value, String> {
     fetch_branch_scoped_payload(
         db,
         branch_id,

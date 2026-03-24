@@ -610,7 +610,10 @@ pub(crate) fn setting_bool(conn: &rusqlite::Connection, category: &str, key: &st
 }
 
 fn print_queue_pause_key(printer_profile_id: Option<&str>) -> String {
-    match printer_profile_id.map(str::trim).filter(|value| !value.is_empty()) {
+    match printer_profile_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(printer_profile_id) => {
             format!("{PRINT_QUEUE_PAUSED_PROFILE_PREFIX}{printer_profile_id}")
         }
@@ -635,12 +638,7 @@ fn paused_printer_profiles(conn: &rusqlite::Connection) -> HashSet<String> {
             PRINT_QUEUE_SETTINGS_CATEGORY,
             format!("{PRINT_QUEUE_PAUSED_PROFILE_PREFIX}%")
         ],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
     ) {
         Ok(rows) => rows,
         Err(_) => return paused,
@@ -673,7 +671,10 @@ fn is_print_queue_paused_with_conn(
         return true;
     }
 
-    match printer_profile_id.map(str::trim).filter(|value| !value.is_empty()) {
+    match printer_profile_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(printer_profile_id) => setting_bool(
             conn,
             PRINT_QUEUE_SETTINGS_CATEGORY,
@@ -3086,6 +3087,21 @@ fn object_text_field(payload: &Value, keys: &[&str]) -> Option<String> {
         .and_then(non_empty_text)
 }
 
+fn object_number_field(payload: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        payload.get(*key).and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_i64().map(|number| number as f64))
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                })
+        })
+    })
+}
+
 fn build_shift_checkout_doc(
     db: &DbState,
     shift_id: &str,
@@ -3102,6 +3118,15 @@ fn build_shift_checkout_doc(
         .unwrap_or(serde_json::json!({}));
     let explicit_terminal_name =
         payload.and_then(|value| object_text_field(value, &["terminalName", "terminal_name"]));
+    let snapshot_check_out_time = payload.and_then(|value| {
+        object_text_field(value, &["snapshotCheckOutTime", "snapshot_check_out_time"])
+    });
+    let snapshot_expected_amount =
+        payload.and_then(|value| object_number_field(value, &["expectedAmount", "expected_amount"]));
+    let snapshot_closing_amount =
+        payload.and_then(|value| object_number_field(value, &["closingAmount", "closing_amount"]));
+    let snapshot_variance_amount =
+        payload.and_then(|value| object_number_field(value, &["varianceAmount", "variance_amount"]));
     let terminal_name = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
@@ -3125,6 +3150,37 @@ fn build_shift_checkout_doc(
             })
             .sum::<f64>();
     }
+    let staff_payout_lines = summary
+        .get("staffPayments")
+        .and_then(Value::as_array)
+        .map(|payments| {
+            payments
+                .iter()
+                .map(|payment| crate::receipt_renderer::StaffPayoutLine {
+                    staff_name: text_from_paths(payment, &["/staff_name", "/staffName"])
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    role_type: text_from_paths(payment, &["/role_type", "/roleType"])
+                        .unwrap_or_else(|| "staff".to_string()),
+                    amount: number_from_paths(payment, &["/amount"]).unwrap_or(0.0),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let staff_payouts_total = number_from_paths(
+        &summary,
+        &[
+            "/staffPayments/total",
+            "/cashDrawer/total_staff_payments",
+            "/cashDrawer/totalStaffPayments",
+            "/staffPaymentsTotal",
+        ],
+    )
+    .unwrap_or_else(|| {
+        staff_payout_lines
+            .iter()
+            .map(|line| line.amount)
+            .sum::<f64>()
+    });
 
     let mut doc = Ok(ShiftCheckoutDoc {
         shift_id: shift_id.to_string(),
@@ -3152,20 +3208,32 @@ fn build_shift_checkout_doc(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        check_out: shift
-            .get("check_out_time")
-            .or_else(|| shift.get("checkOutTime"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        check_out: snapshot_check_out_time
+            .or_else(|| {
+                shift
+                    .get("check_out_time")
+                    .or_else(|| shift.get("checkOutTime"))
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string())
+            })
+            .unwrap_or_default(),
         orders_count: summary
             .get("ordersCount")
             .and_then(Value::as_i64)
+            .or_else(|| {
+                number_from_paths(&shift, &["/total_orders_count", "/totalOrdersCount"])
+                    .map(|v| v as i64)
+            })
             .unwrap_or(0),
-        sales_amount: summary
-            .get("salesAmount")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
+        sales_amount: number_from_paths(
+            &summary,
+            &[
+                "/salesAmount",
+                "/shift/total_sales_amount",
+                "/shift/totalSalesAmount",
+            ],
+        )
+        .unwrap_or(0.0),
         total_expenses: summary
             .get("totalExpenses")
             .and_then(Value::as_f64)
@@ -3177,16 +3245,54 @@ fn build_shift_checkout_doc(
         opening_amount: number_from_paths(&cash_drawer, &["/opening_amount", "/openingAmount"])
             .or_else(|| number_from_paths(&shift, &["/opening_cash_amount", "/openingCashAmount"]))
             .unwrap_or(0.0),
+        cash_sales: number_from_paths(
+            &summary,
+            &[
+                "/sales/cashSales",
+                "/totals/cash_sales",
+                "/shift/total_cash_sales",
+                "/cashDrawer/total_cash_sales",
+            ],
+        )
+        .unwrap_or(0.0),
+        card_sales: number_from_paths(
+            &summary,
+            &[
+                "/sales/cardSales",
+                "/totals/card_sales",
+                "/shift/total_card_sales",
+                "/cashDrawer/total_card_sales",
+            ],
+        )
+        .unwrap_or(0.0),
+        cash_drops: number_from_paths(&cash_drawer, &["/cash_drops", "/cashDrops"]).unwrap_or(0.0),
+        driver_cash_given: number_from_paths(
+            &cash_drawer,
+            &["/driver_cash_given", "/driverCashGiven"],
+        )
+        .unwrap_or(0.0),
+        driver_cash_returned: number_from_paths(
+            &cash_drawer,
+            &["/driver_cash_returned", "/driverCashReturned"],
+        )
+        .unwrap_or(0.0),
+        staff_payouts_total,
+        staff_payout_lines,
         transferred_staff_count,
         transferred_staff_returns,
-        expected_amount: number_from_paths(&cash_drawer, &["/expected_amount", "/expectedAmount"])
-            .or_else(|| {
-                number_from_paths(&shift, &["/expected_cash_amount", "/expectedCashAmount"])
-            }),
-        closing_amount: number_from_paths(&cash_drawer, &["/closing_amount", "/closingAmount"])
-            .or_else(|| number_from_paths(&shift, &["/closing_cash_amount", "/closingCashAmount"])),
-        variance_amount: number_from_paths(&cash_drawer, &["/variance_amount", "/varianceAmount"])
-            .or_else(|| number_from_paths(&shift, &["/cash_variance", "/cashVariance"])),
+        expected_amount: snapshot_expected_amount.or_else(|| {
+            number_from_paths(&cash_drawer, &["/expected_amount", "/expectedAmount"]).or_else(
+                || number_from_paths(&shift, &["/expected_cash_amount", "/expectedCashAmount"]),
+            )
+        }),
+        closing_amount: snapshot_closing_amount.or_else(|| {
+            number_from_paths(&cash_drawer, &["/closing_amount", "/closingAmount"])
+                .or_else(|| number_from_paths(&shift, &["/closing_cash_amount", "/closingCashAmount"]))
+        }),
+        variance_amount: snapshot_variance_amount.or_else(|| {
+            number_from_paths(&cash_drawer, &["/variance_amount", "/varianceAmount"])
+                .or_else(|| number_from_paths(&shift, &["/cash_variance", "/cashVariance"]))
+        }),
         driver_deliveries: Vec::new(),
         total_cash_collected: 0.0,
         total_card_collected: 0.0,
@@ -4306,12 +4412,12 @@ pub fn process_pending_jobs(db: &DbState, data_dir: &Path) -> Result<usize, Stri
                     let conn = db.conn.lock().map_err(|e| e.to_string())?;
                     let affected = conn
                         .execute(
-                        "UPDATE print_jobs
+                            "UPDATE print_jobs
                          SET status = 'printing', updated_at = ?1
                          WHERE id = ?2 AND status = 'pending'",
-                        params![now_str, job_id],
-                    )
-                    .map_err(|e| format!("mark print job as printing: {e}"))?;
+                            params![now_str, job_id],
+                        )
+                        .map_err(|e| format!("mark print job as printing: {e}"))?;
                     if affected == 0 {
                         return Ok(());
                     }
@@ -4968,6 +5074,72 @@ mod tests {
     }
 
     #[test]
+    fn test_build_document_for_job_shift_checkout_payload_overrides_snapshot_values() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "shift-checkout-snapshot", "terminal-1");
+        }
+
+        let payload = serde_json::json!({
+            "snapshotCheckOutTime": "2026-03-24T10:15:00Z",
+            "expectedAmount": 161.0,
+            "closingAmount": 165.5,
+            "varianceAmount": 4.5
+        })
+        .to_string();
+
+        let doc = build_document_for_job(
+            &db,
+            "shift_checkout",
+            "shift-checkout-snapshot",
+            Some(payload.as_str()),
+        )
+        .expect("build shift checkout doc with snapshot payload");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.check_out, "2026-03-24T10:15:00Z");
+                assert_eq!(doc.expected_amount, Some(161.0));
+                assert_eq!(doc.closing_amount, Some(165.5));
+                assert_eq!(doc.variance_amount, Some(4.5));
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_non_financial_shift_checkout_prefers_snapshot_timestamp() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "shift-checkout-kitchen", "terminal-1");
+        }
+
+        let payload = serde_json::json!({
+            "roleType": "kitchen",
+            "snapshotCheckOutTime": "2026-03-24T11:45:00Z"
+        })
+        .to_string();
+
+        let doc = build_document_for_job(
+            &db,
+            "shift_checkout",
+            "shift-checkout-kitchen",
+            Some(payload.as_str()),
+        )
+        .expect("build non-financial shift checkout doc with snapshot payload");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.role_type, "kitchen");
+                assert_eq!(doc.check_out, "2026-03-24T11:45:00Z");
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
     fn test_build_document_for_job_cashier_shift_checkout_includes_transferred_staff_returns() {
         let db = test_db();
 
@@ -5041,6 +5213,85 @@ mod tests {
     }
 
     #[test]
+    fn test_build_document_for_job_cashier_shift_checkout_includes_staff_payout_breakdown() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_shift_checkout_fixture(&conn, "shift-checkout-payouts", "terminal-1");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS staff_payments (
+                    id TEXT PRIMARY KEY,
+                    cashier_shift_id TEXT NOT NULL,
+                    paid_to_staff_id TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    payment_type TEXT NOT NULL DEFAULT 'wage',
+                    notes TEXT,
+                    created_at TEXT NOT NULL
+                );",
+            )
+            .expect("create staff_payments table");
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, closing_amount, expected_amount, variance_amount,
+                    total_cash_sales, total_card_sales, total_refunds, total_expenses,
+                    cash_drops, driver_cash_given, driver_cash_returned, total_staff_payments,
+                    opened_at, closed_at, reconciled, created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, 'staff-1', 'branch-1', 'terminal-1',
+                    100.0, 125.0, 81.0, 44.0,
+                    15.0, 10.0, 1.0, 4.0,
+                    5.0, 20.0, 0.0, 34.0,
+                    '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z', 1, '2026-03-15T08:00:00Z', '2026-03-15T16:00:00Z'
+                 )",
+                params!["drawer-shift-checkout-payouts", "shift-checkout-payouts"],
+            )
+            .expect("insert cashier drawer session");
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, staff_name, role_type, status,
+                    check_in_time, check_out_time, branch_id, terminal_id,
+                    calculation_version, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'driver-shift-1', 'driver-1', 'Driver One', 'driver', 'closed',
+                    '2026-03-15T10:00:00Z', '2026-03-15T15:00:00Z', 'branch-1', 'terminal-1',
+                    2, 'pending', '2026-03-15T10:00:00Z', '2026-03-15T15:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert driver shift");
+            conn.execute(
+                "INSERT INTO staff_payments (
+                    id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at
+                 ) VALUES (
+                    'staff-payment-1', 'shift-checkout-payouts', 'driver-1', 34.0, 'wage', 'Driver payout', '2026-03-15T15:30:00Z'
+                 )",
+                [],
+            )
+            .expect("insert staff payout");
+        }
+
+        let doc = build_document_for_job(&db, "shift_checkout", "shift-checkout-payouts", None)
+            .expect("build cashier shift checkout doc");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.cash_sales, 15.0);
+                assert_eq!(doc.card_sales, 10.0);
+                assert_eq!(doc.cash_drops, 5.0);
+                assert_eq!(doc.driver_cash_given, 20.0);
+                assert_eq!(doc.driver_cash_returned, 0.0);
+                assert_eq!(doc.staff_payouts_total, 34.0);
+                assert_eq!(doc.staff_payout_lines.len(), 1);
+                assert_eq!(doc.staff_payout_lines[0].staff_name, "Driver One");
+                assert_eq!(doc.staff_payout_lines[0].role_type, "driver");
+                assert_eq!(doc.staff_payout_lines[0].amount, 34.0);
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
     fn test_build_document_for_job_driver_shift_checkout_keeps_amount_to_return_without_delivery_rows(
     ) {
         let db = test_db();
@@ -5091,6 +5342,68 @@ mod tests {
                 assert_eq!(doc.amount_to_return, 25.0);
                 assert_eq!(doc.closing_amount, Some(20.0));
                 assert_eq!(doc.variance_amount, Some(-5.0));
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_driver_shift_checkout_payload_overrides_manual_snapshot_values() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cashier-shift-print-override", "drawer-shift-print-override");
+        }
+
+        let open_result = crate::shifts::open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "driver-print-1",
+                "staffName": "Driver Print",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "driver",
+                "openingCash": 25.0,
+            }),
+        )
+        .expect("open driver shift");
+        let driver_shift_id = open_result["shiftId"]
+            .as_str()
+            .expect("driver shift id")
+            .to_string();
+
+        crate::shifts::close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": driver_shift_id.as_str(),
+                "closingCash": 20.0,
+            }),
+        )
+        .expect("close driver shift");
+
+        let payload = serde_json::json!({
+            "snapshotCheckOutTime": "2026-03-24T12:15:00Z",
+            "expectedAmount": 60.0,
+            "closingAmount": 62.0,
+            "varianceAmount": 2.0
+        })
+        .to_string();
+
+        let doc = build_document_for_job(
+            &db,
+            "shift_checkout",
+            &driver_shift_id,
+            Some(payload.as_str()),
+        )
+        .expect("build driver shift checkout doc with snapshot payload");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.role_type, "driver");
+                assert_eq!(doc.check_out, "2026-03-24T12:15:00Z");
+                assert_eq!(doc.expected_amount, Some(60.0));
+                assert_eq!(doc.closing_amount, Some(62.0));
+                assert_eq!(doc.variance_amount, Some(2.0));
             }
             _ => panic!("expected shift checkout document"),
         }
@@ -5169,17 +5482,31 @@ mod tests {
                 .expect("insert driver order");
             }
 
-            for (
-                earning_id,
-                order_id,
-                payment_method,
-                cash_collected,
-                card_amount,
-                tip_amount,
-            ) in [
-                ("earning-driver-cash", "order-driver-cash", "cash", 67.75, 0.0, 2.5),
-                ("earning-driver-card", "order-driver-card", "card", 0.0, 83.85, 0.0),
-                ("earning-driver-refund", "order-driver-refund", "cash", 9.0, 0.0, 1.0),
+            for (earning_id, order_id, payment_method, cash_collected, card_amount, tip_amount) in [
+                (
+                    "earning-driver-cash",
+                    "order-driver-cash",
+                    "cash",
+                    67.75,
+                    0.0,
+                    2.5,
+                ),
+                (
+                    "earning-driver-card",
+                    "order-driver-card",
+                    "card",
+                    0.0,
+                    83.85,
+                    0.0,
+                ),
+                (
+                    "earning-driver-refund",
+                    "order-driver-refund",
+                    "cash",
+                    9.0,
+                    0.0,
+                    1.0,
+                ),
             ] {
                 conn.execute(
                     "INSERT INTO driver_earnings (

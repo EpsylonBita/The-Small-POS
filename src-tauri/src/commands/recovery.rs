@@ -141,7 +141,10 @@ pub async fn recovery_open_dir(
     };
 
     if !target.exists() {
-        return Err(format!("Recovery directory does not exist: {}", target.display()));
+        return Err(format!(
+            "Recovery directory does not exist: {}",
+            target.display()
+        ));
     }
 
     open_directory(&target)?;

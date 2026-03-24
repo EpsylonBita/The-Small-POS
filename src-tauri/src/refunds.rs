@@ -10,8 +10,8 @@
 //! - Works fully offline; syncs when connectivity returns
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
-use serde_json::Value;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{Map, Value};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -101,6 +101,119 @@ fn normalize_adjustment_context(value: Option<&str>) -> AdjustmentContext {
     }
 }
 
+fn normalize_non_empty_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn normalize_uuid_text(value: Option<&str>) -> Option<String> {
+    normalize_non_empty_text(value).and_then(|candidate| {
+        if Uuid::parse_str(&candidate).is_ok() {
+            Some(candidate)
+        } else {
+            None
+        }
+    })
+}
+
+fn resolve_staff_id_from_shift(conn: &Connection, staff_shift_id: Option<&str>) -> Option<String> {
+    let normalized_shift_id = normalize_uuid_text(staff_shift_id)?;
+    conn.query_row(
+        "SELECT staff_id
+         FROM staff_shifts
+         WHERE id = ?1
+         LIMIT 1",
+        params![normalized_shift_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .flatten()
+    .and_then(|candidate| normalize_uuid_text(Some(candidate.as_str())))
+}
+
+fn resolve_adjustment_staff_context(
+    conn: &Connection,
+    requested_staff_id: Option<&str>,
+    requested_staff_shift_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let staff_shift_id = normalize_uuid_text(requested_staff_shift_id);
+    let staff_id = normalize_uuid_text(requested_staff_id)
+        .or_else(|| resolve_staff_id_from_shift(conn, staff_shift_id.as_deref()));
+    (staff_id, staff_shift_id)
+}
+
+fn build_adjustment_queue_payload(
+    adjustment_id: &str,
+    payment_id: &str,
+    order_id: &str,
+    adjustment_type: &str,
+    amount: f64,
+    reason: &str,
+    staff_id: Option<&str>,
+    staff_shift_id: Option<&str>,
+    terminal_id: &str,
+    branch_id: &str,
+    refund_method: Option<&str>,
+    cash_handler: Option<&str>,
+    adjustment_context: Option<&str>,
+) -> String {
+    let mut payload = Map::new();
+    payload.insert(
+        "adjustmentId".to_string(),
+        Value::String(adjustment_id.to_string()),
+    );
+    payload.insert(
+        "paymentId".to_string(),
+        Value::String(payment_id.to_string()),
+    );
+    payload.insert("orderId".to_string(), Value::String(order_id.to_string()));
+    payload.insert(
+        "adjustmentType".to_string(),
+        Value::String(adjustment_type.to_string()),
+    );
+    payload.insert("amount".to_string(), Value::from(amount));
+    payload.insert("reason".to_string(), Value::String(reason.to_string()));
+    payload.insert(
+        "terminalId".to_string(),
+        Value::String(terminal_id.to_string()),
+    );
+    payload.insert("branchId".to_string(), Value::String(branch_id.to_string()));
+
+    if let Some(staff_id) = staff_id {
+        payload.insert("staffId".to_string(), Value::String(staff_id.to_string()));
+    }
+    if let Some(staff_shift_id) = staff_shift_id {
+        payload.insert(
+            "staffShiftId".to_string(),
+            Value::String(staff_shift_id.to_string()),
+        );
+    }
+    if let Some(refund_method) = refund_method {
+        payload.insert(
+            "refundMethod".to_string(),
+            Value::String(refund_method.to_string()),
+        );
+    }
+    if let Some(cash_handler) = cash_handler {
+        payload.insert(
+            "cashHandler".to_string(),
+            Value::String(cash_handler.to_string()),
+        );
+    }
+    if let Some(adjustment_context) = adjustment_context {
+        payload.insert(
+            "adjustmentContext".to_string(),
+            Value::String(adjustment_context.to_string()),
+        );
+    }
+
+    Value::Object(payload).to_string()
+}
+
 pub(crate) fn refund_payment_in_connection(
     conn: &Connection,
     payload: &Value,
@@ -113,8 +226,9 @@ pub(crate) fn refund_payment_in_connection(
         return Err("Refund amount must be positive".into());
     }
     let reason = str_field(payload, "reason").ok_or("Missing reason")?;
-    let staff_id = str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
-    let staff_shift_id =
+    let requested_staff_id =
+        str_field(payload, "staffId").or_else(|| str_field(payload, "staff_id"));
+    let requested_staff_shift_id =
         str_field(payload, "staffShiftId").or_else(|| str_field(payload, "staff_shift_id"));
     let requested_refund_method = normalize_refund_method(
         str_field(payload, "refundMethod")
@@ -205,20 +319,38 @@ pub(crate) fn refund_payment_in_connection(
     let now = Utc::now().to_rfc3339();
     let new_total_refunds = prior_refunds + amount;
     let is_fully_refunded = (new_total_refunds - original_amount).abs() < 0.01;
+    let order_shift_id: Option<String> = conn
+        .query_row(
+            "SELECT staff_shift_id FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let (resolved_staff_id, resolved_staff_shift_id) = resolve_adjustment_staff_context(
+        conn,
+        requested_staff_id.as_deref(),
+        requested_staff_shift_id
+            .as_deref()
+            .or(payment_shift_id.as_deref())
+            .or(order_shift_id.as_deref()),
+    );
 
     conn.execute(
         "INSERT INTO payment_adjustments (
             id, payment_id, order_id, adjustment_type, amount,
-            reason, staff_id, sync_state, refund_method, cash_handler,
+            reason, staff_id, staff_shift_id, sync_state, refund_method, cash_handler,
             adjustment_context, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+        ) VALUES (?1, ?2, ?3, 'refund', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         params![
             adjustment_id,
             payment_id,
             order_id,
             amount,
             reason,
-            staff_id,
+            resolved_staff_id,
+            resolved_staff_shift_id,
             initial_sync_state,
             refund_method.as_str(),
             cash_handler.map(CashHandler::as_str),
@@ -236,22 +368,9 @@ pub(crate) fn refund_payment_in_connection(
         .map_err(|e| format!("update payment status: {e}"))?;
     }
 
-    let order_shift_id: Option<String> = conn
-        .query_row(
-            "SELECT staff_shift_id FROM orders WHERE id = ?1",
-            params![order_id],
-            |row| row.get(0),
-        )
-        .ok()
-        .flatten();
-
     match cash_handler {
         Some(CashHandler::CashierDrawer) => {
-            let target_shift_id = staff_shift_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| value.to_string())
+            let target_shift_id = normalize_non_empty_text(requested_staff_shift_id.as_deref())
                 .or(payment_shift_id.clone())
                 .or(order_shift_id.clone());
             if let Some(ref sid) = target_shift_id {
@@ -323,22 +442,21 @@ pub(crate) fn refund_payment_in_connection(
     let idempotency_key = format!("adjustment:{adjustment_id}");
     let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
     let branch_id = storage::get_credential("branch_id").unwrap_or_default();
-    let sync_payload = serde_json::json!({
-        "adjustmentId": adjustment_id,
-        "paymentId": payment_id,
-        "orderId": order_id,
-        "adjustmentType": "refund",
-        "amount": amount,
-        "reason": reason,
-        "staffId": staff_id,
-        "staffShiftId": staff_shift_id,
-        "terminalId": terminal_id,
-        "branchId": branch_id,
-        "refundMethod": refund_method.as_str(),
-        "cashHandler": cash_handler.map(CashHandler::as_str),
-        "adjustmentContext": adjustment_context.as_str(),
-    })
-    .to_string();
+    let sync_payload = build_adjustment_queue_payload(
+        &adjustment_id,
+        &payment_id,
+        &order_id,
+        "refund",
+        amount,
+        &reason,
+        resolved_staff_id.as_deref(),
+        resolved_staff_shift_id.as_deref(),
+        &terminal_id,
+        &branch_id,
+        Some(refund_method.as_str()),
+        cash_handler.map(CashHandler::as_str),
+        Some(adjustment_context.as_str()),
+    );
 
     let queue_status = if initial_sync_state == "waiting_parent" {
         "deferred"
@@ -426,6 +544,7 @@ pub fn void_payment_with_adjustment(
     payment_id: &str,
     reason: &str,
     staff_id: Option<&str>,
+    staff_shift_id: Option<&str>,
 ) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -437,6 +556,19 @@ pub fn void_payment_with_adjustment(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| format!("No completed payment found with id {payment_id}"))?;
+    let order_shift_id: Option<String> = conn
+        .query_row(
+            "SELECT staff_shift_id FROM orders WHERE id = ?1",
+            params![order_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+    let (resolved_staff_id, resolved_staff_shift_id) = resolve_adjustment_staff_context(
+        &conn,
+        staff_id,
+        staff_shift_id.or(order_shift_id.as_deref()),
+    );
 
     let now = Utc::now().to_rfc3339();
     let adjustment_id = Uuid::new_v4().to_string();
@@ -466,7 +598,7 @@ pub fn void_payment_with_adjustment(
                 status = 'voided', voided_at = ?1, voided_by = ?2,
                 void_reason = ?3, sync_status = 'pending', updated_at = ?1
              WHERE id = ?4",
-            params![now, staff_id, reason, payment_id],
+            params![now, resolved_staff_id, reason, payment_id],
         )
         .map_err(|e| format!("void payment: {e}"))?;
 
@@ -481,15 +613,16 @@ pub fn void_payment_with_adjustment(
         conn.execute(
             "INSERT INTO payment_adjustments (
                 id, payment_id, order_id, adjustment_type, amount,
-                reason, staff_id, sync_state, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?8)",
+                reason, staff_id, staff_shift_id, sync_state, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, 'void', ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             params![
                 adjustment_id,
                 payment_id,
                 order_id,
                 amount,
                 reason,
-                staff_id,
+                resolved_staff_id,
+                resolved_staff_shift_id,
                 initial_sync_state,
                 now,
             ],
@@ -498,15 +631,7 @@ pub fn void_payment_with_adjustment(
 
         // Reverse the original payment's drawer entry.
         // Voids reverse the sale (not add to refunds).
-        let void_shift_id: Option<String> = conn
-            .query_row(
-                "SELECT staff_shift_id FROM orders WHERE id = ?1",
-                params![order_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        if let Some(ref sid) = void_shift_id {
+        if let Some(ref sid) = order_shift_id {
             if pay_method == "cash" {
                 conn.execute(
                     "UPDATE cash_drawer_sessions SET
@@ -530,17 +655,24 @@ pub fn void_payment_with_adjustment(
 
         // Enqueue void sync for the payment (existing flow)
         let void_idem_key = format!("payment:void:{payment_id}");
-        let void_payload = serde_json::json!({
-            "paymentId": payment_id,
-            "orderId": order_id,
-            "voidReason": reason,
-            "voidedBy": staff_id,
-        })
-        .to_string();
+        let mut void_payload = Map::new();
+        void_payload.insert(
+            "paymentId".to_string(),
+            Value::String(payment_id.to_string()),
+        );
+        void_payload.insert("orderId".to_string(), Value::String(order_id.to_string()));
+        void_payload.insert("voidReason".to_string(), Value::String(reason.to_string()));
+        if let Some(voided_by) = resolved_staff_id.as_deref() {
+            void_payload.insert("voidedBy".to_string(), Value::String(voided_by.to_string()));
+        }
         conn.execute(
             "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
              VALUES ('payment', ?1, 'void', ?2, ?3)",
-            params![payment_id, void_payload, void_idem_key],
+            params![
+                payment_id,
+                Value::Object(void_payload).to_string(),
+                void_idem_key
+            ],
         )
         .map_err(|e| format!("enqueue void sync: {e}"))?;
 
@@ -548,18 +680,21 @@ pub fn void_payment_with_adjustment(
         let adj_idem_key = format!("adjustment:{adjustment_id}");
         let terminal_id = storage::get_credential("terminal_id").unwrap_or_default();
         let branch_id = storage::get_credential("branch_id").unwrap_or_default();
-        let adj_payload = serde_json::json!({
-            "adjustmentId": adjustment_id,
-            "paymentId": payment_id,
-            "orderId": order_id,
-            "adjustmentType": "void",
-            "amount": amount,
-            "reason": reason,
-            "staffId": staff_id,
-            "terminalId": terminal_id,
-            "branchId": branch_id,
-        })
-        .to_string();
+        let adj_payload = build_adjustment_queue_payload(
+            &adjustment_id,
+            payment_id,
+            &order_id,
+            "void",
+            amount,
+            reason,
+            resolved_staff_id.as_deref(),
+            resolved_staff_shift_id.as_deref(),
+            &terminal_id,
+            &branch_id,
+            None,
+            None,
+            None,
+        );
 
         let queue_status = if initial_sync_state == "waiting_parent" {
             "deferred"
@@ -613,7 +748,7 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
     let mut stmt = conn
         .prepare(
             "SELECT id, payment_id, order_id, adjustment_type, amount,
-                    reason, staff_id, sync_state, sync_last_error,
+                    reason, staff_id, staff_shift_id, sync_state, sync_last_error,
                     refund_method, cash_handler, adjustment_context,
                     created_at, updated_at
              FROM payment_adjustments
@@ -632,13 +767,14 @@ pub fn list_order_adjustments(db: &DbState, order_id: &str) -> Result<Value, Str
                 "amount": row.get::<_, f64>(4)?,
                 "reason": row.get::<_, String>(5)?,
                 "staffId": row.get::<_, Option<String>>(6)?,
-                "syncState": row.get::<_, String>(7)?,
-                "syncLastError": row.get::<_, Option<String>>(8)?,
-                "refundMethod": row.get::<_, Option<String>>(9)?,
-                "cashHandler": row.get::<_, Option<String>>(10)?,
-                "adjustmentContext": row.get::<_, Option<String>>(11)?,
-                "createdAt": row.get::<_, String>(12)?,
-                "updatedAt": row.get::<_, String>(13)?,
+                "staffShiftId": row.get::<_, Option<String>>(7)?,
+                "syncState": row.get::<_, String>(8)?,
+                "syncLastError": row.get::<_, Option<String>>(9)?,
+                "refundMethod": row.get::<_, Option<String>>(10)?,
+                "cashHandler": row.get::<_, Option<String>>(11)?,
+                "adjustmentContext": row.get::<_, Option<String>>(12)?,
+                "createdAt": row.get::<_, String>(13)?,
+                "updatedAt": row.get::<_, String>(14)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -846,7 +982,7 @@ mod tests {
         let pay_id = seed_order_and_payment(&db, "ord-r4", 25.0);
 
         // Void the payment first
-        void_payment_with_adjustment(&db, &pay_id, "Wrong order", None).unwrap();
+        void_payment_with_adjustment(&db, &pay_id, "Wrong order", None, None).unwrap();
 
         // Try to refund — should fail
         let payload = serde_json::json!({ "paymentId": pay_id, "amount": 10.0, "reason": "test" });
@@ -860,7 +996,7 @@ mod tests {
         let pay_id = seed_order_and_payment(&db, "ord-v1", 40.0);
 
         let result =
-            void_payment_with_adjustment(&db, &pay_id, "Customer complaint", Some("staff-1"))
+            void_payment_with_adjustment(&db, &pay_id, "Customer complaint", Some("staff-1"), None)
                 .unwrap();
         assert_eq!(result["success"], true);
         assert!(result["adjustmentId"].as_str().is_some());
@@ -960,7 +1096,7 @@ mod tests {
         let db = test_db();
         let pay_id = seed_order_and_payment(&db, "ord-gbv", 45.0);
 
-        void_payment_with_adjustment(&db, &pay_id, "Cancelled", None).unwrap();
+        void_payment_with_adjustment(&db, &pay_id, "Cancelled", None, None).unwrap();
 
         let b = get_payment_balance(&db, &pay_id).unwrap();
         assert_eq!(b["balance"], 0.0);
@@ -1046,7 +1182,7 @@ mod tests {
         drop(conn);
 
         // Void the payment
-        void_payment_with_adjustment(&db, "pay-vr", "Wrong order", None).unwrap();
+        void_payment_with_adjustment(&db, "pay-vr", "Wrong order", None, None).unwrap();
 
         // Verify drawer cash_sales was reversed
         let conn = db.conn.lock().unwrap();
@@ -1143,7 +1279,7 @@ mod tests {
         // Now void — should fail because payment has refunds and is not purely "completed"
         // Actually, the payment is still "completed" (only "refunded" when fully refunded)
         // So void should work
-        let result = void_payment_with_adjustment(&db, &pay_id, "Cancel rest", None).unwrap();
+        let result = void_payment_with_adjustment(&db, &pay_id, "Cancel rest", None, None).unwrap();
         assert_eq!(result["success"], true);
 
         // Payment should be voided
@@ -1166,5 +1302,204 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_refund_resolves_staff_uuid_from_valid_shift_id() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let staff_shift_id = "8576c26a-c6bc-4d8c-bf6a-1f58f903081f";
+        let database_staff_id = "159496f0-f218-4d08-bca8-1d8c8d28f7ef";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            params![staff_shift_id, database_staff_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                 id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount, total_cash_sales, opened_at, created_at, updated_at
+             ) VALUES (
+                 'cd-adjustment-staff', ?1, ?2, 'b1', 't1', 50.0, 20.0, datetime('now'), datetime('now'), datetime('now')
+             )",
+            params![staff_shift_id, database_staff_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (id, items, total_amount, status, sync_status, staff_shift_id, supabase_id, created_at, updated_at)
+             VALUES ('ord-adjustment-staff', '[]', 20.0, 'completed', 'synced', ?1, 'sup-adjustment-staff', datetime('now'), datetime('now'))",
+            params![staff_shift_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at)
+             VALUES ('pay-adjustment-staff', 'ord-adjustment-staff', 'cash', 20.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let payload = serde_json::json!({
+            "paymentId": "pay-adjustment-staff",
+            "amount": 5.0,
+            "reason": "Operator correction",
+            "staffId": "STF0008",
+            "staffShiftId": staff_shift_id,
+        });
+        refund_payment(&db, &payload).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let stored_staff_id: Option<String> = conn
+            .query_row(
+                "SELECT staff_id FROM payment_adjustments WHERE payment_id = 'pay-adjustment-staff'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_staff_shift_id: Option<String> = conn
+            .query_row(
+                "SELECT staff_shift_id FROM payment_adjustments WHERE payment_id = 'pay-adjustment-staff'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_staff_id.as_deref(), Some(database_staff_id));
+        assert_eq!(stored_staff_shift_id.as_deref(), Some(staff_shift_id));
+
+        let queued_payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id IN (
+                     SELECT id FROM payment_adjustments WHERE payment_id = 'pay-adjustment-staff'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed_payload: Value = serde_json::from_str(&queued_payload).unwrap();
+        assert_eq!(parsed_payload["staffId"], database_staff_id);
+        assert_eq!(parsed_payload["staffShiftId"], staff_shift_id);
+    }
+
+    #[test]
+    fn test_void_persists_resolved_staff_shift_id() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let staff_shift_id = "343000e2-3d0d-4140-b8db-dd7b9e437f34";
+        let database_staff_id = "6ecb4b36-9e70-41ad-b8f2-fb393e10a043";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            params![staff_shift_id, database_staff_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                 id, items, total_amount, status, sync_status, staff_shift_id, created_at, updated_at
+             ) VALUES (
+                 'ord-void-adjustment-staff', '[]', 18.0, 'completed', 'synced', ?1, datetime('now'), datetime('now')
+             )",
+            params![staff_shift_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'pay-void-adjustment-staff', 'ord-void-adjustment-staff', 'cash', 18.0, 'completed', 'synced', 'applied', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        void_payment_with_adjustment(
+            &db,
+            "pay-void-adjustment-staff",
+            "Operator correction",
+            Some("STF0008"),
+            Some(staff_shift_id),
+        )
+        .unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (stored_staff_id, stored_staff_shift_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT staff_id, staff_shift_id
+                 FROM payment_adjustments
+                 WHERE payment_id = 'pay-void-adjustment-staff'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_staff_id.as_deref(), Some(database_staff_id));
+        assert_eq!(stored_staff_shift_id.as_deref(), Some(staff_shift_id));
+
+        let queued_payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id IN (
+                     SELECT id FROM payment_adjustments WHERE payment_id = 'pay-void-adjustment-staff'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed_payload: Value = serde_json::from_str(&queued_payload).unwrap();
+        assert_eq!(parsed_payload["staffId"], database_staff_id);
+        assert_eq!(parsed_payload["staffShiftId"], staff_shift_id);
+    }
+
+    #[test]
+    fn test_refund_omits_invalid_staff_identifiers_from_sync_payload() {
+        let db = test_db();
+        let pay_id = seed_order_and_payment(&db, "ord-invalid-adjustment-staff", 30.0);
+
+        let payload = serde_json::json!({
+            "paymentId": pay_id,
+            "amount": 10.0,
+            "reason": "Operator correction",
+            "staffId": "STF0008",
+            "staffShiftId": "shift-not-a-uuid",
+        });
+        refund_payment(&db, &payload).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let stored_staff_id: Option<String> = conn
+            .query_row(
+                "SELECT staff_id FROM payment_adjustments WHERE payment_id = ?1",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_staff_id, None);
+
+        let queued_payload: String = conn
+            .query_row(
+                "SELECT payload
+                 FROM sync_queue
+                 WHERE entity_type = 'payment_adjustment'
+                   AND entity_id IN (
+                     SELECT id FROM payment_adjustments WHERE payment_id = ?1
+                   )",
+                params![pay_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let parsed_payload: Value = serde_json::from_str(&queued_payload).unwrap();
+        assert!(parsed_payload.get("staffId").is_none());
+        assert!(parsed_payload.get("staffShiftId").is_none());
     }
 }

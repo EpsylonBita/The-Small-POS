@@ -146,6 +146,14 @@ struct ShiftPrintCheckoutPayload {
     role_type: Option<String>,
     #[serde(default, alias = "terminal_name")]
     terminal_name: Option<String>,
+    #[serde(default, alias = "snapshot_check_out_time")]
+    snapshot_check_out_time: Option<String>,
+    #[serde(default, alias = "expected_amount")]
+    expected_amount: Option<f64>,
+    #[serde(default, alias = "closing_amount")]
+    closing_amount: Option<f64>,
+    #[serde(default, alias = "variance_amount")]
+    variance_amount: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -339,6 +347,13 @@ fn parse_shift_print_checkout_payload(
         "" => None,
         v => Some(v.to_string()),
     });
+    parsed.snapshot_check_out_time =
+        parsed
+            .snapshot_check_out_time
+            .and_then(|value| match value.trim() {
+                "" => None,
+                v => Some(v.to_string()),
+            });
 
     if parsed.shift_id.is_empty() {
         return Err("Missing shiftId".into());
@@ -697,6 +712,10 @@ pub async fn shift_print_checkout(
         "shiftId": shift_id,
         "roleType": role_type_for_job,
         "terminalName": terminal_name_for_job,
+        "snapshotCheckOutTime": payload.snapshot_check_out_time,
+        "expectedAmount": payload.expected_amount,
+        "closingAmount": payload.closing_amount,
+        "varianceAmount": payload.variance_amount,
     });
 
     if !crate::print::is_print_action_enabled(&db, "shift_close") {
@@ -1144,13 +1163,24 @@ mod dto_tests {
         let from_object = parse_shift_print_checkout_payload(Some(serde_json::json!({
             "shiftId": "shift-4",
             "roleType": "cashier",
-            "terminalName": "Main POS"
+            "terminalName": "Main POS",
+            "snapshotCheckOutTime": "2026-03-24T09:30:00Z",
+            "expectedAmount": 150.0,
+            "closingAmount": 152.0,
+            "varianceAmount": 2.0
         })))
         .expect("object payload should parse");
         assert_eq!(from_string.shift_id, "shift-3");
         assert_eq!(from_object.shift_id, "shift-4");
         assert_eq!(from_object.role_type.as_deref(), Some("cashier"));
         assert_eq!(from_object.terminal_name.as_deref(), Some("Main POS"));
+        assert_eq!(
+            from_object.snapshot_check_out_time.as_deref(),
+            Some("2026-03-24T09:30:00Z")
+        );
+        assert_eq!(from_object.expected_amount, Some(150.0));
+        assert_eq!(from_object.closing_amount, Some(152.0));
+        assert_eq!(from_object.variance_amount, Some(2.0));
     }
 
     #[test]

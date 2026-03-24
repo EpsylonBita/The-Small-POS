@@ -25,6 +25,8 @@ struct PaymentVoidPayload {
     reason: String,
     #[serde(default, alias = "voided_by")]
     voided_by: Option<String>,
+    #[serde(default, alias = "staff_shift_id")]
+    staff_shift_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +37,8 @@ struct RefundVoidPayload {
     reason: String,
     #[serde(default, alias = "staff_id")]
     staff_id: Option<String>,
+    #[serde(default, alias = "staff_shift_id")]
+    staff_shift_id: Option<String>,
 }
 
 fn parse_payment_update_status_payload(
@@ -302,6 +306,7 @@ pub async fn payment_void(
         &payload.payment_id,
         &payload.reason,
         payload.voided_by.as_deref(),
+        payload.staff_shift_id.as_deref(),
     )
 }
 
@@ -376,6 +381,7 @@ pub async fn refund_void_payment(
         &payload.payment_id,
         &payload.reason,
         payload.staff_id.as_deref(),
+        payload.staff_shift_id.as_deref(),
     )
 }
 
@@ -456,12 +462,14 @@ mod dto_tests {
         let parsed = parse_refund_void_payload(Some(serde_json::json!({
             "payment_id": "pay-2",
             "reason": "operator correction",
-            "staff_id": "staff-1"
+            "staff_id": "staff-1",
+            "staff_shift_id": "shift-1"
         })))
         .expect("alias payload should parse");
         assert_eq!(parsed.payment_id, "pay-2");
         assert_eq!(parsed.reason, "operator correction");
         assert_eq!(parsed.staff_id.as_deref(), Some("staff-1"));
+        assert_eq!(parsed.staff_shift_id.as_deref(), Some("shift-1"));
     }
 
     #[test]

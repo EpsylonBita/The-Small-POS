@@ -39,8 +39,14 @@ const POINT_TABLES: &[&str] = &[
 ];
 const FINGERPRINT_TABLES: &[(&str, &[&str])] = &[
     ("orders", &["updated_at", "created_at"]),
-    ("staff_shifts", &["updated_at", "check_out_time", "check_in_time"]),
-    ("cash_drawer_sessions", &["updated_at", "closed_at", "opened_at"]),
+    (
+        "staff_shifts",
+        &["updated_at", "check_out_time", "check_in_time"],
+    ),
+    (
+        "cash_drawer_sessions",
+        &["updated_at", "closed_at", "opened_at"],
+    ),
     ("order_payments", &["updated_at", "created_at"]),
     ("payment_adjustments", &["updated_at", "created_at"]),
     ("shift_expenses", &["updated_at", "created_at"]),
@@ -225,7 +231,8 @@ fn cancel_replayable_restored_print_jobs(db_path: &Path) -> Result<usize, String
 
 pub(crate) fn ensure_recovery_dirs(app_data_dir: &Path) -> Result<(), String> {
     let root = recovery_root_for_app_data(app_data_dir);
-    fs::create_dir_all(points_dir(&root)).map_err(|e| format!("create recovery points dir: {e}"))?;
+    fs::create_dir_all(points_dir(&root))
+        .map_err(|e| format!("create recovery points dir: {e}"))?;
     fs::create_dir_all(exports_dir(&root))
         .map_err(|e| format!("create recovery exports dir: {e}"))?;
     fs::create_dir_all(quarantine_dir(&root))
@@ -269,7 +276,8 @@ pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<
         return Ok(None);
     }
 
-    let raw = fs::read_to_string(&restore_file).map_err(|e| format!("read pending restore: {e}"))?;
+    let raw =
+        fs::read_to_string(&restore_file).map_err(|e| format!("read pending restore: {e}"))?;
     let staged: PendingRestoreMetadata =
         serde_json::from_str(&raw).map_err(|e| format!("parse pending restore: {e}"))?;
 
@@ -308,13 +316,15 @@ pub(crate) fn maybe_apply_pending_restore(app_data_dir: &Path) -> Result<Option<
         if let Some(wal_path_value) = staged.staged_wal_path.as_deref() {
             let source = PathBuf::from(wal_path_value);
             if source.exists() {
-                fs::copy(&source, &wal_path).map_err(|e| format!("restore snapshot wal file: {e}"))?;
+                fs::copy(&source, &wal_path)
+                    .map_err(|e| format!("restore snapshot wal file: {e}"))?;
             }
         }
         if let Some(shm_path_value) = staged.staged_shm_path.as_deref() {
             let source = PathBuf::from(shm_path_value);
             if source.exists() {
-                fs::copy(&source, &shm_path).map_err(|e| format!("restore snapshot shm file: {e}"))?;
+                fs::copy(&source, &shm_path)
+                    .map_err(|e| format!("restore snapshot shm file: {e}"))?;
             }
         }
         let cancelled_jobs = cancel_replayable_restored_print_jobs(&db_path)?;
@@ -375,7 +385,8 @@ pub(crate) fn maybe_create_scheduled_snapshot(
         }
     }
 
-    let point = create_snapshot_for_db(db, RecoveryPointKind::Scheduled, Some(current_fingerprint))?;
+    let point =
+        create_snapshot_for_db(db, RecoveryPointKind::Scheduled, Some(current_fingerprint))?;
     Ok(Some(point))
 }
 
@@ -469,7 +480,9 @@ pub(crate) fn quarantine_database_files(
                 None
             },
             Some(reason.to_string()),
-            fs::metadata(&snapshot_path).map(|meta| meta.len()).unwrap_or(0),
+            fs::metadata(&snapshot_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0),
         )?,
         Err(_) => build_storage_only_metadata(
             db_path,
@@ -489,7 +502,9 @@ pub(crate) fn quarantine_database_files(
                 None
             },
             Some(reason.to_string()),
-            fs::metadata(&snapshot_path).map(|meta| meta.len()).unwrap_or(0),
+            fs::metadata(&snapshot_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0),
         ),
     };
 
@@ -511,7 +526,8 @@ pub(crate) fn export_current_bundle(db: &db::DbState) -> Result<RecoveryExportRe
     fs::create_dir_all(&exports_root).map_err(|e| format!("create recovery exports dir: {e}"))?;
 
     let temp_export_dir = exports_root.join(format!(".tmp-current-{}", Uuid::new_v4()));
-    fs::create_dir_all(&temp_export_dir).map_err(|e| format!("create temporary export dir: {e}"))?;
+    fs::create_dir_all(&temp_export_dir)
+        .map_err(|e| format!("create temporary export dir: {e}"))?;
     let temp_snapshot_path = temp_export_dir.join(SNAPSHOT_FILE_NAME);
     let final_zip = exports_root.join(format!(
         "thesmall-pos-recovery-current-{}.zip",
@@ -534,7 +550,9 @@ pub(crate) fn export_current_bundle(db: &db::DbState) -> Result<RecoveryExportRe
         None,
         None,
         None,
-        fs::metadata(&temp_snapshot_path).map(|meta| meta.len()).unwrap_or(0),
+        fs::metadata(&temp_snapshot_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0),
     )?;
     write_export_bundle(&snapshot_conn, &metadata, &temp_snapshot_path, &final_zip)?;
     let _ = fs::remove_dir_all(&temp_export_dir);
@@ -704,8 +722,11 @@ fn create_snapshot_from_connection(
     }
 
     write_json_file(&layout.temp_dir.join(METADATA_FILE_NAME), &metadata)?;
-    fs::rename(&layout.temp_snapshot_path, &layout.temp_dir.join(SNAPSHOT_FILE_NAME))
-        .map_err(|e| format!("finalize recovery snapshot file: {e}"))?;
+    fs::rename(
+        &layout.temp_snapshot_path,
+        &layout.temp_dir.join(SNAPSHOT_FILE_NAME),
+    )
+    .map_err(|e| format!("finalize recovery snapshot file: {e}"))?;
     fs::rename(&layout.temp_dir, &layout.final_dir)
         .map_err(|e| format!("finalize recovery snapshot directory: {e}"))?;
 
@@ -735,7 +756,8 @@ fn vacuum_into_snapshot(conn: &Connection, snapshot_path: &Path) -> Result<(), S
         fs::create_dir_all(parent).map_err(|e| format!("create snapshot parent dir: {e}"))?;
     }
     if snapshot_path.exists() {
-        fs::remove_file(snapshot_path).map_err(|e| format!("remove existing snapshot file: {e}"))?;
+        fs::remove_file(snapshot_path)
+            .map_err(|e| format!("remove existing snapshot file: {e}"))?;
     }
     let escaped = snapshot_path.to_string_lossy().replace('\'', "''");
     conn.execute_batch(&format!("VACUUM INTO '{escaped}';"))
@@ -779,7 +801,12 @@ fn build_metadata_from_connection(
              ORDER BY COALESCE(period_start_at, check_in_time) DESC
              LIMIT 1",
             [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()
         .map_err(|e| format!("read active shift business-day metadata: {e}"))?
@@ -788,56 +815,61 @@ fn build_metadata_from_connection(
         (None, None)
     };
 
-    let (latest_z_report_id, latest_z_report_date, latest_z_report_generated_at, latest_z_report_sync_state) =
-        if table_exists(conn, "z_reports")? {
-            let date_column =
-                first_existing_column(conn, "z_reports", &["report_date", "date", "business_date"])?;
-            let generated_column =
-                first_existing_column(conn, "z_reports", &["generated_at", "created_at"])?;
-            let sync_column =
-                first_existing_column(conn, "z_reports", &["sync_state", "status"])?;
-            let query = format!(
-                "SELECT id, {}, {}, {}
+    let (
+        latest_z_report_id,
+        latest_z_report_date,
+        latest_z_report_generated_at,
+        latest_z_report_sync_state,
+    ) = if table_exists(conn, "z_reports")? {
+        let date_column =
+            first_existing_column(conn, "z_reports", &["report_date", "date", "business_date"])?;
+        let generated_column =
+            first_existing_column(conn, "z_reports", &["generated_at", "created_at"])?;
+        let sync_column = first_existing_column(conn, "z_reports", &["sync_state", "status"])?;
+        let query = format!(
+            "SELECT id, {}, {}, {}
                  FROM z_reports
                  ORDER BY COALESCE({}, {}) DESC
                  LIMIT 1",
-                date_column
-                    .as_deref()
-                    .map(quote_identifier)
-                    .unwrap_or_else(|| "NULL".to_string()),
-                generated_column
-                    .as_deref()
-                    .map(quote_identifier)
-                    .unwrap_or_else(|| "NULL".to_string()),
-                sync_column
-                    .as_deref()
-                    .map(quote_identifier)
-                    .unwrap_or_else(|| "NULL".to_string()),
-                generated_column
-                    .as_deref()
-                    .map(quote_identifier)
-                    .unwrap_or_else(|| "id".to_string()),
-                date_column
-                    .as_deref()
-                    .map(quote_identifier)
-                    .unwrap_or_else(|| "id".to_string()),
-            );
-            conn.query_row(&query, [], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .optional()
-            .map_err(|e| format!("read latest z report metadata: {e}"))?
-            .unwrap_or((None, None, None, None))
-        } else {
-            (None, None, None, None)
-        };
+            date_column
+                .as_deref()
+                .map(quote_identifier)
+                .unwrap_or_else(|| "NULL".to_string()),
+            generated_column
+                .as_deref()
+                .map(quote_identifier)
+                .unwrap_or_else(|| "NULL".to_string()),
+            sync_column
+                .as_deref()
+                .map(quote_identifier)
+                .unwrap_or_else(|| "NULL".to_string()),
+            generated_column
+                .as_deref()
+                .map(quote_identifier)
+                .unwrap_or_else(|| "id".to_string()),
+            date_column
+                .as_deref()
+                .map(quote_identifier)
+                .unwrap_or_else(|| "id".to_string()),
+        );
+        conn.query_row(&query, [], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .optional()
+        .map_err(|e| format!("read latest z report metadata: {e}"))?
+        .unwrap_or((None, None, None, None))
+    } else {
+        (None, None, None, None)
+    };
 
-    let db_size_bytes = fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(snapshot_size_bytes);
+    let db_size_bytes = fs::metadata(db_path)
+        .map(|meta| meta.len())
+        .unwrap_or(snapshot_size_bytes);
 
     Ok(RecoveryPointMetadata {
         id: id.to_string(),
@@ -879,13 +911,18 @@ fn build_storage_only_metadata(
     error: Option<String>,
     snapshot_size_bytes: u64,
 ) -> RecoveryPointMetadata {
-    let db_size_bytes = fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(snapshot_size_bytes);
+    let db_size_bytes = fs::metadata(db_path)
+        .map(|meta| meta.len())
+        .unwrap_or(snapshot_size_bytes);
     let terminal_id = storage::get_credential("terminal_id");
     let branch_id = storage::get_credential("branch_id");
     let organization_id = storage::get_credential("organization_id");
     let fingerprint = hash_string(&format!(
         "{}:{}:{}:{}",
-        id, created_at, snapshot_size_bytes, kind.as_str()
+        id,
+        created_at,
+        snapshot_size_bytes,
+        kind.as_str()
     ));
 
     RecoveryPointMetadata {
@@ -931,7 +968,9 @@ fn collect_table_counts(conn: &Connection) -> Result<BTreeMap<String, i64>, Stri
     Ok(counts)
 }
 
-fn collect_sync_backlog(conn: &Connection) -> Result<BTreeMap<String, BTreeMap<String, i64>>, String> {
+fn collect_sync_backlog(
+    conn: &Connection,
+) -> Result<BTreeMap<String, BTreeMap<String, i64>>, String> {
     let mut backlog = BTreeMap::new();
 
     if table_exists(conn, "sync_queue")? {
@@ -971,7 +1010,8 @@ fn collect_sync_backlog(conn: &Connection) -> Result<BTreeMap<String, BTreeMap<S
         if !table_exists(conn, table)? {
             continue;
         }
-        let Some(sync_column) = first_existing_column(conn, table, &["sync_state", "status"])? else {
+        let Some(sync_column) = first_existing_column(conn, table, &["sync_state", "status"])?
+        else {
             continue;
         };
 
@@ -992,7 +1032,8 @@ fn collect_sync_backlog(conn: &Connection) -> Result<BTreeMap<String, BTreeMap<S
         let rows = stmt
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?.unwrap_or_else(|| "unknown".to_string()),
+                    row.get::<_, Option<String>>(0)?
+                        .unwrap_or_else(|| "unknown".to_string()),
                     row.get::<_, i64>(1)?,
                 ))
             })
@@ -1020,18 +1061,19 @@ fn compute_operational_fingerprint(conn: &Connection) -> Result<String, String> 
         let count = conn
             .query_row(&count_query, [], |row| row.get::<_, i64>(0))
             .unwrap_or(0);
-        let max_timestamp = if let Some(column) = first_existing_column(conn, table, candidate_columns)? {
-            let query = format!(
-                "SELECT MAX({}) FROM {}",
-                quote_identifier(&column),
-                quote_identifier(table)
-            );
-            conn.query_row(&query, [], |row| row.get::<_, Option<String>>(0))
-                .unwrap_or(None)
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let max_timestamp =
+            if let Some(column) = first_existing_column(conn, table, candidate_columns)? {
+                let query = format!(
+                    "SELECT MAX({}) FROM {}",
+                    quote_identifier(&column),
+                    quote_identifier(table)
+                );
+                conn.query_row(&query, [], |row| row.get::<_, Option<String>>(0))
+                    .unwrap_or(None)
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
         parts.push(format!("{table}:{count}:{max_timestamp}"));
     }
 
@@ -1077,8 +1119,8 @@ fn read_identity_value(conn: &Connection, key: &str) -> Option<String> {
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let serialized =
-        serde_json::to_vec_pretty(value).map_err(|e| format!("serialize json {}: {e}", path.display()))?;
+    let serialized = serde_json::to_vec_pretty(value)
+        .map_err(|e| format!("serialize json {}: {e}", path.display()))?;
     fs::write(path, serialized).map_err(|e| format!("write json {}: {e}", path.display()))
 }
 
@@ -1088,7 +1130,8 @@ fn load_recovery_points(root: &Path) -> Result<Vec<RecoveryPointMetadata>, Strin
         if !dir.exists() {
             continue;
         }
-        let entries = fs::read_dir(&dir).map_err(|e| format!("read recovery dir {}: {e}", dir.display()))?;
+        let entries =
+            fs::read_dir(&dir).map_err(|e| format!("read recovery dir {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("read recovery entry: {e}"))?;
             let path = entry.path();
@@ -1151,7 +1194,8 @@ fn prune_recovery_points(root: &Path) -> Result<(), String> {
         if !dir.exists() {
             continue;
         }
-        let entries = fs::read_dir(&dir).map_err(|e| format!("read recovery dir {}: {e}", dir.display()))?;
+        let entries =
+            fs::read_dir(&dir).map_err(|e| format!("read recovery dir {}: {e}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|e| format!("read recovery entry: {e}"))?;
             let path = entry.path();
@@ -1198,7 +1242,9 @@ fn validate_restore_point(db: &db::DbState, point: &RecoveryPointMetadata) -> Re
             point.schema_version, current_schema_version
         ));
     }
-    if let (Some(current), Some(candidate)) = (current_terminal_id.as_deref(), point.terminal_id.as_deref()) {
+    if let (Some(current), Some(candidate)) =
+        (current_terminal_id.as_deref(), point.terminal_id.as_deref())
+    {
         if !current.trim().is_empty() && !candidate.trim().is_empty() && current != candidate {
             return Err(format!(
                 "Recovery point terminal {} does not match current terminal {}",
@@ -1206,7 +1252,9 @@ fn validate_restore_point(db: &db::DbState, point: &RecoveryPointMetadata) -> Re
             ));
         }
     }
-    if let (Some(current), Some(candidate)) = (current_branch_id.as_deref(), point.branch_id.as_deref()) {
+    if let (Some(current), Some(candidate)) =
+        (current_branch_id.as_deref(), point.branch_id.as_deref())
+    {
         if !current.trim().is_empty() && !candidate.trim().is_empty() && current != candidate {
             return Err(format!(
                 "Recovery point branch {} does not match current branch {}",
@@ -1214,7 +1262,9 @@ fn validate_restore_point(db: &db::DbState, point: &RecoveryPointMetadata) -> Re
             ));
         }
     }
-    if let (Some(current), Some(candidate)) = (current_org_id.as_deref(), point.organization_id.as_deref()) {
+    if let (Some(current), Some(candidate)) =
+        (current_org_id.as_deref(), point.organization_id.as_deref())
+    {
         if !current.trim().is_empty() && !candidate.trim().is_empty() && current != candidate {
             return Err(format!(
                 "Recovery point organization {} does not match current organization {}",
@@ -1273,8 +1323,8 @@ fn write_export_bundle(
     });
     zip.start_file("summary.json", zip_options)
         .map_err(|e| format!("start summary entry: {e}"))?;
-    let summary_json =
-        serde_json::to_string_pretty(&summary).map_err(|e| format!("serialize recovery summary: {e}"))?;
+    let summary_json = serde_json::to_string_pretty(&summary)
+        .map_err(|e| format!("serialize recovery summary: {e}"))?;
     zip.write_all(summary_json.as_bytes())
         .map_err(|e| format!("write summary entry: {e}"))?;
 
@@ -1337,7 +1387,10 @@ fn render_table_as_csv(conn: &Connection, table: &str) -> Result<String, String>
     );
     out.push('\n');
 
-    while let Some(row) = rows.next().map_err(|e| format!("iterate csv export for {table}: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("iterate csv export for {table}: {e}"))?
+    {
         let mut cells = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
             let value = sqlite_value_to_string(
@@ -1388,7 +1441,8 @@ fn sqlite_value_to_string(value: ValueRef<'_>) -> String {
 }
 
 fn csv_escape(value: &str) -> String {
-    let needs_quotes = value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
+    let needs_quotes =
+        value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r');
     if !needs_quotes {
         return value.to_string();
     }
