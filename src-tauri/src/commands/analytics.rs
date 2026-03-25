@@ -469,11 +469,16 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
 
 fn count_unsynced_sync_queue_items(db: &db::DbState) -> Result<i64, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let historical_pattern = format!("{}%", crate::sync::HISTORICAL_Z_REPORT_CONFLICT_PREFIX);
     conn.query_row(
         "SELECT COUNT(*)
          FROM sync_queue
-         WHERE status NOT IN ('synced', 'applied')",
-        [],
+         WHERE status NOT IN ('synced', 'applied')
+           AND NOT (
+                entity_type = 'z_report'
+                AND last_error LIKE ?1
+           )",
+        params![historical_pattern],
         |row| row.get(0),
     )
     .map_err(|e| format!("count unsynced sync queue items: {e}"))
@@ -481,18 +486,23 @@ fn count_unsynced_sync_queue_items(db: &db::DbState) -> Result<i64, String> {
 
 fn summarize_unsynced_sync_queue_items(db: &db::DbState, limit: i64) -> Result<String, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let historical_pattern = format!("{}%", crate::sync::HISTORICAL_Z_REPORT_CONFLICT_PREFIX);
     let mut stmt = conn
         .prepare(
             "SELECT entity_type, status, COUNT(*) AS total
              FROM sync_queue
              WHERE status NOT IN ('synced', 'applied')
+               AND NOT (
+                    entity_type = 'z_report'
+                    AND last_error LIKE ?2
+               )
              GROUP BY entity_type, status
              ORDER BY total DESC, entity_type ASC, status ASC
              LIMIT ?1",
         )
         .map_err(|e| format!("prepare unsynced sync queue summary: {e}"))?;
     let rows = stmt
-        .query_map(params![limit], |row| {
+        .query_map(params![limit, historical_pattern], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1255,9 +1265,19 @@ pub async fn report_generate_z_report(
         || payload.get("date").and_then(|v| v.as_str()).is_some();
 
     let generated = if has_shift_id && !has_branch_or_date {
-        zreport::generate_z_report(&db, &payload)?
+        let generated = zreport::generate_z_report(&db, &payload)?;
+        if !generated
+            .get("existing")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            if let Some(z_report_id) = extract_z_report_id_from_payload(&generated) {
+                zreport::discard_generated_z_report_by_id(&db, &z_report_id)?;
+            }
+        }
+        generated
     } else {
-        zreport::generate_z_report_for_date(&db, &payload)?
+        zreport::preview_z_report_for_date(&db, &payload)?
     };
 
     // Frontend expects report_json fields (sales, cashDrawer, etc.) directly

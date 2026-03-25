@@ -97,9 +97,28 @@ pub async fn zreport_generate(
         || payload.get("date").and_then(|v| v.as_str()).is_some();
 
     if has_shift_id && !has_branch_date {
-        zreport::generate_z_report(&db, &payload)
+        let generated = zreport::generate_z_report(&db, &payload)?;
+        if !generated
+            .get("existing")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            if let Some(z_report_id) = generated
+                .get("zReportId")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    generated
+                        .get("report")
+                        .and_then(|report| report.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                })
+            {
+                zreport::discard_generated_z_report_by_id(&db, z_report_id)?;
+            }
+        }
+        Ok(generated)
     } else {
-        zreport::generate_z_report_for_date(&db, &payload)
+        zreport::preview_z_report_for_date(&db, &payload)
     }
 }
 

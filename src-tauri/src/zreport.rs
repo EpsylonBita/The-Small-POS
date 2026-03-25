@@ -9,7 +9,7 @@
 //! from `local_settings` (category='system') so that successive Z-Reports
 //! never double-count orders or payments.
 
-use chrono::{Local, Utc};
+use chrono::{Local, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -455,6 +455,210 @@ fn discard_generated_z_report(conn: &Connection, z_report_id: &str) -> Result<()
     }
 }
 
+pub(crate) fn discard_generated_z_report_by_id(
+    db: &DbState,
+    z_report_id: &str,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    discard_generated_z_report(&conn, z_report_id)
+}
+
+fn normalize_report_window_timestamp(value: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|parsed| {
+            parsed
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+        })
+}
+
+fn report_window_timestamp_matches(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            normalize_report_window_timestamp(left) == normalize_report_window_timestamp(right)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn extract_period_bounds_from_report_json(report_json: &Value) -> (Option<String>, Option<String>) {
+    (
+        str_field(report_json, "periodStart").or_else(|| str_field(report_json, "period_start")),
+        str_field(report_json, "periodEnd").or_else(|| str_field(report_json, "period_end")),
+    )
+}
+
+fn load_matching_local_z_report_ids_for_window(
+    conn: &Connection,
+    branch_id: &str,
+    report_date: &str,
+    period_start: &str,
+    period_end: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, report_json
+             FROM z_reports
+             WHERE report_date = ?1
+               AND (branch_id = ?2 OR branch_id IS NULL)
+             ORDER BY generated_at DESC, created_at DESC, id DESC",
+        )
+        .map_err(|e| format!("prepare matching local z-report selector: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![report_date, branch_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("query matching local z-report selector: {e}"))?;
+
+    let expected_start = Some(period_start);
+    let expected_end = Some(period_end);
+    let mut matching_ids = Vec::new();
+
+    for row in rows {
+        let (id, report_json_str) =
+            row.map_err(|e| format!("collect matching local z-report selector: {e}"))?;
+        let parsed = serde_json::from_str::<Value>(&report_json_str).unwrap_or_default();
+        let (candidate_start, candidate_end) = extract_period_bounds_from_report_json(&parsed);
+        if report_window_timestamp_matches(candidate_start.as_deref(), expected_start)
+            && report_window_timestamp_matches(candidate_end.as_deref(), expected_end)
+        {
+            matching_ids.push(id);
+        }
+    }
+
+    Ok(matching_ids)
+}
+
+fn ensure_z_report_sync_queue_row(
+    conn: &Connection,
+    z_report_id: &str,
+    sync_payload: &str,
+    now: &str,
+) -> Result<(), String> {
+    let existing_status: Option<String> = conn
+        .query_row(
+            "SELECT status
+             FROM sync_queue
+             WHERE entity_type = 'z_report'
+               AND entity_id = ?1
+             ORDER BY id DESC
+             LIMIT 1",
+            params![z_report_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load existing z-report sync queue row: {e}"))?;
+
+    if matches!(existing_status.as_deref(), Some("synced")) {
+        return Ok(());
+    }
+
+    let idempotency_key = format!("zreport:{z_report_id}");
+    match existing_status {
+        Some(_) => {
+            conn.execute(
+                "UPDATE sync_queue
+                 SET payload = ?1,
+                     idempotency_key = ?2,
+                     updated_at = ?3
+                 WHERE id = (
+                     SELECT id
+                     FROM sync_queue
+                     WHERE entity_type = 'z_report'
+                       AND entity_id = ?4
+                     ORDER BY id DESC
+                     LIMIT 1
+                 )",
+                params![sync_payload, idempotency_key, now, z_report_id],
+            )
+            .map_err(|e| format!("update existing z-report sync queue row: {e}"))?;
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key, created_at, updated_at)
+                 VALUES ('z_report', ?1, 'insert', ?2, ?3, ?4, ?4)",
+                params![z_report_id, sync_payload, idempotency_key, now],
+            )
+            .map_err(|e| format!("insert z-report sync queue row: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn prune_duplicate_local_z_reports_for_window(
+    conn: &Connection,
+    branch_id: &str,
+    report_date: &str,
+    period_start: &str,
+    period_end: &str,
+    keep_id: &str,
+) -> Result<usize, String> {
+    let duplicate_ids = load_matching_local_z_report_ids_for_window(
+        conn,
+        branch_id,
+        report_date,
+        period_start,
+        period_end,
+    )?
+    .into_iter()
+    .filter(|candidate_id| candidate_id != keep_id)
+    .collect::<Vec<_>>();
+
+    let mut removed = 0usize;
+    for duplicate_id in duplicate_ids {
+        conn.execute(
+            "DELETE FROM sync_queue WHERE entity_type = 'z_report' AND entity_id = ?1",
+            params![duplicate_id],
+        )
+        .map_err(|e| format!("delete duplicate z-report sync queue row: {e}"))?;
+        removed += conn
+            .execute("DELETE FROM z_reports WHERE id = ?1", params![duplicate_id])
+            .map_err(|e| format!("delete duplicate z-report row: {e}"))?;
+    }
+
+    Ok(removed)
+}
+
+fn preview_response_from_built_date_z_report(
+    report: &BuiltDateZReport,
+    preview_only: bool,
+) -> Value {
+    serde_json::json!({
+        "success": true,
+        "preview": preview_only,
+        "existing": false,
+        "report": {
+            "shiftId": report.shift_id_for_db.clone().unwrap_or_default(),
+            "shiftCount": report.shift_count,
+            "branchId": report.branch_id,
+            "terminalId": report.terminal_id,
+            "terminalName": report.terminal_name,
+            "reportDate": report.report_date,
+            "generatedAt": report.generated_at,
+            "grossSales": report.gross_sales,
+            "netSales": report.net_sales,
+            "totalOrders": report.total_orders,
+            "cashSales": report.cash_sales,
+            "cardSales": report.card_sales,
+            "refundsTotal": report.refunds_total,
+            "voidsTotal": report.voids_total,
+            "discountsTotal": report.discounts_total,
+            "tipsTotal": report.tips_total,
+            "expensesTotal": report.expenses_total,
+            "cashVariance": report.total_variance,
+            "openingCash": report.total_opening,
+            "closingCash": report.total_closing,
+            "paymentsBreakdown": report.payments_breakdown,
+            "reportJson": report.report_json,
+            "syncState": if preview_only { "preview" } else { "pending" },
+        },
+    })
+}
+
 fn role_order_type_filter_sql(role_type: &str, order_alias: &str) -> String {
     match role_type {
         "driver" => format!("AND COALESCE({order_alias}.order_type, 'dine-in') = 'delivery'"),
@@ -572,6 +776,33 @@ struct ReportStaffShift {
     cash_variance: Option<f64>,
     check_in_time: Option<String>,
     check_out_time: Option<String>,
+}
+
+#[derive(Clone)]
+struct BuiltDateZReport {
+    shift_id_for_db: Option<String>,
+    shift_count: i64,
+    branch_id: String,
+    terminal_id: String,
+    terminal_name: Option<String>,
+    report_date: String,
+    generated_at: String,
+    gross_sales: f64,
+    net_sales: f64,
+    total_orders: i64,
+    cash_sales: f64,
+    card_sales: f64,
+    refunds_total: f64,
+    voids_total: f64,
+    discounts_total: f64,
+    tips_total: f64,
+    expenses_total: f64,
+    total_variance: f64,
+    total_opening: f64,
+    total_closing: f64,
+    total_expected: f64,
+    payments_breakdown: Value,
+    report_json: Value,
 }
 
 fn normalize_order_type(value: &str) -> String {
@@ -2427,13 +2658,11 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
 // Multi-shift aggregation (Gap 7)
 // ---------------------------------------------------------------------------
 
-/// Generate a Z-report for all closed shifts since the last Z-Report for a
-/// given branch. This is the Electron-compatible "end of day" report that
-/// aggregates across multiple shifts.
+/// Build a multi-shift Z-report snapshot for a branch/date window.
 ///
-/// Returns an un-persisted `report_json` Value. Call `submit_z_report` to
-/// persist and enqueue for sync.
-pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
+/// The returned value is not persisted. Callers choose whether the snapshot
+/// is used as a preview or materialized into `z_reports` and `sync_queue`.
+fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZReport, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let branch_id = str_field(payload, "branchId")
@@ -2952,31 +3181,110 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "staffReports": staff_reports,
     });
 
-    // If no closed shifts, return a preview-only response (no persist).
-    // This lets the frontend display aggregated order/payment data even when
-    // staff are still checked in.
-    if shifts.is_empty() {
+    Ok(BuiltDateZReport {
+        shift_id_for_db: shifts.first().map(|s| s.id.clone()),
+        shift_count: shifts.len() as i64,
+        branch_id,
+        terminal_id,
+        terminal_name,
+        report_date: date,
+        generated_at: Utc::now().to_rfc3339(),
+        gross_sales,
+        net_sales,
+        total_orders,
+        cash_sales,
+        card_sales,
+        refunds_total,
+        voids_total,
+        discounts_total,
+        tips_total,
+        expenses_total,
+        total_variance,
+        total_opening,
+        total_closing,
+        total_expected: shifts
+            .iter()
+            .map(|s| s.expected_cash.unwrap_or(0.0))
+            .sum::<f64>(),
+        payments_breakdown,
+        report_json,
+    })
+}
+
+pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let built = build_z_report_for_date(db, payload)?;
+    if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
-        return Ok(serde_json::json!({
-            "success": true,
-            "preview": true,
-            "report": {
-                "shiftCount": shifts.len() as i64,
-                "terminalId": terminal_id,
-                "terminalName": terminal_name,
-                "reportJson": report_json,
-            },
-        }));
+    }
+    Ok(preview_response_from_built_date_z_report(&built, true))
+}
+
+pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let built = build_z_report_for_date(db, payload)?;
+    if built.shift_count == 0 {
+        info!("No closed shifts in period — returning preview-only Z-report");
+        return Ok(preview_response_from_built_date_z_report(&built, true));
     }
 
-    // --- Persist in transaction ---
-    let z_report_id = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
-    let payments_json_str = payments_breakdown.to_string();
-    let report_json_str = report_json.to_string();
-    let idempotency_key = format!("zreport:{z_report_id}");
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let period_start = str_field(&built.report_json, "periodStart")
+        .ok_or("Missing reportJson.periodStart for Z-report persistence")?;
+    let period_end = str_field(&built.report_json, "periodEnd")
+        .ok_or("Missing reportJson.periodEnd for Z-report persistence")?;
+    let sync_payload = serde_json::json!({
+        "terminal_id": built.terminal_id,
+        "branch_id": built.branch_id,
+        "report_date": built.report_date,
+        "report_data": built.report_json,
+    })
+    .to_string();
 
-    let shift_id_for_db = shifts.first().map(|s| s.id.clone()).unwrap();
+    let matching_ids = load_matching_local_z_report_ids_for_window(
+        &conn,
+        built.branch_id.as_str(),
+        built.report_date.as_str(),
+        period_start.as_str(),
+        period_end.as_str(),
+    )?;
+
+    if let Some(existing_id) = matching_ids.first() {
+        let existing_id = existing_id.clone();
+        ensure_z_report_sync_queue_row(&conn, &existing_id, &sync_payload, &built.generated_at)?;
+        let _ = prune_duplicate_local_z_reports_for_window(
+            &conn,
+            built.branch_id.as_str(),
+            built.report_date.as_str(),
+            period_start.as_str(),
+            period_end.as_str(),
+            existing_id.as_str(),
+        )?;
+
+        return get_z_report_by_id(&conn, &existing_id).map(|mut report| {
+            if let Some(obj) = report.as_object_mut() {
+                if let Some(terminal_name) = built.terminal_name.clone() {
+                    obj.entry("terminalName".to_string())
+                        .or_insert(serde_json::Value::String(terminal_name));
+                }
+                obj.entry("shiftCount".to_string())
+                    .or_insert(serde_json::json!(built.shift_count));
+            }
+
+            serde_json::json!({
+                "success": true,
+                "existing": true,
+                "zReportId": existing_id,
+                "report": report,
+            })
+        });
+    }
+
+    let z_report_id = Uuid::new_v4().to_string();
+    let payments_json_str = built.payments_breakdown.to_string();
+    let report_json_str = built.report_json.to_string();
+    let shift_id_for_db = built
+        .shift_id_for_db
+        .clone()
+        .ok_or("Missing shiftId for persisted multi-shift Z-report")?;
 
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
@@ -3001,50 +3309,32 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             params![
                 z_report_id,
                 shift_id_for_db,
-                branch_id,
-                terminal_id,
-                date,
-                now,
-                gross_sales,
-                net_sales,
-                total_orders,
-                cash_sales,
-                card_sales,
-                refunds_total,
-                voids_total,
-                discounts_total,
-                tips_total,
-                expenses_total,
-                total_variance,
-                total_opening,
-                total_closing,
-                shifts
-                    .iter()
-                    .map(|s| s.expected_cash.unwrap_or(0.0))
-                    .sum::<f64>(),
+                built.branch_id,
+                built.terminal_id,
+                built.report_date,
+                built.generated_at,
+                built.gross_sales,
+                built.net_sales,
+                built.total_orders,
+                built.cash_sales,
+                built.card_sales,
+                built.refunds_total,
+                built.voids_total,
+                built.discounts_total,
+                built.tips_total,
+                built.expenses_total,
+                built.total_variance,
+                built.total_opening,
+                built.total_closing,
+                built.total_expected,
                 payments_json_str,
                 report_json_str,
-                now,
+                built.generated_at,
             ],
         )
         .map_err(|e| format!("insert z_report: {e}"))?;
 
-        // Enqueue for sync
-        let sync_payload = serde_json::json!({
-            "terminal_id": terminal_id,
-            "branch_id": branch_id,
-            "report_date": date,
-            "report_data": report_json,
-        })
-        .to_string();
-
-        conn.execute(
-            "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-             VALUES ('z_report', ?1, 'insert', ?2, ?3)",
-            params![z_report_id, sync_payload, idempotency_key],
-        )
-        .map_err(|e| format!("enqueue z_report sync: {e}"))?;
-
+        ensure_z_report_sync_queue_row(&conn, &z_report_id, &sync_payload, &built.generated_at)?;
         Ok(())
     })();
 
@@ -3053,17 +3343,17 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
             conn.execute_batch("COMMIT")
                 .map_err(|e| format!("commit: {e}"))?;
         }
-        Err(e) => {
+        Err(error) => {
             let _ = conn.execute_batch("ROLLBACK");
-            return Err(e);
+            return Err(error);
         }
     }
 
     info!(
         z_report_id = %z_report_id,
-        shifts_count = %shifts_total,
-        gross_sales = %gross_sales,
-        net_sales = %net_sales,
+        shifts_count = %built.shift_count,
+        gross_sales = %built.gross_sales,
+        net_sales = %built.net_sales,
         "Multi-shift Z-report generated"
     );
 
@@ -3074,27 +3364,27 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
         "report": {
             "id": z_report_id,
             "shiftId": shift_id_for_db,
-            "shiftCount": shifts.len() as i64,
-            "branchId": branch_id,
-            "terminalId": terminal_id,
-            "terminalName": terminal_name,
-            "reportDate": date,
-            "generatedAt": now,
-            "grossSales": gross_sales,
-            "netSales": net_sales,
-            "totalOrders": total_orders,
-            "cashSales": cash_sales,
-            "cardSales": card_sales,
-            "refundsTotal": refunds_total,
-            "voidsTotal": voids_total,
-            "discountsTotal": discounts_total,
-            "tipsTotal": tips_total,
-            "expensesTotal": expenses_total,
-            "cashVariance": total_variance,
-            "openingCash": total_opening,
-            "closingCash": total_closing,
-            "paymentsBreakdown": payments_breakdown,
-            "reportJson": report_json,
+            "shiftCount": built.shift_count,
+            "branchId": built.branch_id,
+            "terminalId": built.terminal_id,
+            "terminalName": built.terminal_name,
+            "reportDate": built.report_date,
+            "generatedAt": built.generated_at,
+            "grossSales": built.gross_sales,
+            "netSales": built.net_sales,
+            "totalOrders": built.total_orders,
+            "cashSales": built.cash_sales,
+            "cardSales": built.card_sales,
+            "refundsTotal": built.refunds_total,
+            "voidsTotal": built.voids_total,
+            "discountsTotal": built.discounts_total,
+            "tipsTotal": built.tips_total,
+            "expensesTotal": built.expenses_total,
+            "cashVariance": built.total_variance,
+            "openingCash": built.total_opening,
+            "closingCash": built.total_closing,
+            "paymentsBreakdown": built.payments_breakdown,
+            "reportJson": built.report_json,
             "syncState": "pending",
         },
     }))
@@ -4485,6 +4775,88 @@ mod tests {
         assert_eq!(report_json_str["expenses"]["staffPaymentsTotal"], 0.0);
         assert_eq!(report_json_str["expenses"]["pendingCount"], 1);
         assert_eq!(report_json_str["drawers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_preview_z_report_for_date_does_not_persist_or_enqueue() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_second_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+        let result = preview_z_report_for_date(&db, &payload).expect("preview should succeed");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["preview"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let z_reports_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+            .unwrap();
+        let queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            z_reports_count, 0,
+            "preview should not persist local z_reports"
+        );
+        assert_eq!(
+            queue_count, 0,
+            "preview should not enqueue z_report sync rows"
+        );
+    }
+
+    #[test]
+    fn test_prepare_z_report_submission_reuses_existing_multi_shift_row_for_same_window() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_second_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+
+        let first = prepare_z_report_submission(&db, &payload).expect("first prepare");
+        let first_id = first
+            .z_report_id
+            .clone()
+            .expect("first prepare should persist z-report");
+        assert!(first.created_new_z_report);
+
+        let second = prepare_z_report_submission(&db, &payload).expect("second prepare");
+        let second_id = second
+            .z_report_id
+            .clone()
+            .expect("second prepare should reuse z-report");
+        assert_eq!(second_id, first_id);
+        assert!(!second.created_new_z_report);
+
+        let conn = db.conn.lock().unwrap();
+        let z_reports_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+            .unwrap();
+        let queue_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            z_reports_count, 1,
+            "should keep a single canonical local z-report row"
+        );
+        assert_eq!(queue_count, 1, "should keep a single z-report queue row");
     }
 
     #[test]

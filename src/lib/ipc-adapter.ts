@@ -617,6 +617,7 @@ export interface SyncStatus {
   lastSyncAt: string | null;
   pendingChanges: number;
   syncErrors: number;
+  historicalZReportConflicts?: number;
   lastQueueFailure?: {
     queueId: number;
     entityType: string;

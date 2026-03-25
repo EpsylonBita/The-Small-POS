@@ -40,6 +40,7 @@ interface SyncStatus {
   lastSync: string | null;
   pendingItems: number;
   queuedRemote: number;
+  historicalZReportConflicts: number;
   backpressureDeferred: number;
   oldestNextRetryAt: string | null;
   syncInProgress: boolean;
@@ -220,6 +221,7 @@ const normalizeStatus = (status: any): SyncStatus => {
       lastSync: null,
       pendingItems: 0,
       queuedRemote: 0,
+      historicalZReportConflicts: 0,
       backpressureDeferred: 0,
       oldestNextRetryAt: null,
       syncInProgress: false,
@@ -243,6 +245,10 @@ const normalizeStatus = (status: any): SyncStatus => {
       0,
     ),
     queuedRemote: coerceNumber(status.queuedRemote, 0),
+    historicalZReportConflicts: coerceNumber(
+      status.historicalZReportConflicts,
+      0,
+    ),
     backpressureDeferred: coerceNumber(status.backpressureDeferred, 0),
     oldestNextRetryAt: toDateString(status.oldestNextRetryAt),
     syncInProgress: !!status.syncInProgress,
@@ -391,6 +397,7 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     lastSync: null,
     pendingItems: 0,
     queuedRemote: 0,
+    historicalZReportConflicts: 0,
     backpressureDeferred: 0,
     oldestNextRetryAt: null,
     syncInProgress: false,
@@ -1030,6 +1037,16 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
             syncStatus.queuedRemote > 0
               ? 'text-cyan-600 dark:text-cyan-300'
               : 'text-slate-700 dark:text-slate-200',
+        })}
+        {renderMetricTile({
+          label: t('sync.dashboard.historicalZReportConflicts', {
+            defaultValue: 'Historical Z-report Conflicts',
+          }),
+          value: syncStatus.historicalZReportConflicts,
+          valueClassName:
+            syncStatus.historicalZReportConflicts > 0
+              ? 'text-slate-600 dark:text-slate-300'
+              : 'text-emerald-600 dark:text-emerald-300',
         })}
         {renderMetricTile({
           label: t('sync.dashboard.deferred'),

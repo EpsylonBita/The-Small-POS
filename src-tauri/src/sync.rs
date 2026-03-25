@@ -51,7 +51,7 @@
 //! 5. Mark rows as `applied` or schedule retry on failure
 //! 6. Emit `sync_status` event to the frontend
 
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Local, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -243,6 +243,8 @@ static FAILED_FINANCIAL_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 static PAYMENT_ADJUSTMENT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Re-enqueue shifts that were wrongly marked synced due to ignored per-event errors.
 static SHIFT_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
+/// Repair historical local z-report rows after cutoff so stale duplicates stop blocking close-day.
+static Z_REPORT_HISTORY_REPAIR_DONE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_RETRY_DELAY_MS: i64 = 5_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
 const ORDER_SYNC_SINCE_FALLBACK: &str = "1970-01-01T00:00:00.000Z";
@@ -254,6 +256,9 @@ const SYNC_BOOTSTRAP_MODE_EMPTY_DB: &str = "bootstrap_empty_db";
 #[allow(dead_code)]
 const ORDER_DIRECT_FALLBACK_QUEUE_AGE_SEC: i64 = 600;
 const SYNC_LOG_DEDUPE_COOLDOWN_SECS: i64 = 120;
+pub(crate) const HISTORICAL_Z_REPORT_CONFLICT_PREFIX: &str = "historical_z_report_conflict:";
+const Z_REPORT_FINALIZED_BOUND_CONFLICT_MESSAGE: &str =
+    "Finalized Z-report period bounds cannot be changed without a rebuild flow";
 
 #[derive(Debug, Clone)]
 struct QueueFailureSnapshot {
@@ -1415,10 +1420,49 @@ pub fn remove_invalid_orders(db: &DbState, order_ids: Vec<String>) -> Result<Val
 // Sync status queries
 // ---------------------------------------------------------------------------
 
+fn historical_z_report_conflict_pattern() -> String {
+    format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}%")
+}
+
+fn is_historical_z_report_conflict_error(error: &str) -> bool {
+    let trimmed = error.trim();
+    if trimmed.starts_with(HISTORICAL_Z_REPORT_CONFLICT_PREFIX) {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains(&Z_REPORT_FINALIZED_BOUND_CONFLICT_MESSAGE.to_ascii_lowercase())
+        && lower.contains("http 409")
+}
+
+fn park_historical_z_report_conflict_error(error: &str) -> String {
+    if error
+        .trim()
+        .starts_with(HISTORICAL_Z_REPORT_CONFLICT_PREFIX)
+    {
+        error.trim().to_string()
+    } else {
+        format!("{HISTORICAL_Z_REPORT_CONFLICT_PREFIX}{error}")
+    }
+}
+
+fn count_historical_z_report_conflicts(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM sync_queue
+         WHERE entity_type = 'z_report'
+           AND last_error LIKE ?1",
+        params![historical_z_report_conflict_pattern()],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
 /// Get sync queue statistics.
 pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     cleanup_order_update_queue_rows(&conn, None)?;
+    let historical_pattern = historical_z_report_conflict_pattern();
 
     let pending: i64 = conn
         .query_row(
@@ -1438,8 +1482,14 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
 
     let errors: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sync_queue WHERE status = 'failed'",
-            [],
+            "SELECT COUNT(*)
+             FROM sync_queue
+             WHERE status = 'failed'
+               AND NOT (
+                    entity_type = 'z_report'
+                    AND last_error LIKE ?1
+               )",
+            params![historical_pattern.clone()],
             |row| row.get(0),
         )
         .unwrap_or(0);
@@ -1484,6 +1534,7 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
 
     let financial_stats = collect_financial_sync_stats(&conn);
     let last_queue_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
+    let historical_z_report_conflicts = count_historical_z_report_conflicts(&conn);
 
     let is_online = storage::is_configured();
     let last_sync = sync_state.last_sync.lock().ok().and_then(|g| g.clone());
@@ -1506,6 +1557,7 @@ pub fn get_sync_status(db: &DbState, sync_state: &SyncState) -> Result<Value, St
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
         "lastQueueFailure": last_queue_failure,
+        "historicalZReportConflicts": historical_z_report_conflicts,
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
@@ -2413,6 +2465,10 @@ fn extract_last_queue_failure_snapshot(
              FROM sync_queue
              WHERE last_error IS NOT NULL
                AND trim(last_error) != ''
+               AND NOT (
+                    entity_type = 'z_report'
+                    AND last_error LIKE ?1
+               )
                AND (
                     status IN ('in_progress', 'pending')
                     OR status = 'failed'
@@ -2425,7 +2481,7 @@ fn extract_last_queue_failure_snapshot(
         .ok()?;
 
     let candidates: Vec<QueueFailureSnapshot> = stmt
-        .query_map([], |row| {
+        .query_map(params![historical_z_report_conflict_pattern()], |row| {
             let entity_type: String = row.get(1)?;
             let last_error: String = row.get(8)?;
             Ok(QueueFailureSnapshot {
@@ -4992,6 +5048,32 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                     repaired,
                     "Backfilled active shift business-day metadata and requeued live shift inserts"
                 );
+            }
+        }
+    }
+
+    if Z_REPORT_HISTORY_REPAIR_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+    {
+        match repair_historical_z_report_rows_after_cutoff(
+            db,
+            &admin_url,
+            api_key.as_str(),
+            &terminal_id,
+            &branch_id,
+        )
+        .await
+        {
+            Ok(repaired) if repaired > 0 => {
+                info!(
+                    repaired,
+                    "Repaired historical local z-report rows after cutoff"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "Historical z-report repair skipped");
             }
         }
     }
@@ -8195,19 +8277,31 @@ async fn sync_z_report_items(
             Err(e) => {
                 warn!(z_report_id = %entity_id, error = %e, "Z-report sync failed");
                 if let Ok(conn) = db.conn.lock() {
-                    let new_retry = retry_count + 1;
-                    let (queue_status, zr_state) = if new_retry >= *max_retries {
+                    let is_historical_conflict = is_historical_z_report_conflict_error(&e);
+                    let parked_error = if is_historical_conflict {
+                        park_historical_z_report_conflict_error(&e)
+                    } else {
+                        e.clone()
+                    };
+                    let new_retry = if is_historical_conflict {
+                        *max_retries
+                    } else {
+                        retry_count + 1
+                    };
+                    let (queue_status, zr_state) = if is_historical_conflict {
+                        ("failed", "failed")
+                    } else if new_retry >= *max_retries {
                         ("failed", "failed")
                     } else {
                         ("pending", "pending")
                     };
                     let _ = conn.execute(
                         "UPDATE sync_queue SET status = ?1, retry_count = ?2, last_error = ?3, updated_at = datetime('now') WHERE id = ?4",
-                        params![queue_status, new_retry, e, id],
+                        params![queue_status, new_retry, parked_error, id],
                     );
                     let _ = conn.execute(
                         "UPDATE z_reports SET sync_state = ?1, sync_retry_count = ?2, sync_last_error = ?3, updated_at = datetime('now') WHERE id = ?4",
-                        params![zr_state, new_retry, e, entity_id],
+                        params![zr_state, new_retry, parked_error, entity_id],
                     );
                 }
             }
@@ -8509,9 +8603,11 @@ fn get_sync_status_for_event(
         oldest_next_retry_at,
         financial_stats,
         last_queue_failure,
+        historical_z_report_conflicts,
     ) = match db.conn.lock() {
         Ok(conn) => {
             let _ = cleanup_order_update_queue_rows(&conn, None);
+            let historical_pattern = historical_z_report_conflict_pattern();
             let p: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sync_queue WHERE status IN ('pending', 'in_progress')",
@@ -8528,8 +8624,14 @@ fn get_sync_status_for_event(
                 .unwrap_or(0);
             let e: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM sync_queue WHERE status = 'failed'",
-                    [],
+                    "SELECT COUNT(*)
+                     FROM sync_queue
+                     WHERE status = 'failed'
+                       AND NOT (
+                            entity_type = 'z_report'
+                            AND last_error LIKE ?1
+                       )",
+                    params![historical_pattern.clone()],
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
@@ -8570,9 +8672,20 @@ fn get_sync_status_for_event(
                 .flatten();
             let financial = collect_financial_sync_stats(&conn);
             let last_failure = extract_last_queue_failure_snapshot(&conn).map(|s| s.to_json());
-            (p, q, e, ip, b, oldest, financial, last_failure)
+            let historical_conflicts = count_historical_z_report_conflicts(&conn);
+            (
+                p,
+                q,
+                e,
+                ip,
+                b,
+                oldest,
+                financial,
+                last_failure,
+                historical_conflicts,
+            )
         }
-        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default(), None),
+        Err(_) => (0, 0, 0, 0, 0, None, FinancialSyncStats::default(), None, 0),
     };
 
     let last = last_sync.lock().ok().and_then(|g| g.clone());
@@ -8595,6 +8708,7 @@ fn get_sync_status_for_event(
         "backpressureDeferred": backpressure_deferred,
         "oldestNextRetryAt": oldest_next_retry_at,
         "lastQueueFailure": last_queue_failure,
+        "historicalZReportConflicts": historical_z_report_conflicts,
         "pendingPaymentItems": financial_stats.pending_payment_items(),
         "failedPaymentItems": financial_stats.failed_payment_items(),
         "financialStats": financial_stats.to_json(),
@@ -8815,6 +8929,385 @@ fn promote_financials_for_shift(conn: &rusqlite::Connection, shift_id: &str) {
             "Inline-promoted deferred financial items after shift sync"
         );
     }
+}
+
+#[derive(Debug, Clone)]
+struct LocalHistoricalZReportRow {
+    id: String,
+    branch_id: String,
+    terminal_id: String,
+    report_date: String,
+    report_json: Value,
+    sync_state: String,
+    sort_key: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteHistoricalZReportRow {
+    report_id: String,
+    period_start_at: String,
+    period_end_at: String,
+}
+
+fn json_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+}
+
+fn normalize_report_timestamp_for_compare(value: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(value).ok().map(|parsed| {
+        parsed
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+    })
+}
+
+fn report_timestamps_match(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            normalize_report_timestamp_for_compare(left)
+                == normalize_report_timestamp_for_compare(right)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn local_z_report_period_bounds(
+    row: &LocalHistoricalZReportRow,
+) -> (Option<String>, Option<String>) {
+    (
+        json_string_field(&row.report_json, &["periodStart", "period_start"]),
+        json_string_field(&row.report_json, &["periodEnd", "period_end"]),
+    )
+}
+
+fn load_historical_local_z_report_rows(
+    conn: &rusqlite::Connection,
+) -> Result<HashMap<String, Vec<LocalHistoricalZReportRow>>, String> {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,
+                    COALESCE(branch_id, ''),
+                    COALESCE(terminal_id, ''),
+                    report_date,
+                    report_json,
+                    sync_state,
+                    COALESCE(updated_at, generated_at, created_at, '')
+             FROM z_reports
+             WHERE sync_state != 'applied'
+               AND report_date < ?1
+             ORDER BY report_date ASC,
+                      COALESCE(updated_at, generated_at, created_at, '') DESC,
+                      id DESC",
+        )
+        .map_err(|e| format!("prepare historical local z-report selector: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![today], |row| {
+            let report_json_str: String = row.get(4)?;
+            Ok(LocalHistoricalZReportRow {
+                id: row.get(0)?,
+                branch_id: row.get(1)?,
+                terminal_id: row.get(2)?,
+                report_date: row.get(3)?,
+                report_json: serde_json::from_str(&report_json_str).unwrap_or_default(),
+                sync_state: row.get(5)?,
+                sort_key: row.get(6)?,
+            })
+        })
+        .map_err(|e| format!("query historical local z-report selector: {e}"))?;
+
+    let mut grouped = HashMap::new();
+    for row in rows {
+        let row = row.map_err(|e| format!("collect historical local z-report selector: {e}"))?;
+        grouped
+            .entry(row.report_date.clone())
+            .or_insert_with(Vec::new)
+            .push(row);
+    }
+    Ok(grouped)
+}
+
+fn choose_canonical_local_z_report_row(
+    rows: &[LocalHistoricalZReportRow],
+) -> Option<LocalHistoricalZReportRow> {
+    let mut sorted = rows.to_vec();
+    sorted.sort_by(|left, right| {
+        right
+            .sort_key
+            .cmp(&left.sort_key)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    sorted.into_iter().next()
+}
+
+fn delete_z_report_queue_rows(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+) -> Result<usize, String> {
+    let mut removed = 0usize;
+    for id in ids {
+        removed += conn
+            .execute(
+                "DELETE FROM sync_queue WHERE entity_type = 'z_report' AND entity_id = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("delete z-report sync queue rows: {e}"))?;
+    }
+    Ok(removed)
+}
+
+fn delete_local_z_report_rows(
+    conn: &rusqlite::Connection,
+    ids: &[String],
+) -> Result<usize, String> {
+    let mut removed = 0usize;
+    for id in ids {
+        removed += conn
+            .execute("DELETE FROM z_reports WHERE id = ?1", params![id])
+            .map_err(|e| format!("delete local z-report row: {e}"))?;
+    }
+    Ok(removed)
+}
+
+fn ensure_canonical_local_z_report_queue_row(
+    conn: &rusqlite::Connection,
+    row: &LocalHistoricalZReportRow,
+    now: &str,
+) -> Result<(), String> {
+    let sync_payload = serde_json::json!({
+        "terminal_id": row.terminal_id,
+        "branch_id": row.branch_id,
+        "report_date": row.report_date,
+        "report_data": row.report_json,
+    })
+    .to_string();
+
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type = 'z_report'
+           AND entity_id = ?1",
+        params![row.id],
+    )
+    .map_err(|e| format!("clear canonical z-report queue row before requeue: {e}"))?;
+
+    conn.execute(
+        "INSERT INTO sync_queue (
+            entity_type, entity_id, operation, payload, idempotency_key,
+            status, retry_count, max_retries, last_error, next_retry_at,
+            created_at, updated_at
+         ) VALUES (
+            'z_report', ?1, 'insert', ?2, ?3,
+            'pending', 0, 5, NULL, NULL,
+            ?4, ?4
+         )",
+        params![row.id, sync_payload, format!("zreport:{}", row.id), now],
+    )
+    .map_err(|e| format!("insert canonical z-report queue row: {e}"))?;
+
+    conn.execute(
+        "UPDATE z_reports
+         SET sync_state = 'pending',
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?2
+         WHERE id = ?1",
+        params![row.id, now],
+    )
+    .map_err(|e| format!("reset canonical local z-report sync state: {e}"))?;
+
+    Ok(())
+}
+
+fn apply_historical_z_report_repair(
+    conn: &rusqlite::Connection,
+    locals_by_date: &HashMap<String, Vec<LocalHistoricalZReportRow>>,
+    remote_by_date: &HashMap<String, RemoteHistoricalZReportRow>,
+) -> Result<usize, String> {
+    let now = Utc::now().to_rfc3339();
+    let mut repaired = 0usize;
+
+    for (report_date, rows) in locals_by_date {
+        if rows.is_empty() {
+            continue;
+        }
+
+        if let Some(remote) = remote_by_date.get(report_date) {
+            let canonical = rows.iter().find(|row| {
+                let (local_start, local_end) = local_z_report_period_bounds(row);
+                report_timestamps_match(
+                    local_start.as_deref(),
+                    Some(remote.period_start_at.as_str()),
+                ) && report_timestamps_match(
+                    local_end.as_deref(),
+                    Some(remote.period_end_at.as_str()),
+                )
+            });
+
+            if let Some(canonical) = canonical {
+                conn.execute(
+                    "UPDATE z_reports
+                     SET sync_state = 'applied',
+                         sync_retry_count = 0,
+                         sync_last_error = NULL,
+                         sync_next_retry_at = NULL,
+                         updated_at = ?2
+                     WHERE id = ?1",
+                    params![canonical.id, now],
+                )
+                .map_err(|e| format!("mark canonical local z-report applied: {e}"))?;
+                repaired += 1;
+
+                let all_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+                repaired += delete_z_report_queue_rows(conn, &all_ids)?;
+
+                let duplicate_ids = rows
+                    .iter()
+                    .filter(|row| row.id != canonical.id)
+                    .map(|row| row.id.clone())
+                    .collect::<Vec<_>>();
+                repaired += delete_local_z_report_rows(conn, &duplicate_ids)?;
+
+                info!(
+                    report_date = %report_date,
+                    server_report_id = %remote.report_id,
+                    canonical_local_id = %canonical.id,
+                    duplicates_removed = duplicate_ids.len(),
+                    "Repaired historical local z-report backlog from finalized server row"
+                );
+            } else {
+                let stale_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+                repaired += delete_z_report_queue_rows(conn, &stale_ids)?;
+                repaired += delete_local_z_report_rows(conn, &stale_ids)?;
+                warn!(
+                    report_date = %report_date,
+                    server_report_id = %remote.report_id,
+                    stale_rows = stale_ids.len(),
+                    "Removed stale local historical z-report rows because the finalized server row is authoritative"
+                );
+            }
+            continue;
+        }
+
+        let Some(canonical) = choose_canonical_local_z_report_row(rows) else {
+            continue;
+        };
+        let duplicate_ids = rows
+            .iter()
+            .filter(|row| row.id != canonical.id)
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+        repaired += delete_z_report_queue_rows(conn, &duplicate_ids)?;
+        repaired += delete_local_z_report_rows(conn, &duplicate_ids)?;
+        ensure_canonical_local_z_report_queue_row(conn, &canonical, &now)?;
+        repaired += 1;
+        info!(
+            report_date = %report_date,
+            canonical_local_id = %canonical.id,
+            duplicates_removed = duplicate_ids.len(),
+            previous_sync_state = %canonical.sync_state,
+            "Collapsed duplicate local historical z-report rows to a single retryable canonical row"
+        );
+    }
+
+    Ok(repaired)
+}
+
+async fn fetch_remote_historical_z_report_rows(
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    branch_id: &str,
+    date_from: &str,
+    date_to: &str,
+) -> Result<HashMap<String, RemoteHistoricalZReportRow>, String> {
+    let path = format!(
+        "/api/pos/z-report/history?terminal_id={terminal_id}&branch_id={branch_id}&date_from={date_from}&date_to={date_to}&limit=200&page=1"
+    );
+    let response = api::fetch_from_admin(admin_url, api_key, &path, "GET", None).await?;
+    let reports = response
+        .get("reports")
+        .or_else(|| response.get("data"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut remote_by_date = HashMap::new();
+    for report in reports {
+        let Some(report_date) = json_string_field(&report, &["report_date", "reportDate"]) else {
+            continue;
+        };
+        let Some(period_start_at) =
+            json_string_field(&report, &["period_start_at", "periodStartAt"])
+        else {
+            continue;
+        };
+        let Some(period_end_at) = json_string_field(&report, &["period_end_at", "periodEndAt"])
+        else {
+            continue;
+        };
+        let report_id = json_string_field(&report, &["id"]).unwrap_or_default();
+
+        remote_by_date.insert(
+            report_date,
+            RemoteHistoricalZReportRow {
+                report_id,
+                period_start_at,
+                period_end_at,
+            },
+        );
+    }
+
+    Ok(remote_by_date)
+}
+
+async fn repair_historical_z_report_rows_after_cutoff(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    terminal_id: &str,
+    branch_id: &str,
+) -> Result<usize, String> {
+    let locals_by_date = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let active_shifts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_shifts WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if active_shifts > 0 {
+            return Ok(0);
+        }
+        load_historical_local_z_report_rows(&conn)?
+    };
+
+    if locals_by_date.is_empty() {
+        return Ok(0);
+    }
+
+    let mut dates = locals_by_date.keys().cloned().collect::<Vec<_>>();
+    dates.sort();
+    let date_from = dates.first().cloned().unwrap_or_default();
+    let date_to = dates.last().cloned().unwrap_or_default();
+    let remote_by_date = fetch_remote_historical_z_report_rows(
+        admin_url,
+        api_key,
+        terminal_id,
+        branch_id,
+        date_from.as_str(),
+        date_to.as_str(),
+    )
+    .await?;
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    apply_historical_z_report_repair(&conn, &locals_by_date, &remote_by_date)
 }
 
 /// One-time requeue: recover financial items that failed with "was not found on
@@ -10078,6 +10571,222 @@ mod tests {
             failure.get("classification").and_then(Value::as_str),
             Some("transient")
         );
+    }
+
+    #[test]
+    fn test_get_sync_status_parks_historical_z_report_conflicts_separately() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue
+             (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+             VALUES ('z_report', 'zr-historical', 'insert', '{}', 'idem-zr-historical', 'failed', 5, 5, ?1)",
+            params![park_historical_z_report_conflict_error(
+                "Finalized Z-report period bounds cannot be changed without a rebuild flow (HTTP 409)"
+            )],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sync_state = SyncState::new();
+        let status = get_sync_status(&db, &sync_state).expect("status");
+        assert_eq!(status["syncErrors"], 0);
+        assert_eq!(status["error"], Value::Null);
+        assert_eq!(status["historicalZReportConflicts"], 1);
+        assert_eq!(status["lastQueueFailure"], Value::Null);
+    }
+
+    #[test]
+    fn test_apply_historical_z_report_repair_marks_matching_local_row_applied() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, check_out_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-1', 'staff-1', 'Cashier One', 'branch-1', 'terminal-1', 'cashier',
+                '2026-03-24T04:01:27Z', '2026-03-25T04:15:55Z', 'closed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        for id in ["zr-a", "zr-b"] {
+            conn.execute(
+                "INSERT INTO z_reports (
+                    id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                    gross_sales, net_sales, total_orders, cash_sales, card_sales,
+                    refunds_total, voids_total, discounts_total, tips_total,
+                    expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                    payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, 'shift-1', 'branch-1', 'terminal-1', '2026-03-24', '2026-03-25T04:17:02Z',
+                    10, 10, 1, 10, 0,
+                    0, 0, 0, 0,
+                    0, 0, 0, 0, 0,
+                    '{}', ?2, 'failed', ?3, 5,
+                    '2026-03-25T04:17:02Z', '2026-03-25T04:17:02Z'
+                 )",
+                params![
+                    id,
+                    serde_json::json!({
+                        "periodStart": "2026-03-24T04:01:27.396883800+00:00",
+                        "periodEnd": "2026-03-25T04:15:55.044004500+00:00"
+                    })
+                    .to_string(),
+                    park_historical_z_report_conflict_error(
+                        "Finalized Z-report period bounds cannot be changed without a rebuild flow (HTTP 409)"
+                    ),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue
+                 (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+                 VALUES ('z_report', ?1, 'insert', '{}', ?2, 'failed', 5, 5, ?3)",
+                params![
+                    id,
+                    format!("idem-{id}"),
+                    park_historical_z_report_conflict_error(
+                        "Finalized Z-report period bounds cannot be changed without a rebuild flow (HTTP 409)"
+                    ),
+                ],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let conn = db.conn.lock().unwrap();
+        let locals = load_historical_local_z_report_rows(&conn).expect("locals");
+        drop(conn);
+
+        let mut remote = HashMap::new();
+        remote.insert(
+            "2026-03-24".to_string(),
+            RemoteHistoricalZReportRow {
+                report_id: "server-zr-1".to_string(),
+                period_start_at: "2026-03-24T04:01:27.396883800+00:00".to_string(),
+                period_end_at: "2026-03-25T04:15:55.044004500+00:00".to_string(),
+            },
+        );
+
+        let conn = db.conn.lock().unwrap();
+        let repaired = apply_historical_z_report_repair(&conn, &locals, &remote).unwrap();
+        assert!(repaired >= 2);
+
+        let remaining_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+            .unwrap();
+        let applied_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM z_reports WHERE sync_state = 'applied'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(remaining_rows, 1);
+        assert_eq!(applied_rows, 1);
+        assert_eq!(queue_rows, 0);
+    }
+
+    #[test]
+    fn test_apply_historical_z_report_repair_requeues_one_canonical_local_row_when_server_missing()
+    {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                check_in_time, check_out_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-1', 'staff-1', 'Cashier One', 'branch-1', 'terminal-1', 'cashier',
+                '2026-03-24T04:01:27Z', '2026-03-25T04:15:55Z', 'closed', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+
+        for (id, generated_at) in [
+            ("zr-retry-a", "2026-03-25T04:17:02Z"),
+            ("zr-retry-b", "2026-03-25T04:17:03Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO z_reports (
+                    id, shift_id, branch_id, terminal_id, report_date, generated_at,
+                    gross_sales, net_sales, total_orders, cash_sales, card_sales,
+                    refunds_total, voids_total, discounts_total, tips_total,
+                    expenses_total, cash_variance, opening_cash, closing_cash, expected_cash,
+                    payments_breakdown_json, report_json, sync_state, sync_last_error, sync_retry_count,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, 'shift-1', 'branch-1', 'terminal-1', '2026-03-24', ?2,
+                    10, 10, 1, 10, 0,
+                    0, 0, 0, 0,
+                    0, 0, 0, 0, 0,
+                    '{}', ?3, 'failed', 'Admin dashboard server error (HTTP 500)', 5,
+                    ?2, ?2
+                 )",
+                params![
+                    id,
+                    generated_at,
+                    serde_json::json!({
+                        "periodStart": "2026-03-24T04:01:27.396883800+00:00",
+                        "periodEnd": "2026-03-25T04:15:55.044004500+00:00"
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue
+                 (entity_type, entity_id, operation, payload, idempotency_key, status, retry_count, max_retries, last_error)
+                 VALUES ('z_report', ?1, 'insert', '{}', ?2, 'failed', 5, 5, 'Admin dashboard server error (HTTP 500)')",
+                params![id, format!("idem-{id}")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let conn = db.conn.lock().unwrap();
+        let locals = load_historical_local_z_report_rows(&conn).expect("locals");
+        drop(conn);
+
+        let remote = HashMap::new();
+        let conn = db.conn.lock().unwrap();
+        let repaired = apply_historical_z_report_repair(&conn, &locals, &remote).unwrap();
+        assert!(repaired >= 2);
+
+        let remaining_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM z_reports", [], |row| row.get(0))
+            .unwrap();
+        let pending_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM z_reports WHERE sync_state = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE entity_type = 'z_report' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(remaining_rows, 1);
+        assert_eq!(pending_rows, 1);
+        assert_eq!(queue_rows, 1);
     }
 
     #[test]

@@ -3121,12 +3121,12 @@ fn build_shift_checkout_doc(
     let snapshot_check_out_time = payload.and_then(|value| {
         object_text_field(value, &["snapshotCheckOutTime", "snapshot_check_out_time"])
     });
-    let snapshot_expected_amount =
-        payload.and_then(|value| object_number_field(value, &["expectedAmount", "expected_amount"]));
+    let snapshot_expected_amount = payload
+        .and_then(|value| object_number_field(value, &["expectedAmount", "expected_amount"]));
     let snapshot_closing_amount =
         payload.and_then(|value| object_number_field(value, &["closingAmount", "closing_amount"]));
-    let snapshot_variance_amount =
-        payload.and_then(|value| object_number_field(value, &["varianceAmount", "variance_amount"]));
+    let snapshot_variance_amount = payload
+        .and_then(|value| object_number_field(value, &["varianceAmount", "variance_amount"]));
     let terminal_name = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         resolve_printed_terminal_name_with_conn(&conn, explicit_terminal_name.as_deref())
@@ -3286,8 +3286,9 @@ fn build_shift_checkout_doc(
             )
         }),
         closing_amount: snapshot_closing_amount.or_else(|| {
-            number_from_paths(&cash_drawer, &["/closing_amount", "/closingAmount"])
-                .or_else(|| number_from_paths(&shift, &["/closing_cash_amount", "/closingCashAmount"]))
+            number_from_paths(&cash_drawer, &["/closing_amount", "/closingAmount"]).or_else(|| {
+                number_from_paths(&shift, &["/closing_cash_amount", "/closingCashAmount"])
+            })
         }),
         variance_amount: snapshot_variance_amount.or_else(|| {
             number_from_paths(&cash_drawer, &["/variance_amount", "/varianceAmount"])
@@ -5348,11 +5349,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_document_for_job_driver_shift_checkout_payload_overrides_manual_snapshot_values() {
+    fn test_build_document_for_job_driver_shift_checkout_payload_overrides_manual_snapshot_values()
+    {
         let db = test_db();
         {
             let conn = db.conn.lock().unwrap();
-            insert_active_cashier_fixture(&conn, "cashier-shift-print-override", "drawer-shift-print-override");
+            insert_active_cashier_fixture(
+                &conn,
+                "cashier-shift-print-override",
+                "drawer-shift-print-override",
+            );
         }
 
         let open_result = crate::shifts::open_shift(
