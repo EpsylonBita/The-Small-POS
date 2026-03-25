@@ -5080,6 +5080,183 @@ fn attach_remote_order_identity_to_local_order(
     Ok(Some(remote_order_id))
 }
 
+fn sync_remote_order_snapshot_into_local(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_order: &Value,
+    repaired_at: &str,
+) -> Result<usize, String> {
+    let remote_order_id = str_any(remote_order, &["id"]);
+    let order_number = str_any(remote_order, &["order_number", "orderNumber"]);
+    let items_json = remote_order.get("items").map(|items| match items {
+        Value::String(raw) => raw.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "[]".to_string()),
+    });
+    let total_amount = num_any(remote_order, &["total_amount", "totalAmount"]);
+    let tax_amount = num_any(remote_order, &["tax_amount", "taxAmount"]);
+    let subtotal = num_any(remote_order, &["subtotal"]);
+    let status = remote_order
+        .get("status")
+        .and_then(Value::as_str)
+        .map(normalize_order_status_for_sync);
+    let order_type = str_any(remote_order, &["order_type", "orderType"]);
+    let table_number = str_any(remote_order, &["table_number", "tableNumber"]);
+    let delivery_address = str_any(remote_order, &["delivery_address", "deliveryAddress"]);
+    let delivery_city = str_any(remote_order, &["delivery_city", "deliveryCity"]);
+    let delivery_postal_code = str_any(
+        remote_order,
+        &["delivery_postal_code", "deliveryPostalCode"],
+    );
+    let delivery_floor = str_any(remote_order, &["delivery_floor", "deliveryFloor"]);
+    let delivery_notes = str_any(remote_order, &["delivery_notes", "deliveryNotes"]);
+    let name_on_ringer = str_any(remote_order, &["name_on_ringer", "nameOnRinger"]);
+    let special_instructions = str_any(
+        remote_order,
+        &["special_instructions", "specialInstructions", "notes"],
+    );
+    let updated_at =
+        str_any(remote_order, &["updated_at", "updatedAt"]).unwrap_or_else(|| repaired_at.to_string());
+    let estimated_time = i64_any(remote_order, &["estimated_time", "estimatedTime"]);
+    let payment_status = remote_order
+        .get("payment_status")
+        .and_then(Value::as_str)
+        .map(|value| normalize_payment_status_for_sync(Some(value)));
+    let payment_method = normalize_payment_method_for_sync(
+        str_any(remote_order, &["payment_method", "paymentMethod"]).as_deref(),
+    );
+    let payment_tx = str_any(
+        remote_order,
+        &["payment_transaction_id", "paymentTransactionId"],
+    );
+    let staff_shift_id = str_any(remote_order, &["staff_shift_id", "staffShiftId"]);
+    let staff_id = str_any(remote_order, &["staff_id", "staffId"]);
+    let driver_id = str_any(remote_order, &["driver_id", "driverId"]);
+    let driver_name = str_any(remote_order, &["driver_name", "driverName"]);
+    let discount_percentage =
+        num_any(remote_order, &["discount_percentage", "discountPercentage"]);
+    let discount_amount = num_any(remote_order, &["discount_amount", "discountAmount"]);
+    let tip_amount = num_any(remote_order, &["tip_amount", "tipAmount"]);
+    let version = remote_order
+        .get("version")
+        .and_then(Value::as_i64)
+        .map(|value| value.max(1));
+    let terminal_id = str_any(remote_order, &["terminal_id", "terminalId"]);
+    let branch_id = str_any(remote_order, &["branch_id", "branchId"]);
+    let plugin = str_any(remote_order, &["plugin", "platform"]);
+    let external_plugin_order_id = str_any(
+        remote_order,
+        &["external_plugin_order_id", "externalPluginOrderId"],
+    );
+    let tax_rate = num_any(remote_order, &["tax_rate", "taxRate"]);
+    let delivery_fee = num_any(remote_order, &["delivery_fee", "deliveryFee"]);
+    let is_ghost = bool_any(remote_order, &["is_ghost", "isGhost"]).map(i64::from);
+    let ghost_source = str_any(remote_order, &["ghost_source", "ghostSource"]);
+    let ghost_metadata = remote_order
+        .get("ghost_metadata")
+        .or_else(|| remote_order.get("ghostMetadata"))
+        .and_then(|value| {
+            if value.is_null() {
+                return None;
+            }
+            if let Some(raw) = value.as_str() {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                return Some(trimmed.to_string());
+            }
+            Some(value.to_string())
+        });
+
+    conn.execute(
+        "UPDATE orders
+         SET supabase_id = COALESCE(?1, supabase_id),
+             order_number = COALESCE(?2, order_number),
+             items = COALESCE(?3, items),
+             total_amount = COALESCE(?4, total_amount),
+             tax_amount = COALESCE(?5, tax_amount),
+             subtotal = COALESCE(?6, subtotal),
+             status = COALESCE(?7, status),
+             order_type = COALESCE(?8, order_type),
+             table_number = COALESCE(?9, table_number),
+             delivery_address = COALESCE(?10, delivery_address),
+             delivery_city = COALESCE(?11, delivery_city),
+             delivery_postal_code = COALESCE(?12, delivery_postal_code),
+             delivery_floor = COALESCE(?13, delivery_floor),
+             delivery_notes = COALESCE(?14, delivery_notes),
+             name_on_ringer = COALESCE(?15, name_on_ringer),
+             special_instructions = COALESCE(?16, special_instructions),
+             estimated_time = COALESCE(?17, estimated_time),
+             payment_status = COALESCE(?18, payment_status),
+             payment_method = COALESCE(?19, payment_method),
+             payment_transaction_id = COALESCE(?20, payment_transaction_id),
+             staff_shift_id = COALESCE(?21, staff_shift_id),
+             staff_id = COALESCE(?22, staff_id),
+             driver_id = COALESCE(?23, driver_id),
+             driver_name = COALESCE(?24, driver_name),
+             discount_percentage = COALESCE(?25, discount_percentage),
+             discount_amount = COALESCE(?26, discount_amount),
+             tip_amount = COALESCE(?27, tip_amount),
+             version = COALESCE(?28, version),
+             terminal_id = COALESCE(?29, terminal_id),
+             branch_id = COALESCE(?30, branch_id),
+             plugin = COALESCE(?31, plugin),
+             external_plugin_order_id = COALESCE(?32, external_plugin_order_id),
+             tax_rate = COALESCE(?33, tax_rate),
+             delivery_fee = COALESCE(?34, delivery_fee),
+             is_ghost = COALESCE(?35, is_ghost),
+             ghost_source = COALESCE(?36, ghost_source),
+             ghost_metadata = COALESCE(?37, ghost_metadata),
+             sync_status = 'synced',
+             last_synced_at = datetime('now'),
+             updated_at = COALESCE(?38, updated_at, ?39)
+         WHERE id = ?40",
+        params![
+            remote_order_id,
+            order_number,
+            items_json,
+            total_amount,
+            tax_amount,
+            subtotal,
+            status,
+            order_type,
+            table_number,
+            delivery_address,
+            delivery_city,
+            delivery_postal_code,
+            delivery_floor,
+            delivery_notes,
+            name_on_ringer,
+            special_instructions,
+            estimated_time,
+            payment_status,
+            payment_method,
+            payment_tx,
+            staff_shift_id,
+            staff_id,
+            driver_id,
+            driver_name,
+            discount_percentage,
+            discount_amount,
+            tip_amount,
+            version,
+            terminal_id,
+            branch_id,
+            plugin,
+            external_plugin_order_id,
+            tax_rate,
+            delivery_fee,
+            is_ghost,
+            ghost_source,
+            ghost_metadata,
+            Some(updated_at.clone()),
+            repaired_at,
+            local_order_id,
+        ],
+    )
+    .map_err(|e| format!("sync remote order snapshot into local cache: {e}"))
+}
+
 fn extract_remote_orders_from_response(response: &Value) -> Vec<Value> {
     response
         .get("orders")
@@ -5103,11 +5280,10 @@ async fn resolve_remote_order_for_local_order(
         return Ok(None);
     };
 
-    if let Some(remote_order_id) = lookup.supabase_id.clone() {
-        return Ok(Some((remote_order_id, None)));
-    }
-
     let mut search_terms = Vec::new();
+    if let Some(remote_order_id) = lookup.supabase_id.as_ref() {
+        search_terms.push(remote_order_id.clone());
+    }
     if let Some(order_number) = lookup.order_number.as_ref() {
         search_terms.push(order_number.clone());
     }
@@ -5145,6 +5321,10 @@ async fn resolve_remote_order_for_local_order(
         }
     }
 
+    if let Some(remote_order_id) = lookup.supabase_id {
+        return Ok(Some((remote_order_id, None)));
+    }
+
     Ok(None)
 }
 
@@ -5159,6 +5339,12 @@ async fn reconcile_remote_payments_for_local_order(
     else {
         return Ok(0);
     };
+
+    if let Some(remote_order) = remote_order_context.as_ref() {
+        let synced_at = Utc::now().to_rfc3339();
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        sync_remote_order_snapshot_into_local(&conn, local_order_id, remote_order, &synced_at)?;
+    }
 
     let path = format!(
         "/api/pos/payments?limit=200&order_id={}",
@@ -10508,8 +10694,8 @@ mod tests {
                 id, order_number, items, total_amount, status, order_type,
                 payment_status, payment_method, sync_status, created_at, updated_at
              ) VALUES (
-                'ord-repair-by-number', 'ORD-REPAIR-100', '[]', 6.0, 'completed', 'pickup',
-                'paid', 'cash', 'failed', '2026-03-25T05:10:00Z', '2026-03-25T05:10:00Z'
+                'ord-repair-by-number', 'ORD-REPAIR-100', '[]', 12.0, 'completed', 'pickup',
+                'partially_paid', 'split', 'failed', '2026-03-25T05:10:00Z', '2026-03-25T05:10:00Z'
              )",
             [],
         )
@@ -10525,6 +10711,9 @@ mod tests {
             "payment_method": "cash",
             "status": "completed",
             "total_amount": 6.0,
+            "subtotal": 6.0,
+            "discount_amount": 0.0,
+            "delivery_fee": 0.0,
             "updated_at": "2026-03-25T05:12:00Z"
         });
         let remote_orders = vec![remote_order.clone()];
@@ -10543,6 +10732,15 @@ mod tests {
         .expect("attach remote identity");
         assert_eq!(attached.as_deref(), Some("remote-order-repair-100"));
 
+        let snapshot_changed = sync_remote_order_snapshot_into_local(
+            &conn,
+            "ord-repair-by-number",
+            &remote_order,
+            "2026-03-25T05:12:30Z",
+        )
+        .expect("sync remote order snapshot");
+        assert_eq!(snapshot_changed, 1);
+
         let remote_payment = serde_json::json!({
             "id": "remote-payment-repair-100",
             "order_id": "remote-order-repair-100",
@@ -10556,18 +10754,30 @@ mod tests {
             sync_remote_payment_into_local(&conn, &remote_payment).expect("sync remote payment");
         assert_eq!(changed, 1);
 
-        let (supabase_id, payment_count): (Option<String>, i64) = conn
+        let (supabase_id, total_amount, payment_status, payment_method, payment_count): (
+            Option<String>,
+            f64,
+            String,
+            String,
+            i64,
+        ) = conn
             .query_row(
                 "SELECT
                      supabase_id,
+                     total_amount,
+                     payment_status,
+                     payment_method,
                      (SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-repair-by-number')
                  FROM orders
                  WHERE id = 'ord-repair-by-number'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
         assert_eq!(supabase_id.as_deref(), Some("remote-order-repair-100"));
+        assert_eq!(total_amount, 6.0);
+        assert_eq!(payment_status, "paid");
+        assert_eq!(payment_method, "cash");
         assert_eq!(payment_count, 1);
     }
 
