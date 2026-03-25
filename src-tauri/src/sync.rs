@@ -3750,7 +3750,7 @@ fn mark_payment_queue_row_synced(
              next_retry_at = NULL,
              last_error = NULL,
              updated_at = ?1
-         WHERE entity_type = 'payment'
+         WHERE entity_type IN ('payment', 'order_payments')
            AND entity_id = ?2
            AND status != 'synced'",
         params![synced_at, payment_id],
@@ -3781,6 +3781,121 @@ fn mark_local_payment_applied(
     .map_err(|e| format!("mark local payment applied: {e}"))?;
 
     mark_payment_queue_row_synced(conn, payment_id, synced_at)
+}
+
+fn resolve_duplicate_payment_total_conflict_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+    resolved_at: &str,
+) -> Result<Option<String>, String> {
+    let payment_context: Option<(String, String, f64, Option<String>, i64)> = conn
+        .query_row(
+            "SELECT
+                 order_id,
+                 method,
+                 amount,
+                 NULLIF(TRIM(COALESCE(transaction_ref, '')), ''),
+                 (
+                     SELECT COUNT(*)
+                     FROM payment_adjustments
+                     WHERE payment_id = op.id
+                 )
+             FROM order_payments op
+             WHERE op.id = ?1
+             LIMIT 1",
+            params![payment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load duplicate payment context: {e}"))?;
+
+    let Some((order_id, method, amount, transaction_ref, adjustment_count)) = payment_context
+    else {
+        return Ok(None);
+    };
+
+    if adjustment_count > 0 {
+        return Ok(None);
+    }
+
+    let canonical: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT
+                 id,
+                 NULLIF(TRIM(COALESCE(remote_payment_id, '')), '')
+             FROM order_payments
+             WHERE order_id = ?1
+               AND id != ?2
+               AND status = 'completed'
+               AND method = ?3
+               AND ABS(amount - ?4) < 0.01
+               AND (
+                    NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL
+                    OR COALESCE(sync_state, '') = 'applied'
+               )
+               AND (
+                    ?5 IS NULL
+                    OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') = ?5
+                    OR NULLIF(TRIM(COALESCE(transaction_ref, '')), '') IS NULL
+               )
+             ORDER BY
+                 CASE
+                     WHEN NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NOT NULL THEN 0
+                     ELSE 1
+                 END,
+                 COALESCE(updated_at, created_at, '') ASC,
+                 id ASC
+             LIMIT 1",
+            params![order_id, payment_id, method, amount, transaction_ref],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("resolve canonical duplicate payment target: {e}"))?;
+
+    let Some((canonical_payment_id, _canonical_remote_payment_id)) = canonical else {
+        return Ok(None);
+    };
+
+    let void_reason = format!(
+        "Superseded duplicate local payment replay; canonical payment {canonical_payment_id}"
+    );
+
+    conn.execute(
+        "UPDATE order_payments
+         SET status = 'voided',
+             voided_at = ?1,
+             void_reason = ?2,
+             sync_status = 'synced',
+             sync_state = 'applied',
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?1
+         WHERE id = ?3",
+        params![resolved_at, void_reason, payment_id],
+    )
+    .map_err(|e| format!("void stale duplicate payment row: {e}"))?;
+
+    mark_payment_queue_row_synced(conn, payment_id, resolved_at)?;
+
+    Ok(Some(canonical_payment_id))
+}
+
+fn resolve_duplicate_payment_total_conflict(
+    db: &DbState,
+    payment_id: &str,
+) -> Result<Option<String>, String> {
+    let resolved_at = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    resolve_duplicate_payment_total_conflict_with_conn(&conn, payment_id, &resolved_at)
 }
 
 fn hydrate_local_payment_from_remote(
@@ -4053,7 +4168,7 @@ fn reconcile_applied_payment_queue_rows(db: &DbState) -> Result<usize, String> {
             "SELECT DISTINCT op.id
              FROM sync_queue sq
              JOIN order_payments op ON op.id = sq.entity_id
-             WHERE sq.entity_type = 'payment'
+             WHERE sq.entity_type IN ('payment', 'order_payments')
                AND sq.status != 'synced'
                AND (
                     COALESCE(op.remote_payment_id, '') != ''
@@ -4890,21 +5005,21 @@ async fn recover_payment_total_conflicts(
     admin_url: &str,
     api_key: &str,
 ) -> Result<usize, String> {
-    let local_order_ids: Vec<String> = {
+    let pending_conflicts: Vec<(String, String)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT op.order_id
+                "SELECT DISTINCT op.id, op.order_id
                  FROM sync_queue sq
                  JOIN order_payments op ON op.id = sq.entity_id
-                 WHERE sq.entity_type = 'payment'
+                 WHERE sq.entity_type IN ('payment', 'order_payments')
                    AND sq.status != 'synced'
                    AND LOWER(COALESCE(sq.last_error, '')) LIKE '%payment exceeds order total%'",
             )
             .map_err(|e| format!("prepare payment conflict recovery query: {e}"))?;
 
         let rows = stmt
-            .query_map([], |row| row.get(0))
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("query payment conflict recovery rows: {e}"))?
             .filter_map(|row| row.ok())
             .collect();
@@ -4912,21 +5027,36 @@ async fn recover_payment_total_conflicts(
         rows
     };
 
-    let mut reconciled = 0usize;
-    for local_order_id in local_order_ids {
-        reconciled +=
+    let mut remote_reconciled = 0usize;
+    let mut duplicate_resolved = 0usize;
+
+    for (payment_id, local_order_id) in pending_conflicts {
+        remote_reconciled +=
             reconcile_remote_payments_for_local_order(db, admin_url, api_key, &local_order_id)
                 .await?;
+
+        if let Some(canonical_payment_id) =
+            resolve_duplicate_payment_total_conflict(db, &payment_id)?
+        {
+            duplicate_resolved += 1;
+            info!(
+                payment_id = %payment_id,
+                order_id = %local_order_id,
+                canonical_payment_id = %canonical_payment_id,
+                "Resolved stale duplicate local payment conflict after canonical payment recovery"
+            );
+        }
     }
 
-    if reconciled > 0 {
+    if remote_reconciled > 0 || duplicate_resolved > 0 {
         info!(
-            reconciled,
+            remote_reconciled,
+            duplicate_resolved,
             "Recovered stale payment total-conflict rows from canonical remote payments"
         );
     }
 
-    Ok(reconciled)
+    Ok(remote_reconciled + duplicate_resolved)
 }
 
 /// Execute one sync cycle: read pending queue items and POST to admin.
@@ -7955,6 +8085,28 @@ async fn sync_payment_items(
                             );
                         }
                     }
+
+                    match resolve_duplicate_payment_total_conflict(db, entity_id) {
+                        Ok(Some(canonical_payment_id)) => {
+                            info!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                canonical_payment_id = %canonical_payment_id,
+                                "Payment sync conflict resolved by voiding stale duplicate local payment"
+                            );
+                            synced += 1;
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(resolve_error) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                error = %resolve_error,
+                                "Failed to resolve stale duplicate local payment conflict"
+                            );
+                        }
+                    }
                 }
 
                 warn!(payment_id = %entity_id, error = %e, "Payment sync failed");
@@ -10420,6 +10572,17 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'order_payments', 'pay-applied-stale', 'insert', '{}', 'order_payments:pay-applied-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
         drop(conn);
 
         let reconciled = reconcile_applied_payment_queue_rows(&db).expect("reconcile applied rows");
@@ -10437,6 +10600,125 @@ mod tests {
             .unwrap();
         assert_eq!(queue_status, "synced");
         assert!(queue_error.is_none());
+
+        let (legacy_queue_status, legacy_queue_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'order_payments' AND entity_id = 'pay-applied-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(legacy_queue_status, "synced");
+        assert!(legacy_queue_error.is_none());
+    }
+
+    #[test]
+    fn test_resolve_duplicate_payment_total_conflict_voids_stale_duplicate_and_clears_queue_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-duplicate', 'remote-payment-duplicate', '[]', 6.0, 'completed', 'synced',
+                datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-canonical', 'ord-payment-duplicate', 'cash', 6.0, 'EUR', 'completed',
+                'remote-pay-canonical', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-duplicate', 'ord-payment-duplicate', 'cash', 6.0, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'payment', 'pay-duplicate', 'insert', '{}', 'payment:pay-duplicate',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'order_payments', 'pay-duplicate', 'insert', '{}', 'order_payments:pay-duplicate',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let resolved_at = "2026-03-25T11:39:00Z";
+        let canonical_payment_id = {
+            let conn = db.conn.lock().unwrap();
+            resolve_duplicate_payment_total_conflict_with_conn(&conn, "pay-duplicate", resolved_at)
+                .expect("resolve duplicate conflict")
+        };
+
+        assert_eq!(canonical_payment_id.as_deref(), Some("pay-canonical"));
+
+        let conn = db.conn.lock().unwrap();
+        let (status, sync_status, sync_state, void_reason): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state, void_reason
+                 FROM order_payments
+                 WHERE id = 'pay-duplicate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+        assert!(void_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("pay-canonical"));
+
+        let synced_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_id = 'pay-duplicate'
+                   AND entity_type IN ('payment', 'order_payments')
+                   AND status = 'synced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_queue_rows, 2);
     }
 
     #[test]
