@@ -4993,6 +4993,8 @@ struct LocalOrderRemoteLookup {
     local_order_id: String,
     supabase_id: Option<String>,
     order_number: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 fn load_local_order_remote_lookup(
@@ -5003,7 +5005,9 @@ fn load_local_order_remote_lookup(
         "SELECT
              id,
              NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
-             NULLIF(TRIM(COALESCE(order_number, '')), '')
+             NULLIF(TRIM(COALESCE(order_number, '')), ''),
+             NULLIF(TRIM(COALESCE(created_at, '')), ''),
+             NULLIF(TRIM(COALESCE(updated_at, '')), '')
          FROM orders
          WHERE id = ?1
          LIMIT 1",
@@ -5013,11 +5017,32 @@ fn load_local_order_remote_lookup(
                 local_order_id: row.get(0)?,
                 supabase_id: row.get(1)?,
                 order_number: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
             })
         },
     )
     .optional()
     .map_err(|e| format!("load local order lookup context for payment recovery: {e}"))
+}
+
+fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> String {
+    for candidate in [&lookup.updated_at, &lookup.created_at] {
+        let Some(raw_value) = candidate.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(raw_value) {
+            return parsed
+                .with_timezone(&Utc)
+                .checked_sub_signed(ChronoDuration::days(1))
+                .unwrap_or_else(|| DateTime::<Utc>::from(UNIX_EPOCH))
+                .to_rfc3339_opts(SecondsFormat::Secs, true);
+        }
+    }
+
+    "1970-01-01T00:00:00Z".to_string()
 }
 
 fn select_remote_order_match<'a>(
@@ -5319,6 +5344,53 @@ async fn resolve_remote_order_for_local_order(
                 return Ok(Some((remote_order_id, Some(remote_order_value))));
             }
         }
+    }
+
+    let mut sync_since_cursor = build_remote_order_repair_since_cursor(&lookup);
+    for _page in 0..3 {
+        let path = format!(
+            "/api/pos/orders/sync?limit=200&since={}",
+            percent_encode(sync_since_cursor.trim())
+        );
+        let response = api::fetch_from_admin(admin_url, api_key, &path, "GET", None)
+            .await
+            .map_err(|e| format!("scan remote order sync history during payment recovery: {e}"))?;
+        let remote_orders = extract_remote_orders_from_response(&response);
+
+        if let Some(remote_order) = select_remote_order_match(&lookup, &remote_orders) {
+            let now = Utc::now().to_rfc3339();
+            let remote_order_value = remote_order.clone();
+            let remote_order_id = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                attach_remote_order_identity_to_local_order(
+                    &conn,
+                    local_order_id,
+                    &remote_order_value,
+                    &now,
+                )?
+            };
+            if let Some(remote_order_id) = remote_order_id {
+                return Ok(Some((remote_order_id, Some(remote_order_value))));
+            }
+        }
+
+        let has_more = response
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !has_more {
+            break;
+        }
+
+        let Some(next_cursor) = remote_orders
+            .iter()
+            .map(remote_order_changed_at)
+            .filter(|value| !value.trim().is_empty())
+            .next_back()
+        else {
+            break;
+        };
+        sync_since_cursor = next_cursor;
     }
 
     if let Some(remote_order_id) = lookup.supabase_id {
@@ -10779,6 +10851,20 @@ mod tests {
         assert_eq!(payment_status, "paid");
         assert_eq!(payment_method, "cash");
         assert_eq!(payment_count, 1);
+    }
+
+    #[test]
+    fn test_build_remote_order_repair_since_cursor_uses_previous_day_of_updated_at() {
+        let lookup = LocalOrderRemoteLookup {
+            local_order_id: "ord-repair-window".to_string(),
+            supabase_id: Some("remote-order-repair-window".to_string()),
+            order_number: Some("ORD-REPAIR-WINDOW".to_string()),
+            created_at: Some("2026-03-23T04:15:00Z".to_string()),
+            updated_at: Some("2026-03-25T05:10:00Z".to_string()),
+        };
+
+        let since_cursor = build_remote_order_repair_since_cursor(&lookup);
+        assert_eq!(since_cursor, "2026-03-24T05:10:00Z");
     }
 
     #[test]
