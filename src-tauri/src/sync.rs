@@ -4988,29 +4988,175 @@ fn is_payment_total_conflict_error(error: &str) -> bool {
         || (lower.contains("http 422") && lower.contains("existing completed"))
 }
 
+#[derive(Clone, Debug)]
+struct LocalOrderRemoteLookup {
+    local_order_id: String,
+    supabase_id: Option<String>,
+    order_number: Option<String>,
+}
+
+fn load_local_order_remote_lookup(
+    conn: &Connection,
+    local_order_id: &str,
+) -> Result<Option<LocalOrderRemoteLookup>, String> {
+    conn.query_row(
+        "SELECT
+             id,
+             NULLIF(TRIM(COALESCE(supabase_id, '')), ''),
+             NULLIF(TRIM(COALESCE(order_number, '')), '')
+         FROM orders
+         WHERE id = ?1
+         LIMIT 1",
+        params![local_order_id],
+        |row| {
+            Ok(LocalOrderRemoteLookup {
+                local_order_id: row.get(0)?,
+                supabase_id: row.get(1)?,
+                order_number: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load local order lookup context for payment recovery: {e}"))
+}
+
+fn select_remote_order_match<'a>(
+    lookup: &LocalOrderRemoteLookup,
+    remote_orders: &'a [Value],
+) -> Option<&'a Value> {
+    remote_orders.iter().find(|remote_order| {
+        let remote_id_matches = lookup
+            .supabase_id
+            .as_ref()
+            .map(|remote_id| {
+                str_any(remote_order, &["id"])
+                    .map(|candidate| candidate == *remote_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if remote_id_matches {
+            return true;
+        }
+
+        let client_order_id_matches = str_any(remote_order, &["client_order_id", "clientOrderId"])
+            .map(|candidate| candidate == lookup.local_order_id)
+            .unwrap_or(false);
+        if client_order_id_matches {
+            return true;
+        }
+
+        lookup
+            .order_number
+            .as_ref()
+            .map(|order_number| {
+                str_any(remote_order, &["order_number", "orderNumber"])
+                    .map(|candidate| candidate.eq_ignore_ascii_case(order_number))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn attach_remote_order_identity_to_local_order(
+    conn: &Connection,
+    local_order_id: &str,
+    remote_order: &Value,
+    now: &str,
+) -> Result<Option<String>, String> {
+    let Some(remote_order_id) = str_any(remote_order, &["id"]) else {
+        return Ok(None);
+    };
+
+    conn.execute(
+        "UPDATE orders
+         SET supabase_id = ?1,
+             updated_at = ?2
+         WHERE id = ?3
+           AND COALESCE(NULLIF(TRIM(COALESCE(supabase_id, '')), ''), '') != ?1",
+        params![remote_order_id, now, local_order_id],
+    )
+    .map_err(|e| format!("attach remote order identity for payment recovery: {e}"))?;
+
+    Ok(Some(remote_order_id))
+}
+
+fn extract_remote_orders_from_response(response: &Value) -> Vec<Value> {
+    response
+        .get("orders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+async fn resolve_remote_order_for_local_order(
+    db: &DbState,
+    admin_url: &str,
+    api_key: &str,
+    local_order_id: &str,
+) -> Result<Option<(String, Option<Value>)>, String> {
+    let lookup = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        load_local_order_remote_lookup(&conn, local_order_id)?
+    };
+
+    let Some(lookup) = lookup else {
+        return Ok(None);
+    };
+
+    if let Some(remote_order_id) = lookup.supabase_id.clone() {
+        return Ok(Some((remote_order_id, None)));
+    }
+
+    let mut search_terms = Vec::new();
+    if let Some(order_number) = lookup.order_number.as_ref() {
+        search_terms.push(order_number.clone());
+    }
+    search_terms.push(lookup.local_order_id.clone());
+
+    for search_term in search_terms {
+        if search_term.trim().is_empty() {
+            continue;
+        }
+
+        let path = format!(
+            "/api/pos/orders?limit=25&search={}",
+            percent_encode(search_term.trim())
+        );
+        let response = api::fetch_from_admin(admin_url, api_key, &path, "GET", None)
+            .await
+            .map_err(|e| format!("search remote order during payment recovery: {e}"))?;
+        let remote_orders = extract_remote_orders_from_response(&response);
+
+        if let Some(remote_order) = select_remote_order_match(&lookup, &remote_orders) {
+            let now = Utc::now().to_rfc3339();
+            let remote_order_value = remote_order.clone();
+            let remote_order_id = {
+                let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                attach_remote_order_identity_to_local_order(
+                    &conn,
+                    local_order_id,
+                    &remote_order_value,
+                    &now,
+                )?
+            };
+            if let Some(remote_order_id) = remote_order_id {
+                return Ok(Some((remote_order_id, Some(remote_order_value))));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 async fn reconcile_remote_payments_for_local_order(
     db: &DbState,
     admin_url: &str,
     api_key: &str,
     local_order_id: &str,
 ) -> Result<usize, String> {
-    let remote_order_id: Option<String> = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(
-            "SELECT supabase_id
-             FROM orders
-             WHERE id = ?1
-             LIMIT 1",
-            params![local_order_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(|e| format!("load remote order id for payment recovery: {e}"))?
-        .flatten()
-        .filter(|value: &String| !value.trim().is_empty())
-    };
-
-    let Some(remote_order_id) = remote_order_id else {
+    let Some((remote_order_id, remote_order_context)) =
+        resolve_remote_order_for_local_order(db, admin_url, api_key, local_order_id).await?
+    else {
         return Ok(0);
     };
 
@@ -5034,6 +5180,10 @@ async fn reconcile_remote_payments_for_local_order(
         });
 
     if payments.is_empty() {
+        if let Some(remote_order) = remote_order_context {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            return maybe_reconstruct_paid_remote_order_payment(&conn, &remote_order);
+        }
         return Ok(0);
     }
 
@@ -10347,6 +10497,78 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn test_order_number_match_can_attach_remote_identity_and_hydrate_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, order_type,
+                payment_status, payment_method, sync_status, created_at, updated_at
+             ) VALUES (
+                'ord-repair-by-number', 'ORD-REPAIR-100', '[]', 6.0, 'completed', 'pickup',
+                'paid', 'cash', 'failed', '2026-03-25T05:10:00Z', '2026-03-25T05:10:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let lookup = load_local_order_remote_lookup(&conn, "ord-repair-by-number")
+            .expect("load lookup")
+            .expect("local order should exist");
+        let remote_order = serde_json::json!({
+            "id": "remote-order-repair-100",
+            "order_number": "ORD-REPAIR-100",
+            "payment_status": "paid",
+            "payment_method": "cash",
+            "status": "completed",
+            "total_amount": 6.0,
+            "updated_at": "2026-03-25T05:12:00Z"
+        });
+        let remote_orders = vec![remote_order.clone()];
+        assert_eq!(
+            select_remote_order_match(&lookup, &remote_orders)
+                .and_then(|matched| str_any(matched, &["id"])),
+            Some("remote-order-repair-100".to_string())
+        );
+
+        let attached = attach_remote_order_identity_to_local_order(
+            &conn,
+            "ord-repair-by-number",
+            &remote_order,
+            "2026-03-25T05:12:30Z",
+        )
+        .expect("attach remote identity");
+        assert_eq!(attached.as_deref(), Some("remote-order-repair-100"));
+
+        let remote_payment = serde_json::json!({
+            "id": "remote-payment-repair-100",
+            "order_id": "remote-order-repair-100",
+            "amount": 6.0,
+            "payment_method": "cash",
+            "currency": "EUR",
+            "created_at": "2026-03-25T05:12:35Z",
+            "updated_at": "2026-03-25T05:12:35Z"
+        });
+        let changed =
+            sync_remote_payment_into_local(&conn, &remote_payment).expect("sync remote payment");
+        assert_eq!(changed, 1);
+
+        let (supabase_id, payment_count): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT
+                     supabase_id,
+                     (SELECT COUNT(*) FROM order_payments WHERE order_id = 'ord-repair-by-number')
+                 FROM orders
+                 WHERE id = 'ord-repair-by-number'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(supabase_id.as_deref(), Some("remote-order-repair-100"));
+        assert_eq!(payment_count, 1);
     }
 
     #[test]
