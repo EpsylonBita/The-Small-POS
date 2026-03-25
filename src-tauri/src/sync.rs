@@ -3885,6 +3885,7 @@ fn resolve_duplicate_payment_total_conflict_with_conn(
     .map_err(|e| format!("void stale duplicate payment row: {e}"))?;
 
     mark_payment_queue_row_synced(conn, payment_id, resolved_at)?;
+    recompute_local_order_payment_snapshot(conn, &order_id, resolved_at)?;
 
     Ok(Some(canonical_payment_id))
 }
@@ -3896,6 +3897,66 @@ fn resolve_duplicate_payment_total_conflict(
     let resolved_at = Utc::now().to_rfc3339();
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     resolve_duplicate_payment_total_conflict_with_conn(&conn, payment_id, &resolved_at)
+}
+
+fn recompute_local_order_payment_snapshot(
+    conn: &Connection,
+    order_id: &str,
+    now: &str,
+) -> Result<(), String> {
+    let payment_context: Option<(String, String)> = conn
+        .query_row(
+            "SELECT
+                 op.id,
+                 COALESCE(NULLIF(TRIM(op.method), ''), 'split')
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND op.status = 'completed'
+             ORDER BY COALESCE(op.updated_at, op.created_at, '') DESC, op.id DESC
+             LIMIT 1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load local payment snapshot for order recompute: {e}"))?;
+
+    let Some((payment_id, method)) = payment_context else {
+        return Ok(());
+    };
+
+    let has_item_assignments = match conn.query_row(
+        "SELECT COUNT(*)
+         FROM sqlite_master
+         WHERE type = 'table'
+           AND name = 'order_payment_items'",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(table_count) if table_count > 0 => {
+            conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM order_payment_items
+                    WHERE payment_id = ?1
+                    LIMIT 1
+                )",
+                params![payment_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+                != 0
+        }
+        _ => false,
+    };
+
+    payments::recompute_order_payment_state(
+        conn,
+        order_id,
+        &method,
+        has_item_assignments,
+        now,
+        &payment_id,
+    )
 }
 
 fn hydrate_local_payment_from_remote(
@@ -4998,6 +5059,38 @@ async fn reconcile_remote_payments_for_local_order(
     }
 
     Ok(reconciled)
+}
+
+pub(crate) async fn repair_local_payment_mirrors_for_orders(
+    db: &DbState,
+    order_ids: &[String],
+) -> Result<usize, String> {
+    if order_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let admin_url = storage::get_credential("admin_dashboard_url")
+        .ok_or("Missing admin dashboard URL for blocking payment repair")?;
+    let api_key = load_zeroized_pos_api_key_optional()
+        .ok_or("Missing POS API key for blocking payment repair")?;
+    let now = Utc::now().to_rfc3339();
+    let mut repaired = 0usize;
+    let mut seen = HashSet::new();
+
+    for order_id in order_ids {
+        let normalized = order_id.trim();
+        if normalized.is_empty() || !seen.insert(normalized.to_string()) {
+            continue;
+        }
+
+        repaired +=
+            reconcile_remote_payments_for_local_order(db, &admin_url, &api_key, normalized).await?;
+
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        recompute_local_order_payment_snapshot(&conn, normalized, &now)?;
+    }
+
+    Ok(repaired)
 }
 
 async fn recover_payment_total_conflicts(
@@ -10621,10 +10714,11 @@ mod tests {
 
         conn.execute(
             "INSERT INTO orders (
-                id, supabase_id, items, total_amount, status, sync_status, created_at, updated_at
+                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                payment_transaction_id, sync_status, created_at, updated_at
             ) VALUES (
-                'ord-payment-duplicate', 'remote-payment-duplicate', '[]', 6.0, 'completed', 'synced',
-                datetime('now'), datetime('now')
+                'ord-payment-duplicate', 'remote-payment-duplicate', '[]', 6.0, 'completed',
+                'partially_paid', 'split', 'pay-duplicate', 'synced', datetime('now'), datetime('now')
             )",
             [],
         )
@@ -10719,6 +10813,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(synced_queue_rows, 2);
+
+        let (order_payment_status, order_payment_method, order_transaction_id): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT payment_status, payment_method, payment_transaction_id
+                 FROM orders
+                 WHERE id = 'ord-payment-duplicate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(order_payment_status, "paid");
+        assert_eq!(order_payment_method.as_deref(), Some("split"));
+        assert_eq!(order_transaction_id.as_deref(), Some("pay-canonical"));
     }
 
     #[test]

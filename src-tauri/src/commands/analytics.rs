@@ -536,6 +536,14 @@ fn ensure_sync_queue_clear_for_z_report(db: &db::DbState, stage: &str) -> Result
     ))
 }
 
+fn is_z_report_payment_settlement_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("cannot generate z-report:")
+        && (lower.contains("missing local payment row")
+            || lower.contains("genuinely unsettled payment")
+            || lower.contains("genuinely unpaid/partial"))
+}
+
 fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_json::Value {
     match arg0 {
         Some(serde_json::Value::String(shift_id)) => serde_json::json!({
@@ -1309,7 +1317,30 @@ pub async fn report_submit_z_report(
         .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
     ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
 
-    let prepared = zreport::prepare_z_report_submission(&db, &payload)?;
+    let prepared = match zreport::prepare_z_report_submission(&db, &payload) {
+        Ok(prepared) => prepared,
+        Err(error) if is_z_report_payment_settlement_error(&error) => {
+            let blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
+            if blockers.is_empty() {
+                return Err(error);
+            }
+
+            let blocking_order_ids: Vec<String> = blockers
+                .iter()
+                .map(|blocker| blocker.order_id.clone())
+                .collect();
+            crate::sync::repair_local_payment_mirrors_for_orders(&db, &blocking_order_ids)
+                .await
+                .map_err(|repair_error| {
+                    format!(
+                        "Cannot close day: failed to refresh payment mirrors for blocking orders: {repair_error}"
+                    )
+                })?;
+
+            zreport::prepare_z_report_submission(&db, &payload)?
+        }
+        Err(error) => return Err(error),
+    };
 
     crate::sync::force_sync(&db, &sync_state, &app)
         .await
