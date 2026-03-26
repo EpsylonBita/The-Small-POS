@@ -20,6 +20,7 @@ const KEY_BUSINESS_TYPE: &str = "business_type";
 const KEY_SUPABASE_URL: &str = "supabase_url";
 const KEY_SUPABASE_ANON_KEY: &str = "supabase_anon_key";
 const KEY_GHOST_MODE_FEATURE_ENABLED: &str = "ghost_mode_feature_enabled";
+pub const KEY_CALLERID_SIP_PASSWORD: &str = "callerid_sip_password";
 
 /// All credential keys managed by this module.
 const ALL_KEYS: &[&str] = &[
@@ -32,6 +33,7 @@ const ALL_KEYS: &[&str] = &[
     KEY_SUPABASE_URL,
     KEY_SUPABASE_ANON_KEY,
     KEY_GHOST_MODE_FEATURE_ENABLED,
+    KEY_CALLERID_SIP_PASSWORD,
 ];
 
 // ---------------------------------------------------------------------------

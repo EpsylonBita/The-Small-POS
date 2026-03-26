@@ -24,6 +24,7 @@ import CustomTitleBar from "./components/CustomTitleBar";
 import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
+import { useCallerIdNotifications } from "./hooks/useCallerIdNotifications";
 import { useWindowState } from "./hooks/useWindowState";
 import { updateAdminUrlFromSettings } from "../config/environment";
 import { setSupabaseContext } from "../shared/supabase-config";
@@ -466,6 +467,9 @@ function AppContent() {
 
   // Start background menu version polling once a user session exists
   useMenuVersionPolling({ enabled: !!user });
+
+  // Caller ID notifications (gated by module availability inside the hook)
+  useCallerIdNotifications();
 
   // Track hash route for unauthenticated screens so UI updates without reload
   const [hash, setHash] = useState<string>(typeof window !== 'undefined' ? window.location.hash : '');

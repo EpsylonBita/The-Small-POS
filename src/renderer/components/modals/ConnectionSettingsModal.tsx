@@ -8,7 +8,8 @@ import { Wifi, Lock, Palette, Globe, ChevronDown, Sun, Moon, Monitor, Database, 
 import { inputBase, liquidGlassModalButton } from '../../styles/designSystem';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import PrinterSettingsModal from './PrinterSettingsModal';
-import CashRegisterSection from '../peripherals/CashRegisterSection';
+import CashRegisterSection, { type CashRegisterSetupIntent } from '../peripherals/CashRegisterSection';
+import CallerIdSection from '../peripherals/CallerIdSection';
 import { PaymentTerminalsSection } from '../ecr/PaymentTerminalsSection';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { useHardwareManager } from '../../hooks/useHardwareManager';
@@ -99,6 +100,7 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
   const [printerSettingsInitialMode, setPrinterSettingsInitialMode] = useState<'quick' | 'expert'>('quick')
   const [printerSettingsAutoStartWizard, setPrinterSettingsAutoStartWizard] = useState(false)
   const [showPaymentTerminalsSection, setShowPaymentTerminalsSection] = useState(false)
+  const [cashRegisterSetupIntent, setCashRegisterSetupIntent] = useState<CashRegisterSetupIntent | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
   const [showDatabaseSettings, setShowDatabaseSettings] = useState(false)
   const [showClearOperationalConfirm, setShowClearOperationalConfirm] = useState(false)
@@ -813,7 +815,17 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
       closeOnEscape={true}
     >
       {showPaymentTerminalsSection ? (
-        <PaymentTerminalsSection onBack={() => setShowPaymentTerminalsSection(false)} />
+        <PaymentTerminalsSection
+          onBack={() => setShowPaymentTerminalsSection(false)}
+          onOpenCashRegisterSetup={() => {
+            setShowPaymentTerminalsSection(false)
+            setShowPeripheralsSettings(true)
+            setCashRegisterSetupIntent({
+              mode: 'rbs_network',
+              token: Date.now(),
+            })
+          }}
+        />
       ) : (
       <div className="space-y-4">
         <div className="rounded-xl backdrop-blur-sm border liquid-glass-modal-border bg-emerald-500/10 dark:bg-emerald-500/10 px-4 py-4 transition-all">
@@ -1836,7 +1848,12 @@ const ConnectionSettingsModal: React.FC<Props> = ({ isOpen, onClose, initialSect
               <div className="border-t liquid-glass-modal-border" />
 
               {/* --- Cash Register / Fiscal Printer --- */}
-              <CashRegisterSection />
+              <CashRegisterSection setupIntent={cashRegisterSetupIntent} />
+
+              <div className="border-t liquid-glass-modal-border" />
+
+              {/* --- Caller ID / VoIP --- */}
+              <CallerIdSection />
 
               {/* Save Peripherals Button */}
               <div className="pt-2 border-t liquid-glass-modal-border">

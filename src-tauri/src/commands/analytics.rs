@@ -464,6 +464,55 @@ fn flatten_generated_z_report_data(generated: &serde_json::Value) -> serde_json:
         }
     }
 
+    let period_start = obj
+        .get("periodStart")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            obj.get("period")
+                .and_then(|period| period.get("start"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+    let period_end = obj
+        .get("periodEnd")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            obj.get("period")
+                .and_then(|period| period.get("end"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    if !obj.contains_key("period") && (period_start.is_some() || period_end.is_some()) {
+        obj.insert(
+            "period".to_string(),
+            serde_json::json!({
+                "start": period_start.clone(),
+                "end": period_end.clone(),
+            }),
+        );
+    }
+
+    if !obj.contains_key("periodStart") {
+        if let Some(period_start) = period_start {
+            obj.insert(
+                "periodStart".to_string(),
+                serde_json::Value::String(period_start),
+            );
+        }
+    }
+
+    if !obj.contains_key("periodEnd") {
+        if let Some(period_end) = period_end {
+            obj.insert(
+                "periodEnd".to_string(),
+                serde_json::Value::String(period_end),
+            );
+        }
+    }
+
     report_data
 }
 
@@ -1653,5 +1702,24 @@ mod dto_tests {
         assert_eq!(flattened["terminalName"], "Front Counter");
         assert_eq!(flattened["shiftCount"], 3);
         assert_eq!(flattened["sales"]["totalSales"], 245.0);
+    }
+
+    #[test]
+    fn flatten_generated_z_report_data_synthesizes_compatible_period_fields() {
+        let generated = serde_json::json!({
+            "report": {
+                "reportJson": {
+                    "date": "2026-03-15",
+                    "periodStart": "2026-03-15T08:00:00Z",
+                    "periodEnd": "2026-03-15T18:00:00Z"
+                }
+            }
+        });
+
+        let flattened = flatten_generated_z_report_data(&generated);
+        assert_eq!(flattened["periodStart"], "2026-03-15T08:00:00Z");
+        assert_eq!(flattened["periodEnd"], "2026-03-15T18:00:00Z");
+        assert_eq!(flattened["period"]["start"], "2026-03-15T08:00:00Z");
+        assert_eq!(flattened["period"]["end"], "2026-03-15T18:00:00Z");
     }
 }

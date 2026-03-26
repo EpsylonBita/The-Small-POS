@@ -33,6 +33,7 @@ import { TerminalConfigModal } from './TerminalConfigModal'
 // ============================================================
 
 type ConnectionType = 'bluetooth' | 'serial_usb' | 'network'
+type DeviceType = 'payment_terminal' | 'cash_register'
 type Protocol = 'generic' | 'zvt' | 'pax'
 type DeviceState = 'disconnected' | 'connecting' | 'connected' | 'busy' | 'error'
 
@@ -68,6 +69,14 @@ interface DiscoveredDevice {
   manufacturer?: string
   model?: string
   isConfigured: boolean
+  isSupported: boolean
+  unsupportedReason?: string
+  discoverySource?: string
+}
+
+interface DiscoveryResponse {
+  devices: DiscoveredDevice[]
+  warnings?: string[]
 }
 
 interface TerminalStats {
@@ -91,17 +100,177 @@ const asDeviceState = (value: unknown): DeviceState => {
   return 'disconnected'
 }
 
+const asConnectionType = (value: unknown): ConnectionType => {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'bluetooth' || normalized === 'network' || normalized === 'serial_usb') {
+    return normalized
+  }
+  return 'serial_usb'
+}
+
+const asDeviceType = (payload: any): DeviceType => {
+  const normalized = String(payload?.deviceType ?? payload?.device_type ?? '').toLowerCase()
+  if (normalized === 'cash_register' || normalized === 'payment_terminal') {
+    return normalized
+  }
+  if (
+    payload?.print_mode ||
+    payload?.printMode ||
+    Array.isArray(payload?.tax_rates) ||
+    Array.isArray(payload?.taxRates) ||
+    typeof payload?.brand === 'string'
+  ) {
+    return 'cash_register'
+  }
+  return 'payment_terminal'
+}
+
+const asProtocol = (value: unknown): Protocol => {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'generic' || normalized === 'zvt' || normalized === 'pax') {
+    return normalized
+  }
+  return 'zvt'
+}
+
+const buildConnectionDetails = (
+  payload: any,
+  connectionType: ConnectionType
+): Record<string, unknown> => {
+  if (payload?.connectionDetails && typeof payload.connectionDetails === 'object') {
+    return payload.connectionDetails
+  }
+
+  if (connectionType === 'network') {
+    return {
+      type: 'network',
+      ip: payload?.ip_address ?? payload?.ipAddress ?? '',
+      port: payload?.tcp_port ?? payload?.tcpPort ?? 20007,
+    }
+  }
+
+  if (connectionType === 'bluetooth') {
+    return {
+      type: 'bluetooth',
+      address: payload?.mac_address ?? payload?.macAddress ?? '',
+      channel: payload?.bt_channel ?? payload?.btChannel ?? 1,
+    }
+  }
+
+  return {
+    type: 'serial_usb',
+    port: payload?.com_port ?? payload?.comPort ?? '',
+    baudRate: payload?.baud_rate ?? payload?.baudRate ?? 9600,
+  }
+}
+
 const extractDeviceId = (payload: any): string | null => {
   if (typeof payload === 'string' && payload.trim()) return payload.trim()
   const candidate = payload?.deviceId ?? payload?.device_id ?? payload?.id
   return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
 }
 
+const normalizeTerminalDevice = (payload: any): ECRDevice => {
+  const connectionType = asConnectionType(payload?.connectionType ?? payload?.connection_type)
+
+  return {
+    id: typeof payload?.id === 'string' ? payload.id : '',
+    name: typeof payload?.name === 'string' ? payload.name : '',
+    deviceType: asDeviceType(payload),
+    connectionType,
+    connectionDetails: buildConnectionDetails(payload, connectionType),
+    protocol: asProtocol(payload?.protocol),
+    terminalId:
+      typeof payload?.terminalId === 'string'
+        ? payload.terminalId
+        : typeof payload?.terminal_id === 'string'
+          ? payload.terminal_id
+          : undefined,
+    merchantId:
+      typeof payload?.merchantId === 'string'
+        ? payload.merchantId
+        : typeof payload?.merchant_id === 'string'
+          ? payload.merchant_id
+          : undefined,
+    isDefault: payload?.isDefault === true || payload?.is_default === true,
+    enabled: payload?.enabled !== false,
+    settings: payload?.settings && typeof payload.settings === 'object' ? payload.settings : {},
+    createdAt:
+      typeof payload?.createdAt === 'string'
+        ? payload.createdAt
+        : typeof payload?.created_at === 'string'
+          ? payload.created_at
+          : undefined,
+    updatedAt:
+      typeof payload?.updatedAt === 'string'
+        ? payload.updatedAt
+        : typeof payload?.updated_at === 'string'
+          ? payload.updated_at
+          : undefined,
+  }
+}
+
 const toDeviceList = (payload: any): ECRDevice[] => {
-  if (Array.isArray(payload)) return payload as ECRDevice[]
-  if (Array.isArray(payload?.devices)) return payload.devices as ECRDevice[]
-  if (Array.isArray(payload?.data?.devices)) return payload.data.devices as ECRDevice[]
-  return []
+  const rawDevices = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.devices)
+      ? payload.devices
+      : Array.isArray(payload?.data?.devices)
+        ? payload.data.devices
+        : []
+
+  return rawDevices
+    .map((device: any) => normalizeTerminalDevice(device))
+    .filter((device: ECRDevice) => device.deviceType === 'payment_terminal')
+}
+
+const normalizeDiscoveredDevice = (payload: any): DiscoveredDevice => ({
+  name: typeof payload?.name === 'string' ? payload.name : '',
+  deviceType: asDeviceType(payload),
+  connectionType: asConnectionType(payload?.connectionType ?? payload?.connection_type),
+  connectionDetails:
+    payload?.connectionDetails && typeof payload.connectionDetails === 'object'
+      ? payload.connectionDetails
+      : {},
+  manufacturer:
+    typeof payload?.manufacturer === 'string' && payload.manufacturer.trim()
+      ? payload.manufacturer
+      : undefined,
+  model: typeof payload?.model === 'string' && payload.model.trim() ? payload.model : undefined,
+  isConfigured: payload?.isConfigured === true,
+  isSupported: payload?.isSupported !== false,
+  unsupportedReason:
+    typeof payload?.unsupportedReason === 'string' && payload.unsupportedReason.trim()
+      ? payload.unsupportedReason
+      : undefined,
+  discoverySource:
+    typeof payload?.discoverySource === 'string' && payload.discoverySource.trim()
+      ? payload.discoverySource
+      : undefined,
+})
+
+const toDiscoveryResponse = (payload: any): DiscoveryResponse => {
+  const rawDevices = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.devices)
+      ? payload.devices
+      : Array.isArray(payload?.data?.devices)
+        ? payload.data.devices
+        : []
+  const rawWarnings = Array.isArray(payload?.warnings)
+    ? payload.warnings
+    : Array.isArray(payload?.data?.warnings)
+      ? payload.data.warnings
+      : []
+
+  return {
+    devices: rawDevices
+      .map((device: any) => normalizeDiscoveredDevice(device))
+      .filter((device: DiscoveredDevice) => device.deviceType === 'payment_terminal'),
+    warnings: rawWarnings.filter(
+      (warning: unknown): warning is string => typeof warning === 'string' && warning.trim().length > 0
+    ),
+  }
 }
 
 const toStatusMap = (payload: any): Record<string, ECRDeviceStatus> => {
@@ -147,9 +316,9 @@ const toStatusMap = (payload: any): Record<string, ECRDeviceStatus> => {
 // ============================================================
 
 const ecrAPI = {
-  discoverDevices: async (types?: ConnectionType[]): Promise<DiscoveredDevice[]> => {
+  discoverDevices: async (types?: ConnectionType[]): Promise<DiscoveryResponse> => {
     const result = await getBridge().ecr.discoverDevices(types)
-    return toDeviceList(result) as unknown as DiscoveredDevice[]
+    return toDiscoveryResponse(result)
   },
   getDevices: async (): Promise<ECRDevice[]> => {
     const result = await getBridge().ecr.getDevices()
@@ -257,9 +426,13 @@ const MiniStatCard: React.FC<MiniStatCardProps> = ({ label, value, icon: Icon, c
 
 interface Props {
   onBack: () => void
+  onOpenCashRegisterSetup?: () => void
 }
 
-export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
+export const PaymentTerminalsSection: React.FC<Props> = ({
+  onBack,
+  onOpenCashRegisterSetup,
+}) => {
   const { t } = useTranslation()
 
   // State
@@ -500,6 +673,11 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
     setShowConfigModal(true)
   }, [])
 
+  const handleOpenCashRegisterSetup = useCallback(() => {
+    setShowDiscoveryModal(false)
+    onOpenCashRegisterSetup?.()
+  }, [onOpenCashRegisterSetup])
+
   const handleSaveDevice = useCallback(
     async (config: Omit<ECRDevice, 'id' | 'createdAt' | 'updatedAt'>) => {
       try {
@@ -507,13 +685,21 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
           // Update existing device
           const updated = await ecrAPI.updateDevice(editingDevice.id, config)
           if (updated) {
-            setDevices((prev) => prev.map((d) => (d.id === editingDevice.id ? updated : d)))
+            const normalized = normalizeTerminalDevice(updated)
+            setDevices((prev) =>
+              normalized.deviceType === 'payment_terminal'
+                ? prev.map((d) => (d.id === editingDevice.id ? normalized : d))
+                : prev.filter((d) => d.id !== editingDevice.id)
+            )
             toast.success(t('ecr.updateSuccess', 'Terminal updated'))
           }
         } else {
           // Add new device
           const newDevice = await ecrAPI.addDevice(config)
-          setDevices((prev) => [...prev, newDevice])
+          const normalized = normalizeTerminalDevice(newDevice)
+          if (normalized.deviceType === 'payment_terminal') {
+            setDevices((prev) => [...prev, normalized])
+          }
           toast.success(t('ecr.addSuccess', 'Terminal added'))
         }
         setShowConfigModal(false)
@@ -528,7 +714,9 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
 
   // Calculate stats
   const stats = useMemo<TerminalStats>(() => {
-    const statusList = Object.values(statuses)
+    const statusList = devices
+      .map((device) => statuses[device.id])
+      .filter((status): status is ECRDeviceStatus => !!status)
     return {
       total: devices.length,
       connected: statusList.filter((s) => s.state === 'connected').length,
@@ -721,6 +909,7 @@ export const PaymentTerminalsSection: React.FC<Props> = ({ onBack }) => {
         onClose={() => setShowDiscoveryModal(false)}
         onSelect={handleDiscoveredDeviceSelect}
         discoverDevices={ecrAPI.discoverDevices}
+        onOpenCashRegisterSetup={onOpenCashRegisterSetup ? handleOpenCashRegisterSetup : undefined}
       />
 
       {/* Config Modal */}

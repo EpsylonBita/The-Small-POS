@@ -3181,19 +3181,60 @@ fn build_shift_checkout_doc(
             .map(|line| line.amount)
             .sum::<f64>()
     });
+    let resolved_role_type = payload
+        .and_then(|value| object_text_field(value, &["roleType", "role_type"]))
+        .or_else(|| {
+            shift
+                .get("role_type")
+                .or_else(|| shift.get("roleType"))
+                .and_then(Value::as_str)
+                .and_then(non_empty_text)
+        })
+        .unwrap_or_else(|| "staff".to_string());
+    let shift_status = shift
+        .get("status")
+        .or_else(|| shift.get("shiftStatus"))
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let persisted_cash_sales = number_from_paths(
+        &summary,
+        &[
+            "/sales/cashSales",
+            "/totals/cash_sales",
+            "/shift/total_cash_sales",
+            "/cashDrawer/total_cash_sales",
+        ],
+    );
+    let persisted_card_sales = number_from_paths(
+        &summary,
+        &[
+            "/sales/cardSales",
+            "/totals/card_sales",
+            "/shift/total_card_sales",
+            "/cashDrawer/total_card_sales",
+        ],
+    );
+    let is_active_cashier_checkout =
+        shift_status == "active" && matches!(resolved_role_type.as_str(), "cashier" | "manager");
+    let cash_sales = if is_active_cashier_checkout {
+        number_from_paths(&summary, &["/breakdown/instore/cashTotal"])
+            .or(persisted_cash_sales)
+            .unwrap_or(0.0)
+    } else {
+        persisted_cash_sales.unwrap_or(0.0)
+    };
+    let card_sales = if is_active_cashier_checkout {
+        number_from_paths(&summary, &["/breakdown/instore/cardTotal"])
+            .or(persisted_card_sales)
+            .unwrap_or(0.0)
+    } else {
+        persisted_card_sales.unwrap_or(0.0)
+    };
 
     let mut doc = Ok(ShiftCheckoutDoc {
         shift_id: shift_id.to_string(),
-        role_type: payload
-            .and_then(|value| object_text_field(value, &["roleType", "role_type"]))
-            .or_else(|| {
-                shift
-                    .get("role_type")
-                    .or_else(|| shift.get("roleType"))
-                    .and_then(Value::as_str)
-                    .and_then(non_empty_text)
-            })
-            .unwrap_or_else(|| "staff".to_string()),
+        role_type: resolved_role_type,
         staff_name: shift
             .get("staff_name")
             .or_else(|| shift.get("staffName"))
@@ -3245,26 +3286,8 @@ fn build_shift_checkout_doc(
         opening_amount: number_from_paths(&cash_drawer, &["/opening_amount", "/openingAmount"])
             .or_else(|| number_from_paths(&shift, &["/opening_cash_amount", "/openingCashAmount"]))
             .unwrap_or(0.0),
-        cash_sales: number_from_paths(
-            &summary,
-            &[
-                "/sales/cashSales",
-                "/totals/cash_sales",
-                "/shift/total_cash_sales",
-                "/cashDrawer/total_cash_sales",
-            ],
-        )
-        .unwrap_or(0.0),
-        card_sales: number_from_paths(
-            &summary,
-            &[
-                "/sales/cardSales",
-                "/totals/card_sales",
-                "/shift/total_card_sales",
-                "/cashDrawer/total_card_sales",
-            ],
-        )
-        .unwrap_or(0.0),
+        cash_sales,
+        card_sales,
         cash_drops: number_from_paths(&cash_drawer, &["/cash_drops", "/cashDrops"]).unwrap_or(0.0),
         driver_cash_given: number_from_paths(
             &cash_drawer,
@@ -5287,6 +5310,78 @@ mod tests {
                 assert_eq!(doc.staff_payout_lines[0].staff_name, "Driver One");
                 assert_eq!(doc.staff_payout_lines[0].role_type, "driver");
                 assert_eq!(doc.staff_payout_lines[0].amount, 34.0);
+            }
+            _ => panic!("expected shift checkout document"),
+        }
+    }
+
+    #[test]
+    fn test_build_document_for_job_active_cashier_shift_checkout_prefers_live_instore_totals() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_active_cashier_fixture(&conn, "cashier-shift-live-print", "drawer-live-print");
+
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    payment_status, payment_method, staff_shift_id, terminal_id, branch_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'order-live-cash', '#C1', '[]', 30.0, 30.0, 'completed', 'pickup',
+                    'paid', 'cash', 'cashier-shift-live-print', 'term-1', 'branch-1',
+                    'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active cashier cash order");
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, items, total_amount, subtotal, status, order_type,
+                    payment_status, payment_method, staff_shift_id, terminal_id, branch_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'order-live-card', '#C2', '[]', 20.0, 20.0, 'completed', 'takeaway',
+                    'paid', 'card', 'cashier-shift-live-print', 'term-1', 'branch-1',
+                    'pending', '2026-03-18T09:15:00Z', '2026-03-18T09:15:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active cashier card order");
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, staff_shift_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'payment-live-cash', 'order-live-cash', 'cash', 30.0, 'completed',
+                    'cashier-shift-live-print', 'pending', '2026-03-18T09:00:00Z', '2026-03-18T09:00:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active cashier cash payment");
+            conn.execute(
+                "INSERT INTO order_payments (
+                    id, order_id, method, amount, status, staff_shift_id,
+                    sync_status, created_at, updated_at
+                 ) VALUES (
+                    'payment-live-card', 'order-live-card', 'card', 20.0, 'completed',
+                    'cashier-shift-live-print', 'pending', '2026-03-18T09:15:00Z', '2026-03-18T09:15:00Z'
+                 )",
+                [],
+            )
+            .expect("insert active cashier card payment");
+        }
+
+        let doc = build_document_for_job(&db, "shift_checkout", "cashier-shift-live-print", None)
+            .expect("build active cashier shift checkout doc");
+
+        match doc {
+            ReceiptDocument::ShiftCheckout(doc) => {
+                assert_eq!(doc.role_type, "cashier");
+                assert_eq!(doc.orders_count, 2);
+                assert_eq!(doc.sales_amount, 50.0);
+                assert_eq!(doc.cash_sales, 30.0);
+                assert_eq!(doc.card_sales, 20.0);
             }
             _ => panic!("expected shift checkout document"),
         }

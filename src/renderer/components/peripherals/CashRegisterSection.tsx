@@ -27,6 +27,7 @@ type ConnectionType = 'serial_usb' | 'network' | 'bluetooth'
 type Protocol = 'generic' | 'zvt' | 'pax'
 type PrintMode = 'register_prints' | 'pos_sends_receipt'
 type DeviceStatus = 'connected' | 'disconnected' | 'error'
+type CashRegisterSetupMode = 'rbs_network'
 
 interface TaxRate {
   code: string
@@ -56,6 +57,11 @@ interface ECRCashDevice {
 }
 
 type FormData = Omit<ECRCashDevice, 'id' | 'status' | 'error_message'>
+
+export interface CashRegisterSetupIntent {
+  mode: CashRegisterSetupMode
+  token: number
+}
 
 const BRANDS = [
   'Generic',
@@ -98,6 +104,12 @@ const DEFAULT_TAX_RATES: TaxRate[] = [
   { code: 'D', rate: '0', label: 'Zero' },
 ]
 
+const cloneTaxRates = (taxRates: TaxRate[]): TaxRate[] =>
+  taxRates.map((taxRate) => ({ ...taxRate }))
+
+const defaultNetworkPortForDevice = (deviceType: DeviceType): number =>
+  deviceType === 'payment_terminal' ? 20007 : 9100
+
 const EMPTY_FORM: FormData = {
   name: '',
   device_type: 'cash_register',
@@ -114,6 +126,148 @@ const EMPTY_FORM: FormData = {
   operator_id: '',
   is_default: false,
   enabled: true,
+}
+
+const buildEmptyForm = (): FormData => ({
+  ...EMPTY_FORM,
+  tax_rates: cloneTaxRates(DEFAULT_TAX_RATES),
+})
+
+const buildRbsNetworkPreset = (): FormData => ({
+  ...buildEmptyForm(),
+  name: 'RBS ELIO CR',
+  brand: 'RBS',
+  protocol: 'generic',
+  connection_type: 'network',
+  tcp_port: defaultNetworkPortForDevice('cash_register'),
+})
+
+const asDeviceType = (payload: any): DeviceType => {
+  const normalized = String(payload?.device_type ?? payload?.deviceType ?? '').toLowerCase()
+  if (normalized === 'cash_register' || normalized === 'payment_terminal') {
+    return normalized
+  }
+  if (
+    payload?.print_mode ||
+    payload?.printMode ||
+    Array.isArray(payload?.tax_rates) ||
+    Array.isArray(payload?.taxRates) ||
+    typeof payload?.brand === 'string'
+  ) {
+    return 'cash_register'
+  }
+  return 'payment_terminal'
+}
+
+const asConnectionType = (value: unknown): ConnectionType => {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'serial_usb' || normalized === 'network' || normalized === 'bluetooth') {
+    return normalized
+  }
+  return 'serial_usb'
+}
+
+const asProtocol = (value: unknown): Protocol => {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'generic' || normalized === 'zvt' || normalized === 'pax') {
+    return normalized
+  }
+  return 'generic'
+}
+
+const asDeviceStatus = (value: unknown): DeviceStatus | undefined => {
+  const normalized = String(value || '').toLowerCase()
+  if (normalized === 'connected' || normalized === 'disconnected' || normalized === 'error') {
+    return normalized
+  }
+  return undefined
+}
+
+const normalizeCashRegisterDevice = (payload: any): ECRCashDevice => {
+  const device_type = asDeviceType(payload)
+  const connection_type = asConnectionType(payload?.connection_type ?? payload?.connectionType)
+  const connectionDetails =
+    payload?.connectionDetails && typeof payload.connectionDetails === 'object'
+      ? payload.connectionDetails
+      : {}
+
+  return {
+    id: typeof payload?.id === 'string' ? payload.id : '',
+    name: typeof payload?.name === 'string' ? payload.name : '',
+    device_type,
+    brand:
+      typeof payload?.brand === 'string' && payload.brand.trim()
+        ? payload.brand
+        : typeof payload?.manufacturer === 'string' && payload.manufacturer.trim()
+          ? payload.manufacturer
+          : 'Generic',
+    protocol: asProtocol(payload?.protocol),
+    connection_type,
+    com_port:
+      typeof payload?.com_port === 'string'
+        ? payload.com_port
+        : typeof payload?.comPort === 'string'
+          ? payload.comPort
+          : typeof connectionDetails?.port === 'string' && connection_type === 'serial_usb'
+            ? (connectionDetails.port as string)
+            : '',
+    baud_rate:
+      typeof payload?.baud_rate === 'number'
+        ? payload.baud_rate
+        : typeof payload?.baudRate === 'number'
+          ? payload.baudRate
+          : typeof connectionDetails?.baudRate === 'number'
+            ? (connectionDetails.baudRate as number)
+            : 9600,
+    ip_address:
+      typeof payload?.ip_address === 'string'
+        ? payload.ip_address
+        : typeof payload?.ipAddress === 'string'
+          ? payload.ipAddress
+          : typeof connectionDetails?.ip === 'string' && connection_type === 'network'
+            ? (connectionDetails.ip as string)
+            : '',
+    tcp_port:
+      typeof payload?.tcp_port === 'number'
+        ? payload.tcp_port
+        : typeof payload?.tcpPort === 'number'
+          ? payload.tcpPort
+          : typeof connectionDetails?.port === 'number' && connection_type === 'network'
+            ? (connectionDetails.port as number)
+            : defaultNetworkPortForDevice(device_type),
+    mac_address:
+      typeof payload?.mac_address === 'string'
+        ? payload.mac_address
+        : typeof payload?.macAddress === 'string'
+          ? payload.macAddress
+          : typeof connectionDetails?.address === 'string' && connection_type === 'bluetooth'
+            ? (connectionDetails.address as string)
+            : '',
+    print_mode:
+      payload?.print_mode === 'pos_sends_receipt' || payload?.printMode === 'pos_sends_receipt'
+        ? 'pos_sends_receipt'
+        : 'register_prints',
+    tax_rates: Array.isArray(payload?.tax_rates)
+      ? cloneTaxRates(payload.tax_rates as TaxRate[])
+      : Array.isArray(payload?.taxRates)
+        ? cloneTaxRates(payload.taxRates as TaxRate[])
+        : cloneTaxRates(DEFAULT_TAX_RATES),
+    operator_id:
+      typeof payload?.operator_id === 'string'
+        ? payload.operator_id
+        : typeof payload?.operatorId === 'string'
+          ? payload.operatorId
+          : '',
+    is_default: payload?.is_default === true || payload?.isDefault === true,
+    enabled: payload?.enabled !== false,
+    status: asDeviceStatus(payload?.status),
+    error_message:
+      typeof payload?.error_message === 'string'
+        ? payload.error_message
+        : typeof payload?.errorMessage === 'string'
+          ? payload.errorMessage
+          : undefined,
+  }
 }
 
 // ============================================================
@@ -184,19 +338,19 @@ const StatusIndicator: React.FC<{ status?: DeviceStatus; error?: string }> = ({ 
 // ============================================================
 
 interface CashRegisterSectionProps {
-  // optional: refresh trigger, etc.
+  setupIntent?: CashRegisterSetupIntent | null
 }
 
 type ViewMode = 'list' | 'add' | 'edit'
 
-export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
+export const CashRegisterSection: React.FC<CashRegisterSectionProps> = ({ setupIntent }) => {
   const { t } = useTranslation()
 
   const [devices, setDevices] = useState<ECRCashDevice[]>([])
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null)
-  const [form, setForm] = useState<FormData>({ ...EMPTY_FORM })
+  const [form, setForm] = useState<FormData>(buildEmptyForm())
   const [isSaving, setIsSaving] = useState(false)
   const [isTesting, setIsTesting] = useState<string | null>(null)
   const [showDevices, setShowDevices] = useState(true)
@@ -209,7 +363,12 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
       setLoading(true)
       const result = await invokeIPC('ecr_get_devices')
       const list = result?.devices || result?.data || []
-      setDevices(Array.isArray(list) ? list : [])
+      const normalized = Array.isArray(list)
+        ? list
+            .map((device) => normalizeCashRegisterDevice(device))
+            .filter((device) => device.device_type === 'cash_register')
+        : []
+      setDevices(normalized)
     } catch (e) {
       console.error('Failed to load ECR cash register devices:', e)
     } finally {
@@ -263,7 +422,7 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
   const handleConnectionTypeChange = (connectionType: ConnectionType) => {
     const patch: Partial<FormData> = { connection_type: connectionType }
     if (connectionType === 'network') {
-      patch.tcp_port = form.device_type === 'payment_terminal' ? 20007 : 9100
+      patch.tcp_port = defaultNetworkPortForDevice('cash_register')
     }
     updateForm(patch)
   }
@@ -274,8 +433,8 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
     updateForm({ tax_rates: updated })
   }
 
-  const resetForm = () => {
-    setForm({ ...EMPTY_FORM })
+  const resetForm = (nextForm: FormData = buildEmptyForm()) => {
+    setForm(nextForm)
     setEditingDeviceId(null)
   }
 
@@ -284,6 +443,13 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
     resetForm()
     setViewMode('add')
   }
+
+  useEffect(() => {
+    if (setupIntent?.mode !== 'rbs_network') return
+    setDeleteConfirmId(null)
+    resetForm(buildRbsNetworkPreset())
+    setViewMode('add')
+  }, [setupIntent?.token])
 
   // Open edit form
   const handleEdit = (device: ECRCashDevice) => {
@@ -652,39 +818,6 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
         />
       </div>
 
-      {/* Device Type */}
-      <div>
-        <label className="block text-xs font-medium mb-1.5 liquid-glass-modal-text-muted">
-          {t('settings.peripherals.cashRegister.deviceType', 'Device Type')}
-        </label>
-        <div className="flex gap-3">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name="deviceType"
-              checked={form.device_type === 'cash_register'}
-              onChange={() => updateForm({ device_type: 'cash_register' })}
-              className="accent-cyan-500"
-            />
-            <span className="text-sm liquid-glass-modal-text">
-              {t('settings.peripherals.cashRegister.typeCashRegister', 'Cash Register')}
-            </span>
-          </label>
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="radio"
-              name="deviceType"
-              checked={form.device_type === 'payment_terminal'}
-              onChange={() => updateForm({ device_type: 'payment_terminal' })}
-              className="accent-cyan-500"
-            />
-            <span className="text-sm liquid-glass-modal-text">
-              {t('settings.peripherals.cashRegister.typePaymentTerminal', 'Payment Terminal')}
-            </span>
-          </label>
-        </div>
-      </div>
-
       {/* Brand & Protocol */}
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -790,12 +923,25 @@ export const CashRegisterSection: React.FC<CashRegisterSectionProps> = () => {
             </label>
             <input
               type="number"
-              value={form.tcp_port || 9100}
-              onChange={(e) => updateForm({ tcp_port: parseInt(e.target.value, 10) || 9100 })}
+              value={form.tcp_port || defaultNetworkPortForDevice('cash_register')}
+              onChange={(e) =>
+                updateForm({
+                  tcp_port:
+                    parseInt(e.target.value, 10) || defaultNetworkPortForDevice('cash_register'),
+                })
+              }
               className="liquid-glass-modal-input"
               placeholder={form.protocol === 'zvt' ? '20007' : '9100'}
             />
           </div>
+          {form.brand === 'RBS' && (
+            <div className="col-span-2 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              {t(
+                'settings.peripherals.cashRegister.rbsNetworkHint',
+                'Use the IP address and TCP port configured on the RBS device or by your installer. POS does not auto-discover RBS fiscal registers yet.'
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -23,6 +23,7 @@ const MENU_WARMUP_THROTTLE_MS: u64 = 15_000;
 mod api;
 mod auth;
 mod business_day;
+mod callerid;
 mod commands;
 mod core_helpers;
 mod customer_display;
@@ -461,12 +462,14 @@ pub fn run() {
                 format!("Failed to initialize database: {e}")
             })?;
             hydrate_terminal_credentials_from_local_settings(&db_state);
+            let caller_id_manager = Arc::new(callerid::CallerIdManager::new());
             app.manage(db_state);
 
             // Auth state
             app.manage(auth::AuthState::new());
             app.manage(UpdaterRuntimeState::default());
             app.manage(ecr::DeviceManager::new());
+            app.manage(Arc::clone(&caller_id_manager));
             app.manage(commands::runtime::ScreenCaptureSignalPollingState::default());
 
             let updater_app = app.handle().clone();
@@ -481,6 +484,15 @@ pub fn run() {
             // Cancellation token for graceful shutdown of background tasks
             let cancel_token = tokio_util::sync::CancellationToken::new();
             app.manage(cancel_token.clone());
+            {
+                let db_state = app.state::<db::DbState>();
+                commands::callerid::autostart_if_enabled(
+                    &app.handle(),
+                    &db_state,
+                    &caller_id_manager,
+                    &cancel_token,
+                );
+            }
 
             // Second DB connection for the background sync loop
             let db_for_sync = match db::init(&app_data_dir) {
@@ -962,6 +974,13 @@ pub fn run() {
             commands::ecr::ecr_test_connection,
             commands::ecr::ecr_test_print,
             commands::ecr::ecr_fiscal_print,
+            // Caller ID / VoIP
+            commands::callerid::callerid_start,
+            commands::callerid::callerid_stop,
+            commands::callerid::callerid_get_status,
+            commands::callerid::callerid_save_config,
+            commands::callerid::callerid_get_config,
+            commands::callerid::callerid_test_connection,
             // Cash drawer
             commands::hardware::drawer_open,
             // Serial ports

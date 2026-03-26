@@ -1,5 +1,9 @@
 use serde::Deserialize;
+use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
 use tauri::Emitter;
+use tracing::{info, warn};
 
 use crate::{db, ecr, payload_arg0_as_string, value_str};
 
@@ -32,6 +36,21 @@ struct VoidTransactionCompatPayload {
     device_id: Option<String>,
 }
 
+const DEFAULT_DISCOVERY_TYPES: [&str; 3] = ["serial_usb", "network", "bluetooth"];
+const DEFAULT_SERIAL_BAUD_RATE: u32 = 9600;
+const DEFAULT_NETWORK_DISCOVERY_TIMEOUT_MS: u64 = 180;
+const BLUETOOTH_DISCOVERY_ONLY_WARNING_KEY: &str = "ecr.discovery.warnings.bluetoothDiscoveryOnly";
+const BLUETOOTH_WINDOWS_ONLY_WARNING_KEY: &str = "ecr.discovery.warnings.bluetoothWindowsOnly";
+const NETWORK_WINDOWS_ONLY_WARNING_KEY: &str = "ecr.discovery.warnings.networkWindowsOnly";
+const BLUETOOTH_UNSUPPORTED_REASON_KEY: &str = "ecr.discovery.unsupportedBluetooth";
+const NETWORK_DISCOVERY_PORTS: [u16; 2] = [20007, 10009];
+
+#[derive(Default, Clone)]
+struct ConfiguredEcrLookup {
+    names: HashSet<String>,
+    addresses: HashSet<String>,
+}
+
 fn value_to_string(value: serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => {
@@ -61,6 +80,902 @@ fn value_to_u64(value: serde_json::Value) -> Option<u64> {
         serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
         _ => None,
     }
+}
+
+fn value_ref_to_u16(value: &serde_json::Value) -> Option<u16> {
+    value
+        .as_u64()
+        .and_then(|parsed| u16::try_from(parsed).ok())
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|parsed| parsed.trim().parse::<u16>().ok())
+        })
+}
+
+fn normalize_lookup_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn format_mac_address(hex12: &str) -> String {
+    let upper = hex12.to_ascii_uppercase();
+    let parts: Vec<String> = upper
+        .chars()
+        .collect::<Vec<char>>()
+        .chunks(2)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect();
+    parts.join(":")
+}
+
+fn extract_mac_from_instance_id(instance_id: &str) -> Option<String> {
+    let upper = instance_id.to_ascii_uppercase();
+    if let Some(start) = upper.find("DEV_") {
+        let candidate = upper.get(start + 4..start + 16)?;
+        if candidate.len() == 12 && candidate.chars().all(|value| value.is_ascii_hexdigit()) {
+            return Some(format_mac_address(candidate));
+        }
+    }
+
+    if upper.contains("BTH") {
+        for token in upper.split(|value: char| !value.is_ascii_hexdigit()) {
+            if token.len() == 12 && token.chars().all(|value| value.is_ascii_hexdigit()) {
+                return Some(format_mac_address(token));
+            }
+        }
+    }
+
+    None
+}
+
+fn stable_bt_fallback_address(instance_id: &str, name: &str) -> String {
+    let seed = if !instance_id.trim().is_empty() {
+        instance_id
+    } else if !name.trim().is_empty() {
+        name
+    } else {
+        "unknown"
+    };
+
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    format!("bt-instance-{:016x}", hasher.finish())
+}
+
+fn normalize_address_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(mac) = extract_mac_from_instance_id(trimmed) {
+        return Some(mac.to_ascii_lowercase());
+    }
+
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn connection_detail_string(
+    connection_details: &serde_json::Value,
+    keys: &[&str],
+) -> Option<String> {
+    for key in keys {
+        let Some(value) = connection_details.get(*key) else {
+            continue;
+        };
+        if let Some(text) = value.as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+
+        if value.is_number() {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn connection_detail_u16(connection_details: &serde_json::Value, keys: &[&str]) -> Option<u16> {
+    for key in keys {
+        let Some(value) = connection_details.get(*key) else {
+            continue;
+        };
+        if let Some(parsed) = value_ref_to_u16(value) {
+            return Some(parsed);
+        }
+    }
+
+    None
+}
+
+fn normalize_discovery_type(value: &str) -> Option<&'static str> {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace(' ', "_")
+        .replace('/', "_");
+
+    match normalized.as_str() {
+        "serial_usb" | "serial" | "usb" | "usb_serial" => Some("serial_usb"),
+        "bluetooth" | "bt" => Some("bluetooth"),
+        "network" | "tcp" | "lan" => Some("network"),
+        _ => None,
+    }
+}
+
+fn resolve_requested_discovery_types(types: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut requested = Vec::new();
+
+    for value in types {
+        if let Some(normalized) = normalize_discovery_type(&value) {
+            if seen.insert(normalized.to_string()) {
+                requested.push(normalized.to_string());
+            }
+        }
+    }
+
+    if requested.is_empty() {
+        DEFAULT_DISCOVERY_TYPES
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    } else {
+        requested
+    }
+}
+
+fn build_discovery_warning_keys(requested_types: &[String]) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if requested_types.iter().any(|value| value == "bluetooth") {
+        if cfg!(target_os = "windows") {
+            warnings.push(BLUETOOTH_DISCOVERY_ONLY_WARNING_KEY.to_string());
+        } else {
+            warnings.push(BLUETOOTH_WINDOWS_ONLY_WARNING_KEY.to_string());
+        }
+    }
+
+    if !cfg!(target_os = "windows") && requested_types.iter().any(|value| value == "network") {
+        warnings.push(NETWORK_WINDOWS_ONLY_WARNING_KEY.to_string());
+    }
+
+    warnings
+}
+
+fn configured_ecr_lookup_from_devices(devices: &[serde_json::Value]) -> ConfiguredEcrLookup {
+    let mut lookup = ConfiguredEcrLookup::default();
+
+    for device in devices {
+        if let Some(name) = value_str(device, &["name", "terminalName", "terminal_name"]) {
+            if let Some(token) = normalize_lookup_token(&name) {
+                lookup.names.insert(token);
+            }
+        }
+
+        let connection_details = device
+            .get("connectionDetails")
+            .or_else(|| device.get("connection_details"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        for key in [
+            "port",
+            "serialPort",
+            "portName",
+            "comPort",
+            "path",
+            "address",
+            "ip",
+            "host",
+            "hostname",
+            "macAddress",
+            "mac_address",
+        ] {
+            if let Some(value) = connection_detail_string(&connection_details, &[key]) {
+                if let Some(token) = normalize_address_token(&value) {
+                    lookup.addresses.insert(token);
+                }
+            }
+        }
+
+        let connection_type = value_str(device, &["connectionType", "connection_type"])
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if connection_type == "network" {
+            if let (Some(ip), Some(port)) = (
+                connection_detail_string(&connection_details, &["ip", "host", "hostname"]),
+                connection_detail_u16(&connection_details, &["port", "tcpPort", "tcp_port"]),
+            ) {
+                if let Some(token) = normalize_address_token(&format!("{ip}:{port}")) {
+                    lookup.addresses.insert(token);
+                }
+            }
+        }
+    }
+
+    lookup
+}
+
+fn is_configured_terminal(configured: &ConfiguredEcrLookup, name: &str, address: &str) -> bool {
+    let normalized_name = normalize_lookup_token(name).unwrap_or_default();
+    let normalized_address = normalize_address_token(address).unwrap_or_default();
+
+    (!normalized_name.is_empty() && configured.names.contains(&normalized_name))
+        || (!normalized_address.is_empty() && configured.addresses.contains(&normalized_address))
+}
+
+fn build_serial_terminal_candidate(
+    port_name: &str,
+    manufacturer: Option<&str>,
+    model: Option<&str>,
+    configured: &ConfiguredEcrLookup,
+) -> serde_json::Value {
+    let manufacturer = manufacturer
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let model = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let name = model
+        .clone()
+        .or_else(|| {
+            manufacturer
+                .clone()
+                .map(|value| format!("{value} Terminal"))
+        })
+        .unwrap_or_else(|| format!("Serial Terminal ({port_name})"));
+    let is_configured = is_configured_terminal(configured, &name, port_name);
+
+    serde_json::json!({
+        "name": name,
+        "deviceType": "payment_terminal",
+        "connectionType": "serial_usb",
+        "connectionDetails": {
+            "type": "serial_usb",
+            "port": port_name,
+            "baudRate": DEFAULT_SERIAL_BAUD_RATE,
+        },
+        "manufacturer": manufacturer,
+        "model": model,
+        "isConfigured": is_configured,
+        "isSupported": true,
+        "unsupportedReason": serde_json::Value::Null,
+        "discoverySource": "serial-enum",
+    })
+}
+
+fn build_network_terminal_candidate(
+    ip: &str,
+    port: u16,
+    configured: &ConfiguredEcrLookup,
+    discovery_source: &str,
+) -> serde_json::Value {
+    let address = format!("{ip}:{port}");
+    let name = format!("Network Terminal ({address})");
+    let is_configured = is_configured_terminal(configured, &name, &address);
+
+    serde_json::json!({
+        "name": name,
+        "deviceType": "payment_terminal",
+        "connectionType": "network",
+        "connectionDetails": {
+            "type": "network",
+            "ip": ip,
+            "port": port,
+        },
+        "manufacturer": serde_json::Value::Null,
+        "model": serde_json::Value::Null,
+        "isConfigured": is_configured,
+        "isSupported": true,
+        "unsupportedReason": serde_json::Value::Null,
+        "discoverySource": discovery_source,
+    })
+}
+
+fn build_bluetooth_terminal_candidate(
+    name: &str,
+    address: &str,
+    manufacturer: Option<&str>,
+    model: Option<&str>,
+    configured: &ConfiguredEcrLookup,
+    discovery_source: &str,
+) -> serde_json::Value {
+    let resolved_name = if name.trim().is_empty() {
+        format!("Bluetooth Terminal ({address})")
+    } else {
+        name.trim().to_string()
+    };
+    let manufacturer = manufacturer
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let model = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let is_configured = is_configured_terminal(configured, &resolved_name, address);
+
+    serde_json::json!({
+        "name": resolved_name,
+        "deviceType": "payment_terminal",
+        "connectionType": "bluetooth",
+        "connectionDetails": {
+            "type": "bluetooth",
+            "address": address,
+            "channel": 1,
+        },
+        "manufacturer": manufacturer,
+        "model": model,
+        "isConfigured": is_configured,
+        "isSupported": false,
+        "unsupportedReason": BLUETOOTH_UNSUPPORTED_REASON_KEY,
+        "discoverySource": discovery_source,
+    })
+}
+
+fn discovery_identity(entry: &serde_json::Value) -> String {
+    let connection_type = value_str(entry, &["connectionType", "connection_type"])
+        .unwrap_or_else(|| "unknown".to_string())
+        .to_ascii_lowercase();
+    let connection_details = entry
+        .get("connectionDetails")
+        .or_else(|| entry.get("connection_details"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let identity = match connection_type.as_str() {
+        "serial_usb" => connection_detail_string(
+            &connection_details,
+            &["port", "serialPort", "portName", "comPort", "path"],
+        )
+        .and_then(|value| normalize_lookup_token(&value)),
+        "network" => match (
+            connection_detail_string(&connection_details, &["ip", "host", "hostname"]),
+            connection_detail_u16(&connection_details, &["port", "tcpPort", "tcp_port"]),
+        ) {
+            (Some(ip), Some(port)) => normalize_address_token(&format!("{ip}:{port}")),
+            (Some(ip), None) => normalize_address_token(&ip),
+            _ => None,
+        },
+        "bluetooth" => connection_detail_string(
+            &connection_details,
+            &["address", "macAddress", "mac_address"],
+        )
+        .and_then(|value| normalize_address_token(&value)),
+        _ => None,
+    }
+    .or_else(|| value_str(entry, &["name"]).and_then(|value| normalize_lookup_token(&value)))
+    .unwrap_or_default();
+
+    format!("{connection_type}:{identity}")
+}
+
+fn dedupe_discovered_terminals(terminals: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+
+    for terminal in terminals {
+        if seen.insert(discovery_identity(&terminal)) {
+            deduped.push(terminal);
+        }
+    }
+
+    deduped
+}
+
+fn discover_serial_terminals_native(configured: &ConfiguredEcrLookup) -> Vec<serde_json::Value> {
+    let mut discovered = Vec::new();
+
+    let ports = match serialport::available_ports() {
+        Ok(ports) => ports,
+        Err(error) => {
+            warn!(error = %error, "ECR serial discovery failed to enumerate ports");
+            return discovered;
+        }
+    };
+
+    for port in ports {
+        match &port.port_type {
+            serialport::SerialPortType::BluetoothPort => {}
+            serialport::SerialPortType::UsbPort(usb) => {
+                discovered.push(build_serial_terminal_candidate(
+                    &port.port_name,
+                    usb.manufacturer.as_deref(),
+                    usb.product.as_deref(),
+                    configured,
+                ));
+            }
+            _ => {
+                discovered.push(build_serial_terminal_candidate(
+                    &port.port_name,
+                    None,
+                    None,
+                    configured,
+                ));
+            }
+        }
+    }
+
+    dedupe_discovered_terminals(discovered)
+}
+
+fn parse_powershell_device_rows(parsed: serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(arr) = parsed.as_array() {
+        arr.clone()
+    } else if parsed.is_object() {
+        vec![parsed]
+    } else {
+        vec![]
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:80").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_link_local() => {
+            Some(ip)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_lan_ipv4_values(parsed: &serde_json::Value) -> Vec<std::net::Ipv4Addr> {
+    let values: Vec<String> = match parsed {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|value| value_to_string(value.clone()))
+            .collect(),
+        serde_json::Value::String(value) => vec![value.clone()],
+        serde_json::Value::Object(obj) => obj
+            .get("IPAddress")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default(),
+        _ => vec![],
+    };
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let parsed_ip = match value.trim().parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if ip.is_private() && !ip.is_loopback() && !ip.is_link_local() => ip,
+            _ => continue,
+        };
+        if seen.insert(parsed_ip) {
+            out.push(parsed_ip);
+        }
+    }
+
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn detect_local_ipv4s() -> Vec<std::net::Ipv4Addr> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    if let Some(primary) = detect_primary_ipv4() {
+        seen.insert(primary);
+        out.push(primary);
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$rows = Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
+  $_.IPAddress -and
+  $_.IPAddress -notlike '127.*' -and
+  $_.IPAddress -notlike '169.254.*' -and
+  $_.SkipAsSource -ne $true
+} | Sort-Object -Property InterfaceMetric | Select-Object -ExpandProperty IPAddress
+$rows | ConvertTo-Json -Compress
+"#;
+
+    let output = match run_hidden_powershell(script) {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(error = %error, "ECR network discovery failed to enumerate local IPv4 addresses");
+            return out;
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            stderr = %stderr,
+            "ECR network discovery PowerShell IPv4 enumeration returned a non-success status"
+        );
+        return out;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() || stdout == "null" {
+        return out;
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(parsed) => {
+            for ip in parse_lan_ipv4_values(&parsed) {
+                if seen.insert(ip) {
+                    out.push(ip);
+                }
+            }
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                output = %stdout,
+                "ECR network discovery PowerShell IPv4 enumeration returned invalid JSON"
+            );
+        }
+    }
+
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn lan_subnet_hosts(primary_ip: std::net::Ipv4Addr) -> Vec<std::net::Ipv4Addr> {
+    let [a, b, c, host] = primary_ip.octets();
+    (1u8..=254u8)
+        .filter(|candidate| *candidate != host)
+        .map(|candidate| std::net::Ipv4Addr::new(a, b, c, candidate))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_lan_terminal_host(ip: std::net::Ipv4Addr, timeout_ms: u64) -> Vec<u16> {
+    let mut open_ports = Vec::new();
+
+    for port in NETWORK_DISCOVERY_PORTS {
+        let addr = std::net::SocketAddr::from((std::net::IpAddr::V4(ip), port));
+        if tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
+        {
+            open_ports.push(port);
+        }
+    }
+
+    open_ports
+}
+
+#[cfg(target_os = "windows")]
+async fn discover_network_terminals_native(
+    configured: &ConfiguredEcrLookup,
+    timeout_ms: u64,
+) -> Vec<serde_json::Value> {
+    let local_ips = detect_local_ipv4s();
+    if local_ips.is_empty() {
+        warn!("ECR network discovery skipped: no private IPv4 address could be detected");
+        return vec![];
+    }
+
+    let mut hosts = Vec::new();
+    let mut seen_hosts = HashSet::new();
+    for local_ip in &local_ips {
+        for host in lan_subnet_hosts(*local_ip) {
+            if seen_hosts.insert(host) {
+                hosts.push(host);
+            }
+        }
+    }
+
+    let bounded_timeout_ms = timeout_ms.clamp(80, 1000);
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(48));
+    let mut set = tokio::task::JoinSet::new();
+
+    for ip in hosts {
+        let semaphore = semaphore.clone();
+        set.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok()?;
+            let open_ports = probe_lan_terminal_host(ip, bounded_timeout_ms).await;
+            if open_ports.is_empty() {
+                None
+            } else {
+                Some((ip, open_ports))
+            }
+        });
+    }
+
+    let mut discovered = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some((ip, ports))) = joined {
+            let ip_string = ip.to_string();
+            for port in ports {
+                discovered.push(build_network_terminal_candidate(
+                    &ip_string,
+                    port,
+                    configured,
+                    "lan-port-scan",
+                ));
+            }
+        }
+    }
+
+    let deduped = dedupe_discovered_terminals(discovered);
+    info!(
+        local_ips = ?local_ips,
+        discovered = deduped.len(),
+        "ECR network discovery completed"
+    );
+    deduped
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn discover_network_terminals_native(
+    _configured: &ConfiguredEcrLookup,
+    _timeout_ms: u64,
+) -> Vec<serde_json::Value> {
+    vec![]
+}
+
+#[cfg(target_os = "windows")]
+fn run_hidden_powershell(script: &str) -> Result<std::process::Output, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Failed to execute PowerShell command: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn run_hidden_powershell_json_rows(script: &str, context: &str) -> Vec<serde_json::Value> {
+    let output = match run_hidden_powershell(script) {
+        Ok(output) => output,
+        Err(error) => {
+            warn!(error = %error, context = %context, "PowerShell discovery command failed to start");
+            return vec![];
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        warn!(
+            stderr = %stderr,
+            context = %context,
+            "PowerShell discovery command returned a non-success status"
+        );
+        return vec![];
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() || stdout == "null" {
+        return vec![];
+    }
+
+    match serde_json::from_str::<serde_json::Value>(&stdout) {
+        Ok(parsed) => parse_powershell_device_rows(parsed),
+        Err(error) => {
+            warn!(
+                error = %error,
+                output = %stdout,
+                context = %context,
+                "PowerShell discovery output was not valid JSON"
+            );
+            vec![]
+        }
+    }
+}
+
+fn is_internal_bluetooth_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+
+    [
+        "adapter",
+        "enumerator",
+        "protocol",
+        "transport",
+        "radio",
+        "personal area network",
+        "wireless bluetooth",
+        "host controller",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_internal_bluetooth_instance(instance_id: &str) -> bool {
+    let upper = instance_id.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return false;
+    }
+
+    [
+        "BTH\\MS_BTHBRB",
+        "BTH\\MS_BTHLE",
+        "BTH\\MS_RFCOMM",
+        "BTH\\MS_BTHPAN",
+        "SWD\\RADIO\\",
+    ]
+    .iter()
+    .any(|needle| upper.starts_with(needle))
+}
+
+fn resolve_bluetooth_address(device: &serde_json::Value, instance_id: &str, name: &str) -> String {
+    let explicit = value_str(
+        device,
+        &[
+            "Address",
+            "address",
+            "MacAddress",
+            "macAddress",
+            "BluetoothAddress",
+            "bluetoothAddress",
+        ],
+    );
+    if let Some(raw) = explicit {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            if let Some(mac) = extract_mac_from_instance_id(trimmed) {
+                return mac;
+            }
+            if trimmed.len() == 12 && trimmed.chars().all(|value| value.is_ascii_hexdigit()) {
+                return format_mac_address(trimmed);
+            }
+            return trimmed.to_string();
+        }
+    }
+
+    extract_mac_from_instance_id(instance_id)
+        .unwrap_or_else(|| stable_bt_fallback_address(instance_id, name))
+}
+
+fn build_bluetooth_terminals_from_rows(
+    rows: Vec<serde_json::Value>,
+    configured: &ConfiguredEcrLookup,
+) -> Vec<serde_json::Value> {
+    let mut discovered = Vec::new();
+
+    for device in rows {
+        let instance_id = value_str(&device, &["InstanceId", "instanceId"]).unwrap_or_default();
+        if is_internal_bluetooth_instance(&instance_id) {
+            continue;
+        }
+
+        let name = value_str(&device, &["FriendlyName", "friendlyName", "name"])
+            .unwrap_or_else(|| "Bluetooth Terminal".to_string());
+        if is_internal_bluetooth_name(&name) {
+            continue;
+        }
+
+        let address = resolve_bluetooth_address(&device, &instance_id, &name);
+        let source =
+            value_str(&device, &["Source", "source"]).unwrap_or_else(|| "windows-pnp".to_string());
+        let manufacturer = value_str(&device, &["Manufacturer", "manufacturer"]);
+        let model = value_str(&device, &["Model", "model"]);
+
+        discovered.push(build_bluetooth_terminal_candidate(
+            &name,
+            &address,
+            manufacturer.as_deref(),
+            model.as_deref(),
+            configured,
+            &source,
+        ));
+    }
+
+    dedupe_discovered_terminals(discovered)
+}
+
+#[cfg(target_os = "windows")]
+fn discover_bluetooth_pnp_rows() -> Vec<serde_json::Value> {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$devices = Get-PnpDevice | Where-Object {
+  (
+    ($_.Class -like '*Bluetooth*') -or
+    ($_.InstanceId -like 'BTH*') -or
+    ($_.InstanceId -like 'SWD\RADIO\*')
+  ) -and
+  ($_.FriendlyName -notlike '*Adapter*') -and
+  ($_.FriendlyName -notlike '*Enumerator*') -and
+  ($_.FriendlyName -notlike '*Protocol*') -and
+  ($_.FriendlyName -notlike '*Transport*')
+}
+$devices |
+  Select-Object `
+    @{Name='FriendlyName';Expression={ if ($_.FriendlyName) { $_.FriendlyName } elseif ($_.Name) { $_.Name } else { 'Bluetooth Device' } }}, `
+    InstanceId, Class, Status, @{Name='Source';Expression={'windows-pnp'}} |
+  ConvertTo-Json -Depth 6 -Compress
+"#;
+
+    run_hidden_powershell_json_rows(script, "ecr-bluetooth-pnp")
+}
+
+#[cfg(target_os = "windows")]
+fn discover_bluetooth_ble_rows() -> Vec<serde_json::Value> {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$watcher = [Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher, Windows, ContentType=WindowsRuntime]::new()
+$watcher.ScanningMode = [Windows.Devices.Bluetooth.Advertisement.BluetoothLEScanningMode, Windows, ContentType=WindowsRuntime]::Active
+$devices = [hashtable]::Synchronized(@{})
+$handler = [Windows.Foundation.TypedEventHandler[Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher, Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementReceivedEventArgs]] {
+  param($sender, $args)
+  $hex = ('{0:X12}' -f $args.BluetoothAddress)
+  if ([string]::IsNullOrWhiteSpace($hex)) { return }
+  $address = ($hex -replace '(..)(?=.)', '$1:')
+  $name = $args.Advertisement.LocalName
+  if ([string]::IsNullOrWhiteSpace($name)) {
+    $name = \"Bluetooth Terminal ($address)\"
+  }
+
+  if (-not $devices.ContainsKey($address)) {
+    $devices[$address] = [pscustomobject]@{
+      FriendlyName = $name
+      InstanceId = \"BLE::$address\"
+      Address = $address
+      Class = 'BluetoothLE'
+      Status = 'Discovered'
+      Source = 'windows-ble'
+    }
+  } elseif ($devices[$address].FriendlyName -like 'Bluetooth Terminal*' -and -not [string]::IsNullOrWhiteSpace($args.Advertisement.LocalName)) {
+    $devices[$address].FriendlyName = $args.Advertisement.LocalName
+  }
+}
+
+$token = $watcher.add_Received($handler)
+try {
+  $watcher.Start()
+  Start-Sleep -Milliseconds 4500
+} finally {
+  try { $watcher.Stop() } catch {}
+  $watcher.remove_Received($token)
+}
+
+$devices.Values | ConvertTo-Json -Depth 6 -Compress
+"#;
+
+    run_hidden_powershell_json_rows(script, "ecr-bluetooth-ble")
+}
+
+#[cfg(target_os = "windows")]
+fn discover_bluetooth_terminals_native(configured: &ConfiguredEcrLookup) -> Vec<serde_json::Value> {
+    let mut candidates = discover_bluetooth_pnp_rows();
+    let ble_rows = discover_bluetooth_ble_rows();
+    if !ble_rows.is_empty() {
+        candidates.extend(ble_rows);
+    }
+
+    if candidates.is_empty() {
+        info!("ECR bluetooth discovery returned no candidate devices");
+        return vec![];
+    }
+
+    let deduped = build_bluetooth_terminals_from_rows(candidates, configured);
+    info!(
+        discovered = deduped.len(),
+        "ECR bluetooth discovery completed"
+    );
+    deduped
+}
+
+#[cfg(not(target_os = "windows"))]
+fn discover_bluetooth_terminals_native(
+    _configured: &ConfiguredEcrLookup,
+) -> Vec<serde_json::Value> {
+    vec![]
 }
 
 fn parse_required_device_id(arg0: Option<serde_json::Value>) -> Result<String, String> {
@@ -244,12 +1159,38 @@ pub async fn ecr_discover_devices(
     arg1: Option<serde_json::Value>,
     db: tauri::State<'_, db::DbState>,
 ) -> Result<serde_json::Value, String> {
-    let (_types, _timeout) = parse_discover_args(arg0, arg1);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let devices = db::ecr_list_devices(&conn);
+    let (requested_types_raw, timeout) = parse_discover_args(arg0, arg1);
+    let requested_types = resolve_requested_discovery_types(requested_types_raw);
+    let warnings = build_discovery_warning_keys(&requested_types);
+
+    let configured_devices = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        db::ecr_list_devices(&conn)
+    };
+    let configured_lookup = configured_ecr_lookup_from_devices(&configured_devices);
+
+    let mut devices = Vec::new();
+    if requested_types.iter().any(|value| value == "serial_usb") {
+        devices.extend(discover_serial_terminals_native(&configured_lookup));
+    }
+    if requested_types.iter().any(|value| value == "network") {
+        devices.extend(
+            discover_network_terminals_native(
+                &configured_lookup,
+                timeout.unwrap_or(DEFAULT_NETWORK_DISCOVERY_TIMEOUT_MS),
+            )
+            .await,
+        );
+    }
+    if requested_types.iter().any(|value| value == "bluetooth") {
+        devices.extend(discover_bluetooth_terminals_native(&configured_lookup));
+    }
+
+    let devices = dedupe_discovered_terminals(devices);
     Ok(serde_json::json!({
         "success": true,
-        "devices": devices
+        "devices": devices,
+        "warnings": warnings,
     }))
 }
 
@@ -1322,6 +2263,209 @@ pub async fn ecr_fiscal_print(
     }
 
     Ok(serde_json::json!({ "success": true }))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn sample_configured_lookup() -> ConfiguredEcrLookup {
+        configured_ecr_lookup_from_devices(&[serde_json::json!({
+            "name": "Main Counter",
+            "connectionType": "serial_usb",
+            "connectionDetails": {
+                "port": "COM3"
+            }
+        })])
+    }
+
+    #[test]
+    fn resolve_requested_discovery_types_normalizes_and_defaults() {
+        assert_eq!(
+            resolve_requested_discovery_types(vec!["USB".into(), "bt".into(), "lan".into()]),
+            vec![
+                "serial_usb".to_string(),
+                "bluetooth".to_string(),
+                "network".to_string()
+            ]
+        );
+
+        assert_eq!(
+            resolve_requested_discovery_types(vec!["unknown".into()]),
+            DEFAULT_DISCOVERY_TYPES
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<String>>()
+        );
+    }
+
+    #[test]
+    fn configured_lookup_matches_serial_connection_details() {
+        let lookup = configured_ecr_lookup_from_devices(&[serde_json::json!({
+            "name": "Till Lane",
+            "connectionType": "network",
+            "connectionDetails": {
+                "ip": "192.168.1.55",
+                "port": 20007
+            }
+        })]);
+
+        assert!(is_configured_terminal(
+            &lookup,
+            "Network Terminal (192.168.1.55:20007)",
+            "192.168.1.55:20007"
+        ));
+    }
+
+    #[test]
+    fn serial_candidate_marks_configured_devices() {
+        let candidate = build_serial_terminal_candidate(
+            "COM3",
+            Some("PAX"),
+            Some("A920"),
+            &sample_configured_lookup(),
+        );
+
+        assert_eq!(
+            candidate
+                .get("connectionType")
+                .and_then(|value| value.as_str()),
+            Some("serial_usb")
+        );
+        assert_eq!(
+            candidate
+                .pointer("/connectionDetails/port")
+                .and_then(|value| value.as_str()),
+            Some("COM3")
+        );
+        assert_eq!(
+            candidate
+                .get("isConfigured")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            candidate
+                .get("isSupported")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn network_candidate_uses_terminal_ports() {
+        let candidate = build_network_terminal_candidate(
+            "192.168.1.55",
+            20007,
+            &ConfiguredEcrLookup::default(),
+            "lan-port-scan",
+        );
+
+        assert_eq!(
+            candidate
+                .pointer("/connectionDetails/ip")
+                .and_then(|value| value.as_str()),
+            Some("192.168.1.55")
+        );
+        assert_eq!(
+            candidate
+                .pointer("/connectionDetails/port")
+                .and_then(|value| value.as_u64()),
+            Some(20007)
+        );
+        assert_eq!(
+            candidate
+                .get("isSupported")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn bluetooth_candidates_are_marked_discovery_only() {
+        let candidates = build_bluetooth_terminals_from_rows(
+            vec![serde_json::json!({
+                "FriendlyName": "Ingenico Move",
+                "InstanceId": "BTHENUM\\DEV_AABBCCDDEEFF\\8&1234",
+                "Source": "windows-pnp"
+            })],
+            &ConfiguredEcrLookup::default(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0]
+                .get("connectionType")
+                .and_then(|value| value.as_str()),
+            Some("bluetooth")
+        );
+        assert_eq!(
+            candidates[0]
+                .get("isSupported")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            candidates[0]
+                .get("unsupportedReason")
+                .and_then(|value| value.as_str()),
+            Some(BLUETOOTH_UNSUPPORTED_REASON_KEY)
+        );
+    }
+
+    #[test]
+    fn dedupe_prefers_single_identity_per_connection_target() {
+        let configured = ConfiguredEcrLookup::default();
+        let deduped = dedupe_discovered_terminals(vec![
+            build_network_terminal_candidate("192.168.1.80", 10009, &configured, "lan-port-scan"),
+            build_network_terminal_candidate("192.168.1.80", 10009, &configured, "lan-port-scan"),
+            build_bluetooth_terminal_candidate(
+                "Ingenico",
+                "AA:BB:CC:DD:EE:FF",
+                None,
+                None,
+                &configured,
+                "windows-pnp",
+            ),
+            build_bluetooth_terminal_candidate(
+                "Ingenico Copy",
+                "AABBCCDDEEFF",
+                None,
+                None,
+                &configured,
+                "windows-ble",
+            ),
+        ]);
+
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn parse_powershell_rows_accepts_single_object() {
+        let parsed = parse_powershell_device_rows(serde_json::json!({
+            "FriendlyName": "Terminal One",
+            "InstanceId": "BTHENUM\\DEV_AABBCCDDEEFF\\x"
+        }));
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn extract_mac_from_instance_id_formats_hex_pairs() {
+        assert_eq!(
+            extract_mac_from_instance_id("BTHENUM\\DEV_AABBCCDDEEFF\\8&1234"),
+            Some("AA:BB:CC:DD:EE:FF".to_string())
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lan_subnet_hosts_excludes_the_local_host() {
+        let hosts = lan_subnet_hosts(std::net::Ipv4Addr::new(192, 168, 1, 42));
+        assert_eq!(hosts.len(), 253);
+        assert!(!hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 42)));
+        assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(hosts.contains(&std::net::Ipv4Addr::new(192, 168, 1, 254)));
+    }
 }
 
 #[cfg(test)]

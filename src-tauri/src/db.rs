@@ -47,7 +47,7 @@ pub struct DbState {
 }
 
 /// Current schema version. Bump when adding new migrations.
-const CURRENT_SCHEMA_VERSION: i32 = 41;
+const CURRENT_SCHEMA_VERSION: i32 = 42;
 
 /// Initialize the database at `{app_data_dir}/pos.db`.
 ///
@@ -267,6 +267,9 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     }
     if current < 41 {
         migrate_v41(conn)?;
+    }
+    if current < 42 {
+        migrate_v42(conn)?;
     }
 
     Ok(())
@@ -2657,6 +2660,32 @@ fn migrate_v41(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_v42(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS caller_id_log (
+            id TEXT PRIMARY KEY,
+            caller_number TEXT NOT NULL,
+            caller_name TEXT,
+            customer_id TEXT,
+            customer_name TEXT,
+            sip_call_id TEXT,
+            action_taken TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(sip_call_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_caller_id_log_number ON caller_id_log(caller_number);
+        CREATE INDEX IF NOT EXISTS idx_caller_id_log_created ON caller_id_log(created_at);
+
+        INSERT INTO schema_version (version) VALUES (42);
+        ",
+    )
+    .map_err(|e| format!("migration v42 caller_id_log: {e}"))?;
+
+    info!("Applied migration v42 (caller_id_log table)");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // ECR device helpers
 // ---------------------------------------------------------------------------
@@ -3049,6 +3078,40 @@ pub fn set_setting(
         params![category, key, value],
     )
     .map_err(|e| format!("set_setting: {e}"))?;
+    Ok(())
+}
+
+pub fn upsert_caller_id_log(
+    conn: &Connection,
+    caller_number: &str,
+    caller_name: Option<&str>,
+    customer_id: Option<&str>,
+    customer_name: Option<&str>,
+    sip_call_id: &str,
+    action_taken: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO caller_id_log
+            (id, caller_number, caller_name, customer_id, customer_name, sip_call_id, action_taken, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+         ON CONFLICT(sip_call_id) DO UPDATE SET
+            caller_number = excluded.caller_number,
+            caller_name = excluded.caller_name,
+            customer_id = excluded.customer_id,
+            customer_name = excluded.customer_name,
+            action_taken = excluded.action_taken",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            caller_number,
+            caller_name,
+            customer_id,
+            customer_name,
+            sip_call_id,
+            action_taken,
+        ],
+    )
+    .map_err(|e| format!("upsert caller_id_log: {e}"))?;
+
     Ok(())
 }
 

@@ -34,6 +34,11 @@ import {
   canPrintShiftCheckoutSnapshot,
   queueShiftCheckoutPrint,
 } from '../../src/renderer/utils/staffShiftCheckoutPrint';
+import {
+  normalizeZReportData,
+  resolveShiftEarnedTotal,
+  resolveZReportPeriod,
+} from '../../src/renderer/utils/zReport';
 import type {
   HealthSupportContext,
   PrinterSupportContext,
@@ -790,4 +795,112 @@ test('queueShiftCheckoutPrint sends snapshot overrides through the bridge', asyn
     closingAmount: 172,
     varianceAmount: 2,
   });
+});
+
+test('resolveZReportPeriod supports flat-only payloads', () => {
+  assert.deepEqual(
+    resolveZReportPeriod({
+      periodStart: '2026-03-24T08:00:00Z',
+      periodEnd: '2026-03-24T18:00:00Z',
+    } as never),
+    {
+      start: '2026-03-24T08:00:00Z',
+      end: '2026-03-24T18:00:00Z',
+    },
+  );
+});
+
+test('normalizeZReportData promotes nested period values to flat compatibility fields', () => {
+  const normalized = normalizeZReportData({
+    date: '2026-03-24',
+    period: {
+      start: '2026-03-24T08:00:00Z',
+      end: '2026-03-24T18:00:00Z',
+    },
+    shifts: {
+      total: 2,
+      cashier: 1,
+      driver: 1,
+    },
+    sales: {
+      totalOrders: 10,
+      totalSales: 120,
+      cashSales: 40,
+      cardSales: 80,
+    },
+    cashDrawer: {
+      totalVariance: 0,
+      totalCashDrops: 0,
+      unreconciledCount: 0,
+    },
+    expenses: {
+      total: 0,
+      pendingCount: 0,
+    },
+    driverEarnings: {
+      totalDeliveries: 0,
+      totalEarnings: 0,
+      unsettledCount: 0,
+    },
+  });
+
+  assert.equal(normalized?.periodStart, '2026-03-24T08:00:00Z');
+  assert.equal(normalized?.periodEnd, '2026-03-24T18:00:00Z');
+  assert.equal(normalized?.period?.start, '2026-03-24T08:00:00Z');
+  assert.equal(normalized?.period?.end, '2026-03-24T18:00:00Z');
+});
+
+test('resolveZReportPeriod prefers nested fields when both shapes are present', () => {
+  assert.deepEqual(
+    resolveZReportPeriod({
+      period: {
+        start: '2026-03-24T06:00:00Z',
+        end: '2026-03-24T16:00:00Z',
+      },
+      periodStart: '2026-03-24T08:00:00Z',
+      periodEnd: '2026-03-24T18:00:00Z',
+    } as never),
+    {
+      start: '2026-03-24T06:00:00Z',
+      end: '2026-03-24T16:00:00Z',
+    },
+  );
+});
+
+test('resolveZReportPeriod tolerates a missing end timestamp', () => {
+  assert.deepEqual(
+    resolveZReportPeriod({
+      periodStart: '2026-03-24T08:00:00Z',
+    } as never),
+    {
+      start: '2026-03-24T08:00:00Z',
+      end: undefined,
+    },
+  );
+});
+
+test('resolveShiftEarnedTotal uses explicit totals and falls back to cash plus card', () => {
+  assert.equal(
+    resolveShiftEarnedTotal({
+      orders: {
+        count: 3,
+        cashAmount: 20,
+        cardAmount: 30,
+        totalAmount: 55,
+      },
+    } as never),
+    55,
+  );
+
+  assert.equal(
+    resolveShiftEarnedTotal({
+      orders: {
+        count: 3,
+        cashAmount: 20,
+        cardAmount: 30,
+        totalAmount: Number.NaN,
+      },
+    } as never),
+    50,
+  );
 });

@@ -868,6 +868,24 @@ export interface EcrRefundOptions {
   currency?: string;
 }
 
+export interface EcrDiscoveredDevice {
+  name: string;
+  deviceType: string;
+  connectionType: string;
+  connectionDetails: Record<string, unknown>;
+  manufacturer?: string;
+  model?: string;
+  isConfigured: boolean;
+  isSupported: boolean;
+  unsupportedReason?: string;
+  discoverySource?: string;
+}
+
+export interface EcrDiscoveryResponse {
+  devices: EcrDiscoveredDevice[];
+  warnings?: string[];
+}
+
 // -- Window / Update ---------------------------------------------------------
 
 export interface WindowState {
@@ -1463,7 +1481,7 @@ export interface PlatformBridge {
     discoverDevices(
       connectionTypes?: string[],
       timeout?: number,
-    ): Promise<any[]>;
+    ): Promise<EcrDiscoveryResponse>;
     getDevices(): Promise<any[]>;
     getDevice(deviceId: string): Promise<any>;
     addDevice(config: any): Promise<IpcResult>;
@@ -1495,6 +1513,16 @@ export interface PlatformBridge {
     testConnection(deviceId: string): Promise<IpcResult>;
     testPrint(deviceId: string): Promise<IpcResult>;
     fiscalPrint(orderId: string): Promise<IpcResult>;
+  };
+
+  // -- Caller ID (VoIP/SIP) --------------------------------------------------
+  callerid: {
+    start(): Promise<{ status: string }>;
+    stop(): Promise<{ status: string }>;
+    getStatus(): Promise<any>;
+    saveConfig(config: any): Promise<{ success: boolean }>;
+    getConfig(): Promise<any>;
+    testConnection(config?: any): Promise<{ success: boolean; message: string; reasonCode?: string }>;
   };
 
   // -- Loyalty ---------------------------------------------------------------
@@ -1994,6 +2022,14 @@ export const CHANNEL_MAP: Record<string, string> = {
   "ecr:test-connection": "ecr.testConnection",
   "ecr:test-print": "ecr.testPrint",
   "ecr:fiscal-print": "ecr.fiscalPrint",
+
+  // Caller ID / VoIP
+  "callerid:start": "callerid_start",
+  "callerid:stop": "callerid_stop",
+  "callerid:get-status": "callerid_get_status",
+  "callerid:save-config": "callerid_save_config",
+  "callerid:get-config": "callerid_get_config",
+  "callerid:test": "callerid_test_connection",
 
   // Loyalty
   "loyalty:get-settings": "loyalty.getSettings",
@@ -2749,6 +2785,15 @@ export class TauriBridge implements PlatformBridge {
     testConnection: (did: string) => this.inv("ecr:test-connection", did),
     testPrint: (did: string) => this.inv("ecr:test-print", did),
     fiscalPrint: (oid: string) => this.inv("ecr:fiscal-print", oid),
+  };
+
+  callerid = {
+    start: () => this.inv("callerid:start"),
+    stop: () => this.inv("callerid:stop"),
+    getStatus: () => this.inv("callerid:get-status"),
+    saveConfig: (config: any) => this.inv("callerid:save-config", config),
+    getConfig: () => this.inv("callerid:get-config"),
+    testConnection: (config?: any) => this.inv("callerid:test", config),
   };
 
   loyalty = {

@@ -1,4 +1,5 @@
 import type { ZReportData, StaffPerformance } from '../types/reports';
+import { resolveZReportPeriod } from './zReport';
 
 export function exportArrayToCSV(data: Record<string, any>[], filename: string) {
   if (!data || data.length === 0) {
@@ -25,11 +26,16 @@ function downloadCSV(csvString: string, filename: string) {
 export function exportZReportToCSV(zReport: ZReportData, filename: string = 'z-report') {
   if (!zReport) return;
   const rows: Record<string, any>[] = [];
+  const period = resolveZReportPeriod(zReport);
   const driverEarnings = zReport.driverEarnings ?? {
     totalDeliveries: 0,
     totalEarnings: 0,
     unsettledCount: 0,
   };
+
+  rows.push({ Section: 'Report', Metric: 'Business Day', Value: zReport.date });
+  rows.push({ Section: 'Report', Metric: 'Period Start', Value: period.start ?? '' });
+  rows.push({ Section: 'Report', Metric: 'Period End', Value: period.end ?? '' });
 
   rows.push({ Section: 'Shifts', Metric: 'Total', Value: zReport.shifts.total });
   rows.push({ Section: 'Shifts', Metric: 'Cashier', Value: zReport.shifts.cashier });

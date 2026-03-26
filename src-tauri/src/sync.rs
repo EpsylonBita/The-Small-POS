@@ -5028,7 +5028,10 @@ fn load_local_order_remote_lookup(
 
 fn build_remote_order_repair_since_cursor(lookup: &LocalOrderRemoteLookup) -> String {
     for candidate in [&lookup.updated_at, &lookup.created_at] {
-        let Some(raw_value) = candidate.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        let Some(raw_value) = candidate
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
         else {
             continue;
         };
@@ -5139,8 +5142,8 @@ fn sync_remote_order_snapshot_into_local(
         remote_order,
         &["special_instructions", "specialInstructions", "notes"],
     );
-    let updated_at =
-        str_any(remote_order, &["updated_at", "updatedAt"]).unwrap_or_else(|| repaired_at.to_string());
+    let updated_at = str_any(remote_order, &["updated_at", "updatedAt"])
+        .unwrap_or_else(|| repaired_at.to_string());
     let estimated_time = i64_any(remote_order, &["estimated_time", "estimatedTime"]);
     let payment_status = remote_order
         .get("payment_status")
@@ -5157,8 +5160,7 @@ fn sync_remote_order_snapshot_into_local(
     let staff_id = str_any(remote_order, &["staff_id", "staffId"]);
     let driver_id = str_any(remote_order, &["driver_id", "driverId"]);
     let driver_name = str_any(remote_order, &["driver_name", "driverName"]);
-    let discount_percentage =
-        num_any(remote_order, &["discount_percentage", "discountPercentage"]);
+    let discount_percentage = num_any(remote_order, &["discount_percentage", "discountPercentage"]);
     let discount_amount = num_any(remote_order, &["discount_amount", "discountAmount"]);
     let tip_amount = num_any(remote_order, &["tip_amount", "tipAmount"]);
     let version = remote_order
@@ -10843,7 +10845,15 @@ mod tests {
                  FROM orders
                  WHERE id = 'ord-repair-by-number'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(supabase_id.as_deref(), Some("remote-order-repair-100"));

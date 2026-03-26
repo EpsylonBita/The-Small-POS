@@ -27,6 +27,10 @@ interface DiscoveredDevice {
   connectionDetails: Record<string, unknown>
   manufacturer?: string
   model?: string
+  isConfigured?: boolean
+  isSupported?: boolean
+  unsupportedReason?: string
+  discoverySource?: string
 }
 
 interface Props {
@@ -50,7 +54,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
   // Form state
   const [name, setName] = useState('')
   const [connectionType, setConnectionType] = useState<ConnectionType>('serial_usb')
-  const [protocol, setProtocol] = useState<Protocol>('generic')
+  const [protocol, setProtocol] = useState<Protocol>('zvt')
   const [terminalId, setTerminalId] = useState('')
   const [merchantId, setMerchantId] = useState('')
   const [isDefault, setIsDefault] = useState(false)
@@ -69,6 +73,7 @@ export const TerminalConfigModal: React.FC<Props> = ({
   const [printOnTerminal, setPrintOnTerminal] = useState(true)
 
   const [isSaving, setIsSaving] = useState(false)
+  const showLegacyGenericOption = device?.protocol === 'generic' || protocol === 'generic'
 
   // Initialize form values
   useEffect(() => {
@@ -116,12 +121,14 @@ export const TerminalConfigModal: React.FC<Props> = ({
         setProtocol('zvt')
       } else if (manufacturer?.includes('pax')) {
         setProtocol('pax')
+      } else {
+        setProtocol('zvt')
       }
     } else {
       // Reset form
       setName('')
       setConnectionType('serial_usb')
-      setProtocol('generic')
+      setProtocol('zvt')
       setTerminalId('')
       setMerchantId('')
       setIsDefault(false)
@@ -264,7 +271,11 @@ export const TerminalConfigModal: React.FC<Props> = ({
                 onChange={(e) => setProtocol(e.target.value as Protocol)}
                 className="w-full px-4 py-2 rounded-lg bg-white/50 dark:bg-gray-800/50 border border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               >
-                <option value="generic">Generic ECR</option>
+                {showLegacyGenericOption && (
+                  <option value="generic">
+                    {t('ecr.config.legacyGeneric', 'Generic ECR (legacy)')}
+                  </option>
+                )}
                 <option value="zvt">ZVT (Ingenico/Verifone)</option>
                 <option value="pax">PAX Protocol</option>
               </select>

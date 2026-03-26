@@ -23,13 +23,22 @@ interface DiscoveredDevice {
   manufacturer?: string
   model?: string
   isConfigured: boolean
+  isSupported: boolean
+  unsupportedReason?: string
+  discoverySource?: string
+}
+
+interface DiscoveryResponse {
+  devices: DiscoveredDevice[]
+  warnings?: string[]
 }
 
 interface Props {
   isOpen: boolean
   onClose: () => void
   onSelect: (device: DiscoveredDevice) => void
-  discoverDevices: (types?: ConnectionType[]) => Promise<DiscoveredDevice[]>
+  discoverDevices: (types?: ConnectionType[]) => Promise<DiscoveryResponse>
+  onOpenCashRegisterSetup?: () => void
 }
 
 const ConnectionIcon: React.FC<{ type: ConnectionType; className?: string }> = ({
@@ -53,14 +62,18 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
   onClose,
   onSelect,
   discoverDevices,
+  onOpenCashRegisterSetup,
 }) => {
   const { t } = useTranslation()
   const [isSearching, setIsSearching] = useState(false)
   const [devices, setDevices] = useState<DiscoveredDevice[]>([])
+  const [warnings, setWarnings] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [hasSearched, setHasSearched] = useState(false)
   const [searchTypes, setSearchTypes] = useState<ConnectionType[]>([
     'serial_usb',
     'bluetooth',
+    'network',
   ])
 
   const toggleSearchType = (type: ConnectionType) => {
@@ -78,12 +91,16 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
     }
 
     setIsSearching(true)
+    setHasSearched(true)
     setError(null)
     setDevices([])
+    setWarnings([])
 
     try {
-      const found = await discoverDevices(searchTypes)
+      const response = await discoverDevices(searchTypes)
+      const found = response.devices || []
       setDevices(found)
+      setWarnings(response.warnings || [])
 
       if (found.length === 0) {
         setError(t('ecr.discovery.noDevices', 'No payment terminals found'))
@@ -105,9 +122,13 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
       handleSearch()
     } else {
       setDevices([])
+      setWarnings([])
       setError(null)
+      setHasSearched(false)
     }
   }, [isOpen])
+
+  const showFiscalHint = hasSearched && !isSearching && devices.length === 0
 
   return (
     <LiquidGlassModal
@@ -182,6 +203,51 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
           </div>
         )}
 
+        {/* Discovery warnings */}
+        {warnings.length > 0 && !isSearching && (
+          <div className="space-y-2">
+            {warnings.map((warning) => (
+              <div
+                key={warning}
+                className="flex items-center gap-3 p-4 rounded-lg bg-amber-500/10 border border-amber-500/30"
+              >
+                <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                <p className="text-amber-300 text-sm">{t(warning, warning)}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showFiscalHint && (
+          <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-amber-200">
+                  {t(
+                    'ecr.discovery.fiscalDeviceTitle',
+                    'Looking for an RBS or fiscal register?'
+                  )}
+                </p>
+                <p className="text-sm text-amber-300">
+                  {t(
+                    'ecr.discovery.fiscalDeviceHelp',
+                    'RBS, Datecs, Casio, and similar fiscal printers are configured under Cash Register / Fiscal Printer, not Payment Terminals.'
+                  )}
+                </p>
+              </div>
+            </div>
+            {onOpenCashRegisterSetup && (
+              <button
+                onClick={onOpenCashRegisterSetup}
+                className="w-full rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
+              >
+                {t('ecr.discovery.configureCashRegister', 'Configure Cash Register')}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Device list */}
         {devices.length > 0 && (
           <div className="space-y-3">
@@ -191,27 +257,42 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
             <div className="space-y-2 max-h-64 overflow-y-auto scrollbar-hide">
               {devices.map((device, index) => (
                 <div
-                  key={index}
+                  key={`${device.connectionType}-${device.name}-${index}`}
                   className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
                     device.isConfigured
                       ? 'bg-gray-700/30 border-gray-700/50 opacity-60'
-                      : 'bg-gray-700/50 border-gray-700 hover:bg-gray-700/70 cursor-pointer'
+                      : device.isSupported
+                        ? 'bg-gray-700/50 border-gray-700 hover:bg-gray-700/70 cursor-pointer'
+                        : 'bg-amber-500/5 border-amber-500/20 opacity-90'
                   }`}
-                  onClick={() => !device.isConfigured && onSelect(device)}
+                  onClick={() => {
+                    if (!device.isConfigured && device.isSupported) {
+                      onSelect(device)
+                    }
+                  }}
                 >
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
                     <div className="p-2 rounded-lg bg-gray-600/50">
                       <ConnectionIcon
                         type={device.connectionType}
                         className="w-5 h-5 text-gray-300"
                       />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-medium text-white">{device.name}</p>
                       <p className="text-sm text-gray-400">
                         {device.manufacturer && `${device.manufacturer} `}
                         {device.model}
                       </p>
+                      {!device.isSupported && (
+                        <p className="text-xs text-amber-300 mt-1">
+                          {t(
+                            device.unsupportedReason || 'ecr.discovery.unsupportedBluetooth',
+                            device.unsupportedReason ||
+                              'Bluetooth terminals can be discovered but not added from search yet.'
+                          )}
+                        </p>
+                      )}
                     </div>
                   </div>
                   {device.isConfigured ? (
@@ -220,6 +301,19 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
                       <span className="text-sm">
                         {t('ecr.discovery.configured', 'Configured')}
                       </span>
+                    </div>
+                  ) : !device.isSupported ? (
+                    <div className="flex flex-col items-end gap-2">
+                      <span className="text-xs px-2 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        {t('ecr.discovery.discoveryOnly', 'Discovery only')}
+                      </span>
+                      <button
+                        disabled
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-700/60 text-gray-500 cursor-not-allowed"
+                      >
+                        <Plus className="w-4 h-4" />
+                        {t('ecr.discovery.unavailable', 'Unavailable')}
+                      </button>
                     </div>
                   ) : (
                     <button
@@ -247,13 +341,14 @@ export const TerminalDiscoveryModal: React.FC<Props> = ({
           <button
             onClick={() =>
               onSelect({
-                name: '',
-                deviceType: 'payment_terminal',
-                connectionType: 'serial_usb',
-                connectionDetails: {},
-                isConfigured: false,
-              })
-            }
+              name: '',
+              deviceType: 'payment_terminal',
+              connectionType: 'serial_usb',
+              connectionDetails: {},
+              isConfigured: false,
+              isSupported: true,
+            })
+          }
             className="w-full py-3 rounded-lg bg-gray-700/50 text-gray-300 hover:bg-gray-700 transition-colors"
           >
             {t('ecr.discovery.addManually', 'Add Terminal Manually')}

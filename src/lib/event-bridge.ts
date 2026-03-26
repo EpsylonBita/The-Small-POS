@@ -101,6 +101,10 @@ const EVENT_MAP: Record<string, string> = {
   // --- Terminal config events ---
   'terminal_config_updated': 'terminal-config-updated',
 
+  // --- Caller ID events ---
+  'caller_id_incoming_call': 'callerid:incoming-call',
+  'caller_id_status_changed': 'callerid:status-changed',
+
   // --- ECR events ---
   'ecr_event_device_connected': 'ecr:event:device-connected',
   'ecr_event_device_disconnected': 'ecr:event:device-disconnected',

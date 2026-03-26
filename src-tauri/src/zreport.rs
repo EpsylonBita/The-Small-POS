@@ -667,6 +667,57 @@ fn load_matching_local_z_report_ids_for_window(
     Ok(matching_ids)
 }
 
+fn load_latest_local_z_report_for_report_date(
+    conn: &Connection,
+    branch_id: &str,
+    report_date: &str,
+) -> Result<Option<Value>, String> {
+    let existing_id: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM z_reports
+             WHERE report_date = ?1
+               AND (branch_id = ?2 OR branch_id IS NULL)
+             ORDER BY generated_at DESC, created_at DESC, id DESC
+             LIMIT 1",
+            params![report_date, branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load existing z-report by date: {e}"))?;
+
+    existing_id
+        .map(|id| get_z_report_by_id(conn, &id))
+        .transpose()
+}
+
+fn existing_response_from_local_z_report(report: Value) -> Value {
+    serde_json::json!({
+        "success": true,
+        "preview": false,
+        "existing": true,
+        "report": report,
+    })
+}
+
+fn load_existing_local_z_report_response(
+    db: &DbState,
+    payload: &Value,
+) -> Result<Option<Value>, String> {
+    let requested_date = str_field(payload, "date");
+    let Some(report_date) = requested_date else {
+        return Ok(None);
+    };
+
+    let branch_id = str_field(payload, "branchId")
+        .or_else(|| str_field(payload, "branch_id"))
+        .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    load_latest_local_z_report_for_report_date(&conn, branch_id.as_str(), report_date.as_str())
+        .map(|report| report.map(existing_response_from_local_z_report))
+}
+
 fn ensure_z_report_sync_queue_row(
     conn: &Connection,
     z_report_id: &str,
@@ -3347,6 +3398,10 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
 }
 
 pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
+    if let Some(existing) = load_existing_local_z_report_response(db, payload)? {
+        return Ok(existing);
+    }
+
     let built = build_z_report_for_date(db, payload)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
@@ -3355,6 +3410,10 @@ pub fn preview_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value,
 }
 
 pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value, String> {
+    if let Some(existing) = load_existing_local_z_report_response(db, payload)? {
+        return Ok(existing);
+    }
+
     let built = build_z_report_for_date(db, payload)?;
     if built.shift_count == 0 {
         info!("No closed shifts in period — returning preview-only Z-report");
@@ -4903,6 +4962,52 @@ mod tests {
             queue_count, 0,
             "preview should not enqueue z_report sync rows"
         );
+    }
+
+    #[test]
+    fn test_preview_z_report_for_date_reuses_existing_local_report_for_historical_day() {
+        let db = test_db();
+        seed_closed_shift(&db);
+        seed_second_closed_shift(&db);
+
+        let payload = serde_json::json!({
+            "branchId": "branch-1",
+            "date": "2026-02-16",
+        });
+
+        let generated =
+            generate_z_report_for_date(&db, &payload).expect("historical generate should persist");
+        let existing_id = generated["report"]["id"]
+            .as_str()
+            .expect("generated z-report id")
+            .to_string();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            db::set_setting(
+                &conn,
+                "system",
+                "last_z_report_timestamp",
+                "2026-02-16T23:59:59Z",
+            )
+            .expect("advance active period");
+        }
+
+        let result = preview_z_report_for_date(&db, &payload)
+            .expect("historical preview should reuse local z-report");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["preview"], false);
+        assert_eq!(result["existing"], true);
+        assert_eq!(result["report"]["id"], existing_id);
+        assert_eq!(result["report"]["reportDate"], "2026-02-16");
+
+        let report_json_str = result["report"]["reportJson"]
+            .as_str()
+            .expect("stored reportJson string");
+        let report_json: Value =
+            serde_json::from_str(report_json_str).expect("parse stored reportJson");
+        assert_eq!(report_json["shifts"]["total"], 2);
     }
 
     #[test]

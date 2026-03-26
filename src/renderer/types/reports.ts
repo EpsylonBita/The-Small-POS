@@ -251,6 +251,10 @@ export interface ZReportData {
     createdAt: string;
   }>;
   daySummary?: { cashTotal: number; cardTotal: number; total: number; totalOrders: number };
+  period?: {
+    start?: string;
+    end?: string;
+  };
   periodStart?: string;
   periodEnd?: string;
 }
