@@ -49,8 +49,8 @@ export function normalizeZReportData(report: ZReportData | null | undefined): ZR
   return {
     ...report,
     period: normalizedPeriod,
-    periodStart: report.periodStart ?? normalizedPeriod?.start,
-    periodEnd: report.periodEnd ?? normalizedPeriod?.end,
+    periodStart: period.start,
+    periodEnd: period.end,
   };
 }
 

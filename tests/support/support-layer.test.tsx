@@ -850,6 +850,48 @@ test('normalizeZReportData promotes nested period values to flat compatibility f
   assert.equal(normalized?.period?.end, '2026-03-24T18:00:00Z');
 });
 
+test('normalizeZReportData prefers nested period values when both shapes are present', () => {
+  const normalized = normalizeZReportData({
+    date: '2026-03-24',
+    period: {
+      start: '2026-03-24T06:00:00Z',
+      end: '2026-03-24T16:00:00Z',
+    },
+    periodStart: '2026-03-24T08:00:00Z',
+    periodEnd: '2026-03-24T18:00:00Z',
+    shifts: {
+      total: 1,
+      cashier: 1,
+      driver: 0,
+    },
+    sales: {
+      totalOrders: 1,
+      totalSales: 10,
+      cashSales: 10,
+      cardSales: 0,
+    },
+    cashDrawer: {
+      totalVariance: 0,
+      totalCashDrops: 0,
+      unreconciledCount: 0,
+    },
+    expenses: {
+      total: 0,
+      pendingCount: 0,
+    },
+    driverEarnings: {
+      totalDeliveries: 0,
+      totalEarnings: 0,
+      unsettledCount: 0,
+    },
+  });
+
+  assert.equal(normalized?.periodStart, '2026-03-24T06:00:00Z');
+  assert.equal(normalized?.periodEnd, '2026-03-24T16:00:00Z');
+  assert.equal(normalized?.period?.start, '2026-03-24T06:00:00Z');
+  assert.equal(normalized?.period?.end, '2026-03-24T16:00:00Z');
+});
+
 test('resolveZReportPeriod prefers nested fields when both shapes are present', () => {
   assert.deepEqual(
     resolveZReportPeriod({

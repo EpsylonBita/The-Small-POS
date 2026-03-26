@@ -9634,8 +9634,14 @@ fn local_z_report_period_bounds(
     row: &LocalHistoricalZReportRow,
 ) -> (Option<String>, Option<String>) {
     (
-        json_string_field(&row.report_json, &["periodStart", "period_start"]),
-        json_string_field(&row.report_json, &["periodEnd", "period_end"]),
+        row.report_json
+            .get("period")
+            .and_then(|period| json_string_field(period, &["start"]))
+            .or_else(|| json_string_field(&row.report_json, &["periodStart", "period_start"])),
+        row.report_json
+            .get("period")
+            .and_then(|period| json_string_field(period, &["end"]))
+            .or_else(|| json_string_field(&row.report_json, &["periodEnd", "period_end"])),
     )
 }
 

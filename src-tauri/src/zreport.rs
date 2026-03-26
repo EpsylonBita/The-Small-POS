@@ -618,10 +618,35 @@ fn report_window_timestamp_matches(left: Option<&str>, right: Option<&str>) -> b
     }
 }
 
+fn canonicalize_report_json_period(report_json: &mut Value, period_start: &str, period_end: &str) {
+    if let Some(obj) = report_json.as_object_mut() {
+        obj.insert(
+            "period".to_string(),
+            serde_json::json!({
+                "start": period_start,
+                "end": period_end,
+            }),
+        );
+        obj.insert(
+            "periodStart".to_string(),
+            Value::String(period_start.to_string()),
+        );
+        obj.insert("periodEnd".to_string(), Value::String(period_end.to_string()));
+    }
+}
+
 fn extract_period_bounds_from_report_json(report_json: &Value) -> (Option<String>, Option<String>) {
     (
-        str_field(report_json, "periodStart").or_else(|| str_field(report_json, "period_start")),
-        str_field(report_json, "periodEnd").or_else(|| str_field(report_json, "period_end")),
+        report_json
+            .get("period")
+            .and_then(|period| str_field(period, "start"))
+            .or_else(|| str_field(report_json, "periodStart"))
+            .or_else(|| str_field(report_json, "period_start")),
+        report_json
+            .get("period")
+            .and_then(|period| str_field(period, "end"))
+            .or_else(|| str_field(report_json, "periodEnd"))
+            .or_else(|| str_field(report_json, "period_end")),
     )
 }
 
@@ -2482,12 +2507,14 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "kitchen": if role_type == "kitchen" { 1 } else { 0 },
     });
     let now = Utc::now().to_rfc3339();
+    let period_start = check_in_time
+        .as_deref()
+        .unwrap_or_else(|| check_out_time.as_deref().unwrap_or(now.as_str()));
+    let period_end = check_out_time.as_deref().unwrap_or(now.as_str());
 
     // Build full report_json (matches Electron POS shape for server compat)
-    let report_json = serde_json::json!({
+    let mut report_json = serde_json::json!({
         "date": report_date,
-        "periodStart": check_in_time,
-        "periodEnd": check_out_time.clone().unwrap_or_else(|| now.clone()),
         "shifts": shift_counts,
         "sales": {
             "totalOrders": total_orders,
@@ -2528,6 +2555,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         },
         "staffReports": staff_reports,
     });
+    canonicalize_report_json_period(&mut report_json, period_start, period_end);
 
     // --- Persist in transaction ---
 
@@ -3317,10 +3345,8 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     );
 
     // Build Electron-compatible report_json
-    let report_json = serde_json::json!({
+    let mut report_json = serde_json::json!({
         "date": date,
-        "periodStart": period_start,
-        "periodEnd": period_end,
         "shifts": {
             "total": shifts_total,
             "cashier": shifts_cashier,
@@ -3366,6 +3392,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         },
         "staffReports": staff_reports,
     });
+    canonicalize_report_json_period(&mut report_json, period_start.as_str(), period_end.as_str());
 
     Ok(BuiltDateZReport {
         shift_id_for_db: shifts.first().map(|s| s.id.clone()),
@@ -3421,10 +3448,10 @@ pub fn generate_z_report_for_date(db: &DbState, payload: &Value) -> Result<Value
     }
 
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let period_start = str_field(&built.report_json, "periodStart")
-        .ok_or("Missing reportJson.periodStart for Z-report persistence")?;
-    let period_end = str_field(&built.report_json, "periodEnd")
-        .ok_or("Missing reportJson.periodEnd for Z-report persistence")?;
+    let (period_start, period_end) = extract_period_bounds_from_report_json(&built.report_json);
+    let period_start =
+        period_start.ok_or("Missing reportJson.periodStart for Z-report persistence")?;
+    let period_end = period_end.ok_or("Missing reportJson.periodEnd for Z-report persistence")?;
     let sync_payload = serde_json::json!({
         "terminal_id": built.terminal_id,
         "branch_id": built.branch_id,
@@ -4415,6 +4442,8 @@ mod tests {
         assert_eq!(report["syncState"], "pending");
 
         let report_json = report["reportJson"].as_object().expect("reportJson object");
+        assert_eq!(report_json["period"]["start"], "2026-02-16T09:00:00Z");
+        assert_eq!(report_json["period"]["end"], "2026-02-16T18:00:00Z");
         assert_eq!(report_json["periodStart"], "2026-02-16T09:00:00Z");
         assert_eq!(report_json["periodEnd"], "2026-02-16T18:00:00Z");
         assert_eq!(
@@ -4475,7 +4504,25 @@ mod tests {
         let report = &result["report"];
         assert_eq!(report["reportDate"], "2026-02-15");
         assert_eq!(report["reportJson"]["date"], "2026-02-15");
+        assert_eq!(report["reportJson"]["period"]["start"], "2026-02-16T09:00:00Z");
+        assert_eq!(report["reportJson"]["period"]["end"], "2026-02-16T18:00:00Z");
         assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
+    }
+
+    #[test]
+    fn test_extract_period_bounds_prefers_nested_period() {
+        let report_json = serde_json::json!({
+            "period": {
+                "start": "2026-02-16T08:00:00Z",
+                "end": "2026-02-16T18:00:00Z",
+            },
+            "periodStart": "2026-02-16T09:00:00Z",
+            "periodEnd": "2026-02-16T19:00:00Z",
+        });
+
+        let (start, end) = extract_period_bounds_from_report_json(&report_json);
+        assert_eq!(start.as_deref(), Some("2026-02-16T08:00:00Z"));
+        assert_eq!(end.as_deref(), Some("2026-02-16T18:00:00Z"));
     }
 
     #[test]
@@ -5882,6 +5929,8 @@ mod tests {
         assert_eq!(report["reportDate"], "2026-02-16");
         assert_eq!(report["totalOrders"], 3);
         assert_eq!(report["grossSales"], 100.0);
+        assert_eq!(report["reportJson"]["period"]["start"], "2026-02-16T09:00:00Z");
+        assert_eq!(report["reportJson"]["period"]["end"], "2026-02-16T18:00:00Z");
         assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
         assert_eq!(report["reportJson"]["periodEnd"], "2026-02-16T18:00:00Z");
     }
