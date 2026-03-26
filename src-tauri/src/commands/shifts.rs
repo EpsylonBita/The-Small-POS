@@ -29,7 +29,7 @@ async fn emit_sync_status_snapshot(
     }
 }
 
-fn schedule_immediate_financial_sync(
+fn schedule_immediate_sync(
     app: tauri::AppHandle,
     entity_type: &'static str,
     entity_id: String,
@@ -61,7 +61,7 @@ fn schedule_immediate_financial_sync(
         };
 
         let Some(db_dir) = db_dir else {
-            warn!(entity_type, entity_id = %entity_id, "Skipping immediate financial sync: missing database directory");
+            warn!(entity_type, entity_id = %entity_id, "Skipping immediate sync: missing database directory");
             emit_sync_status_snapshot(&app, &sync_state).await;
             return;
         };
@@ -73,7 +73,7 @@ fn schedule_immediate_financial_sync(
                     entity_type,
                     entity_id = %entity_id,
                     %error,
-                    "Failed to open background database for immediate financial sync"
+                    "Failed to open background database for immediate sync"
                 );
                 emit_sync_status_snapshot(&app, &sync_state).await;
                 return;
@@ -85,7 +85,7 @@ fn schedule_immediate_financial_sync(
                 let _ = app.emit(
                     "sync_complete",
                     serde_json::json!({
-                        "trigger": "financial_auto",
+                        "trigger": "auto",
                         "entityType": entity_type,
                         "entityId": entity_id,
                     }),
@@ -96,7 +96,7 @@ fn schedule_immediate_financial_sync(
                     entity_type,
                     entity_id = %entity_id,
                     %error,
-                    "Immediate financial sync attempt failed"
+                    "Immediate sync attempt failed"
                 );
             }
         }
@@ -135,6 +135,15 @@ struct ShiftSummaryPayload {
     shift_id: String,
     #[serde(default, alias = "skip_backfill")]
     skip_backfill: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShiftExpenseDeletePayload {
+    #[serde(alias = "expense_id", alias = "id")]
+    expense_id: String,
+    #[serde(alias = "shift_id", alias = "staff_shift_id", alias = "staffShiftId")]
+    shift_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +327,47 @@ fn parse_shift_summary_payload(
     let mut parsed: ShiftSummaryPayload = serde_json::from_value(payload)
         .map_err(|e| format!("Invalid shift summary payload: {e}"))?;
     parsed.shift_id = parsed.shift_id.trim().to_string();
+    if parsed.shift_id.is_empty() {
+        return Err("Missing shiftId".into());
+    }
+    Ok(parsed)
+}
+
+fn parse_shift_expense_delete_payload(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+) -> Result<ShiftExpenseDeletePayload, String> {
+    let payload = match (arg0, arg1) {
+        (
+            Some(serde_json::Value::String(expense_id)),
+            Some(serde_json::Value::String(shift_id)),
+        ) => serde_json::json!({
+            "expenseId": expense_id,
+            "shiftId": shift_id
+        }),
+        (
+            Some(serde_json::Value::String(expense_id)),
+            Some(serde_json::Value::Object(mut obj)),
+        ) => {
+            obj.entry("expenseId".to_string())
+                .or_insert(serde_json::Value::String(expense_id));
+            serde_json::Value::Object(obj)
+        }
+        (Some(serde_json::Value::Object(mut obj)), Some(serde_json::Value::String(shift_id))) => {
+            obj.entry("shiftId".to_string())
+                .or_insert(serde_json::Value::String(shift_id));
+            serde_json::Value::Object(obj)
+        }
+        (lhs, rhs) => merge_payload_args(lhs, rhs),
+    };
+
+    let mut parsed: ShiftExpenseDeletePayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid expense delete payload: {e}"))?;
+    parsed.expense_id = parsed.expense_id.trim().to_string();
+    parsed.shift_id = parsed.shift_id.trim().to_string();
+    if parsed.expense_id.is_empty() {
+        return Err("Missing expenseId".into());
+    }
     if parsed.shift_id.is_empty() {
         return Err("Missing shiftId".into());
     }
@@ -535,6 +585,9 @@ pub async fn shift_open(
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing shift payload")?;
     let result = shift_service::open_shift(&db, &payload)?;
+    if let Some(shift_id) = result.get("shiftId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_sync(app.clone(), "shift", shift_id.to_string());
+    }
     let _ = app.emit(
         "shift_updated",
         serde_json::json!({
@@ -552,13 +605,16 @@ pub async fn shift_close(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let payload = arg0.ok_or("Missing shift close payload")?;
+    let requested_shift_id = value_str(&payload, &["shiftId", "shift_id"]);
     let mut result = shift_service::close_shift(&db, &payload)?;
 
-    let shift_id = value_str(&result, &["id", "shiftId", "shift_id"]).or_else(|| {
-        result
-            .get("shift")
-            .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
-    });
+    let shift_id = value_str(&result, &["id", "shiftId", "shift_id"])
+        .or_else(|| {
+            result
+                .get("shift")
+                .and_then(|shift| value_str(shift, &["id", "shiftId", "shift_id"]))
+        })
+        .or(requested_shift_id);
     if let Some(shift_id) = shift_id {
         if crate::print::is_print_action_enabled(&db, "shift_close") {
             match print::enqueue_print_job(&db, "shift_checkout", &shift_id, None) {
@@ -576,6 +632,7 @@ pub async fn shift_close(
                 }
             }
         }
+        schedule_immediate_sync(app.clone(), "shift", shift_id);
     }
 
     let _ = app.emit(
@@ -604,6 +661,15 @@ pub async fn shift_get_by_id(
 ) -> Result<serde_json::Value, String> {
     let payload = parse_cashier_shift_payload(arg0)?;
     shift_service::get_shift_by_id(&db, &payload.cashier_shift_id)
+}
+
+#[tauri::command]
+pub async fn shift_get_sync_state(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_cashier_shift_payload(arg0)?;
+    shift_service::get_shift_sync_state(&db, &payload.cashier_shift_id)
 }
 
 #[tauri::command]
@@ -756,7 +822,26 @@ pub async fn shift_record_expense(
     let payload = arg0.ok_or("Missing expense payload")?;
     let result = shift_service::record_expense(&db, &payload)?;
     if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
-        schedule_immediate_financial_sync(app, "shift_expense", expense_id.to_string());
+        schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn shift_delete_expense(
+    arg0: Option<serde_json::Value>,
+    arg1: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let parsed = parse_shift_expense_delete_payload(arg0, arg1)?;
+    let payload = serde_json::json!({
+        "expenseId": parsed.expense_id,
+        "shiftId": parsed.shift_id,
+    });
+    let result = shift_service::delete_expense(&db, &payload)?;
+    if let Some(expense_id) = result.get("expenseId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_sync(app, "shift_expense", expense_id.to_string());
     }
     Ok(result)
 }
@@ -847,7 +932,7 @@ pub async fn shift_record_staff_payment(
         "success": true,
         "paymentId": payment_id
     });
-    schedule_immediate_financial_sync(app, "staff_payment", payment_id);
+    schedule_immediate_sync(app, "staff_payment", payment_id);
     Ok(result)
 }
 
@@ -1181,6 +1266,28 @@ mod dto_tests {
         assert_eq!(from_object.expected_amount, Some(150.0));
         assert_eq!(from_object.closing_amount, Some(152.0));
         assert_eq!(from_object.variance_amount, Some(2.0));
+    }
+
+    #[test]
+    fn parse_shift_expense_delete_payload_supports_aliases_and_tuple() {
+        let from_tuple = parse_shift_expense_delete_payload(
+            Some(serde_json::json!("expense-1")),
+            Some(serde_json::json!("shift-1")),
+        )
+        .expect("tuple payload should parse");
+        let from_object = parse_shift_expense_delete_payload(
+            Some(serde_json::json!({
+                "expense_id": "expense-2",
+                "staff_shift_id": "shift-2"
+            })),
+            None,
+        )
+        .expect("object payload should parse");
+
+        assert_eq!(from_tuple.expense_id, "expense-1");
+        assert_eq!(from_tuple.shift_id, "shift-1");
+        assert_eq!(from_object.expense_id, "expense-2");
+        assert_eq!(from_object.shift_id, "shift-2");
     }
 
     #[test]

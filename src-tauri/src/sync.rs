@@ -12839,6 +12839,67 @@ mod tests {
     }
 
     #[test]
+    fn test_reconcile_financials_promotes_shift_expense_delete_after_parent_shift_sync() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, last_error
+             ) VALUES (
+                'shift_expense',
+                'expense-delete-waiting',
+                'delete',
+                '{\"expenseId\":\"expense-delete-waiting\",\"shiftId\":\"shift-delete-waiting\",\"staffShiftId\":\"shift-delete-waiting\",\"branchId\":\"branch-1\",\"deletedAt\":\"2026-03-26T10:00:00Z\"}',
+                'expense-delete-waiting:delete',
+                'deferred',
+                'Parent shift not yet synced'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-delete-waiting', 'staff-1', 'cashier', datetime('now'), 'active', 'pending', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 0);
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE staff_shifts
+             SET sync_status = 'synced'
+             WHERE id = 'shift-delete-waiting'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let promoted = reconcile_deferred_financials(&db).unwrap();
+        assert_eq!(promoted, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, operation): (String, String) = conn
+            .query_row(
+                "SELECT status, operation
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-delete-waiting'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(operation, "delete");
+    }
+
+    #[test]
     fn test_reconcile_staff_payment_requeues_missing_parent_shift_queue_row() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();

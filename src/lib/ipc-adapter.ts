@@ -814,6 +814,22 @@ export interface RecordExpenseParams {
   receiptNumber?: string;
 }
 
+export interface DeleteShiftExpenseParams {
+  expenseId: string;
+  shiftId: string;
+}
+
+export interface ShiftSyncState {
+  shiftId: string;
+  shiftSyncStatus: string;
+  queueStatus: string | null;
+  lastError?: string | null;
+  retryCount: number;
+  nextRetryAt?: string | null;
+  queueCreatedAt?: string | null;
+  queueUpdatedAt?: string | null;
+}
+
 export interface RecordStaffPaymentParams {
   cashierShiftId: string;
   paidToStaffId: string;
@@ -1258,6 +1274,7 @@ export interface PlatformBridge {
     printCheckout(params: ShiftPrintCheckoutParams): Promise<IpcResult>;
     getActive(staffId: string): Promise<any>;
     getById(shiftId: string): Promise<any>;
+    getSyncState(shiftId: string): Promise<ShiftSyncState>;
     getActiveByTerminal(branchId: string, terminalId: string): Promise<any>;
     getActiveByTerminalLoose(terminalId: string): Promise<any>;
     getActiveCashierByTerminal(
@@ -1274,6 +1291,7 @@ export interface PlatformBridge {
       options?: { skipBackfill?: boolean },
     ): Promise<any>;
     recordExpense(params: RecordExpenseParams): Promise<IpcResult>;
+    deleteExpense(params: DeleteShiftExpenseParams): Promise<IpcResult>;
     getExpenses(shiftId: string): Promise<any[]>;
     recordStaffPayment(params: RecordStaffPaymentParams): Promise<IpcResult>;
     getStaffPayments(cashierShiftId: string): Promise<any[]>;
@@ -1880,6 +1898,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "shift:close": "shifts.close",
   "shift:get-active": "shifts.getActive",
   "shift:get-by-id": "shifts.getById",
+  "shift:get-sync-state": "shifts.getSyncState",
   "shift:get-active-by-terminal": "shifts.getActiveByTerminal",
   "shift:get-active-by-terminal-loose": "shifts.getActiveByTerminalLoose",
   "shift:get-active-cashier-by-terminal": "shifts.getActiveCashierByTerminal",
@@ -1888,6 +1907,7 @@ export const CHANNEL_MAP: Record<string, string> = {
     "shifts.getActiveCashierByTerminalLoose",
   "shift:get-summary": "shifts.getSummary",
   "shift:record-expense": "shifts.recordExpense",
+  "shift:delete-expense": "shifts.deleteExpense",
   "shift:get-expenses": "shifts.getExpenses",
   "shift:record-staff-payment": "shifts.recordStaffPayment",
   "shift:get-staff-payments": "shifts.getStaffPayments",
@@ -2538,6 +2558,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("shift:print-checkout", p),
     getActive: (staffId: string) => this.inv("shift:get-active", staffId),
     getById: (shiftId: string) => this.inv("shift:get-by-id", shiftId),
+    getSyncState: (shiftId: string) =>
+      this.inv("shift:get-sync-state", shiftId) as Promise<ShiftSyncState>,
     getActiveByTerminal: (b: string, t: string) =>
       this.inv("shift:get-active-by-terminal", b, t),
     getActiveByTerminalLoose: (t: string) =>
@@ -2556,6 +2578,8 @@ export class TauriBridge implements PlatformBridge {
       this.inv("shift:get-summary", id, opts),
     recordExpense: (p: RecordExpenseParams) =>
       this.inv("shift:record-expense", p),
+    deleteExpense: (p: DeleteShiftExpenseParams) =>
+      this.inv("shift:delete-expense", p),
     getExpenses: (id: string) => this.inv("shift:get-expenses", id),
     recordStaffPayment: (p: RecordStaffPaymentParams) =>
       this.inv("shift:record-staff-payment", p),

@@ -415,6 +415,31 @@ pub(crate) fn cache_terminal_settings_snapshot(
         updated.push("restaurant.subtitle".to_string());
     }
 
+    if let Some(terminal_name) = nested_value_str(
+        resp,
+        &[
+            "/terminal_name",
+            "/terminal_info/name",
+            "/settings/terminal/name",
+            "/settings/terminal/display_name",
+        ],
+    ) {
+        db::set_setting(&conn, "terminal", "name", &terminal_name)?;
+        updated.push("terminal.name".to_string());
+    }
+
+    if let Some(terminal_location) = nested_value_str(
+        resp,
+        &[
+            "/terminal_location",
+            "/terminal_info/location",
+            "/settings/terminal/location",
+        ],
+    ) {
+        db::set_setting(&conn, "terminal", "location", &terminal_location)?;
+        updated.push("terminal.location".to_string());
+    }
+
     // Persist explicit terminal fallbacks for printing paths.
     if let Some(store_name) = nested_value_str(
         resp,
@@ -771,6 +796,8 @@ mod tests {
     fn cache_snapshot_persists_branch_identity_and_receipt_fallbacks() {
         let db = test_db();
         let payload = serde_json::json!({
+            "terminal_name": "Front Counter",
+            "terminal_location": "Counter A",
             "organization_branding": {
                 "name": "The Small Group",
                 "logo_url": "https://example.com/logo.png"
@@ -810,6 +837,14 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "terminal", "store_name").as_deref(),
             Some("Kifisia Branch")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "name").as_deref(),
+            Some("Front Counter")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "terminal", "location").as_deref(),
+            Some("Counter A")
         );
         assert_eq!(
             db::get_setting(&conn, "restaurant", "address").as_deref(),

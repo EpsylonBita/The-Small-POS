@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { ShiftExpense } from '../../types';
@@ -463,6 +463,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [expenseDescription, setExpenseDescription] = useState('');
   const [expenseReceipt, setExpenseReceipt] = useState('');
   const [expenses, setExpenses] = useState<ShiftExpense[]>([]);
+  const [deletingExpenseId, setDeletingExpenseId] = useState<string | null>(null);
 
   // Staff payment recording state (for cashiers)
   const [staffPaymentsList, setStaffPaymentsList] = useState<Array<{
@@ -515,6 +516,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     message: string;
     variant: ConfirmVariant;
     onConfirm: () => void;
+    confirmText?: string;
+    cancelText?: string;
     requireCheckbox?: string;
     typeToConfirm?: string;
   }>({
@@ -2222,7 +2225,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
 
     if (!expenseDescription.trim()) {
-      setError(t('modals.expense.descriptionRequired'));
+      setError(
+        t('modals.expense.justificationRequired', {
+          defaultValue: 'A clear justification is required before saving.',
+        }),
+      );
       return;
     }
 
@@ -2239,19 +2246,17 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       });
 
       if (result.success) {
-        setSuccess(t('modals.expense.recordSuccess'));
+        setSuccess(
+          t('modals.expense.expenseRecorded', {
+            defaultValue: 'Expense charged to the active cashier drawer',
+          }),
+        );
         setExpenseAmount('');
         setExpenseDescription('');
         setExpenseReceipt('');
         setShowExpenseForm(false);
         await loadExpenses();
-        // Refresh shiftSummary to update totalExpenses for expected amount calculation
-        try {
-          const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
-          setShiftSummary(summaryResult?.data || summaryResult);
-        } catch (e) {
-          console.warn('Failed to refresh shift summary after expense:', e);
-        }
+        await refreshShiftSummaryAfterExpenseMutation(effectiveShift.id);
         setTimeout(() => setSuccess(''), 2000);
       } else {
         setError(result.error || t('modals.staffShift.recordExpenseFailed'));
@@ -2263,7 +2268,103 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  const refreshShiftSummaryAfterExpenseMutation = async (shiftId: string) => {
+    try {
+      const summaryResult = await bridge.shifts.getSummary(shiftId, { skipBackfill: true });
+      setShiftSummary(summaryResult?.data || summaryResult);
+    } catch (error) {
+      console.warn('Failed to refresh shift summary after expense mutation:', error);
+    }
+  };
+
+  const handleDeleteExpense = async (expense: ShiftExpense) => {
+    if (!effectiveShift?.id) {
+      closeConfirm();
+      setError(t('modals.staffShift.noActiveShift'));
+      return;
+    }
+
+    setLoading(true);
+    setDeletingExpenseId(expense.id);
+    setError('');
+
+    try {
+      const result = await bridge.shifts.deleteExpense({
+        expenseId: expense.id,
+        shiftId: effectiveShift.id,
+      });
+
+      if (!result?.success) {
+        throw new Error(
+          result?.error ||
+            t('modals.expense.expenseDeleteFailed', {
+              defaultValue: 'Failed to delete expense',
+            }),
+        );
+      }
+
+      await loadExpenses(effectiveShift.id);
+      await refreshShiftSummaryAfterExpenseMutation(effectiveShift.id);
+      setSuccess(
+        t('modals.expense.expenseDeleted', {
+          defaultValue: 'Expense deleted',
+        }),
+      );
+      setTimeout(() => setSuccess(''), 2000);
+      closeConfirm();
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : t('modals.expense.expenseDeleteFailed', {
+              defaultValue: 'Failed to delete expense',
+            });
+
+      if (message === 'Expense not found') {
+        await loadExpenses(effectiveShift.id);
+        await refreshShiftSummaryAfterExpenseMutation(effectiveShift.id);
+        closeConfirm();
+      } else {
+        setError(message);
+        closeConfirm();
+      }
+    } finally {
+      setDeletingExpenseId(null);
+      setLoading(false);
+    }
+  };
+
   const totalExpenses = expenses.reduce((sum, exp) => sum + exp.amount, 0);
+  const expenseDescriptionPlaceholder = t('modals.expense.justificationPlaceholder', {
+    defaultValue: 'Explain what left the drawer and why it was needed.',
+  });
+  const expenseReceiptPlaceholder = t('modals.expense.receiptPlaceholder', {
+    defaultValue: 'Invoice, receipt, or reference number',
+  });
+  const recordExpenseLabel = t('modals.expense.recordExpense', {
+    defaultValue: 'Record expense',
+  });
+  const noExpensesLabel = t('modals.expense.noExpenses', {
+    defaultValue: 'No expenses recorded yet',
+  });
+  const deleteExpenseLabel = t('modals.expense.deleteExpense', {
+    defaultValue: 'Delete expense',
+  });
+  const getExpenseTypeLabel = (type: ShiftExpense['expense_type'] | string | null | undefined) => {
+    const normalizedType =
+      typeof type === 'string' && ['supplies', 'maintenance', 'petty_cash', 'refund', 'other'].includes(type)
+        ? type
+        : 'other';
+    return t(`modals.expense.expenseTypes.${normalizedType}`, {
+      defaultValue: t(`expense.categories.${normalizedType}`, {
+        defaultValue: normalizedType,
+      }),
+    });
+  };
+  const getExpenseStatusLabel = (status: ShiftExpense['status']) =>
+    t(`expense.status.${status}`, {
+      defaultValue: status,
+    });
 
   const getStatusSymbol = (delivery: any): React.ReactNode => {
     const rawStatus = delivery.status || delivery.order_status || '';
@@ -2591,6 +2692,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const checkoutSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/90 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkoutInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
+  const checkoutActionButtonClass = 'inline-grid min-h-[70px] w-full shrink-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,0.28)] transition-all hover:bg-blue-700 sm:w-[176px]';
   const checkoutMutedTextClass = 'text-sm text-slate-600 dark:text-slate-300/80';
   const checkInSurfaceClass = 'rounded-[28px] border border-slate-200/80 bg-white/92 p-5 shadow-[0_18px_40px_rgba(15,23,42,0.08)] dark:border-white/10 dark:bg-white/[0.04] dark:shadow-[0_18px_40px_rgba(2,6,23,0.28)]';
   const checkInInsetSurfaceClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/88 p-4 shadow-[0_10px_24px_rgba(15,23,42,0.05)] dark:border-white/10 dark:bg-black/25 dark:shadow-none';
@@ -2630,8 +2732,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const renderExpensesPanel = () => (
     <div className={checkoutSurfaceClass}>
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
             {t('modals.staffShift.expenses')}
           </div>
@@ -2648,7 +2750,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           </p>
         </div>
 
-        <div className="text-right">
+        <div className="w-full sm:w-auto sm:text-right">
           <div className="text-xs uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
             {t('modals.staffShift.totalExpenses')}
           </div>
@@ -2658,10 +2760,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {canRecordInlineExpenses && (
             <button
               onClick={() => setShowExpenseForm(!showExpenseForm)}
-              className="mt-3 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,0.28)] transition-all hover:bg-blue-700"
+              className={`mt-3 ${checkoutActionButtonClass}`}
             >
-              <Plus className="h-4 w-4" />
-              {t('modals.staffShift.addExpense')}
+              <Plus className="h-4 w-4 justify-self-center" />
+              <span className="min-w-0 text-center leading-tight whitespace-normal">
+                {t('modals.staffShift.addExpense')}
+              </span>
             </button>
           )}
         </div>
@@ -2674,11 +2778,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             onChange={(e) => setExpenseType(e.target.value as 'supplies' | 'maintenance' | 'petty_cash' | 'refund' | 'other')}
             className="liquid-glass-modal-input text-sm"
           >
-            <option value="supplies">{t('expense.categories.supplies')}</option>
-            <option value="maintenance">{t('expense.categories.maintenance')}</option>
-            <option value="petty_cash">{t('expense.categories.petty_cash')}</option>
-            <option value="refund">{t('expense.categories.refund')}</option>
-            <option value="other">{t('expense.categories.other')}</option>
+            <option value="supplies">{getExpenseTypeLabel('supplies')}</option>
+            <option value="maintenance">{getExpenseTypeLabel('maintenance')}</option>
+            <option value="petty_cash">{getExpenseTypeLabel('petty_cash')}</option>
+            <option value="refund">{getExpenseTypeLabel('refund')}</option>
+            <option value="other">{getExpenseTypeLabel('other')}</option>
           </select>
 
           <input
@@ -2695,7 +2799,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             type="text"
             value={expenseDescription}
             onChange={(e) => setExpenseDescription(e.target.value)}
-            placeholder={t('modals.expense.descriptionPlaceholder')}
+            placeholder={expenseDescriptionPlaceholder}
             className="liquid-glass-modal-input text-sm"
           />
 
@@ -2703,7 +2807,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             type="text"
             value={expenseReceipt}
             onChange={(e) => setExpenseReceipt(e.target.value)}
-            placeholder={t('modals.expense.receiptPlaceholder')}
+            placeholder={expenseReceiptPlaceholder}
             className="liquid-glass-modal-input text-sm"
           />
 
@@ -2712,30 +2816,74 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
             disabled={loading}
             className="w-full rounded-xl bg-green-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(16,185,129,0.26)] transition-all hover:bg-green-700 disabled:opacity-50"
           >
-            {t('modals.expense.recordButton')}
+            {recordExpenseLabel}
           </button>
         </div>
       )}
 
       <div className="mt-5 space-y-2">
         {expenses.length > 0 ? (
-          expenses.map((expense) => (
-            <div
-              key={expense.id}
-              className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-slate-50/85 p-3 dark:border-white/10 dark:bg-black/20"
-            >
-              <div className="min-w-0">
-                <div className="font-semibold liquid-glass-modal-text">{expense.description}</div>
-                <div className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                  {expense.expense_type}
-                  {expense.receipt_number ? ` · ${expense.receipt_number}` : ''}
+          expenses.map((expense) => {
+            const expenseTitle =
+              expense.description ||
+              t('modals.expense.untitledExpense', {
+                defaultValue: 'Untitled expense',
+              });
+            const expenseMeta = [getExpenseTypeLabel(expense.expense_type), expense.receipt_number?.trim() || '']
+              .filter(Boolean)
+              .join(' · ');
+
+            return (
+              <div
+                key={expense.id}
+                className="flex items-center justify-between rounded-2xl border border-slate-200/80 bg-slate-50/85 p-3 dark:border-white/10 dark:bg-black/20"
+              >
+                <div className="min-w-0">
+                  <div className="font-semibold liquid-glass-modal-text">{expenseTitle}</div>
+                  {expenseMeta && (
+                    <div className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
+                      {expenseMeta}
+                    </div>
+                  )}
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-2">
+                  <div className="text-right font-black text-rose-500 dark:text-rose-300">
+                    -{formatCurrency(expense.amount)}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={deletingExpenseId === expense.id}
+                    onClick={() =>
+                      openConfirm({
+                        title: t('modals.expense.deleteExpenseConfirmTitle', {
+                          defaultValue: 'Delete expense',
+                        }),
+                        message: t(
+                          'modals.expense.deleteExpenseConfirmMessage',
+                          'Delete "{{description}}"? This will immediately remove it from the drawer totals.',
+                          {
+                            description: expenseTitle,
+                          },
+                        ),
+                        variant: 'error',
+                        confirmText: deleteExpenseLabel,
+                        cancelText: t('common.actions.cancel', {
+                          defaultValue: 'Cancel',
+                        }),
+                        onConfirm: () => {
+                          void handleDeleteExpense(expense);
+                        },
+                      })
+                    }
+                    className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {deleteExpenseLabel}
+                  </button>
                 </div>
               </div>
-              <div className="text-right font-black text-rose-500 dark:text-rose-300">
-                -{formatCurrency(expense.amount)}
-              </div>
-            </div>
-          ))
+            );
+          })
         ) : (
           <div className="rounded-2xl border border-dashed border-slate-200/90 bg-slate-50/70 px-4 py-5 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/[0.03] dark:text-slate-400">
             {t('modals.staffShift.noExpensesRecorded')}
@@ -2755,8 +2903,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     return (
       <div className={checkoutSurfaceClass}>
-        <div className="flex items-start justify-between gap-4">
-          <div>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 flex-1">
             <div className="text-xs uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
               {t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}
             </div>
@@ -2776,10 +2924,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 void openStaffPaymentForm();
               }
             }}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,0.28)] transition-all hover:bg-blue-700"
+            className={checkoutActionButtonClass}
           >
-            <Plus className="h-4 w-4" />
-            {t('modals.staffShift.addPayment', 'Add Payment')}
+            <Plus className="h-4 w-4 justify-self-center" />
+            <span className="min-w-0 text-center leading-tight whitespace-normal">
+              {t('modals.staffShift.addPayment', 'Add Payment')}
+            </span>
           </button>
         </div>
 
@@ -5152,11 +5302,11 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         onChange={(e) => setExpenseType(e.target.value as 'supplies' | 'maintenance' | 'petty_cash' | 'refund' | 'other')}
                         className="liquid-glass-modal-input text-sm"
                       >
-                        <option value="supplies">{t('expense.categories.supplies')}</option>
-                        <option value="maintenance">{t('expense.categories.maintenance')}</option>
-                        <option value="petty_cash">{t('expense.categories.petty_cash')}</option>
-                        <option value="refund">{t('expense.categories.refund')}</option>
-                        <option value="other">{t('expense.categories.other')}</option>
+                        <option value="supplies">{getExpenseTypeLabel('supplies')}</option>
+                        <option value="maintenance">{getExpenseTypeLabel('maintenance')}</option>
+                        <option value="petty_cash">{getExpenseTypeLabel('petty_cash')}</option>
+                        <option value="refund">{getExpenseTypeLabel('refund')}</option>
+                        <option value="other">{getExpenseTypeLabel('other')}</option>
                       </select>
 
                       <input
@@ -5168,7 +5318,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           setExpenseAmount(val);
                         }}
                         onFocus={(e) => e.target.select()}
-                        placeholder={t('modals.expense.amountPlaceholder')}
+                        placeholder="0,00"
                         className="liquid-glass-modal-input text-sm"
                       />
 
@@ -5176,7 +5326,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         type="text"
                         value={expenseDescription}
                         onChange={(e) => setExpenseDescription(e.target.value)}
-                        placeholder={t('modals.expense.descriptionPlaceholder')}
+                        placeholder={expenseDescriptionPlaceholder}
                         className="liquid-glass-modal-input text-sm"
                       />
 
@@ -5184,7 +5334,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         type="text"
                         value={expenseReceipt}
                         onChange={(e) => setExpenseReceipt(e.target.value)}
-                        placeholder={t('modals.expense.receiptPlaceholder')}
+                        placeholder={expenseReceiptPlaceholder}
                         className="liquid-glass-modal-input text-sm"
                       />
 
@@ -5193,7 +5343,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         disabled={loading}
                         className="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg text-sm shadow-[0_4px_16px_0_rgba(16,185,129,0.5)] hover:shadow-[0_6px_20px_0_rgba(16,185,129,0.6)] transition-all duration-300"
                       >
-                        {t('modals.expense.recordButton')}
+                        {recordExpenseLabel}
                       </button>
                     </div>
                   )}
@@ -5204,16 +5354,50 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                         <div key={expense.id} className="flex items-center justify-between p-3 bg-gray-50/50 dark:bg-gray-800/60 border liquid-glass-modal-border rounded-xl text-sm">
                           <div className="flex-1">
                             <div className="font-medium liquid-glass-modal-text">{expense.description}</div>
-                            <div className="liquid-glass-modal-text-muted capitalize text-xs">{expense.expense_type}</div>
+                            <div className="liquid-glass-modal-text-muted capitalize text-xs">{getExpenseTypeLabel(expense.expense_type)}</div>
                           </div>
-                          <div className="text-right">
+                          <div className="flex shrink-0 flex-col items-end gap-2 text-right">
                             <div className="font-semibold liquid-glass-modal-text">{formatCurrency(expense.amount)}</div>
                             <div className={`text-xs ${expense.status === 'approved' ? 'text-green-400' :
                               expense.status === 'rejected' ? 'text-red-400' :
                                 'text-yellow-400'
                               }`}>
-                              {t('expense.status.' + expense.status)}
+                              {getExpenseStatusLabel(expense.status)}
                             </div>
+                            <button
+                              type="button"
+                              disabled={deletingExpenseId === expense.id}
+                              onClick={() =>
+                                openConfirm({
+                                  title: t('modals.expense.deleteExpenseConfirmTitle', {
+                                    defaultValue: 'Delete expense',
+                                  }),
+                                  message: t(
+                                    'modals.expense.deleteExpenseConfirmMessage',
+                                    'Delete "{{description}}"? This will immediately remove it from the drawer totals.',
+                                    {
+                                      description:
+                                        expense.description ||
+                                        t('modals.expense.untitledExpense', {
+                                          defaultValue: 'Untitled expense',
+                                        }),
+                                    },
+                                  ),
+                                  variant: 'error',
+                                  confirmText: deleteExpenseLabel,
+                                  cancelText: t('common.actions.cancel', {
+                                    defaultValue: 'Cancel',
+                                  }),
+                                  onConfirm: () => {
+                                    void handleDeleteExpense(expense);
+                                  },
+                                })
+                              }
+                              className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {deleteExpenseLabel}
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -5223,7 +5407,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       </div>
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">{t('modals.expense.noExpenses')}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">{noExpensesLabel}</p>
                   )}
                 </div>
               )}

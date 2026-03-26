@@ -109,6 +109,17 @@ export interface ShiftExpense {
   updated_at: string;
 }
 
+export interface ShiftSyncState {
+  shiftId: string;
+  shiftSyncStatus: string;
+  queueStatus: string | null;
+  lastError?: string | null;
+  retryCount: number;
+  nextRetryAt?: string | null;
+  queueCreatedAt?: string | null;
+  queueUpdatedAt?: string | null;
+}
+
 export interface DriverEarning {
   id: string;
   driver_id: string;

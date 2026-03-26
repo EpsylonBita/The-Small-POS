@@ -2133,7 +2133,7 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
     let order_agg = conn
         .query_row(
             "SELECT COUNT(*) as cnt,
-                    COALESCE(SUM(total_amount), 0) as gross,
+                    COALESCE(SUM(total_amount + COALESCE(discount_amount, 0)), 0) as gross,
                     COALESCE(SUM(discount_amount), 0) as discounts,
                     COALESCE(SUM(tip_amount), 0) as tips
              FROM orders
@@ -2518,7 +2518,8 @@ pub fn generate_z_report(db: &DbState, payload: &Value) -> Result<Value, String>
         "shifts": shift_counts,
         "sales": {
             "totalOrders": total_orders,
-            "totalSales": gross_sales,
+            "totalSales": gross_sales - discounts_total,
+            "discountsTotal": discounts_total,
             "cashSales": cash_sales,
             "cardSales": card_sales,
             "dineInOrders": dine_in_orders,
@@ -2952,7 +2953,7 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
     let financial_predicate = lower_bound_mode.sql_predicate(&financial_expr, "?1");
     let order_agg_sql = format!(
         "SELECT COUNT(*) as cnt,
-                COALESCE(SUM(o.total_amount), 0) as gross,
+                COALESCE(SUM(o.total_amount + COALESCE(o.discount_amount, 0)), 0) as gross,
                 COALESCE(SUM(o.discount_amount), 0) as discounts,
                 COALESCE(SUM(o.tip_amount), 0) as tips
          FROM orders o
@@ -3355,7 +3356,8 @@ fn build_z_report_for_date(db: &DbState, payload: &Value) -> Result<BuiltDateZRe
         },
         "sales": {
             "totalOrders": total_orders,
-            "totalSales": gross_sales,
+            "totalSales": gross_sales - discounts_total,
+            "discountsTotal": discounts_total,
             "cashSales": cash_sales,
             "cardSales": card_sales,
             "dineInOrders": dine_in_orders,

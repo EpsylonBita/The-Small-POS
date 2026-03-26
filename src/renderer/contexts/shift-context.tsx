@@ -357,6 +357,37 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShift?.id]);
 
+  useEffect(() => {
+    const handleSyncComplete = async () => {
+      if (!activeShift || activeShift.status !== 'active') {
+        return;
+      }
+
+      const currentSyncStatus = String(activeShift.sync_status ?? '').trim().toLowerCase();
+      if (currentSyncStatus === 'synced') {
+        return;
+      }
+
+      try {
+        const result = await bridge.shifts.getById(activeShift.id);
+        const refreshedShift = result?.data ?? result;
+        if (refreshedShift && refreshedShift.status === 'active') {
+          setActiveShift(refreshedShift);
+          return;
+        }
+      } catch (error) {
+        console.warn('[ShiftContext] Failed to refresh active shift on sync completion:', error);
+      }
+
+      await refreshActiveShift(activeShift.staff_id);
+    };
+
+    onEvent('sync:complete', handleSyncComplete);
+    return () => {
+      offEvent('sync:complete', handleSyncComplete);
+    };
+  }, [activeShift?.id, activeShift?.staff_id, activeShift?.status, activeShift?.sync_status]);
+
 
   const setStaff = (newStaff: StaffData | null) => {
     setStaffState(newStaff);

@@ -919,6 +919,7 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
 
             Ok(serde_json::json!({
                 "success": true,
+                "shiftId": shift_id,
                 "variance": variance,
                 "expected": expected,
                 "closing": closing_cash,
@@ -1028,6 +1029,93 @@ pub fn get_shift_by_id(db: &DbState, shift_id: &str) -> Result<Value, String> {
         "SELECT * FROM staff_shifts WHERE id = ?1 LIMIT 1",
         params![shift_id],
     )
+}
+
+pub fn get_shift_sync_state(db: &DbState, shift_id: &str) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let shift_sync_status: Option<String> = conn
+        .query_row(
+            "SELECT sync_status
+             FROM staff_shifts
+             WHERE id = ?1
+             LIMIT 1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("load shift sync status: {e}"))?;
+
+    let Some(shift_sync_status) = shift_sync_status else {
+        return Err(format!("No shift found with id {shift_id}"));
+    };
+
+    let queue_row: Option<(
+        String,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = conn
+        .query_row(
+            "SELECT status, last_error, retry_count, next_retry_at, created_at, updated_at
+             FROM sync_queue
+             WHERE entity_type = 'shift'
+               AND entity_id = ?1
+               AND status IN ('failed', 'in_progress', 'queued_remote', 'pending')
+             ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC, id DESC
+             LIMIT 1",
+            params![shift_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load shift sync queue state: {e}"))?;
+
+    let (
+        queue_status,
+        last_error,
+        retry_count,
+        next_retry_at,
+        queue_created_at,
+        queue_updated_at,
+    ) = match queue_row {
+        Some((
+            queue_status,
+            last_error,
+            retry_count,
+            next_retry_at,
+            queue_created_at,
+            queue_updated_at,
+        )) => (
+            Some(queue_status),
+            last_error,
+            retry_count,
+            next_retry_at,
+            queue_created_at,
+            queue_updated_at,
+        ),
+        None => (None, None, 0_i64, None, None, None),
+    };
+
+    Ok(serde_json::json!({
+        "shiftId": shift_id,
+        "shiftSyncStatus": shift_sync_status,
+        "queueStatus": queue_status,
+        "lastError": last_error,
+        "retryCount": retry_count,
+        "nextRetryAt": next_retry_at,
+        "queueCreatedAt": queue_created_at,
+        "queueUpdatedAt": queue_updated_at,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1623,6 +1711,122 @@ pub fn get_expenses(db: &DbState, shift_id: &str) -> Result<Value, String> {
     }
 
     Ok(serde_json::json!(expenses))
+}
+
+/// Delete a previously recorded shift expense.
+///
+/// Removes the local row, recomputes the owning drawer's expense total, and
+/// enqueues a canonical delete sync row after clearing any unfinished queue
+/// rows for the same expense so the stale local insert cannot be replayed.
+pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+
+    let expense_id = str_field(payload, "expenseId")
+        .or_else(|| str_field(payload, "expense_id"))
+        .or_else(|| str_field(payload, "id"))
+        .ok_or("Missing expenseId")?;
+    let shift_id = str_field(payload, "shiftId")
+        .or_else(|| str_field(payload, "shift_id"))
+        .or_else(|| str_field(payload, "staffShiftId"))
+        .or_else(|| str_field(payload, "staff_shift_id"))
+        .ok_or("Missing shiftId")?;
+
+    let expense_row: Option<(String, String, f64)> = conn
+        .query_row(
+            "SELECT staff_shift_id, branch_id, amount
+             FROM shift_expenses
+             WHERE id = ?1",
+            params![expense_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("load expense: {e}"))?;
+
+    let Some((stored_shift_id, branch_id, amount)) = expense_row else {
+        return Err("Expense not found".into());
+    };
+
+    if stored_shift_id != shift_id {
+        return Err(format!("Expense does not belong to shift {shift_id}"));
+    }
+
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM shift_expenses WHERE id = ?1",
+            params![expense_id],
+        )
+        .map_err(|e| format!("delete expense: {e}"))?;
+
+        let remaining_total = compute_shift_expenses_total(&conn, &stored_shift_id);
+        conn.execute(
+            "UPDATE cash_drawer_sessions SET
+                total_expenses = ?1,
+                updated_at = ?2
+             WHERE staff_shift_id = ?3",
+            params![remaining_total, now, stored_shift_id],
+        )
+        .map_err(|e| format!("recompute drawer expenses: {e}"))?;
+
+        conn.execute(
+            "DELETE FROM sync_queue
+             WHERE entity_type = 'shift_expense'
+               AND entity_id = ?1
+               AND status NOT IN ('synced', 'applied')",
+            params![expense_id],
+        )
+        .map_err(|e| format!("clear unfinished expense queue rows: {e}"))?;
+
+        let sync_payload = serde_json::json!({
+            "expenseId": expense_id,
+            "shiftId": stored_shift_id,
+            "staffShiftId": stored_shift_id,
+            "branchId": branch_id,
+            "amount": amount,
+            "deletedAt": now,
+        })
+        .to_string();
+        let idempotency_key = format!("expense:{expense_id}:delete:{}", Uuid::new_v4());
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                created_at, updated_at
+            ) VALUES ('shift_expense', ?1, 'delete', ?2, ?3, ?4, ?4)",
+            params![expense_id, sync_payload, idempotency_key, now],
+        )
+        .map_err(|e| format!("enqueue expense delete sync: {e}"))?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    }
+
+    info!(
+        expense_id = %expense_id,
+        shift_id = %stored_shift_id,
+        amount = %amount,
+        "Expense deleted"
+    );
+
+    Ok(serde_json::json!({
+        "success": true,
+        "expenseId": expense_id,
+        "shiftId": stored_shift_id,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4072,5 +4276,332 @@ mod tests {
             orders.is_empty(),
             "quiet cashier shifts should expose an empty cashierOrders array"
         );
+    }
+
+    #[test]
+    fn test_delete_expense_removes_local_row_recomputes_drawer_and_requeues_delete() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
+                100.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                total_expenses, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'term-1', 100.0,
+                15.0, ?1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                status, sync_status, created_at, updated_at
+            ) VALUES (
+                'expense-delete', 'cashier-delete', 'cashier-1', 'branch-1', 'other', 10.0, 'Wrong expense',
+                'pending', 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                status, sync_status, created_at, updated_at
+            ) VALUES (
+                'expense-keep', 'cashier-delete', 'cashier-1', 'branch-1', 'supplies', 5.0, 'Keep expense',
+                'pending', 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'shift_expense', 'expense-delete', 'insert',
+                '{\"shiftId\":\"cashier-delete\",\"amount\":10}', 'expense-delete:insert', 'pending'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = delete_expense(
+            &db,
+            &serde_json::json!({
+                "expenseId": "expense-delete",
+                "shiftId": "cashier-delete",
+            }),
+        )
+        .expect("expense delete should succeed");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["expenseId"], "expense-delete");
+
+        let conn = db.conn.lock().unwrap();
+        let deleted_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM shift_expenses WHERE id = 'expense-delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let total_expenses: f64 = conn
+            .query_row(
+                "SELECT total_expenses FROM cash_drawer_sessions WHERE id = 'drawer-delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (operation, status, payload): (String, String, String) = conn
+            .query_row(
+                "SELECT operation, status, payload
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-delete'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let payload: Value =
+            serde_json::from_str(&payload).expect("delete sync payload should be valid json");
+
+        assert_eq!(deleted_count, 0, "deleted expense row should be removed locally");
+        assert_eq!(
+            total_expenses, 5.0,
+            "drawer total_expenses should be recomputed from remaining expenses"
+        );
+        assert_eq!(
+            queue_rows, 1,
+            "unfinished insert rows should be replaced by one canonical delete row"
+        );
+        assert_eq!(operation, "delete");
+        assert_eq!(status, "pending");
+        assert_eq!(payload["expenseId"], "expense-delete");
+        assert_eq!(payload["shiftId"], "cashier-delete");
+        assert_eq!(payload["staffShiftId"], "cashier-delete");
+        assert_eq!(payload["branchId"], "branch-1");
+        assert!(payload["deletedAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_delete_expense_keeps_synced_history_and_recomputes_remaining_total() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-delete-synced', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
+                100.0, 'active', 2, 'synced', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                total_expenses, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-delete-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'term-1', 100.0,
+                9.0, ?1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                status, sync_status, created_at, updated_at
+            ) VALUES (
+                'expense-synced', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'other', 4.0, 'Synced expense',
+                'pending', 'synced', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                status, sync_status, created_at, updated_at
+            ) VALUES (
+                'expense-stays', 'cashier-delete-synced', 'cashier-1', 'branch-1', 'supplies', 5.0, 'Remaining expense',
+                'pending', 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status, synced_at
+            ) VALUES (
+                'shift_expense', 'expense-synced', 'insert',
+                '{\"shiftId\":\"cashier-delete-synced\",\"amount\":4}', 'expense-synced:insert', 'synced', ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        delete_expense(
+            &db,
+            &serde_json::json!({
+                "expenseId": "expense-synced",
+                "shiftId": "cashier-delete-synced",
+            }),
+        )
+        .expect("synced expense delete should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        let total_expenses: f64 = conn
+            .query_row(
+                "SELECT total_expenses
+                 FROM cash_drawer_sessions
+                 WHERE id = 'drawer-delete-synced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT operation, status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-synced'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            total_expenses, 5.0,
+            "drawer total_expenses should match the remaining synced + unsynced local rows"
+        );
+        assert_eq!(
+            queue_rows,
+            vec![
+                ("insert".to_string(), "synced".to_string()),
+                ("delete".to_string(), "pending".to_string()),
+            ],
+            "final synced insert history should remain while the new delete is queued"
+        );
+    }
+
+    #[test]
+    fn test_get_shift_sync_state_returns_pending_queue_metadata_for_open_shift() {
+        let db = test_db();
+        let result = open_shift(
+            &db,
+            &serde_json::json!({
+                "staffId": "cashier-sync-state",
+                "staffName": "Cashier Sync State",
+                "branchId": "branch-1",
+                "terminalId": "term-1",
+                "roleType": "cashier",
+                "openingCash": 125.0,
+            }),
+        )
+        .expect("shift should open");
+
+        let shift_id = result["shiftId"]
+            .as_str()
+            .expect("shift id should be present")
+            .to_string();
+        let sync_state =
+            get_shift_sync_state(&db, &shift_id).expect("shift sync state should resolve");
+
+        assert_eq!(sync_state["shiftId"], shift_id);
+        assert_eq!(sync_state["shiftSyncStatus"], "pending");
+        assert_eq!(sync_state["queueStatus"], "pending");
+        assert_eq!(sync_state["retryCount"], 0);
+        assert!(sync_state["queueCreatedAt"].as_str().is_some());
+        assert!(sync_state["queueUpdatedAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_get_shift_sync_state_returns_failed_queue_metadata() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+        let failed_at = "2026-03-26T10:05:00Z";
+        let next_retry_at = "2026-03-26T10:10:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-sync-failed', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
+                100.0, 'active', 2, 'failed', ?1, ?2
+            )",
+            params![created_at, failed_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, last_error, next_retry_at, created_at, updated_at
+            ) VALUES (
+                'shift', 'shift-sync-failed', 'insert', '{}', 'shift-sync-failed:open',
+                'pending', 1, NULL, NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, last_error, next_retry_at, created_at, updated_at
+            ) VALUES (
+                'shift', 'shift-sync-failed', 'insert', '{}', 'shift-sync-failed:retry',
+                'failed', 3, 'Validation failed: branch access denied', ?2, ?1, ?3
+            )",
+            params![created_at, next_retry_at, failed_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sync_state =
+            get_shift_sync_state(&db, "shift-sync-failed").expect("shift sync state should resolve");
+
+        assert_eq!(sync_state["shiftId"], "shift-sync-failed");
+        assert_eq!(sync_state["shiftSyncStatus"], "failed");
+        assert_eq!(sync_state["queueStatus"], "failed");
+        assert_eq!(
+            sync_state["lastError"],
+            "Validation failed: branch access denied"
+        );
+        assert_eq!(sync_state["retryCount"], 3);
+        assert_eq!(sync_state["nextRetryAt"], next_retry_at);
+        assert_eq!(sync_state["queueCreatedAt"], created_at);
+        assert_eq!(sync_state["queueUpdatedAt"], failed_at);
     }
 }

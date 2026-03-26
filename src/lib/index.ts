@@ -39,6 +39,8 @@ export {
   type OpenShiftParams,
   type CloseShiftParams,
   type RecordExpenseParams,
+  type DeleteShiftExpenseParams,
+  type ShiftSyncState,
   type RecordStaffPaymentParams,
   type MenuCategory,
   type MenuUpdatePayload,
