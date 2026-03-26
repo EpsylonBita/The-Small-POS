@@ -1985,7 +1985,65 @@
         "rbsNetworkHint": "Usa l'indirizzo IP e la porta TCP configurati sul dispositivo RBS o dal tuo installatore. Il POS non rileva ancora automaticamente i registratori fiscali RBS.",
         "save": "Salva dispositivo",
         "cancel": "Annulla"
+      },
+      "callerId": {
+        "title": "Identificazione chiamante (VoIP/SIP)",
+        "enable": "Abilita identificazione chiamante",
+        "sipServer": "Server SIP (IP)",
+        "sipPort": "Porta SIP",
+        "username": "Nome utente SIP / Interno",
+        "password": "Password SIP",
+        "listenPort": "Porta di ascolto",
+        "testConnection": "Test connessione",
+        "save": "Salva",
+        "saved": "Impostazioni identificazione chiamante salvate",
+        "statusListening": "In ascolto",
+        "statusRegistering": "Registrazione...",
+        "statusError": "Errore",
+        "statusStopped": "Arrestato",
+        "callsDetected": "Chiamate rilevate",
+        "singleSourceTitle": "Configura l'identificazione chiamante su un solo terminale sorgente",
+        "singleSourceBody": "Questo terminale acquisisce le chiamate in arrivo e le inoltra al resto del punto vendita. Non abilitare la stessa linea su più terminali POS.",
+        "providerPreset": "Preimpostazione",
+        "authUsername": "Nome utente di autenticazione",
+        "authUsernamePlaceholder": "Lascia vuoto per usare il nome utente SIP",
+        "transport": "Trasporto",
+        "passwordStored": "Una password è già memorizzata in modo sicuro su questo terminale POS. Lascia vuoto per mantenerla.",
+        "routerUnsupportedTitle": "Gli account telefonici solo-router non sono supportati in v1",
+        "routerUnsupported": "Se il tuo ISP/router mostra le impostazioni telefoniche solo all'interno del router e non fornisce credenziali SIP, questo modulo di identificazione chiamante non è supportato in v1.",
+        "unsupportedProvider": "Questa linea sembra essere bloccata dietro un account router dell'ISP. L'identificazione chiamante in questa build richiede credenziali SIP standard o accesso PBX.",
+        "advanced": "Impostazioni avanzate",
+        "outboundProxy": "Proxy in uscita",
+        "legacyInfoTitle": "Modalità legacy PBX affidabile",
+        "legacyInfoBody": "Usa questa opzione solo se il tuo PBX si fida dell'IP del terminale POS e non richiede autenticazione SIP con nome utente/password.",
+        "saveAndActivate": "Salva e attiva",
+        "disable": "Disabilita",
+        "disabled": "L'identificazione chiamante è stata disabilitata su questo terminale.",
+        "testBeforeSave": "Esegui un test di connessione riuscito dopo le ultime modifiche prima di attivare l'identificazione chiamante.",
+        "testRequiredHint": "Dopo ogni modifica esegui prima Test connessione prima di attivare l'identificazione chiamante su questo terminale.",
+        "setup": {
+          "providerPreset": "Preimpostazione provider",
+          "providerPresetHelp": "Inizia dai valori SIP più comuni e modifica i dettagli del server.",
+          "generic": "SIP generico",
+          "genericHelp": "Usa server SIP, nome utente e password forniti dal tuo provider o PBX.",
+          "legacy": "Avanzato / PBX legacy",
+          "legacyHelp": "Continua a usare un flusso di registrazione PBX basato su IP affidabile per le installazioni più vecchie."
+        },
+        "status": {
+          "listening": "In ascolto",
+          "registering": "Registrazione",
+          "error": "Errore",
+          "stopped": "Arrestato"
+        }
       }
+    }
+  },
+  "callerid": {
+    "popup": {
+      "unknownCaller": "Chiamante sconosciuto",
+      "viewCustomer": "Apri",
+      "startOrder": "Avvia ordine",
+      "addCustomer": "Aggiungi cliente"
     }
   },
   "sync": {

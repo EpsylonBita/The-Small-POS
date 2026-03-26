@@ -679,7 +679,7 @@ async fn handle_call_event(
         "timestamp": event.timestamp,
     });
 
-    let _ = app_handle.emit("callerid:incoming-call", base_payload.clone());
+    emit_incoming_call(app_handle, &base_payload);
     record_caller_log(
         app_handle,
         base_payload["callerNumber"].as_str().unwrap_or_default(),
@@ -700,7 +700,7 @@ async fn handle_call_event(
                 "sipCallId": base_payload["sipCallId"].as_str().unwrap_or_default(),
                 "timestamp": base_payload["timestamp"].as_str().unwrap_or_default(),
             });
-            let _ = app_handle.emit("callerid:incoming-call", payload.clone());
+            emit_incoming_call(app_handle, &payload);
             record_caller_log(
                 app_handle,
                 payload["callerNumber"].as_str().unwrap_or_default(),
@@ -775,15 +775,19 @@ fn emit_status(
     error: Option<String>,
     reason: Option<CallerIdStatusReason>,
 ) {
-    let _ = app_handle.emit(
-        "callerid:status",
-        serde_json::json!({
-            "status": status,
-            "registered": registered,
-            "error": error,
-            "reason": reason,
-        }),
-    );
+    let payload = serde_json::json!({
+        "status": status,
+        "registered": registered,
+        "error": error,
+        "reason": reason,
+    });
+    let _ = app_handle.emit("caller_id_status_changed", payload.clone());
+    let _ = app_handle.emit("callerid:status", payload);
+}
+
+fn emit_incoming_call(app_handle: &tauri::AppHandle, payload: &Value) {
+    let _ = app_handle.emit("caller_id_incoming_call", payload.clone());
+    let _ = app_handle.emit("callerid:incoming-call", payload.clone());
 }
 
 fn record_caller_log(

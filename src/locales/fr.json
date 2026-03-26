@@ -1985,7 +1985,65 @@
         "rbsNetworkHint": "Utilisez l'adresse IP et le port TCP configurés sur l'appareil RBS ou par votre installateur. Le POS ne détecte pas encore automatiquement les caisses fiscales RBS.",
         "save": "Enregistrer l'appareil",
         "cancel": "Annuler"
+      },
+      "callerId": {
+        "title": "Identification de l'appelant (VoIP/SIP)",
+        "enable": "Activer l'identification de l'appelant",
+        "sipServer": "Serveur SIP (IP)",
+        "sipPort": "Port SIP",
+        "username": "Nom d'utilisateur SIP / Extension",
+        "password": "Mot de passe SIP",
+        "listenPort": "Port d'écoute",
+        "testConnection": "Tester la connexion",
+        "save": "Enregistrer",
+        "saved": "Paramètres de l'identification de l'appelant enregistrés",
+        "statusListening": "À l'écoute",
+        "statusRegistering": "Enregistrement...",
+        "statusError": "Erreur",
+        "statusStopped": "Arrêté",
+        "callsDetected": "Appels détectés",
+        "singleSourceTitle": "Configurer l'identification de l'appelant sur un seul terminal source",
+        "singleSourceBody": "Ce terminal capture les appels entrants et les transmet au reste du magasin. N'activez pas la même ligne sur plusieurs terminaux POS.",
+        "providerPreset": "Préréglage",
+        "authUsername": "Nom d'utilisateur d'authentification",
+        "authUsernamePlaceholder": "Laisser vide pour utiliser le nom d'utilisateur SIP",
+        "transport": "Transport",
+        "passwordStored": "Un mot de passe est déjà stocké de manière sécurisée sur ce terminal POS. Laissez ce champ vide pour le conserver.",
+        "routerUnsupportedTitle": "Les comptes téléphoniques limités au routeur ne sont pas pris en charge dans v1",
+        "routerUnsupported": "Si votre FAI/routeur n'affiche les paramètres de téléphonie qu'à l'intérieur du routeur et ne vous fournit pas d'identifiants SIP, ce module d'identification de l'appelant n'est pas pris en charge dans v1.",
+        "unsupportedProvider": "Cette ligne semble être verrouillée derrière un compte routeur d'un FAI. L'identification de l'appelant dans cette version nécessite des identifiants SIP standard ou un accès PBX.",
+        "advanced": "Paramètres avancés",
+        "outboundProxy": "Proxy sortant",
+        "legacyInfoTitle": "Mode de confiance PBX hérité",
+        "legacyInfoBody": "Utilisez ceci uniquement si votre PBX fait confiance à l'adresse IP du terminal POS et n'exige pas d'authentification SIP par nom d'utilisateur/mot de passe.",
+        "saveAndActivate": "Enregistrer et activer",
+        "disable": "Désactiver",
+        "disabled": "L'identification de l'appelant a été désactivée sur ce terminal.",
+        "testBeforeSave": "Exécutez un test de connexion réussi après les derniers changements avant d'activer l'identification de l'appelant.",
+        "testRequiredHint": "Après chaque modification, lancez d'abord un test de connexion avant d'activer l'identification de l'appelant sur ce terminal.",
+        "setup": {
+          "providerPreset": "Préréglage fournisseur",
+          "providerPresetHelp": "Commencez par des valeurs SIP courantes puis modifiez les détails du serveur.",
+          "generic": "SIP générique",
+          "genericHelp": "Utilisez le serveur SIP, le nom d'utilisateur et le mot de passe fournis par votre fournisseur ou votre PBX.",
+          "legacy": "Avancé / PBX hérité",
+          "legacyHelp": "Conservez un flux d'enregistrement PBX basé sur la confiance d'IP pour les anciennes installations."
+        },
+        "status": {
+          "listening": "À l'écoute",
+          "registering": "Enregistrement",
+          "error": "Erreur",
+          "stopped": "Arrêté"
+        }
       }
+    }
+  },
+  "callerid": {
+    "popup": {
+      "unknownCaller": "Appelant inconnu",
+      "viewCustomer": "Voir",
+      "startOrder": "Créer commande",
+      "addCustomer": "Ajouter client"
     }
   },
   "sync": {

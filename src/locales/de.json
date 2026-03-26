@@ -1985,7 +1985,65 @@
         "rbsNetworkHint": "Verwenden Sie die IP-Adresse und den TCP-Port, die im RBS-Gerät oder von Ihrem Installateur konfiguriert wurden. Dieses POS erkennt RBS-Fiskalkassen noch nicht automatisch.",
         "save": "Gerät speichern",
         "cancel": "Abbrechen"
+      },
+      "callerId": {
+        "title": "Anruferkennung (VoIP/SIP)",
+        "enable": "Anruferkennung aktivieren",
+        "sipServer": "SIP-Server (IP)",
+        "sipPort": "SIP-Port",
+        "username": "SIP-Benutzername / Nebenstelle",
+        "password": "SIP-Passwort",
+        "listenPort": "Lauschport",
+        "testConnection": "Verbindung testen",
+        "save": "Speichern",
+        "saved": "Anruferkennungseinstellungen gespeichert",
+        "statusListening": "Lauscht",
+        "statusRegistering": "Registrierung...",
+        "statusError": "Fehler",
+        "statusStopped": "Gestoppt",
+        "callsDetected": "Erkannte Anrufe",
+        "singleSourceTitle": "Anruferkennung nur auf einem Quellterminal konfigurieren",
+        "singleSourceBody": "Dieses Terminal erfasst eingehende Anrufe und leitet sie an den Rest des Standorts weiter. Aktivieren Sie dieselbe Leitung nicht auf mehreren POS-Terminals.",
+        "providerPreset": "Voreinstellung",
+        "authUsername": "Authentifizierungs-Benutzername",
+        "authUsernamePlaceholder": "Leer lassen, um den SIP-Benutzernamen zu verwenden",
+        "transport": "Transport",
+        "passwordStored": "Auf diesem POS-Terminal ist bereits ein Passwort sicher gespeichert. Lassen Sie dieses Feld leer, um es beizubehalten.",
+        "routerUnsupportedTitle": "Router-basierte Telefoniekonten werden in v1 nicht unterstützt",
+        "routerUnsupported": "Wenn Ihr ISP/Router Telefoneinstellungen nur im Router anzeigt und Ihnen keine SIP-Zugangsdaten gibt, wird dieses Anruferkennungsmodul in v1 nicht unterstützt.",
+        "unsupportedProvider": "Diese Leitung scheint an ein ISP-Routerkonto gebunden zu sein. Die Anruferkennung in diesem Build benötigt Standard-SIP-Zugangsdaten oder PBX-Zugriff.",
+        "advanced": "Erweiterte Einstellungen",
+        "outboundProxy": "Outbound-Proxy",
+        "legacyInfoTitle": "Legacy-PBX-Vertrauensmodus",
+        "legacyInfoBody": "Verwenden Sie dies nur, wenn Ihre PBX der IP des POS-Terminals vertraut und keine SIP-Benutzername-/Passwort-Authentifizierung verlangt.",
+        "saveAndActivate": "Speichern und aktivieren",
+        "disable": "Deaktivieren",
+        "disabled": "Die Anruferkennung wurde auf diesem Terminal deaktiviert.",
+        "testBeforeSave": "Führen Sie nach den letzten Änderungen einen erfolgreichen Verbindungstest aus, bevor Sie die Anruferkennung aktivieren.",
+        "testRequiredHint": "Führen Sie nach jeder Änderung zuerst einen Verbindungstest aus, bevor Sie die Anruferkennung auf diesem Terminal aktivieren.",
+        "setup": {
+          "providerPreset": "Anbieter-Voreinstellung",
+          "providerPresetHelp": "Beginnen Sie mit gängigen SIP-Standards und bearbeiten Sie dann die Serverdetails.",
+          "generic": "Generisches SIP",
+          "genericHelp": "Verwenden Sie SIP-Server, Benutzername und Passwort Ihres Anbieters oder Ihrer PBX.",
+          "legacy": "Erweitert / Legacy-PBX",
+          "legacyHelp": "Verwenden Sie weiterhin einen IP-vertrauensbasierten PBX-Registrierungsablauf für ältere Installationen."
+        },
+        "status": {
+          "listening": "Lauscht",
+          "registering": "Registrierung",
+          "error": "Fehler",
+          "stopped": "Gestoppt"
+        }
       }
+    }
+  },
+  "callerid": {
+    "popup": {
+      "unknownCaller": "Unbekannter Anrufer",
+      "viewCustomer": "Anzeigen",
+      "startOrder": "Bestellung starten",
+      "addCustomer": "Kunde hinzufügen"
     }
   },
   "sync": {
