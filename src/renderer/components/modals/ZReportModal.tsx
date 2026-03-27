@@ -18,10 +18,18 @@ import {
 } from '../../utils/zReport';
 import { LiquidGlassModal } from '../ui/pos-glass-components';
 import { POSGlassTooltip } from '../ui/POSGlassTooltip';
+import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
 import { VarianceBadge } from '../ui/VarianceBadge';
 import { Banknote, CheckCircle, Circle, CreditCard, XCircle } from 'lucide-react';
 import { getBridge, offEvent, onEvent } from '../../../lib';
-import type { ZReportSubmitResponse } from '../../../lib/ipc-contracts';
+import type {
+  UnsettledPaymentBlocker,
+  ZReportSubmitResponse,
+} from '../../../lib/ipc-contracts';
+import {
+  extractPaymentIntegrityPayload,
+  formatPaymentIntegrityError,
+} from '../../../lib/payment-integrity';
 
 interface ZReportModalProps {
   isOpen: boolean;
@@ -32,6 +40,11 @@ interface ZReportModalProps {
 }
 
 function extractErrorMessage(error: unknown, fallback: string): string {
+  const paymentIntegrityMessage = formatPaymentIntegrityError(error, '');
+  if (paymentIntegrityMessage.trim()) {
+    return paymentIntegrityMessage.trim();
+  }
+
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
@@ -76,6 +89,9 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<string | null>(null);
   const [printing, setPrinting] = useState(false);
+  const [paymentBlockers, setPaymentBlockers] = useState<
+    UnsettledPaymentBlocker[]
+  >([]);
   const wasOpenRef = useRef(false);
   const pendingOpenDateRef = useRef<string | null>(null);
 
@@ -154,6 +170,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       setPaymentMethodFilter('all');
       setError(null);
       setSubmitResult(null);
+      setPaymentBlockers([]);
       setPrinting(false);
       setSubmitting(false);
       setZReport(null);
@@ -182,11 +199,26 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       if (!silent) {
         setLoading(true);
         setError(null);
+        setPaymentBlockers([]);
       }
 
       try {
         const result = await bridge.reports.generateZReport({ branchId, date: selectedDate });
         if (!active) return;
+
+        if (result?.success === false) {
+          const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+          if (!silent) {
+            setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
+            setError(
+              formatPaymentIntegrityError(
+                result,
+                t('modals.zReport.loadFailed'),
+              ),
+            );
+          }
+          return;
+        }
 
         const report = normalizeZReportData(result?.data || result);
         setZReport(report || null);
@@ -196,6 +228,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
         }
 
         if (!silent) {
+          setPaymentBlockers([]);
           setError(null);
         }
       } catch (e: unknown) {
@@ -445,6 +478,19 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               ))}
             </div>
           </div>
+
+          {paymentBlockers.length > 0 && (
+            <UnsettledPaymentBlockersPanel
+              blockers={paymentBlockers}
+              title={t('modals.zReport.paymentIntegrityTitle', {
+                defaultValue: 'Orders Blocking Z-Report Closeout',
+              })}
+              helperText={t('modals.zReport.paymentIntegrityHelper', {
+                defaultValue:
+                  'These orders must be repaired before the previous business day can be closed locally.',
+              })}
+            />
+          )}
 
           {isPendingLocalSubmit && (
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">
@@ -1139,6 +1185,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
           <button
             onClick={async () => {
               setSubmitResult(null);
+              setPaymentBlockers([]);
               setSubmitting(true);
               try {
                 console.log('[ZReportModal] Starting Z-Report submission...', { branchId, date: selectedDate });
@@ -1146,8 +1193,13 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 
                 // Check for IPC wrapper error (success === false)
                 if (res?.success === false) {
+                  const paymentIntegrityPayload = extractPaymentIntegrityPayload(res);
+                  setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
                   // IPC returned an error - extract specific error message
-                  const errorMessage = res?.error || res?.message || t('modals.zReport.unknownError');
+                  const errorMessage = formatPaymentIntegrityError(
+                    res,
+                    res?.error || res?.message || t('modals.zReport.unknownError'),
+                  );
                   console.error('[ZReportModal] IPC error response:', { error: errorMessage, fullResponse: res });
                   setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
                   return; // Don't proceed, button will be re-enabled in finally
@@ -1155,6 +1207,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 
                 // Check for actual success response
                 if (res?.success && res?.localDayClosed) {
+                  setPaymentBlockers([]);
                   console.log('[ZReportModal] Z-Report submitted successfully:', {
                     id: res?.zReportId,
                     cleanup: res?.cleanup,
@@ -1187,6 +1240,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
                 // Log full error details for debugging (Requirements 3.4)
                 console.error('[ZReportModal] Submit error caught:', e);
                 // Display specific error message to user
+                const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
+                setPaymentBlockers(paymentIntegrityPayload?.blockers || []);
                 const errorMessage = extractErrorMessage(e, t('modals.zReport.submissionFailed'));
                 setSubmitResult(t('modals.zReport.submitFailed', { error: errorMessage }));
               } finally {

@@ -42,6 +42,8 @@ export {
   type DeleteShiftExpenseParams,
   type ShiftSyncState,
   type RecordStaffPaymentParams,
+  type UpdateStaffPaymentParams,
+  type DeleteStaffPaymentParams,
   type MenuCategory,
   type MenuUpdatePayload,
   type ModuleSyncResponse,

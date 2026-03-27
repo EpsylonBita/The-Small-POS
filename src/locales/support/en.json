@@ -190,8 +190,8 @@
       },
       "pending_zreport_submit": {
         "title": "A local Z report still needs submission",
-        "summary": "This terminal shows a pending local end-of-day submission.",
-        "why": "The frozen end-of-day context has not finished local submission yet. Branch day-close data may remain incomplete until that submit clears.",
+        "summary": "The previous business day is already closed on this terminal, but its local Z submission is still pending.",
+        "why": "The frozen end-of-day context has not finished its local Z-report submission yet. This is a closeout state for the previous business day, not a generic sync-health failure.",
         "steps": [
           "Refresh status to confirm whether the pending report cleared.",
           "Avoid starting manual reconciliation from another terminal until this is resolved.",

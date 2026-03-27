@@ -157,13 +157,15 @@ export interface DriverEarning {
  */
 export interface StaffPayment {
   id: string;
-  staff_shift_id: string; // Cashier's shift ID
-  paid_to_staff_id: string;
-  paid_by_cashier_shift_id: string;
+  staff_shift_id?: string; // Legacy alias for cashier shift ID
+  cashier_shift_id?: string;
+  paid_to_staff_id?: string;
+  paid_by_cashier_shift_id?: string;
   amount: number;
   payment_type: 'wage' | 'tip' | 'bonus' | 'advance' | 'other';
   notes?: string;
   created_at: string;
+  updated_at?: string;
   // Additional fields from queries
   cashier_name?: string;
   staff_name?: string;
@@ -181,6 +183,20 @@ export interface RecordStaffPaymentParams {
   amount: number;
   paymentType: 'wage' | 'tip' | 'bonus' | 'advance' | 'other';
   notes?: string;
+}
+
+export interface UpdateStaffPaymentParams {
+  paymentId: string;
+  cashierShiftId: string;
+  paidToStaffId: string;
+  amount: number;
+  paymentType: 'wage' | 'tip' | 'bonus' | 'advance' | 'other';
+  notes?: string;
+}
+
+export interface DeleteStaffPaymentParams {
+  paymentId: string;
+  cashierShiftId: string;
 }
 
 /**

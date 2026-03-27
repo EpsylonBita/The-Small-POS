@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2 } from 'lucide-react';
+import { X, Clock, Euro, FileText, Plus, AlertCircle, User, ChevronRight, AlertTriangle, CheckCircle, XCircle, Banknote, CreditCard, Star, Check, Trash2, Pencil } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
-import { ShiftExpense } from '../../types';
+import { ShiftExpense, StaffPayment } from '../../types';
 import useTerminalSettings from '../../hooks/useTerminalSettings';
 import { liquidGlassModalCard } from '../../styles/designSystem';
 import { LiquidGlassModal, POSGlassBadge, POSGlassCard } from '../ui/pos-glass-components';
@@ -15,6 +15,7 @@ import { toLocalDateString } from '../../utils/date';
 import { ProgressStepper, Step, StepStatus } from '../ui/ProgressStepper';
 import { ConfirmDialog, ConfirmVariant } from '../ui/ConfirmDialog';
 import { ErrorAlert } from '../ui/ErrorAlert';
+import { UnsettledPaymentBlockersPanel } from '../ui/UnsettledPaymentBlockersPanel';
 import { useKeyboardShortcut } from '../../hooks/useKeyboardShortcut';
 import { StaffShiftCheckoutFooterActions } from './StaffShiftCheckoutFooterActions';
 import {
@@ -23,6 +24,14 @@ import {
   queueShiftCheckoutPrint,
 } from '../../utils/staffShiftCheckoutPrint';
 import { getBridge } from '../../../lib';
+import type {
+  PaymentIntegrityErrorPayload,
+  UnsettledPaymentBlocker,
+} from '../../../lib/ipc-contracts';
+import {
+  formatPaymentIntegrityError,
+  extractPaymentIntegrityPayload,
+} from '../../../lib/payment-integrity';
 
 // IPC result shapes from bridge calls
 interface SettingsResult {
@@ -30,7 +39,7 @@ interface SettingsResult {
   terminal?: { branch_id?: string; terminal_id?: string };
 }
 
-interface ShiftIpcResult {
+interface ShiftIpcResult extends PaymentIntegrityErrorPayload {
   success: boolean;
   shiftId?: string;
   variance?: number;
@@ -216,6 +225,11 @@ function normalizeContextId(value: unknown): string | undefined {
 }
 
 function extractErrorMessage(error: unknown, fallback: string): string {
+  const paymentIntegrityMessage = formatPaymentIntegrityError(error, '');
+  if (paymentIntegrityMessage.trim()) {
+    return paymentIntegrityMessage.trim();
+  }
+
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
@@ -455,6 +469,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       actual: number;
     };
   } | null>(null);
+  const [checkoutPaymentBlockers, setCheckoutPaymentBlockers] = useState<
+    UnsettledPaymentBlocker[]
+  >([]);
 
   // Expense state
   const [showExpenseForm, setShowExpenseForm] = useState(false);
@@ -466,21 +483,15 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
   const [deletingExpenseId, setDeletingExpenseId] = useState<string | null>(null);
 
   // Staff payment recording state (for cashiers)
-  const [staffPaymentsList, setStaffPaymentsList] = useState<Array<{
-    id: string;
-    staff_id: string;
-    paid_to_staff_id?: string;
-    staff_name: string;
-    amount: number;
-    payment_type: string;
-    role_type?: string;
-    notes?: string;
-  }>>([]);
+  const [staffPaymentsList, setStaffPaymentsList] = useState<StaffPayment[]>([]);
   const [showStaffPaymentForm, setShowStaffPaymentForm] = useState(false);
+  const [editingStaffPaymentId, setEditingStaffPaymentId] = useState<string | null>(null);
+  const [deletingStaffPaymentId, setDeletingStaffPaymentId] = useState<string | null>(null);
   const [selectedStaffForPayment, setSelectedStaffForPayment] = useState<{ id: string; name: string; role: string } | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentType, setPaymentType] = useState('wage');
   const [paymentNotes, setPaymentNotes] = useState('');
+  const editingStaffPayment = staffPaymentsList.find((payment) => payment.id === editingStaffPaymentId) ?? null;
 
   // Enhanced payment state
   const [paymentHistory, setPaymentHistory] = useState<any[]>([]);
@@ -934,6 +945,8 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     } else {
       setShiftSummary(null);
       setStaffPaymentsList([]);
+      setEditingStaffPaymentId(null);
+      setDeletingStaffPaymentId(null);
     }
   }, [isOpen, effectiveMode, effectiveShift]);
 
@@ -1189,6 +1202,68 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     }
   };
 
+  const clearStaffPaymentDraft = () => {
+    setEditingStaffPaymentId(null);
+    setPaymentAmount('');
+    setPaymentType('wage');
+    setPaymentNotes('');
+    setShowPaymentConfirm(false);
+    setPendingPaymentAmount(0);
+  };
+
+  const refreshStaffPaymentStateAfterMutation = async (shiftId: string) => {
+    await loadStaffPayments(shiftId);
+
+    const shiftDate = effectiveShift?.check_in_time
+      ? toLocalDateString(effectiveShift.check_in_time)
+      : undefined;
+
+    if (selectedStaffForPayment?.id) {
+      await loadPaymentHistoryForStaff(selectedStaffForPayment.id, shiftDate);
+      const activeShiftForSelected = staffActiveShifts.get(selectedStaffForPayment.id);
+      const selectedStaffMeta = availableStaff.find((member) => member.id === selectedStaffForPayment.id);
+      await calculateExpectedPayment(activeShiftForSelected, selectedStaffMeta?.hourly_rate);
+    }
+
+    await refreshShiftSummaryAfterExpenseMutation(shiftId);
+  };
+
+  const beginEditStaffPayment = async (payment: StaffPayment) => {
+    setShowStaffPaymentForm(true);
+    setEditingStaffPaymentId(payment.id);
+    setPaymentAmount(Number(payment.amount || 0).toFixed(2).replace('.', ','));
+    setPaymentType(payment.payment_type);
+    setPaymentNotes(payment.notes || '');
+
+    const selectedMember = availableStaff.find((member) => member.id === payment.paid_to_staff_id);
+    const selectedStaffId = payment.paid_to_staff_id || selectedMember?.id;
+    if (!selectedStaffId) {
+      return;
+    }
+
+    const selectedName = selectedMember?.name || payment.staff_name || t('common.unknown', 'Unknown');
+    const selectedRole =
+      selectedMember?.roles?.[0]?.role_name ||
+      selectedMember?.role_name ||
+      payment.role_type ||
+      'staff';
+
+    setSelectedStaffForPayment({
+      id: selectedStaffId,
+      name: selectedName,
+      role: selectedRole,
+    });
+
+    const shiftDate = effectiveShift?.check_in_time
+      ? toLocalDateString(effectiveShift.check_in_time)
+      : undefined;
+
+    await loadPaymentHistoryForStaff(selectedStaffId, shiftDate);
+    const activeShiftForSelected = staffActiveShifts.get(selectedStaffId);
+    const hourlyRate = selectedMember?.hourly_rate;
+    await calculateExpectedPayment(activeShiftForSelected, hourlyRate);
+  };
+
   /**
    * Load payment history for the staff member being paid
    */
@@ -1258,38 +1333,53 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
     try {
       const amount = parseMoneyInputValue(paymentAmount);
-      const result = await bridge.invoke('shift:record-staff-payment', {
-        cashierShiftId: effectiveShift.id,
-        paidToStaffId: selectedStaffForPayment.id,
-        amount,
-        paymentType,
-        notes: paymentNotes || undefined
-      });
+      const result = editingStaffPaymentId
+        ? await bridge.shifts.updateStaffPayment({
+            paymentId: editingStaffPaymentId,
+            cashierShiftId: effectiveShift.id,
+            paidToStaffId: selectedStaffForPayment.id,
+            amount,
+            paymentType,
+            notes: paymentNotes || undefined,
+          })
+        : await bridge.shifts.recordStaffPayment({
+            cashierShiftId: effectiveShift.id,
+            paidToStaffId: selectedStaffForPayment.id,
+            amount,
+            paymentType,
+            notes: paymentNotes || undefined,
+          });
 
       if (result.success) {
-        setPaymentAmount('');
-        setPaymentType('wage');
-        setPaymentNotes('');
-        setShowPaymentConfirm(false);
+        clearStaffPaymentDraft();
+        await refreshStaffPaymentStateAfterMutation(effectiveShift.id);
 
-        await loadStaffPayments(effectiveShift.id);
-        // Use effectiveShift date context if possible
-        const shiftDate = effectiveShift.check_in_time
-          ? toLocalDateString(effectiveShift.check_in_time)
-          : undefined;
-        await loadPaymentHistoryForStaff(selectedStaffForPayment.id, shiftDate);
-
-        const summaryResult = await bridge.shifts.getSummary(effectiveShift.id, { skipBackfill: true });
-        setShiftSummary(summaryResult?.data || summaryResult);
-
-        setSuccess(t('modals.staffShift.paymentRecorded', 'Payment recorded successfully'));
+        setSuccess(
+          t(
+            editingStaffPaymentId ? 'modals.staffShift.paymentUpdated' : 'modals.staffShift.paymentRecorded',
+            editingStaffPaymentId ? 'Payment updated successfully' : 'Payment recorded successfully',
+          ),
+        );
         setTimeout(() => setSuccess(''), 3000);
       } else {
-        setError(result.error || t('modals.staffShift.paymentFailed', 'Failed to record payment'));
+        setError(
+          result.error ||
+            t(
+              editingStaffPaymentId ? 'modals.staffShift.paymentUpdateFailed' : 'modals.staffShift.paymentFailed',
+              editingStaffPaymentId ? 'Failed to update payment' : 'Failed to record payment',
+            ),
+        );
         setShowPaymentConfirm(false); // Reset confirmation state on error
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('modals.staffShift.paymentFailed', 'Failed to record payment'));
+      setError(
+        err instanceof Error
+          ? err.message
+          : t(
+              editingStaffPaymentId ? 'modals.staffShift.paymentUpdateFailed' : 'modals.staffShift.paymentFailed',
+              editingStaffPaymentId ? 'Failed to update payment' : 'Failed to record payment',
+            ),
+      );
       setShowPaymentConfirm(false); // Reset confirmation state on error
     } finally {
       setLoading(false);
@@ -1333,6 +1423,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const resetStaffPaymentForm = () => {
     setShowStaffPaymentForm(false);
+    setEditingStaffPaymentId(null);
     setSelectedStaffForPayment(null);
     setPaymentAmount('');
     setPaymentType('wage');
@@ -1344,6 +1435,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
 
   const openStaffPaymentForm = async () => {
     setShowStaffPaymentForm(true);
+    setEditingStaffPaymentId(null);
 
     if (!isCashierCheckoutRole || !effectiveShift) {
       return;
@@ -1372,6 +1464,58 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     await loadPaymentHistoryForStaff(currentCashier.id, shiftDate);
     const activeShiftForSelected = staffActiveShifts.get(currentCashier.id);
     await calculateExpectedPayment(activeShiftForSelected, currentCashier.hourly_rate);
+  };
+
+  const handleDeleteStaffPayment = async (payment: StaffPayment) => {
+    if (!effectiveShift) {
+      return;
+    }
+
+    setDeletingStaffPaymentId(payment.id);
+    setError('');
+
+    try {
+      const result = await bridge.shifts.deleteStaffPayment({
+        paymentId: payment.id,
+        cashierShiftId: effectiveShift.id,
+      });
+
+      if (!result.success) {
+        throw new Error(
+          result.error ||
+            t('modals.staffShift.paymentDeleteFailed', 'Failed to delete payment'),
+        );
+      }
+
+      if (editingStaffPaymentId === payment.id) {
+        clearStaffPaymentDraft();
+      }
+
+      await refreshStaffPaymentStateAfterMutation(effectiveShift.id);
+      setSuccess(
+        t(
+          'modals.staffShift.paymentDeleted',
+          'Payment deleted and checkout totals recalculated',
+        ),
+      );
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : t('modals.staffShift.paymentDeleteFailed', 'Failed to delete payment');
+      if (message === 'Staff payment not found') {
+        if (editingStaffPaymentId === payment.id) {
+          clearStaffPaymentDraft();
+        }
+        await refreshStaffPaymentStateAfterMutation(effectiveShift.id);
+      } else {
+        setError(message);
+      }
+    } finally {
+      setDeletingStaffPaymentId(null);
+      closeConfirm();
+    }
   };
 
   const handleStaffSelect = async (staffMember: StaffMember) => {
@@ -2047,6 +2191,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
     setLoading(true);
     setError('');
     setSuccess('');
+    setCheckoutPaymentBlockers([]);
 
     try {
       // For drivers, include the payment amount in the closeShift call
@@ -2065,6 +2210,7 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
       console.log('closeShift result:', result);
 
       if (result.success) {
+        setCheckoutPaymentBlockers([]);
         const variance = result?.variance ?? result?.data?.variance ?? 0;
         const varianceText = variance >= 0
           ? `Overage: €${variance.toFixed(2)}`
@@ -2126,9 +2272,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           onClose();
         }, 2000);
       } else {
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+        setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
         setError(result.error || t('modals.staffShift.closeShiftFailed'));
       }
     } catch (err) {
+      const paymentIntegrityPayload = extractPaymentIntegrityPayload(err);
+      setCheckoutPaymentBlockers(paymentIntegrityPayload?.blockers || []);
       setError(err instanceof Error ? err.message : t('modals.staffShift.closeShiftFailed'));
     } finally {
       setLoading(false);
@@ -2912,7 +3062,10 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
               {t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}
             </h3>
             <p className="mt-2 text-sm text-slate-600 dark:text-slate-300/75">
-              {t('modals.staffShift.staffPaymentsReturnedViaCheckouts')}
+              {t(
+                'modals.staffShift.staffPaymentsReturnedViaCheckouts',
+                'Recorded staff payouts are deducted from this cashier checkout immediately.',
+              )}
             </p>
           </div>
 
@@ -2968,6 +3121,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 className="liquid-glass-modal-input w-full"
               >
                 <option value="">{t('modals.staffShift.selectStaffPlaceholder', '-- Select Staff --')}</option>
+                {editingStaffPayment && selectedStaffForPayment?.id && !availableStaff.some((member) => member.id === (selectedStaffForPayment?.id ?? '')) && (
+                  <option value={selectedStaffForPayment?.id ?? ''}>{selectedStaffForPayment?.name ?? t('common.unknown', 'Unknown')}</option>
+                )}
                 {availableStaff
                   .filter((member) => allowCurrentCashierSelection || member.id !== staff?.staffId)
                   .map(s => (
@@ -3040,7 +3196,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                 disabled={loading || !selectedStaffForPayment || !paymentAmount}
                 className="rounded-xl bg-green-600 px-4 py-2 text-sm font-semibold text-white shadow-[0_6px_18px_rgba(16,185,129,0.26)] transition-all hover:bg-green-700 disabled:opacity-50"
               >
-                {loading ? t('common.saving', 'Saving...') : t('modals.staffShift.recordPayment', 'Record Payment')}
+                {loading
+                  ? t('common.saving', 'Saving...')
+                  : t(
+                      editingStaffPaymentId ? 'modals.staffShift.savePaymentChanges' : 'modals.staffShift.recordPayment',
+                      editingStaffPaymentId ? 'Save Changes' : 'Record Payment',
+                    )}
               </button>
             </div>
           </div>
@@ -3071,8 +3232,40 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                       {payment.notes ? ` · ${payment.notes}` : ''}
                     </div>
                   </div>
-                  <div className="font-bold text-rose-500 dark:text-rose-300">
-                    -{formatCurrency(payment.amount)}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={() => { void beginEditStaffPayment(payment); }}
+                      className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      {t('modals.staffShift.editPayment', 'Edit')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={deletingStaffPaymentId === payment.id}
+                      onClick={() =>
+                        openConfirm({
+                          title: t('modals.staffShift.deleteStaffPaymentConfirmTitle', 'Delete staff payment'),
+                          message: t(
+                            'modals.staffShift.deleteStaffPaymentConfirmMessage',
+                            'Delete the payment for "{{name}}"? Cashier checkout totals will be recalculated immediately.',
+                            { name: payment.staff_name || t('common.unknown', 'Unknown') },
+                          ),
+                          variant: 'error',
+                          confirmText: t('modals.staffShift.deletePayment', 'Delete Payment'),
+                          onConfirm: () => { void handleDeleteStaffPayment(payment); },
+                        })
+                      }
+                      className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {t('modals.staffShift.deletePayment', 'Delete')}
+                    </button>
+                    <div className="font-bold text-rose-500 dark:text-rose-300">
+                      -{formatCurrency(payment.amount)}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -4823,6 +5016,19 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
           {/* Error/Success Messages */}
           {error && <ErrorAlert title={t('common.status.error', 'Error')} message={error} onClose={() => setError('')} className="mb-4" />}
           {success && <ErrorAlert title={t('common.status.success', 'Success')} message={success} severity="success" onClose={() => setSuccess('')} className="mb-4" />}
+          {checkoutPaymentBlockers.length > 0 && (
+            <UnsettledPaymentBlockersPanel
+              blockers={checkoutPaymentBlockers}
+              title={t('modals.staffShift.paymentIntegrityTitle', {
+                defaultValue: 'Orders Blocking Shift Checkout',
+              })}
+              helperText={t('modals.staffShift.paymentIntegrityHelper', {
+                defaultValue:
+                  'These orders belong to the current business day and must be repaired before the cashier can check out.',
+              })}
+              className="mb-4"
+            />
+          )}
 
 
 
@@ -6042,7 +6248,13 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                   <div className="flex items-center justify-between">
                     <h3 className="text-lg font-bold text-slate-800 dark:text-white">{t('modals.staffShift.recordStaffPayments', 'Record Staff Payments')}</h3>
                     <button
-                      onClick={() => setShowStaffPaymentForm(!showStaffPaymentForm)}
+                      onClick={() => {
+                        if (showStaffPaymentForm) {
+                          resetStaffPaymentForm();
+                        } else {
+                          void openStaffPaymentForm();
+                        }
+                      }}
                       className="text-sm font-semibold text-blue-500 hover:text-blue-400 flex items-center gap-1"
                     >
                       <Plus className="w-4 h-4" /> {t('modals.staffShift.addPayment', 'Add Payment')}
@@ -6091,6 +6303,9 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           className="liquid-glass-modal-input w-full"
                         >
                           <option value="">{t('modals.staffShift.selectStaffPlaceholder', '-- Select Staff --')}</option>
+                          {editingStaffPayment && selectedStaffForPayment?.id && !availableStaff.some((member) => member.id === (selectedStaffForPayment?.id ?? '')) && (
+                            <option value={selectedStaffForPayment?.id ?? ''}>{selectedStaffForPayment?.name ?? t('common.unknown', 'Unknown')}</option>
+                          )}
                           {availableStaff
                             .filter(s => s.id !== staff?.staffId) // Exclude current cashier
                             .map(s => (
@@ -6219,7 +6434,12 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                           disabled={loading || !selectedStaffForPayment || !paymentAmount}
                           className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_2px_8px_0_rgba(34,197,94,0.4)]"
                         >
-                          {loading ? t('common.saving', 'Saving...') : t('modals.staffShift.recordPayment', 'Record Payment')}
+                          {loading
+                            ? t('common.saving', 'Saving...')
+                            : t(
+                                editingStaffPaymentId ? 'modals.staffShift.savePaymentChanges' : 'modals.staffShift.recordPayment',
+                                editingStaffPaymentId ? 'Save Changes' : 'Record Payment',
+                              )}
                         </button>
                       </div>
                     </div>
@@ -6238,7 +6458,39 @@ export function StaffShiftModal({ isOpen, onClose, mode, hideCashDrawer = false,
                               {p.notes ? ` • ${p.notes}` : ''}
                             </div>
                           </div>
-                          <div className="font-bold text-red-400">-{formatCurrency(p.amount)}</div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => { void beginEditStaffPayment(p); }}
+                              className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              {t('modals.staffShift.editPayment', 'Edit')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deletingStaffPaymentId === p.id}
+                              onClick={() =>
+                                openConfirm({
+                                  title: t('modals.staffShift.deleteStaffPaymentConfirmTitle', 'Delete staff payment'),
+                                  message: t(
+                                    'modals.staffShift.deleteStaffPaymentConfirmMessage',
+                                    'Delete the payment for "{{name}}"? Cashier checkout totals will be recalculated immediately.',
+                                    { name: p.staff_name || t('common.unknown', 'Unknown') },
+                                  ),
+                                  variant: 'error',
+                                  confirmText: t('modals.staffShift.deletePayment', 'Delete Payment'),
+                                  onConfirm: () => { void handleDeleteStaffPayment(p); },
+                                })
+                              }
+                              className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {t('modals.staffShift.deletePayment', 'Delete')}
+                            </button>
+                            <div className="font-bold text-red-400">-{formatCurrency(p.amount)}</div>
+                          </div>
                         </div>
                       ))}
                       <div className="flex justify-between items-center pt-2 border-t border-white/10">

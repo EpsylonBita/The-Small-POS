@@ -2865,8 +2865,8 @@
       "unknownError": "Erreur inconnue",
       "submissionFailed": "Échec de la soumission",
       "close": "Fermer",
-      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
-      "pendingLocalSubmitTitle": "La journée précédente doit encore être clôturée localement",
+      "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
+      "pendingLocalSubmitTitle": "La journée précédente est clôturée mais attend encore la soumission locale du Z",
       "pendingLocalSubmitHelp": "Utilisez l'action principale ci-dessous pour terminer localement la journée précédente. La date reste verrouillée afin d'éviter l'envoi d'une mauvaise journée d'activité."
     },
     "expense": {

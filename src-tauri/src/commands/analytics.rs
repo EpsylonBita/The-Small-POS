@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, order_ownership, print, value_str, zreport};
+use crate::{db, order_ownership, payment_integrity, print, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -583,14 +583,6 @@ fn ensure_sync_queue_clear_for_z_report(db: &db::DbState, stage: &str) -> Result
     Err(format!(
         "Cannot close day during {stage}: {pending} sync item(s) are still pending or failed.{detail}"
     ))
-}
-
-fn is_z_report_payment_settlement_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("cannot generate z-report:")
-        && (lower.contains("missing local payment row")
-            || lower.contains("genuinely unsettled payment")
-            || lower.contains("genuinely unpaid/partial"))
 }
 
 fn normalize_report_generate_payload(arg0: Option<serde_json::Value>) -> serde_json::Value {
@@ -1366,29 +1358,47 @@ pub async fn report_submit_z_report(
         .map_err(|error| format!("Cannot close day: pre-Z-report sync failed: {error}"))?;
     ensure_sync_queue_clear_for_z_report(&db, "pre-Z-report sync")?;
 
+    let initial_blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
+    let blockers = if initial_blockers
+        .iter()
+        .any(|blocker| blocker.missing_local_payment_row())
+    {
+        let blocking_order_ids: Vec<String> = initial_blockers
+            .iter()
+            .filter(|blocker| blocker.missing_local_payment_row())
+            .map(|blocker| blocker.order_id.clone())
+            .collect();
+        crate::sync::repair_local_payment_mirrors_for_orders(&db, &blocking_order_ids)
+            .await
+            .map_err(|repair_error| {
+                format!(
+                    "Cannot close day: failed to refresh payment mirrors for blocking orders: {repair_error}"
+                )
+            })?;
+        zreport::unsettled_payment_blockers(&db, &payload)?
+    } else {
+        initial_blockers
+    };
+
+    if !blockers.is_empty() {
+        return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+            "Cannot generate Z-report",
+            &blockers,
+        ));
+    }
+
     let prepared = match zreport::prepare_z_report_submission(&db, &payload) {
         Ok(prepared) => prepared,
-        Err(error) if is_z_report_payment_settlement_error(&error) => {
+        Err(error) => {
             let blockers = zreport::unsettled_payment_blockers(&db, &payload)?;
             if blockers.is_empty() {
                 return Err(error);
             }
-
-            let blocking_order_ids: Vec<String> = blockers
-                .iter()
-                .map(|blocker| blocker.order_id.clone())
-                .collect();
-            crate::sync::repair_local_payment_mirrors_for_orders(&db, &blocking_order_ids)
-                .await
-                .map_err(|repair_error| {
-                    format!(
-                        "Cannot close day: failed to refresh payment mirrors for blocking orders: {repair_error}"
-                    )
-                })?;
-
-            zreport::prepare_z_report_submission(&db, &payload)?
+            return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                "Cannot generate Z-report",
+                &blockers,
+            ));
         }
-        Err(error) => return Err(error),
     };
 
     crate::sync::force_sync(&db, &sync_state, &app)

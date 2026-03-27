@@ -2865,8 +2865,8 @@
       "unknownError": "Unbekannter Fehler",
       "submissionFailed": "Einreichung fehlgeschlagen",
       "close": "Schließen",
-      "pendingDateLocked": "This date is locked because a previous business day is waiting for local Z-report submission.",
-      "pendingLocalSubmitTitle": "Der vorherige Geschäftstag braucht noch einen lokalen Z-Abschluss",
+      "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
+      "pendingLocalSubmitTitle": "Der vorherige Geschäftstag ist geschlossen und wartet noch auf die lokale Z-Übermittlung",
       "pendingLocalSubmitHelp": "Nutzen Sie die Hauptaktion unten, um den vorherigen Tag lokal abzuschließen. Das Datum bleibt gesperrt, damit nicht der falsche Geschäftstag übermittelt wird."
     },
     "expense": {

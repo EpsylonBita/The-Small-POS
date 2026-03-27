@@ -6,6 +6,7 @@ import {
   Clock3,
   Euro,
   FileText,
+  Pencil,
   Receipt,
   RefreshCw,
   Trash2,
@@ -81,6 +82,11 @@ interface DeleteExpenseTarget {
   description: string;
 }
 
+interface DeletePaymentTarget {
+  id: string;
+  description: string;
+}
+
 const EXPENSE_TYPES: ExpenseType[] = ['supplies', 'maintenance', 'petty_cash', 'refund', 'other'];
 const STAFF_PAYMENT_TYPES: StaffPaymentType[] = ['wage', 'tip', 'bonus', 'advance', 'other'];
 const SHIFT_SYNC_WARNING_GRACE_MS = 2 * 60 * 1000;
@@ -106,6 +112,10 @@ function extractMessage(error: unknown, fallback: string): string {
 
 function isMissingExpenseError(message: string): boolean {
   return message.trim() === 'Expense not found';
+}
+
+function isMissingPaymentError(message: string): boolean {
+  return message.trim() === 'Staff payment not found';
 }
 
 function unwrapData<T>(value: unknown): T | null {
@@ -329,6 +339,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const [staffDirectoryWarning, setStaffDirectoryWarning] = useState('');
   const [expenseToDelete, setExpenseToDelete] = useState<DeleteExpenseTarget | null>(null);
   const [deletingExpenseId, setDeletingExpenseId] = useState<string | null>(null);
+  const [paymentToDelete, setPaymentToDelete] = useState<DeletePaymentTarget | null>(null);
+  const [deletingPaymentId, setDeletingPaymentId] = useState<string | null>(null);
+  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
   const [expenseDraft, setExpenseDraft] = useState({
     expenseType: 'other' as ExpenseType,
     amount: '',
@@ -348,6 +361,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const displayTerminalName = cashierContext.terminalName || cashierContext.terminalId;
   const canRecord = Boolean(cashierShift?.id) && !resolving;
   const currentCashierStaffId = cashierShift?.staff_id || staff?.databaseStaffId || staff?.staffId || '';
+  const editingPayment = useMemo(
+    () => staffPayments.find((payment) => payment.id === editingPaymentId) ?? null,
+    [editingPaymentId, staffPayments],
+  );
   const cashierShiftSyncStatus = normalizeSyncStatus(
     cashierShiftSyncState?.shiftSyncStatus ?? cashierShift?.sync_status,
   );
@@ -498,6 +515,9 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setActiveTab('expenses');
     setExpenseToDelete(null);
     setDeletingExpenseId(null);
+    setPaymentToDelete(null);
+    setDeletingPaymentId(null);
+    setEditingPaymentId(null);
     setExpenseDraft({ expenseType: 'other', amount: '', description: '', receiptNumber: '' });
     setPaymentDraft({ paidToStaffId: '', amount: '', paymentType: 'wage', notes: '' });
     void refreshModalData();
@@ -750,6 +770,27 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     setStaffPayments(unwrapArray<StaffPayment>(loadedPayments));
   };
 
+  const resetPaymentForm = () => {
+    setEditingPaymentId(null);
+    setPaymentDraft({
+      paidToStaffId: currentCashierStaffId || '',
+      amount: '',
+      paymentType: 'wage',
+      notes: '',
+    });
+  };
+
+  const beginEditStaffPayment = (payment: StaffPayment) => {
+    setEditingPaymentId(payment.id);
+    setActiveTab('staffPayments');
+    setPaymentDraft({
+      paidToStaffId: payment.paid_to_staff_id || '',
+      amount: Number(payment.amount || 0).toFixed(2).replace('.', ','),
+      paymentType: payment.payment_type,
+      notes: payment.notes || '',
+    });
+  };
+
   const refreshCashierShiftContext = async () => {
     const resolved = await resolveActiveCashierContext();
     setCashierContext(resolved);
@@ -894,22 +935,54 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
     setSubmittingPayment(true);
     try {
-      const result = await bridge.shifts.recordStaffPayment({
-        cashierShiftId: cashierShift.id,
-        paidToStaffId: paymentDraft.paidToStaffId,
-        amount,
-        paymentType: paymentDraft.paymentType,
-        notes: paymentDraft.notes.trim() || undefined,
-      });
+      const result = editingPaymentId
+        ? await bridge.shifts.updateStaffPayment({
+            paymentId: editingPaymentId,
+            cashierShiftId: cashierShift.id,
+            paidToStaffId: paymentDraft.paidToStaffId,
+            amount,
+            paymentType: paymentDraft.paymentType,
+            notes: paymentDraft.notes.trim() || undefined,
+          })
+        : await bridge.shifts.recordStaffPayment({
+            cashierShiftId: cashierShift.id,
+            paidToStaffId: paymentDraft.paidToStaffId,
+            amount,
+            paymentType: paymentDraft.paymentType,
+            notes: paymentDraft.notes.trim() || undefined,
+          });
       if (!result.success) {
-        throw new Error(result.error || t('modals.expense.paymentFailed', 'Failed to record staff payment'));
+        throw new Error(
+          result.error ||
+            t(
+              editingPaymentId ? 'modals.expense.paymentUpdateFailed' : 'modals.expense.paymentFailed',
+              editingPaymentId ? 'Failed to update staff payment' : 'Failed to record staff payment',
+            ),
+        );
       }
-      toast.success(t('modals.expense.paymentRecorded', 'Staff payment charged to the active cashier drawer'));
-      setPaymentDraft((current) => ({ ...current, amount: '', paymentType: 'wage', notes: '' }));
+      toast.success(
+        t(
+          editingPaymentId ? 'modals.expense.paymentUpdated' : 'modals.expense.paymentRecorded',
+          editingPaymentId
+            ? 'Staff payment updated and drawer totals recalculated'
+            : 'Staff payment charged to the active cashier drawer',
+        ),
+      );
+      resetPaymentForm();
       await loadShiftActivity(cashierShift);
-      setActiveTab('activity');
+      if (!editingPaymentId) {
+        setActiveTab('activity');
+      }
     } catch (error) {
-      toast.error(extractMessage(error, t('modals.expense.paymentFailed', 'Failed to record staff payment')));
+      toast.error(
+        extractMessage(
+          error,
+          t(
+            editingPaymentId ? 'modals.expense.paymentUpdateFailed' : 'modals.expense.paymentFailed',
+            editingPaymentId ? 'Failed to update staff payment' : 'Failed to record staff payment',
+          ),
+        ),
+      );
     } finally {
       setSubmittingPayment(false);
     }
@@ -917,6 +990,10 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
 
   const requestDeleteExpense = (expense: DeleteExpenseTarget) => {
     setExpenseToDelete(expense);
+  };
+
+  const requestDeletePayment = (payment: DeletePaymentTarget) => {
+    setPaymentToDelete(payment);
   };
 
   const handleConfirmDeleteExpense = async () => {
@@ -956,6 +1033,58 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
     }
   };
 
+  const handleConfirmDeletePayment = async () => {
+    if (!paymentToDelete || !cashierShift?.id) {
+      setPaymentToDelete(null);
+      return;
+    }
+
+    setDeletingPaymentId(paymentToDelete.id);
+    try {
+      const result = await bridge.shifts.deleteStaffPayment({
+        paymentId: paymentToDelete.id,
+        cashierShiftId: cashierShift.id,
+      });
+      if (!result?.success) {
+        throw new Error(
+          result?.error ||
+            t('modals.expense.paymentDeleteFailed', 'Failed to delete staff payment'),
+        );
+      }
+
+      if (editingPaymentId === paymentToDelete.id) {
+        resetPaymentForm();
+      }
+
+      await loadShiftActivity(cashierShift);
+      toast.success(
+        t(
+          'modals.expense.paymentDeleted',
+          'Staff payment deleted and drawer totals recalculated',
+        ),
+      );
+      setPaymentToDelete(null);
+    } catch (error) {
+      const message = extractMessage(
+        error,
+        t('modals.expense.paymentDeleteFailed', 'Failed to delete staff payment'),
+      );
+
+      if (isMissingPaymentError(message)) {
+        if (editingPaymentId === paymentToDelete.id) {
+          resetPaymentForm();
+        }
+        await loadShiftActivity(cashierShift);
+        setPaymentToDelete(null);
+        return;
+      }
+
+      toast.error(message);
+    } finally {
+      setDeletingPaymentId(null);
+    }
+  };
+
   const renderSummaryCard = (
     label: string,
     value: string,
@@ -984,6 +1113,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
   const renderActivityItem = (item: ActivityItem) => {
     const isExpense = item.kind === 'expense';
     const isDeleting = isExpense && deletingExpenseId === item.sourceId;
+    const isDeletingPayment = !isExpense && deletingPaymentId === item.sourceId;
     return (
       <div
         key={item.id}
@@ -1012,7 +1142,7 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
           <div className={`text-lg font-black ${isExpense ? 'text-rose-500 dark:text-rose-300' : 'text-amber-500 dark:text-amber-300'}`}>
             -{formatCurrency(item.amount)}
           </div>
-          {isExpense && (
+          {isExpense ? (
             <button
               type="button"
               disabled={isDeleting}
@@ -1027,6 +1157,37 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
               <Trash2 className="h-3.5 w-3.5" />
               {t('modals.expense.deleteExpense', 'Delete expense')}
             </button>
+          ) : (
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                disabled={submittingPayment}
+                onClick={() => {
+                  const payment = staffPayments.find((entry) => entry.id === item.sourceId);
+                  if (payment) {
+                    beginEditStaffPayment(payment);
+                  }
+                }}
+                className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                {t('modals.expense.editStaffPayment', 'Edit payment')}
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingPayment}
+                onClick={() =>
+                  requestDeletePayment({
+                    id: item.sourceId,
+                    description: item.title,
+                  })
+                }
+                className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {t('modals.expense.deleteStaffPayment', 'Delete payment')}
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -1457,10 +1618,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   {t('modals.expense.staffPaymentFormTitle', 'Record staff payment')}
                 </p>
                 <h3 className="mt-2 text-2xl font-black text-slate-900 dark:text-white">
-                  {t('modals.expense.staffPaymentFormHeading', 'Staff payout from drawer')}
+                  {t(
+                    editingPaymentId ? 'modals.expense.editStaffPaymentTitle' : 'modals.expense.staffPaymentFormHeading',
+                    editingPaymentId ? 'Edit staff payment' : 'Staff payout from drawer',
+                  )}
                 </h3>
                 <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-                  {t('modals.expense.staffPaymentDrawerNote', 'Every payment here is deducted from the active cashier drawer.')}
+                  {t(
+                    'modals.expense.staffPaymentDrawerNote',
+                    'Every payment here is deducted from the active cashier drawer.',
+                  )}
                 </p>
               </div>
               <POSGlassBadge variant="warning">{formatCurrency(totalStaffPayments)}</POSGlassBadge>
@@ -1478,6 +1645,11 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                   className="liquid-glass-modal-input w-full"
                 >
                   <option value="">{t('modals.expense.staffPlaceholder', 'Select a staff member')}</option>
+                  {editingPayment && paymentDraft.paidToStaffId && !staffOptions.some((option) => option.id === paymentDraft.paidToStaffId) && (
+                    <option value={paymentDraft.paidToStaffId}>
+                      {editingPayment.staff_name || t('common.unknown', 'Unknown')}
+                    </option>
+                  )}
                   {staffOptions.map((option) => (
                     <option key={option.id} value={option.id}>
                       {option.name} - {option.role}
@@ -1544,6 +1716,15 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
             )}
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
+              {editingPaymentId && (
+                <POSGlassButton
+                  type="button"
+                  variant="secondary"
+                  onClick={resetPaymentForm}
+                >
+                  {t('modals.expense.cancelEditStaffPayment', 'Cancel edit')}
+                </POSGlassButton>
+              )}
               <POSGlassButton
                 type="button"
                 variant="warning"
@@ -1552,10 +1733,16 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                 onClick={() => { void handleRecordStaffPayment(); }}
                 icon={<BadgeDollarSign className="h-4 w-4" />}
               >
-                {t('modals.expense.recordStaffPayment', 'Record staff payment')}
+                {t(
+                  editingPaymentId ? 'modals.expense.saveStaffPaymentChanges' : 'modals.expense.recordStaffPayment',
+                  editingPaymentId ? 'Save changes' : 'Record staff payment',
+                )}
               </POSGlassButton>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                {t('modals.expense.staffPaymentHelper', 'Use this for cashier self-payments or payments to other staff from the drawer.')}
+                {t(
+                  'modals.expense.staffPaymentHelper',
+                  'Use this for cashier self-payments or payments to other staff from the drawer. Drawer totals update immediately after corrections.',
+                )}
               </p>
             </div>
           </section>
@@ -1603,8 +1790,35 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
                         </div>
                         {payment.notes && <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{payment.notes}</p>}
                       </div>
-                      <div className="shrink-0 text-base font-black text-amber-500 dark:text-amber-300">
-                        -{formatCurrency(payment.amount)}
+                      <div className="flex shrink-0 flex-col items-end gap-2">
+                        <div className="text-base font-black text-amber-500 dark:text-amber-300">
+                          -{formatCurrency(payment.amount)}
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={submittingPayment}
+                            onClick={() => beginEditStaffPayment(payment)}
+                            className="inline-flex items-center gap-1 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200 dark:hover:bg-amber-400/15"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            {t('modals.expense.editStaffPayment', 'Edit payment')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingPaymentId === payment.id}
+                            onClick={() =>
+                              requestDeletePayment({
+                                id: payment.id,
+                                description: payment.staff_name || t('common.unknown', 'Unknown'),
+                              })
+                            }
+                            className="inline-flex items-center gap-1 rounded-xl border border-rose-200/80 bg-rose-50/90 px-3 py-1.5 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-200 dark:hover:bg-rose-500/15"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            {t('modals.expense.deleteStaffPayment', 'Delete payment')}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1693,6 +1907,31 @@ export function ExpenseModal({ isOpen, onClose }: ExpenseModalProps) {
         cancelText={t('common.actions.cancel', 'Cancel')}
         variant="error"
         isLoading={Boolean(deletingExpenseId)}
+      />
+      <ConfirmDialog
+        isOpen={Boolean(paymentToDelete)}
+        onClose={() => {
+          if (!deletingPaymentId) {
+            setPaymentToDelete(null);
+          }
+        }}
+        onConfirm={() => {
+          void handleConfirmDeletePayment();
+        }}
+        title={t('modals.expense.deleteStaffPaymentConfirmTitle', 'Delete staff payment')}
+        message={t(
+          'modals.expense.deleteStaffPaymentConfirmMessage',
+          'Delete the payment for "{{description}}"? The cashier checkout totals will be recalculated immediately.',
+          {
+            description:
+              paymentToDelete?.description ||
+              t('common.unknown', 'Unknown'),
+          },
+        )}
+        confirmText={t('modals.expense.deleteStaffPayment', 'Delete payment')}
+        cancelText={t('common.actions.cancel', 'Cancel')}
+        variant="error"
+        isLoading={Boolean(deletingPaymentId)}
       />
     </>
   );

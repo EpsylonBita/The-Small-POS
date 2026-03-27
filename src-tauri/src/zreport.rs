@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::db::{self, DbState};
-use crate::{business_day, order_ownership, storage};
+use crate::{business_day, order_ownership, payment_integrity, storage};
 
 // ---------------------------------------------------------------------------
 // Period filtering (Gap 9)
@@ -50,20 +50,7 @@ struct EffectiveZReportWindow {
     lower_bound_mode: LowerBoundMode,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct UnsettledPaymentBlocker {
-    pub order_id: String,
-    pub settled_amount: f64,
-    pub payment_status: String,
-    pub payment_method: String,
-    pub total_amount: f64,
-}
-
-impl UnsettledPaymentBlocker {
-    fn missing_local_payment_row(&self) -> bool {
-        self.settled_amount <= 0.009 && self.payment_status == "paid"
-    }
-}
+pub(crate) use payment_integrity::UnsettledPaymentBlocker;
 
 #[derive(Default)]
 struct RolloverProtection {
@@ -416,101 +403,20 @@ fn load_unsettled_payment_blockers_for_window(
     branch_id: &str,
     window: &EffectiveZReportWindow,
 ) -> Result<Vec<UnsettledPaymentBlocker>, String> {
-    let unpaid_financial_expr = business_day::order_financial_timestamp_expr("o");
-    let unpaid_lower_bound = window
-        .lower_bound_mode
-        .sql_predicate(&unpaid_financial_expr, "?1");
-    let unpaid_sql = format!(
-        "WITH blocking_orders AS (
-            SELECT
-                o.id,
-                COALESCE((
-                    SELECT SUM(op_settled.amount)
-                    FROM order_payments op_settled
-                    WHERE op_settled.order_id = o.id
-                      AND op_settled.status = 'completed'
-                ), 0) AS settled_amount,
-                LOWER(COALESCE(o.payment_status, '')) AS payment_status,
-                LOWER(COALESCE(o.payment_method, '')) AS payment_method,
-                COALESCE(o.total_amount, 0) AS total_amount
-            FROM orders o
-            WHERE {unpaid_lower_bound}
-              AND (?2 IS NULL OR {unpaid_financial_expr} <= ?2)
-              AND (?3 = '' OR o.branch_id = ?3 OR o.branch_id IS NULL)
-              AND COALESCE(o.is_ghost, 0) = 0
-              AND o.status NOT IN ('cancelled', 'canceled', 'refunded')
-              AND COALESCE((
-                    SELECT SUM(op_settled.amount)
-                    FROM order_payments op_settled
-                    WHERE op_settled.order_id = o.id
-                      AND op_settled.status = 'completed'
-              ), 0) + 0.009 < COALESCE(o.total_amount, 0)
-        )
-        SELECT
-            id,
-            settled_amount,
-            payment_status,
-            payment_method,
-            total_amount
-        FROM blocking_orders
-        ORDER BY total_amount DESC, id ASC"
-    );
-    let mut stmt = conn
-        .prepare(&unpaid_sql)
-        .map_err(|e| format!("prepare unsettled z-report payment blockers: {e}"))?;
-    let rows = stmt
-        .query_map(
-            params![
-                window.period_start_at,
-                window.cutoff_at.as_deref(),
-                branch_id
-            ],
-            |row| {
-                Ok(UnsettledPaymentBlocker {
-                    order_id: row.get(0)?,
-                    settled_amount: row.get(1)?,
-                    payment_status: row.get(2)?,
-                    payment_method: row.get(3)?,
-                    total_amount: row.get(4)?,
-                })
-            },
-        )
-        .map_err(|e| format!("query unsettled z-report payment blockers: {e}"))?;
-
-    let mut blockers = Vec::new();
-    for row in rows {
-        blockers
-            .push(row.map_err(|e| format!("collect unsettled z-report payment blocker row: {e}"))?);
-    }
-    Ok(blockers)
+    payment_integrity::load_branch_window_payment_blockers(
+        conn,
+        branch_id,
+        window.period_start_at.as_str(),
+        window.cutoff_at.as_deref(),
+        window.lower_bound_mode == LowerBoundMode::Inclusive,
+    )
+    .map_err(|e| format!("load unsettled z-report payment blockers: {e}"))
 }
 
 fn unsettled_payment_blocker_message(blockers: &[UnsettledPaymentBlocker]) -> Option<String> {
-    if blockers.is_empty() {
-        return None;
-    }
-
-    let unpaid_count = blockers.len();
-    let missing_local_payment_rows = blockers
-        .iter()
-        .filter(|blocker| blocker.missing_local_payment_row())
-        .count();
-    let genuinely_unsettled = unpaid_count.saturating_sub(missing_local_payment_rows);
-
-    Some(
-        if missing_local_payment_rows > 0 && genuinely_unsettled > 0 {
-            format!(
-            "Cannot generate Z-report: {unpaid_count} order(s) are blocked ({missing_local_payment_rows} missing local payment row(s), {genuinely_unsettled} genuinely unpaid/partial)"
-        )
-        } else if missing_local_payment_rows > 0 {
-            format!(
-            "Cannot generate Z-report: {unpaid_count} order(s) are marked paid but missing local payment rows"
-        )
-        } else {
-            format!(
-            "Cannot generate Z-report: {unpaid_count} order(s) have genuinely unsettled payments"
-        )
-        },
+    payment_integrity::build_unsettled_payment_blocker_message(
+        "Cannot generate Z-report",
+        blockers,
     )
 }
 
@@ -1036,17 +942,7 @@ fn display_staff_name(shift: &ReportStaffShift) -> String {
 }
 
 fn ensure_staff_payments_table(conn: &Connection) {
-    let _ = conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS staff_payments (
-            id TEXT PRIMARY KEY,
-            cashier_shift_id TEXT NOT NULL,
-            paid_to_staff_id TEXT NOT NULL,
-            amount REAL NOT NULL,
-            payment_type TEXT NOT NULL DEFAULT 'wage',
-            notes TEXT,
-            created_at TEXT NOT NULL
-        );",
-    );
+    let _ = crate::shifts::ensure_staff_payments_table(conn);
 }
 
 fn load_staff_expense_items(conn: &Connection, shift_id: &str) -> Result<Vec<Value>, String> {
@@ -6104,11 +6000,13 @@ mod tests {
 
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].order_id, "ord-missing-local-payment");
+        assert!(!blockers[0].order_number.is_empty());
         assert!(blockers[0].missing_local_payment_row());
 
         let message =
             unsettled_payment_blocker_message(&blockers).expect("message should be present");
-        assert!(message.contains("missing local payment rows"));
+        assert!(message.contains(&blockers[0].order_number));
+        assert!(message.contains(&blockers[0].reason_text));
     }
 
     #[test]

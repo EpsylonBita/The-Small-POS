@@ -180,6 +180,25 @@ export interface SyncFinancialQueueItemsResponse {
   items: SyncFinancialQueueItem[];
 }
 
+export interface UnsettledPaymentBlocker {
+  orderId: string;
+  orderNumber: string;
+  totalAmount: number;
+  settledAmount: number;
+  paymentStatus: string;
+  paymentMethod: string;
+  reasonCode: string;
+  reasonText: string;
+  suggestedFix: string;
+}
+
+export interface PaymentIntegrityErrorPayload {
+  errorCode?: string;
+  error?: string;
+  message?: string;
+  blockers?: UnsettledPaymentBlocker[];
+}
+
 export type ZReportSyncState =
   | 'pending'
   | 'syncing'
@@ -205,7 +224,7 @@ export interface EndOfDayStatusResponse {
   canOpenPendingZReport?: boolean;
 }
 
-export interface ZReportSubmitResponse {
+export interface ZReportSubmitResponse extends PaymentIntegrityErrorPayload {
   success: boolean;
   data?: unknown;
   cleanup?: Record<string, number>;

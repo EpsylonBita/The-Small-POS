@@ -37,6 +37,7 @@ mod hardware_manager;
 mod loyalty;
 mod menu;
 mod order_ownership;
+mod payment_integrity;
 mod payments;
 mod print;
 mod printers;
@@ -878,6 +879,8 @@ pub fn run() {
             commands::shifts::shift_delete_expense,
             commands::shifts::shift_get_expenses,
             commands::shifts::shift_record_staff_payment,
+            commands::shifts::shift_update_staff_payment,
+            commands::shifts::shift_delete_staff_payment,
             commands::shifts::shift_get_staff_payments,
             commands::shifts::shift_get_staff_payments_by_staff,
             commands::shifts::shift_get_staff_payment_total_for_date,

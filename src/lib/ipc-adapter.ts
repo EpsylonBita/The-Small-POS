@@ -24,6 +24,7 @@ import type {
   DiagnosticsOpenExportDirResponse,
   DiagnosticsSystemHealth,
   EndOfDayStatusResponse,
+  UnsettledPaymentBlocker,
   RecoveryExportResponse,
   RecoveryListResponse,
   RecoveryPoint,
@@ -54,6 +55,9 @@ export interface IpcResult<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
+  errorCode?: string;
+  message?: string;
+  blockers?: UnsettledPaymentBlocker[];
 }
 
 export interface AdminApiBridgeResponse<T = unknown> extends IpcResult<T> {
@@ -681,7 +685,7 @@ export interface CustomerAddress {
 
 export interface RecordPaymentParams {
   orderId: string;
-  method: "cash" | "card" | "other";
+  method: "cash" | "card";
   amount: number;
   discountAmount?: number;
   cashReceived?: number;
@@ -836,6 +840,20 @@ export interface RecordStaffPaymentParams {
   amount: number;
   paymentType: string;
   notes?: string;
+}
+
+export interface UpdateStaffPaymentParams {
+  paymentId: string;
+  cashierShiftId: string;
+  paidToStaffId: string;
+  amount: number;
+  paymentType: string;
+  notes?: string;
+}
+
+export interface DeleteStaffPaymentParams {
+  paymentId: string;
+  cashierShiftId: string;
 }
 
 // -- Menu --------------------------------------------------------------------
@@ -1294,6 +1312,8 @@ export interface PlatformBridge {
     deleteExpense(params: DeleteShiftExpenseParams): Promise<IpcResult>;
     getExpenses(shiftId: string): Promise<any[]>;
     recordStaffPayment(params: RecordStaffPaymentParams): Promise<IpcResult>;
+    updateStaffPayment(params: UpdateStaffPaymentParams): Promise<IpcResult>;
+    deleteStaffPayment(params: DeleteStaffPaymentParams): Promise<IpcResult>;
     getStaffPayments(cashierShiftId: string): Promise<any[]>;
     getStaffPaymentsByStaff(params: any): Promise<any[]>;
     getStaffPaymentTotalForDate(staffId: string, date: string): Promise<any>;
@@ -1910,6 +1930,8 @@ export const CHANNEL_MAP: Record<string, string> = {
   "shift:delete-expense": "shifts.deleteExpense",
   "shift:get-expenses": "shifts.getExpenses",
   "shift:record-staff-payment": "shifts.recordStaffPayment",
+  "shift:update-staff-payment": "shifts.updateStaffPayment",
+  "shift:delete-staff-payment": "shifts.deleteStaffPayment",
   "shift:get-staff-payments": "shifts.getStaffPayments",
   "shift:get-staff-payments-by-staff": "shifts.getStaffPaymentsByStaff",
   "shift:get-staff-payment-total-for-date":
@@ -2583,6 +2605,10 @@ export class TauriBridge implements PlatformBridge {
     getExpenses: (id: string) => this.inv("shift:get-expenses", id),
     recordStaffPayment: (p: RecordStaffPaymentParams) =>
       this.inv("shift:record-staff-payment", p),
+    updateStaffPayment: (p: UpdateStaffPaymentParams) =>
+      this.inv("shift:update-staff-payment", p),
+    deleteStaffPayment: (p: DeleteStaffPaymentParams) =>
+      this.inv("shift:delete-staff-payment", p),
     getStaffPayments: (id: string) => this.inv("shift:get-staff-payments", id),
     getStaffPaymentsByStaff: (params: any) =>
       this.inv("shift:get-staff-payments-by-staff", params),

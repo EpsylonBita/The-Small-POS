@@ -6,8 +6,8 @@ use tauri::Emitter;
 
 use crate::{
     can_transition_locally, db, fetch_supabase_rows, normalize_status_for_storage, order_ownership,
-    payload_arg0_as_string, payments, print, read_local_json_array, refunds, resolve_order_id,
-    storage, sync, value_f64, value_i64, value_str, write_local_json,
+    payload_arg0_as_string, payment_integrity, payments, print, read_local_json_array, refunds,
+    resolve_order_id, storage, sync, value_f64, value_i64, value_str, write_local_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +301,13 @@ fn ensure_order_status_transition_allowed(
             "Invalid status transition: {previous_status} -> {next_status}"
         ))
     }
+}
+
+fn status_requires_payment_integrity_guard(next_status: &str) -> bool {
+    matches!(
+        normalize_status_for_storage(next_status).as_str(),
+        "completed" | "delivered"
+    )
 }
 
 #[cfg(test)]
@@ -1081,6 +1088,21 @@ pub async fn order_update_status(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let previous_status =
             ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
+        if status_requires_payment_integrity_guard(&status) {
+            let blockers =
+                payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+            if !blockers.is_empty() {
+                let action_label = if status == "delivered" {
+                    "Cannot mark order as delivered"
+                } else {
+                    "Cannot mark order as completed"
+                };
+                return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                    action_label,
+                    &blockers,
+                ));
+            }
+        }
         let was_cancelled = previous_status == "cancelled";
         let next_is_cancelled = status == "cancelled";
 
@@ -3154,6 +3176,43 @@ mod transition_tests {
             .expect("cancelled alias should normalize");
         assert_eq!(alias, "cancelled");
         assert!(can_transition_locally("approved", "ready"));
+    }
+
+    #[test]
+    fn completion_guard_detects_order_without_persisted_payment() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                     id, order_number, items, total_amount, status, payment_status, payment_method,
+                     sync_status, created_at, updated_at
+                 ) VALUES (
+                     'order-unpaid-final', 'ORD-guard-1', '[]', 13.7, 'pending', 'pending', 'other',
+                     'pending', datetime('now'), datetime('now')
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = db.conn.lock().unwrap();
+        let blockers = crate::payment_integrity::load_order_payment_blockers(
+            &conn,
+            "order-unpaid-final",
+        )
+        .expect("blockers should load");
+
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].order_number, "ORD-guard-1");
+        assert_eq!(blockers[0].reason_code, "no_persisted_payment");
+
+        let response = crate::payment_integrity::build_unsettled_payment_blocker_response(
+            "Cannot mark order as completed",
+            &blockers,
+        );
+        assert_eq!(response["success"], false);
+        assert_eq!(response["errorCode"], "UNSETTLED_PAYMENT_BLOCKER");
     }
 
     #[test]

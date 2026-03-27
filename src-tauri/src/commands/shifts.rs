@@ -170,6 +170,37 @@ struct CashierShiftPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ShiftStaffPaymentMutationPayload {
+    #[serde(default, alias = "payment_id", alias = "id")]
+    payment_id: Option<String>,
+    #[serde(alias = "cashier_shift_id", alias = "shift_id")]
+    cashier_shift_id: String,
+    #[serde(
+        alias = "paid_to_staff_id",
+        alias = "recipient_staff_id",
+        alias = "recipientStaffId",
+        alias = "staff_id",
+        alias = "staffId"
+    )]
+    paid_to_staff_id: String,
+    amount: f64,
+    #[serde(default, alias = "payment_type")]
+    payment_type: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShiftStaffPaymentDeletePayload {
+    #[serde(alias = "payment_id", alias = "id")]
+    payment_id: String,
+    #[serde(alias = "cashier_shift_id", alias = "shift_id")]
+    cashier_shift_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ShiftStaffPaymentsByStaffPayload {
     #[serde(alias = "staff_id")]
     staff_id: String,
@@ -425,6 +456,80 @@ fn parse_cashier_shift_payload(
     Ok(parsed)
 }
 
+fn parse_staff_payment_mutation_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<ShiftStaffPaymentMutationPayload, String> {
+    let payload = match arg0 {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        Some(v) => v,
+        None => serde_json::json!({}),
+    };
+
+    let mut parsed: ShiftStaffPaymentMutationPayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid staff payment payload: {e}"))?;
+    parsed.payment_id = parsed.payment_id.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    parsed.cashier_shift_id = parsed.cashier_shift_id.trim().to_string();
+    parsed.paid_to_staff_id = parsed.paid_to_staff_id.trim().to_string();
+    parsed.payment_type = parsed.payment_type.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    parsed.notes = parsed.notes.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    if parsed.cashier_shift_id.is_empty() {
+        return Err("Missing cashierShiftId".into());
+    }
+    if parsed.paid_to_staff_id.is_empty() {
+        return Err("Missing paidToStaffId".into());
+    }
+    if parsed.amount <= 0.0 {
+        return Err("Amount must be positive".into());
+    }
+
+    Ok(parsed)
+}
+
+fn parse_staff_payment_delete_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<ShiftStaffPaymentDeletePayload, String> {
+    let payload = match arg0 {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        Some(v) => v,
+        None => serde_json::json!({}),
+    };
+
+    let mut parsed: ShiftStaffPaymentDeletePayload = serde_json::from_value(payload)
+        .map_err(|e| format!("Invalid staff payment delete payload: {e}"))?;
+    parsed.payment_id = parsed.payment_id.trim().to_string();
+    parsed.cashier_shift_id = parsed.cashier_shift_id.trim().to_string();
+    if parsed.payment_id.is_empty() {
+        return Err("Missing paymentId".into());
+    }
+    if parsed.cashier_shift_id.is_empty() {
+        return Err("Missing cashierShiftId".into());
+    }
+
+    Ok(parsed)
+}
+
 fn parse_staff_payments_by_staff_payload(
     arg0: Option<serde_json::Value>,
 ) -> Result<ShiftStaffPaymentsByStaffPayload, String> {
@@ -507,26 +612,7 @@ fn parse_branch_payload(arg0: Option<serde_json::Value>) -> Result<ShiftBranchPa
 }
 
 fn ensure_staff_payments_table(conn: &rusqlite::Connection) -> Result<(), String> {
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS staff_payments (
-            id TEXT PRIMARY KEY,
-            cashier_shift_id TEXT NOT NULL,
-            paid_to_staff_id TEXT NOT NULL,
-            amount REAL NOT NULL,
-            payment_type TEXT NOT NULL,
-            notes TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_staff_payments_cashier_shift_id
-            ON staff_payments(cashier_shift_id);
-        CREATE INDEX IF NOT EXISTS idx_staff_payments_paid_to_staff_id
-            ON staff_payments(paid_to_staff_id);
-        CREATE INDEX IF NOT EXISTS idx_staff_payments_created_at
-            ON staff_payments(created_at);
-        ",
-    )
-    .map_err(|e| format!("ensure staff_payments table: {e}"))
+    shift_service::ensure_staff_payments_table(conn)
 }
 
 fn map_scheduled_shift_row(row: &serde_json::Value) -> serde_json::Value {
@@ -600,6 +686,13 @@ pub async fn shift_close(
     let payload = arg0.ok_or("Missing shift close payload")?;
     let requested_shift_id = value_str(&payload, &["shiftId", "shift_id"]);
     let mut result = shift_service::close_shift(&db, &payload)?;
+    let success = result
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    if !success {
+        return Ok(result);
+    }
 
     let shift_id = value_str(&result, &["id", "shiftId", "shift_id"])
         .or_else(|| {
@@ -854,78 +947,59 @@ pub async fn shift_record_staff_payment(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
-    let payload = arg0.ok_or("Missing staff payment payload")?;
-    let cashier_shift_id = value_str(&payload, &["cashierShiftId", "cashier_shift_id"])
-        .ok_or("Missing cashierShiftId")?;
-    let paid_to_staff_id = value_str(
-        &payload,
-        &[
-            "paidToStaffId",
-            "paid_to_staff_id",
-            "recipientStaffId",
-            "recipient_staff_id",
-            "staffId",
-            "staff_id",
-        ],
-    )
-    .ok_or("Missing paidToStaffId")?;
-    let amount = value_f64(&payload, &["amount"]).ok_or("Missing amount")?;
-    let payment_type =
-        value_str(&payload, &["paymentType", "payment_type"]).unwrap_or_else(|| "wage".to_string());
-    let notes = value_str(&payload, &["notes"]);
-
-    let payment_id = uuid::Uuid::new_v4().to_string();
-    let created_at = Utc::now().to_rfc3339();
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    ensure_staff_payments_table(&conn)?;
-
-    conn.execute(
-        "INSERT INTO staff_payments (
-            id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            payment_id,
-            cashier_shift_id,
-            paid_to_staff_id,
-            amount,
-            payment_type,
-            notes,
-            created_at
-        ],
-    )
-    .map_err(|e| format!("record staff payment: {e}"))?;
-
-    let _ = conn.execute(
-        "UPDATE cash_drawer_sessions
-         SET total_staff_payments = COALESCE(total_staff_payments, 0) + ?1,
-             updated_at = datetime('now')
-         WHERE staff_shift_id = ?2",
-        rusqlite::params![amount, cashier_shift_id],
-    );
-
-    let sync_payload = serde_json::json!({
-        "id": payment_id,
-        "cashierShiftId": cashier_shift_id,
-        "paidByCashierShiftId": cashier_shift_id,
-        "paidToStaffId": paid_to_staff_id,
-        "amount": amount,
-        "paymentType": payment_type,
-        "notes": notes,
-        "createdAt": created_at,
-        "updatedAt": created_at,
+    let parsed = parse_staff_payment_mutation_payload(arg0)?;
+    let payload = serde_json::json!({
+        "cashierShiftId": parsed.cashier_shift_id,
+        "paidToStaffId": parsed.paid_to_staff_id,
+        "amount": parsed.amount,
+        "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
+        "notes": parsed.notes,
     });
-    let idem = format!("staff-payment:{}:{}", payment_id, uuid::Uuid::new_v4());
-    let _ = conn.execute(
-        "INSERT INTO sync_queue (entity_type, entity_id, operation, payload, idempotency_key)
-         VALUES ('staff_payment', ?1, 'insert', ?2, ?3)",
-        rusqlite::params![payment_id, sync_payload.to_string(), idem],
-    );
+    let result = shift_service::record_staff_payment(&db, &payload)?;
+    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+    }
+    Ok(result)
+}
 
-    let result = serde_json::json!({
-        "success": true,
-        "paymentId": payment_id
+#[tauri::command]
+pub async fn shift_update_staff_payment(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let parsed = parse_staff_payment_mutation_payload(arg0)?;
+    let payment_id = parsed.payment_id.ok_or("Missing paymentId")?;
+    let payload = serde_json::json!({
+        "paymentId": payment_id,
+        "cashierShiftId": parsed.cashier_shift_id,
+        "paidToStaffId": parsed.paid_to_staff_id,
+        "amount": parsed.amount,
+        "paymentType": parsed.payment_type.unwrap_or_else(|| "wage".to_string()),
+        "notes": parsed.notes,
     });
-    schedule_immediate_sync(app, "staff_payment", payment_id);
+    let result = shift_service::update_staff_payment(&db, &payload)?;
+    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn shift_delete_staff_payment(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let parsed = parse_staff_payment_delete_payload(arg0)?;
+    let payload = serde_json::json!({
+        "paymentId": parsed.payment_id,
+        "cashierShiftId": parsed.cashier_shift_id,
+    });
+    let result = shift_service::delete_staff_payment(&db, &payload)?;
+    if let Some(payment_id) = result.get("paymentId").and_then(serde_json::Value::as_str) {
+        schedule_immediate_sync(app, "staff_payment", payment_id.to_string());
+    }
     Ok(result)
 }
 
@@ -941,7 +1015,7 @@ pub async fn shift_get_staff_payments(
 
     let mut stmt = conn
         .prepare(
-            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at, sp.updated_at,
                     (SELECT ss.staff_name
                      FROM staff_shifts ss
                      WHERE ss.staff_id = sp.paid_to_staff_id
@@ -967,8 +1041,9 @@ pub async fn shift_get_staff_payments(
                 "payment_type": row.get::<_, String>(4)?,
                 "notes": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
-                "staff_name": row.get::<_, Option<String>>(7)?,
-                "role_type": row.get::<_, Option<String>>(8)?,
+                "updated_at": row.get::<_, String>(7)?,
+                "staff_name": row.get::<_, Option<String>>(8)?,
+                "role_type": row.get::<_, Option<String>>(9)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -990,12 +1065,17 @@ pub async fn shift_get_staff_payments_by_staff(
     ensure_staff_payments_table(&conn)?;
 
     let query =
-        "SELECT id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at
-                 FROM staff_payments
-                 WHERE paid_to_staff_id = ?1
-                   AND (?2 IS NULL OR substr(created_at, 1, 10) >= ?2)
-                   AND (?3 IS NULL OR substr(created_at, 1, 10) <= ?3)
-                 ORDER BY created_at DESC";
+        "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes,
+                sp.created_at, sp.updated_at,
+                (SELECT ss.staff_name
+                 FROM staff_shifts ss
+                 WHERE ss.id = sp.cashier_shift_id
+                 LIMIT 1) AS cashier_name
+                 FROM staff_payments sp
+                 WHERE sp.paid_to_staff_id = ?1
+                   AND (?2 IS NULL OR substr(sp.created_at, 1, 10) >= ?2)
+                   AND (?3 IS NULL OR substr(sp.created_at, 1, 10) <= ?3)
+                 ORDER BY sp.created_at DESC";
     let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![staff_id, date_from, date_to], |row| {
@@ -1007,6 +1087,8 @@ pub async fn shift_get_staff_payments_by_staff(
                 "payment_type": row.get::<_, String>(4)?,
                 "notes": row.get::<_, Option<String>>(5)?,
                 "created_at": row.get::<_, String>(6)?,
+                "updated_at": row.get::<_, String>(7)?,
+                "cashier_name": row.get::<_, Option<String>>(8)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -1290,6 +1372,38 @@ mod dto_tests {
         })))
         .expect("cashier shift payload should parse");
         assert_eq!(parsed.cashier_shift_id, "shift-2");
+    }
+
+    #[test]
+    fn parse_staff_payment_mutation_payload_supports_aliases() {
+        let parsed = parse_staff_payment_mutation_payload(Some(serde_json::json!({
+            "payment_id": "payment-1",
+            "cashier_shift_id": "shift-3",
+            "recipient_staff_id": "staff-7",
+            "amount": 18.5,
+            "payment_type": "bonus",
+            "notes": "  payroll correction  "
+        })))
+        .expect("staff payment mutation payload should parse");
+
+        assert_eq!(parsed.payment_id.as_deref(), Some("payment-1"));
+        assert_eq!(parsed.cashier_shift_id, "shift-3");
+        assert_eq!(parsed.paid_to_staff_id, "staff-7");
+        assert_eq!(parsed.amount, 18.5);
+        assert_eq!(parsed.payment_type.as_deref(), Some("bonus"));
+        assert_eq!(parsed.notes.as_deref(), Some("payroll correction"));
+    }
+
+    #[test]
+    fn parse_staff_payment_delete_payload_supports_aliases() {
+        let parsed = parse_staff_payment_delete_payload(Some(serde_json::json!({
+            "id": "payment-2",
+            "shift_id": "shift-9"
+        })))
+        .expect("staff payment delete payload should parse");
+
+        assert_eq!(parsed.payment_id, "payment-2");
+        assert_eq!(parsed.cashier_shift_id, "shift-9");
     }
 
     #[test]

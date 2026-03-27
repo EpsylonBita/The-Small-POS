@@ -6,6 +6,7 @@ import { debugLogger } from '../shared/utils/debug-logger';
 import { ErrorFactory } from '../shared/utils/error-handler';
 import { isBrowser } from '../lib/platform-detect';
 import { getBridge } from '../lib';
+import { formatPaymentIntegrityError } from '../lib/payment-integrity';
 import {
   getCachedTerminalCredentials,
   refreshTerminalCredentialCache,
@@ -292,7 +293,10 @@ export class OrderService {
             return;
           }
           // Bridge returned a non-success response
-          const ipcError = resp?.error || 'Bridge updateStatus returned unexpected response';
+          const ipcError = formatPaymentIntegrityError(
+            resp,
+            resp?.error || 'Bridge updateStatus returned unexpected response',
+          );
           if (!this.allowAdminApiFallback()) {
             throw ErrorFactory.system(typeof ipcError === 'string' ? ipcError : JSON.stringify(ipcError));
           }

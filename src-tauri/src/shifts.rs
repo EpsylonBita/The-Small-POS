@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{business_day, order_ownership, storage};
+use crate::{business_day, order_ownership, payment_integrity, storage};
 
 #[derive(Debug)]
 struct CheckInEligibility {
@@ -486,16 +486,41 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
+    order_ownership::repair_historical_pickup_financial_attribution(
+        &conn,
+        &shift_branch_id,
+        &now,
+    )
+    .map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK");
+        e
+    })?;
+
+    if role_type == "cashier" || role_type == "manager" {
+        let blockers = payment_integrity::load_branch_window_payment_blockers(
+            &conn,
+            &shift_branch_id,
+            shift_business_day.period_start_at.as_str(),
+            Some(now.as_str()),
+            true,
+        )
+        .map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            e
+        })?;
+        if !blockers.is_empty() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Ok(payment_integrity::build_unsettled_payment_blocker_response(
+                "Cannot close shift",
+                &blockers,
+            ));
+        }
+    }
+
     let result = (|| -> Result<(f64, f64), String> {
         #[allow(clippy::needless_late_init)]
         let expected: f64;
         let mut returned_cash_target: Option<(String, String, f64)> = None;
-
-        order_ownership::repair_historical_pickup_financial_attribution(
-            &conn,
-            &shift_branch_id,
-            &now,
-        )?;
 
         if role_type == "cashier" || role_type == "manager" {
             // Transfer active driver shifts to the next cashier BEFORE calculating expected.
@@ -1824,6 +1849,848 @@ pub fn delete_expense(db: &DbState, payload: &Value) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Staff payment management
+// ---------------------------------------------------------------------------
+
+pub(crate) fn ensure_staff_payments_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS staff_payments (
+            id TEXT PRIMARY KEY,
+            cashier_shift_id TEXT NOT NULL,
+            paid_to_staff_id TEXT NOT NULL,
+            amount REAL NOT NULL,
+            payment_type TEXT NOT NULL DEFAULT 'wage',
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_staff_payments_cashier_shift_id
+            ON staff_payments(cashier_shift_id);
+        CREATE INDEX IF NOT EXISTS idx_staff_payments_paid_to_staff_id
+            ON staff_payments(paid_to_staff_id);
+        CREATE INDEX IF NOT EXISTS idx_staff_payments_created_at
+            ON staff_payments(created_at);
+        ",
+    )
+    .map_err(|e| format!("ensure staff_payments table: {e}"))?;
+
+    let has_updated_at: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM pragma_table_info('staff_payments')
+                WHERE name = 'updated_at'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_updated_at {
+        conn.execute(
+            "ALTER TABLE staff_payments
+             ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            [],
+        )
+        .map_err(|e| format!("add staff_payments.updated_at: {e}"))?;
+    }
+
+    conn.execute(
+        "UPDATE staff_payments
+         SET updated_at = COALESCE(NULLIF(trim(updated_at), ''), created_at)
+         WHERE updated_at IS NULL OR trim(updated_at) = ''",
+        [],
+    )
+    .map_err(|e| format!("backfill staff_payments.updated_at: {e}"))?;
+
+    Ok(())
+}
+
+fn compute_staff_payments_total(conn: &Connection, cashier_shift_id: &str) -> Result<f64, String> {
+    ensure_staff_payments_table(conn)?;
+    conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM staff_payments
+         WHERE cashier_shift_id = ?1",
+        params![cashier_shift_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("compute staff payment total: {e}"))
+}
+
+fn clear_unfinished_sync_queue_rows(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM sync_queue
+         WHERE entity_type = ?1
+           AND entity_id = ?2
+           AND status NOT IN ('synced', 'applied')",
+        params![entity_type, entity_id],
+    )
+    .map_err(|e| format!("clear unfinished {entity_type} queue rows: {e}"))?;
+    Ok(())
+}
+
+fn recompute_active_cashier_staff_payment_total(
+    conn: &Connection,
+    cashier_shift_id: &str,
+    written_at: &str,
+) -> Result<f64, String> {
+    let total_staff_payments = compute_staff_payments_total(conn, cashier_shift_id)?;
+    let updated = conn
+        .execute(
+            "UPDATE cash_drawer_sessions
+             SET total_staff_payments = ?1,
+                 updated_at = ?2
+             WHERE staff_shift_id = ?3",
+            params![total_staff_payments, written_at, cashier_shift_id],
+        )
+        .map_err(|e| format!("recompute active drawer staff payments: {e}"))?;
+
+    if updated == 0 {
+        return Err(format!(
+            "No cash drawer session found for cashier shift {cashier_shift_id}"
+        ));
+    }
+
+    Ok(total_staff_payments)
+}
+
+fn recompute_closed_cashier_shift_financial_snapshot(
+    conn: &Connection,
+    shift_id: &str,
+    written_at: &str,
+) -> Result<(f64, f64), String> {
+    let (
+        role_type,
+        opening_cash,
+        calc_version,
+        check_in_time,
+        check_out_time,
+        closing_cash_amount,
+    ): (String, f64, i64, String, String, f64) = conn
+        .query_row(
+            "SELECT role_type, opening_cash_amount, calculation_version,
+                    check_in_time, check_out_time, COALESCE(closing_cash_amount, 0)
+             FROM staff_shifts
+             WHERE id = ?1
+               AND status = 'closed'",
+            params![shift_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load closed shift context: {e}"))?;
+
+    if role_type != "cashier" && role_type != "manager" {
+        return Err(format!(
+            "Staff payments can only be corrected on cashier or manager shifts ({shift_id})"
+        ));
+    }
+
+    if check_out_time.trim().is_empty() {
+        return Err(format!("Closed shift {shift_id} is missing check_out_time"));
+    }
+
+    let order_financial_expr = business_day::order_financial_timestamp_expr("o");
+
+    let reconciled_cash_sales: f64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(op.amount), 0)
+                 FROM orders o
+                 LEFT JOIN order_payments op ON op.order_id = o.id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                   AND op.method = 'cash'
+                   AND op.status = 'completed'
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+            ),
+            params![shift_id, check_in_time, check_out_time],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let reconciled_card_sales: f64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(op.amount), 0)
+                 FROM orders o
+                 LEFT JOIN order_payments op ON op.order_id = o.id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                   AND op.method = 'card'
+                   AND op.status = 'completed'
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+            ),
+            params![shift_id, check_in_time, check_out_time],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let reconciled_refunds: f64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(pa.amount), 0)
+                 FROM orders o
+                 JOIN payment_adjustments pa ON pa.order_id = o.id
+                 LEFT JOIN order_payments op ON op.id = pa.payment_id
+                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
+                   AND pa.adjustment_type = 'refund'
+                   AND COALESCE(o.is_ghost, 0) = 0
+                   AND {order_financial_expr} >= ?2
+                   AND {order_financial_expr} <= ?3"
+            ),
+            params![shift_id, check_in_time, check_out_time],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let reconciled_expenses: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(amount), 0)
+             FROM shift_expenses
+             WHERE staff_shift_id = ?1",
+            params![shift_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let reconciled_staff_payments = compute_staff_payments_total(conn, shift_id)?;
+
+    let drawer_updated = conn
+        .execute(
+            "UPDATE cash_drawer_sessions SET
+                total_cash_sales = ?1,
+                total_card_sales = ?2,
+                total_refunds = ?3,
+                total_expenses = ?4,
+                total_staff_payments = ?5,
+                updated_at = ?6
+             WHERE staff_shift_id = ?7",
+            params![
+                reconciled_cash_sales,
+                reconciled_card_sales,
+                reconciled_refunds,
+                reconciled_expenses,
+                reconciled_staff_payments,
+                written_at,
+                shift_id,
+            ],
+        )
+        .map_err(|e| format!("recompute closed drawer totals: {e}"))?;
+
+    if drawer_updated == 0 {
+        return Err(format!(
+            "No cash drawer session found for closed cashier shift {shift_id}"
+        ));
+    }
+
+    let (cash_drops, driver_cash_given, driver_cash_returned): (f64, f64, f64) = conn
+        .query_row(
+            "SELECT COALESCE(cash_drops, 0),
+                    COALESCE(driver_cash_given, 0),
+                    COALESCE(driver_cash_returned, 0)
+             FROM cash_drawer_sessions
+             WHERE staff_shift_id = ?1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("load closed drawer cash movement totals: {e}"))?;
+
+    let deducted_staff_payments = if calc_version >= 2 {
+        reconciled_staff_payments
+    } else {
+        reconciled_staff_payments
+    };
+
+    let inherited_driver_expected_returns =
+        compute_inherited_cash_staff_expected_returns(conn, shift_id, &check_in_time)?;
+
+    let expected = opening_cash + reconciled_cash_sales
+        - reconciled_refunds
+        - reconciled_expenses
+        - deducted_staff_payments
+        - cash_drops
+        - driver_cash_given
+        + driver_cash_returned
+        + inherited_driver_expected_returns;
+    let variance = closing_cash_amount - expected;
+
+    conn.execute(
+        "UPDATE cash_drawer_sessions SET
+            expected_amount = ?1,
+            variance_amount = ?2,
+            updated_at = ?3
+         WHERE staff_shift_id = ?4",
+        params![expected, variance, written_at, shift_id],
+    )
+    .map_err(|e| format!("update corrected closed drawer snapshot: {e}"))?;
+
+    conn.execute(
+        "UPDATE staff_shifts SET
+            expected_cash_amount = ?1,
+            cash_variance = ?2,
+            sync_status = 'pending',
+            updated_at = ?3
+         WHERE id = ?4",
+        params![expected, variance, written_at, shift_id],
+    )
+    .map_err(|e| format!("update corrected closed shift snapshot: {e}"))?;
+
+    Ok((expected, variance))
+}
+
+fn build_shift_update_sync_payload_from_db(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<String, String> {
+    let (
+        staff_id,
+        staff_name,
+        branch_id,
+        terminal_id,
+        role_type,
+        opening_cash,
+        check_in_time,
+        check_out_time,
+        report_date,
+        period_start_at,
+        calculation_version,
+        total_orders_count,
+        total_sales_amount,
+        total_cash_sales,
+        total_card_sales,
+        closing_cash_amount,
+        expected_cash_amount,
+        cash_variance,
+        payment_amount,
+        closed_by,
+    ): (
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        f64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        f64,
+        f64,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT staff_id, staff_name, branch_id, terminal_id, role_type,
+                    opening_cash_amount, check_in_time, check_out_time,
+                    report_date, period_start_at, calculation_version,
+                    total_orders_count, total_sales_amount, total_cash_sales,
+                    total_card_sales, closing_cash_amount, expected_cash_amount,
+                    cash_variance, payment_amount, closed_by
+             FROM staff_shifts
+             WHERE id = ?1",
+            params![shift_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
+                    row.get(19)?,
+                ))
+            },
+        )
+        .map_err(|e| format!("load shift sync payload source: {e}"))?;
+
+    let fallback_at = check_out_time.as_deref().unwrap_or(&check_in_time);
+    let shift_business_day = resolve_shift_business_day_context(
+        conn,
+        &branch_id,
+        fallback_at,
+        report_date.as_deref(),
+        period_start_at.as_deref(),
+    );
+
+    let mut payload = serde_json::json!({
+        "shiftId": shift_id,
+        "staffId": staff_id,
+        "staffName": staff_name,
+        "branchId": branch_id,
+        "terminalId": terminal_id,
+        "roleType": role_type,
+        "openingCash": opening_cash,
+        "checkInTime": check_in_time,
+        "checkOutTime": check_out_time,
+        "reportDate": shift_business_day.report_date,
+        "periodStartAt": shift_business_day.period_start_at,
+        "calculationVersion": calculation_version,
+        "totalOrdersCount": total_orders_count,
+        "totalSalesAmount": total_sales_amount,
+        "totalCashSales": total_cash_sales,
+        "totalCardSales": total_card_sales,
+        "closingCash": closing_cash_amount,
+        "expectedCash": expected_cash_amount,
+        "variance": cash_variance,
+        "closedBy": closed_by,
+        "paymentAmount": payment_amount,
+    });
+
+    if let Some(drawer_snapshot) = load_cash_drawer_snapshot_for_shift(conn, shift_id)? {
+        payload["cashDrawer"] = drawer_snapshot;
+    }
+
+    Ok(payload.to_string())
+}
+
+fn replace_unfinished_shift_sync_rows_with_current_snapshot(
+    conn: &Connection,
+    shift_id: &str,
+    written_at: &str,
+) -> Result<(), String> {
+    clear_unfinished_sync_queue_rows(conn, "shift", shift_id)?;
+
+    let sync_payload = build_shift_update_sync_payload_from_db(conn, shift_id)?;
+    let idempotency_key = format!("shift:staff-payment-correction:{shift_id}:{}", Uuid::new_v4());
+
+    conn.execute(
+        "INSERT INTO sync_queue (
+            entity_type, entity_id, operation, payload, idempotency_key,
+            created_at, updated_at
+        ) VALUES ('shift', ?1, 'update', ?2, ?3, ?4, ?4)",
+        params![shift_id, sync_payload, idempotency_key, written_at],
+    )
+    .map_err(|e| format!("enqueue corrected shift snapshot sync: {e}"))?;
+
+    Ok(())
+}
+
+fn build_staff_payment_sync_payload(
+    payment_id: &str,
+    cashier_shift_id: &str,
+    paid_to_staff_id: &str,
+    amount: f64,
+    payment_type: &str,
+    notes: Option<&str>,
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    serde_json::json!({
+        "id": payment_id,
+        "cashierShiftId": cashier_shift_id,
+        "paidByCashierShiftId": cashier_shift_id,
+        "paidToStaffId": paid_to_staff_id,
+        "amount": amount,
+        "paymentType": payment_type,
+        "notes": notes,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+    })
+    .to_string()
+}
+
+fn enqueue_staff_payment_upsert_sync(
+    conn: &Connection,
+    payment_id: &str,
+    cashier_shift_id: &str,
+    paid_to_staff_id: &str,
+    amount: f64,
+    payment_type: &str,
+    notes: Option<&str>,
+    created_at: &str,
+    updated_at: &str,
+    operation: &str,
+) -> Result<(), String> {
+    clear_unfinished_sync_queue_rows(conn, "staff_payment", payment_id)?;
+
+    let sync_payload = build_staff_payment_sync_payload(
+        payment_id,
+        cashier_shift_id,
+        paid_to_staff_id,
+        amount,
+        payment_type,
+        notes,
+        created_at,
+        updated_at,
+    );
+    let idempotency_key = format!("staff-payment:{operation}:{payment_id}:{}", Uuid::new_v4());
+
+    conn.execute(
+        "INSERT INTO sync_queue (
+            entity_type, entity_id, operation, payload, idempotency_key,
+            created_at, updated_at
+        ) VALUES ('staff_payment', ?1, ?2, ?3, ?4, ?5, ?5)",
+        params![payment_id, operation, sync_payload, idempotency_key, updated_at],
+    )
+    .map_err(|e| format!("enqueue staff payment {operation} sync: {e}"))?;
+
+    Ok(())
+}
+
+fn enqueue_staff_payment_delete_sync(
+    conn: &Connection,
+    payment_id: &str,
+    cashier_shift_id: &str,
+    paid_to_staff_id: &str,
+    deleted_at: &str,
+) -> Result<(), String> {
+    clear_unfinished_sync_queue_rows(conn, "staff_payment", payment_id)?;
+
+    let sync_payload = serde_json::json!({
+        "id": payment_id,
+        "cashierShiftId": cashier_shift_id,
+        "paidByCashierShiftId": cashier_shift_id,
+        "paidToStaffId": paid_to_staff_id,
+        "deletedAt": deleted_at,
+        "updatedAt": deleted_at,
+    })
+    .to_string();
+    let idempotency_key = format!("staff-payment:delete:{payment_id}:{}", Uuid::new_v4());
+
+    conn.execute(
+        "INSERT INTO sync_queue (
+            entity_type, entity_id, operation, payload, idempotency_key,
+            created_at, updated_at
+        ) VALUES ('staff_payment', ?1, 'delete', ?2, ?3, ?4, ?4)",
+        params![payment_id, sync_payload, idempotency_key, deleted_at],
+    )
+    .map_err(|e| format!("enqueue staff payment delete sync: {e}"))?;
+
+    Ok(())
+}
+
+fn reconcile_cashier_shift_after_staff_payment_mutation(
+    conn: &Connection,
+    shift_id: &str,
+    written_at: &str,
+) -> Result<(), String> {
+    let (role_type, status): (String, String) = conn
+        .query_row(
+            "SELECT role_type, status
+             FROM staff_shifts
+             WHERE id = ?1",
+            params![shift_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("load shift role/status for staff payment correction: {e}"))?;
+
+    if role_type != "cashier" && role_type != "manager" {
+        return Err(format!(
+            "Staff payments can only be corrected on cashier or manager shifts ({shift_id})"
+        ));
+    }
+
+    if status == "closed" {
+        recompute_closed_cashier_shift_financial_snapshot(conn, shift_id, written_at)?;
+        replace_unfinished_shift_sync_rows_with_current_snapshot(conn, shift_id, written_at)?;
+    } else {
+        recompute_active_cashier_staff_payment_total(conn, shift_id, written_at)?;
+    }
+
+    Ok(())
+}
+
+pub fn record_staff_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    ensure_staff_payments_table(&conn)?;
+
+    let cashier_shift_id = str_field(payload, "cashierShiftId")
+        .or_else(|| str_field(payload, "cashier_shift_id"))
+        .ok_or("Missing cashierShiftId")?;
+    let paid_to_staff_id = str_field(payload, "paidToStaffId")
+        .or_else(|| str_field(payload, "paid_to_staff_id"))
+        .or_else(|| str_field(payload, "recipientStaffId"))
+        .or_else(|| str_field(payload, "recipient_staff_id"))
+        .or_else(|| str_field(payload, "staffId"))
+        .or_else(|| str_field(payload, "staff_id"))
+        .ok_or("Missing paidToStaffId")?;
+    let amount = num_field(payload, "amount").ok_or("Missing amount")?;
+    if amount <= 0.0 {
+        return Err("Amount must be positive".into());
+    }
+    let payment_type = str_field(payload, "paymentType")
+        .or_else(|| str_field(payload, "payment_type"))
+        .unwrap_or_else(|| "wage".to_string());
+    let notes = str_field(payload, "notes");
+
+    let role_type: String = conn
+        .query_row(
+            "SELECT role_type
+             FROM staff_shifts
+             WHERE id = ?1",
+            params![cashier_shift_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load cashier shift for staff payment: {e}"))?;
+    if role_type != "cashier" && role_type != "manager" {
+        return Err("Staff payments require a cashier or manager drawer".into());
+    }
+
+    let payment_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type,
+                notes, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                payment_id,
+                cashier_shift_id,
+                paid_to_staff_id,
+                amount,
+                payment_type,
+                notes,
+                now,
+            ],
+        )
+        .map_err(|e| format!("insert staff payment: {e}"))?;
+
+        reconcile_cashier_shift_after_staff_payment_mutation(&conn, &cashier_shift_id, &now)?;
+        enqueue_staff_payment_upsert_sync(
+            &conn,
+            &payment_id,
+            &cashier_shift_id,
+            &paid_to_staff_id,
+            amount,
+            &payment_type,
+            notes.as_deref(),
+            &now,
+            &now,
+            "insert",
+        )?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "paymentId": payment_id,
+    }))
+}
+
+pub fn update_staff_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    ensure_staff_payments_table(&conn)?;
+
+    let payment_id = str_field(payload, "paymentId")
+        .or_else(|| str_field(payload, "payment_id"))
+        .or_else(|| str_field(payload, "id"))
+        .ok_or("Missing paymentId")?;
+    let cashier_shift_id = str_field(payload, "cashierShiftId")
+        .or_else(|| str_field(payload, "cashier_shift_id"))
+        .ok_or("Missing cashierShiftId")?;
+    let paid_to_staff_id = str_field(payload, "paidToStaffId")
+        .or_else(|| str_field(payload, "paid_to_staff_id"))
+        .or_else(|| str_field(payload, "recipientStaffId"))
+        .or_else(|| str_field(payload, "recipient_staff_id"))
+        .or_else(|| str_field(payload, "staffId"))
+        .or_else(|| str_field(payload, "staff_id"))
+        .ok_or("Missing paidToStaffId")?;
+    let amount = num_field(payload, "amount").ok_or("Missing amount")?;
+    if amount <= 0.0 {
+        return Err("Amount must be positive".into());
+    }
+    let payment_type = str_field(payload, "paymentType")
+        .or_else(|| str_field(payload, "payment_type"))
+        .unwrap_or_else(|| "wage".to_string());
+    let notes = str_field(payload, "notes");
+
+    let (stored_shift_id, created_at): (String, String) = conn
+        .query_row(
+            "SELECT cashier_shift_id, created_at
+             FROM staff_payments
+             WHERE id = ?1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "Staff payment not found".to_string())?;
+
+    if stored_shift_id != cashier_shift_id {
+        return Err(format!(
+            "Staff payment does not belong to cashier shift {cashier_shift_id}"
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "UPDATE staff_payments
+             SET paid_to_staff_id = ?1,
+                 amount = ?2,
+                 payment_type = ?3,
+                 notes = ?4,
+                 updated_at = ?5
+             WHERE id = ?6",
+            params![
+                paid_to_staff_id,
+                amount,
+                payment_type,
+                notes,
+                now,
+                payment_id,
+            ],
+        )
+        .map_err(|e| format!("update staff payment: {e}"))?;
+
+        reconcile_cashier_shift_after_staff_payment_mutation(&conn, &cashier_shift_id, &now)?;
+        enqueue_staff_payment_upsert_sync(
+            &conn,
+            &payment_id,
+            &cashier_shift_id,
+            &paid_to_staff_id,
+            amount,
+            &payment_type,
+            notes.as_deref(),
+            &created_at,
+            &now,
+            "update",
+        )?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "paymentId": payment_id,
+    }))
+}
+
+pub fn delete_staff_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    ensure_staff_payments_table(&conn)?;
+
+    let payment_id = str_field(payload, "paymentId")
+        .or_else(|| str_field(payload, "payment_id"))
+        .or_else(|| str_field(payload, "id"))
+        .ok_or("Missing paymentId")?;
+    let cashier_shift_id = str_field(payload, "cashierShiftId")
+        .or_else(|| str_field(payload, "cashier_shift_id"))
+        .ok_or("Missing cashierShiftId")?;
+
+    let (stored_shift_id, paid_to_staff_id): (String, String) = conn
+        .query_row(
+            "SELECT cashier_shift_id, paid_to_staff_id
+             FROM staff_payments
+             WHERE id = ?1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "Staff payment not found".to_string())?;
+
+    if stored_shift_id != cashier_shift_id {
+        return Err(format!(
+            "Staff payment does not belong to cashier shift {cashier_shift_id}"
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<(), String> {
+        conn.execute(
+            "DELETE FROM staff_payments WHERE id = ?1",
+            params![payment_id],
+        )
+        .map_err(|e| format!("delete staff payment: {e}"))?;
+
+        reconcile_cashier_shift_after_staff_payment_mutation(&conn, &cashier_shift_id, &now)?;
+        enqueue_staff_payment_delete_sync(
+            &conn,
+            &payment_id,
+            &cashier_shift_id,
+            &paid_to_staff_id,
+            &now,
+        )?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "success": true,
+        "paymentId": payment_id,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Cash-return staff helpers
 // ---------------------------------------------------------------------------
 
@@ -2591,21 +3458,12 @@ fn load_cashier_staff_payments(
     conn: &rusqlite::Connection,
     cashier_shift_id: &str,
 ) -> Result<Vec<Value>, String> {
-    let _ = conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS staff_payments (
-            id TEXT PRIMARY KEY,
-            cashier_shift_id TEXT NOT NULL,
-            paid_to_staff_id TEXT NOT NULL,
-            amount REAL NOT NULL,
-            payment_type TEXT NOT NULL DEFAULT 'wage',
-            notes TEXT,
-            created_at TEXT NOT NULL
-        );",
-    );
+    ensure_staff_payments_table(conn)?;
 
     let mut stmt = conn
         .prepare(
-            "SELECT sp.id, sp.paid_to_staff_id, sp.amount, sp.payment_type, sp.notes, sp.created_at,
+            "SELECT sp.id, sp.cashier_shift_id, sp.paid_to_staff_id, sp.amount, sp.payment_type,
+                    sp.notes, sp.created_at, sp.updated_at,
                     (SELECT ss.staff_name
                      FROM staff_shifts ss
                      WHERE ss.staff_id = sp.paid_to_staff_id
@@ -2636,15 +3494,20 @@ fn load_cashier_staff_payments(
         .query_map(params![cashier_shift_id], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
-                "staff_id": row.get::<_, String>(1)?,
-                "staff_name": row.get::<_, Option<String>>(6)?,
-                "role_type": row.get::<_, Option<String>>(7)?,
-                "amount": row.get::<_, f64>(2)?,
-                "payment_type": row.get::<_, String>(3)?,
-                "description": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                "created_at": row.get::<_, String>(5)?,
-                "check_in_time": row.get::<_, Option<String>>(8)?,
-                "check_out_time": row.get::<_, Option<String>>(9)?,
+                "cashier_shift_id": row.get::<_, String>(1)?,
+                "staff_id": row.get::<_, String>(2)?,
+                "paid_to_staff_id": row.get::<_, String>(2)?,
+                "paid_by_cashier_shift_id": row.get::<_, String>(1)?,
+                "staff_name": row.get::<_, Option<String>>(8)?,
+                "role_type": row.get::<_, Option<String>>(9)?,
+                "amount": row.get::<_, f64>(3)?,
+                "payment_type": row.get::<_, String>(4)?,
+                "notes": row.get::<_, Option<String>>(5)?,
+                "description": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "created_at": row.get::<_, String>(6)?,
+                "updated_at": row.get::<_, String>(7)?,
+                "check_in_time": row.get::<_, Option<String>>(10)?,
+                "check_out_time": row.get::<_, Option<String>>(11)?,
             }))
         })
         .map_err(|e| format!("query staff payments: {e}"))?
@@ -3026,6 +3889,63 @@ mod tests {
         assert_eq!(parsed["periodStartAt"], "2026-03-12T08:00:00Z");
         assert!(parsed["reportDate"].as_str().is_some());
         assert!(parsed["cutoffAt"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_cashier_close_returns_payment_blockers_for_unsettled_orders() {
+        let db = test_db();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO staff_shifts (
+                    id, staff_id, role_type, branch_id, terminal_id,
+                    check_in_time, opening_cash_amount, status, calculation_version,
+                    report_date, period_start_at, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'cashier-blocked-close', 'cashier-ctx', 'cashier', 'branch-ctx', 'term-ctx',
+                    '2026-03-12T08:00:00Z', 250.0, 'active', 2,
+                    '2026-03-12', '2026-03-12T08:00:00Z', 'pending', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO cash_drawer_sessions (
+                    id, staff_shift_id, cashier_id, branch_id, terminal_id,
+                    opening_amount, opened_at, created_at, updated_at
+                 ) VALUES (
+                    'drawer-blocked-close', 'cashier-blocked-close', 'cashier-ctx', 'branch-ctx', 'term-ctx',
+                    250.0, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO orders (
+                    id, order_number, branch_id, staff_shift_id, items, total_amount, status,
+                    payment_status, payment_method, sync_status, created_at, updated_at
+                 ) VALUES (
+                    'order-blocked-close', 'ORD-blocked-close', 'branch-ctx', 'cashier-blocked-close', '[]', 13.7, 'completed',
+                    'pending', 'other', 'pending', '2026-03-12T12:00:00Z', '2026-03-12T12:00:00Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = close_shift(
+            &db,
+            &serde_json::json!({
+                "shiftId": "cashier-blocked-close",
+                "closingCash": 250.0,
+            }),
+        )
+        .expect("close shift should return a structured blocker payload");
+
+        assert_eq!(result["success"], false);
+        assert_eq!(result["errorCode"], "UNSETTLED_PAYMENT_BLOCKER");
+        assert_eq!(result["blockers"][0]["orderNumber"], "ORD-blocked-close");
     }
 
     #[test]
@@ -4509,6 +5429,468 @@ mod tests {
                 ("delete".to_string(), "pending".to_string()),
             ],
             "final synced insert history should remain while the new delete is queued"
+        );
+    }
+
+    #[test]
+    fn test_update_staff_payment_recomputes_active_drawer_total_and_requeues_sync() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        ensure_staff_payments_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-staff-update', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
+                100.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                total_staff_payments, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-staff-update', 'cashier-staff-update', 'cashier-1', 'branch-1', 'term-1',
+                100.0, 18.0, ?1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-update-target', 'cashier-staff-update', 'staff-1', 12.0, 'wage', 'initial', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-update-other', 'cashier-staff-update', 'staff-2', 6.0, 'tip', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'staff_payment', 'payment-update-target', 'insert', '{}', 'staff-payment:update-target:insert', 'pending'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = update_staff_payment(
+            &db,
+            &serde_json::json!({
+                "paymentId": "payment-update-target",
+                "cashierShiftId": "cashier-staff-update",
+                "paidToStaffId": "staff-3",
+                "amount": 10.0,
+                "paymentType": "bonus",
+                "notes": "corrected amount",
+            }),
+        )
+        .expect("staff payment update should succeed");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let (paid_to_staff_id, amount, payment_type, notes, updated_at): (
+            String,
+            f64,
+            String,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT paid_to_staff_id, amount, payment_type, notes, updated_at
+                 FROM staff_payments
+                 WHERE id = 'payment-update-target'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        let total_staff_payments: f64 = conn
+            .query_row(
+                "SELECT total_staff_payments
+                 FROM cash_drawer_sessions
+                 WHERE id = 'drawer-staff-update'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT operation, status
+                 FROM sync_queue
+                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-update-target'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .unwrap();
+
+        assert_eq!(paid_to_staff_id, "staff-3");
+        assert!((amount - 10.0).abs() < f64::EPSILON);
+        assert_eq!(payment_type, "bonus");
+        assert_eq!(notes.as_deref(), Some("corrected amount"));
+        assert_ne!(updated_at, created_at);
+        assert!(
+            (total_staff_payments - 16.0).abs() < f64::EPSILON,
+            "drawer total should be recomputed from all current staff_payments rows"
+        );
+        assert_eq!(
+            queue_rows,
+            vec![("update".to_string(), "pending".to_string())],
+            "unfinished sync rows should be replaced by one canonical update row"
+        );
+    }
+
+    #[test]
+    fn test_delete_staff_payment_recomputes_active_drawer_total_and_requeues_delete() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        ensure_staff_payments_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time,
+                opening_cash_amount, status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-staff-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1,
+                100.0, 'active', 2, 'pending', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                total_staff_payments, opened_at, created_at, updated_at
+            ) VALUES (
+                'drawer-staff-delete', 'cashier-staff-delete', 'cashier-1', 'branch-1', 'term-1',
+                100.0, 18.0, ?1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-delete-target', 'cashier-staff-delete', 'staff-1', 12.0, 'wage', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-delete-other', 'cashier-staff-delete', 'staff-2', 6.0, 'tip', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'staff_payment', 'payment-delete-target', 'insert', '{}', 'staff-payment:delete-target:insert', 'pending'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = delete_staff_payment(
+            &db,
+            &serde_json::json!({
+                "paymentId": "payment-delete-target",
+                "cashierShiftId": "cashier-staff-delete",
+            }),
+        )
+        .expect("staff payment delete should succeed");
+        assert_eq!(result["success"], true);
+
+        let conn = db.conn.lock().unwrap();
+        let deleted_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_payments WHERE id = 'payment-delete-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let total_staff_payments: f64 = conn
+            .query_row(
+                "SELECT total_staff_payments
+                 FROM cash_drawer_sessions
+                 WHERE id = 'drawer-staff-delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let queue_rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT operation, status
+                 FROM sync_queue
+                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-delete-target'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String)>, _>>()
+            .unwrap();
+
+        assert_eq!(deleted_count, 0);
+        assert!(
+            (total_staff_payments - 6.0).abs() < f64::EPSILON,
+            "drawer total should be recomputed from remaining staff_payments rows"
+        );
+        assert_eq!(
+            queue_rows,
+            vec![("delete".to_string(), "pending".to_string())],
+            "unfinished sync rows should be replaced by one canonical delete row"
+        );
+    }
+
+    #[test]
+    fn test_update_staff_payment_recomputes_closed_shift_expected_and_variance() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        ensure_staff_payments_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-staff-closed-update', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1, ?1,
+                100.0, 80.0, 80.0, 0.0, 'closed', 2, 'synced', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                closing_amount, expected_amount, variance_amount, total_staff_payments,
+                opened_at, closed_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-staff-closed-update', 'cashier-staff-closed-update', 'cashier-1', 'branch-1', 'term-1',
+                100.0, 80.0, 80.0, 0.0, 20.0, ?1, ?1, 1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-closed-update-target', 'cashier-staff-closed-update', 'staff-1', 20.0, 'wage', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'shift', 'cashier-staff-closed-update', 'update', '{}', 'shift:closed-update:stale', 'pending'
+            )",
+            []
+        )
+        .unwrap();
+        drop(conn);
+
+        update_staff_payment(
+            &db,
+            &serde_json::json!({
+                "paymentId": "payment-closed-update-target",
+                "cashierShiftId": "cashier-staff-closed-update",
+                "paidToStaffId": "staff-1",
+                "amount": 12.0,
+                "paymentType": "wage",
+            }),
+        )
+        .expect("closed shift staff payment update should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        let (shift_expected, shift_variance, drawer_expected, drawer_variance, drawer_total): (
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT ss.expected_cash_amount, ss.cash_variance,
+                        cds.expected_amount, cds.variance_amount, cds.total_staff_payments
+                 FROM staff_shifts ss
+                 JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                 WHERE ss.id = 'cashier-staff-closed-update'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        let queue_rows: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT entity_type, operation, status
+                 FROM sync_queue
+                 WHERE entity_id = 'cashier-staff-closed-update'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String, String)>, _>>()
+            .unwrap();
+
+        assert!((shift_expected - 88.0).abs() < f64::EPSILON);
+        assert!((shift_variance - (-8.0)).abs() < f64::EPSILON);
+        assert!((drawer_expected - 88.0).abs() < f64::EPSILON);
+        assert!((drawer_variance - (-8.0)).abs() < f64::EPSILON);
+        assert!((drawer_total - 12.0).abs() < f64::EPSILON);
+        assert_eq!(
+            queue_rows,
+            vec![("shift".to_string(), "update".to_string(), "pending".to_string())],
+            "closed shift corrections should replace unfinished shift sync rows with one fresh snapshot"
+        );
+    }
+
+    #[test]
+    fn test_delete_staff_payment_recomputes_closed_shift_expected_and_variance() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let created_at = "2026-03-26T10:00:00Z";
+
+        ensure_staff_payments_table(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'cashier-staff-closed-delete', 'cashier-1', 'cashier', 'branch-1', 'term-1', ?1, ?1,
+                100.0, 80.0, 80.0, 0.0, 'closed', 2, 'synced', ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                closing_amount, expected_amount, variance_amount, total_staff_payments,
+                opened_at, closed_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-staff-closed-delete', 'cashier-staff-closed-delete', 'cashier-1', 'branch-1', 'term-1',
+                100.0, 80.0, 80.0, 0.0, 20.0, ?1, ?1, 1, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-closed-delete-target', 'cashier-staff-closed-delete', 'staff-1', 8.0, 'tip', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO staff_payments (
+                id, cashier_shift_id, paid_to_staff_id, amount, payment_type, notes, created_at, updated_at
+            ) VALUES (
+                'payment-closed-delete-other', 'cashier-staff-closed-delete', 'staff-2', 12.0, 'wage', NULL, ?1, ?1
+            )",
+            params![created_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'shift', 'cashier-staff-closed-delete', 'update', '{}', 'shift:closed-delete:stale', 'pending'
+            )",
+            []
+        )
+        .unwrap();
+        drop(conn);
+
+        delete_staff_payment(
+            &db,
+            &serde_json::json!({
+                "paymentId": "payment-closed-delete-target",
+                "cashierShiftId": "cashier-staff-closed-delete",
+            }),
+        )
+        .expect("closed shift staff payment delete should succeed");
+
+        let conn = db.conn.lock().unwrap();
+        let deleted_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM staff_payments WHERE id = 'payment-closed-delete-target'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (shift_expected, shift_variance, drawer_expected, drawer_variance, drawer_total): (
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+        ) = conn
+            .query_row(
+                "SELECT ss.expected_cash_amount, ss.cash_variance,
+                        cds.expected_amount, cds.variance_amount, cds.total_staff_payments
+                 FROM staff_shifts ss
+                 JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
+                 WHERE ss.id = 'cashier-staff-closed-delete'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        let queue_rows: Vec<(String, String, String)> = conn
+            .prepare(
+                "SELECT entity_type, operation, status
+                 FROM sync_queue
+                 WHERE entity_id = 'cashier-staff-closed-delete'
+                 ORDER BY id ASC",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<(String, String, String)>, _>>()
+            .unwrap();
+
+        assert_eq!(deleted_count, 0);
+        assert!((shift_expected - 88.0).abs() < f64::EPSILON);
+        assert!((shift_variance - (-8.0)).abs() < f64::EPSILON);
+        assert!((drawer_expected - 88.0).abs() < f64::EPSILON);
+        assert!((drawer_variance - (-8.0)).abs() < f64::EPSILON);
+        assert!((drawer_total - 12.0).abs() < f64::EPSILON);
+        assert_eq!(
+            queue_rows,
+            vec![("shift".to_string(), "update".to_string(), "pending".to_string())],
+            "closed shift corrections should replace unfinished shift sync rows with one fresh snapshot"
         );
     }
 

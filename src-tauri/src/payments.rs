@@ -706,6 +706,9 @@ pub(crate) fn record_payment_in_connection(
 #[allow(clippy::type_complexity)]
 pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
     let input = build_payment_record_input(payload)?;
+    if input.method != "cash" && input.method != "card" {
+        return Err("Only cash and card payments can be recorded locally".to_string());
+    }
     let mut options = PaymentInsertOptions::local();
     if matches!(input.collected_by.as_deref(), Some("cashier_drawer")) {
         options.sync_order_owner_with_payment = false;
