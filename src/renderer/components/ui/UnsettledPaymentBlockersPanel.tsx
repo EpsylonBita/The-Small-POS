@@ -9,6 +9,11 @@ interface UnsettledPaymentBlockersPanelProps {
   title?: string;
   helperText?: string;
   className?: string;
+  onResolveBlocker?: (
+    blocker: UnsettledPaymentBlocker,
+    method: "cash" | "card",
+  ) => void;
+  resolvingKey?: string | null;
 }
 
 function getMethodBadgeClasses(method: string): string {
@@ -39,6 +44,8 @@ export function UnsettledPaymentBlockersPanel({
   title,
   helperText,
   className = "",
+  onResolveBlocker,
+  resolvingKey = null,
 }: UnsettledPaymentBlockersPanelProps) {
   const { t } = useTranslation();
 
@@ -77,6 +84,20 @@ export function UnsettledPaymentBlockersPanel({
             Number(blocker.totalAmount || 0) - Number(blocker.settledAmount || 0),
             0,
           );
+          const canResolveHere =
+            typeof onResolveBlocker === "function" &&
+            outstanding > 0.009 &&
+            blocker.reasonCode !== "unsupported_payment_method";
+          const preferredMethod =
+            blocker.reasonCode === "missing_cash_payment" ||
+            blocker.reasonCode === "partial_cash_payment" ||
+            blocker.paymentMethod === "cash"
+              ? "cash"
+              : blocker.reasonCode === "missing_card_payment" ||
+                  blocker.reasonCode === "partial_card_payment" ||
+                  blocker.paymentMethod === "card"
+                ? "card"
+                : null;
           return (
             <div
               key={`${blocker.orderId}-${blocker.reasonCode}`}
@@ -155,6 +176,60 @@ export function UnsettledPaymentBlockersPanel({
                   {blocker.suggestedFix}
                 </div>
               </div>
+
+              {canResolveHere && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {(["cash", "card"] as const).map((method) => {
+                    const buttonKey = `${blocker.orderId}:${method}`;
+                    const isResolving = resolvingKey === buttonKey;
+                    const isBusy = Boolean(resolvingKey) && resolvingKey !== buttonKey;
+                    const isPreferred = preferredMethod === method;
+                    const baseClasses = isPreferred
+                      ? method === "cash"
+                        ? "border-transparent bg-emerald-500 text-slate-950 hover:bg-emerald-400"
+                        : "border-transparent bg-sky-500 text-slate-950 hover:bg-sky-400"
+                      : "border-white/10 bg-white/[0.04] text-white hover:bg-white/[0.08]";
+                    const icon =
+                      method === "cash" ? (
+                        <Banknote className="h-4 w-4" />
+                      ) : (
+                        <CreditCard className="h-4 w-4" />
+                      );
+
+                    return (
+                      <button
+                        key={buttonKey}
+                        type="button"
+                        disabled={Boolean(resolvingKey)}
+                        onClick={() => onResolveBlocker?.(blocker, method)}
+                        className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${baseClasses} ${
+                          Boolean(resolvingKey)
+                            ? "cursor-not-allowed opacity-60"
+                            : ""
+                        }`}
+                        aria-busy={isResolving}
+                      >
+                        {icon}
+                        {isResolving
+                          ? t("modals.zReport.resolvingPayment")
+                          : t(
+                              method === "cash"
+                                ? "modals.zReport.resolveBlockerCash"
+                                : "modals.zReport.resolveBlockerCard",
+                              {
+                                amount: formatCurrency(outstanding),
+                              },
+                            )}
+                        {isBusy ? null : (
+                          <span className="text-xs opacity-80">
+                            {formatCurrency(outstanding)}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         })}

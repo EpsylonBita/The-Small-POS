@@ -54,6 +54,7 @@ export {
   type PrinterConfig,
   type ReceiptSamplePreviewRequest,
   type ReceiptSamplePreviewResponse,
+  type ResolvePaymentBlockerParams,
 } from './ipc-adapter';
 
 export type {

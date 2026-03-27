@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShift } from '../../contexts/shift-context';
 import { useFeatures } from '../../hooks/useFeatures';
@@ -92,6 +92,8 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
   const [paymentBlockers, setPaymentBlockers] = useState<
     UnsettledPaymentBlocker[]
   >([]);
+  const [resolvingBlockerKey, setResolvingBlockerKey] = useState<string | null>(null);
+  const [reportReloadVersion, setReportReloadVersion] = useState(0);
   const wasOpenRef = useRef(false);
   const pendingOpenDateRef = useRef<string | null>(null);
 
@@ -173,6 +175,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       setPaymentBlockers([]);
       setPrinting(false);
       setSubmitting(false);
+      setResolvingBlockerKey(null);
       setZReport(null);
       setLoading(true);
       setSelectedDate(nextDate);
@@ -269,7 +272,71 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
       clearInterval(intervalId);
       offEvent('shift-updated', handleShiftUpdated);
     };
-  }, [bridge, branchId, isOpen, isUsingLiveDefaultDate, lockDate, selectedDate, t]);
+  }, [bridge, branchId, isOpen, isUsingLiveDefaultDate, lockDate, reportReloadVersion, selectedDate, t]);
+
+  const handleResolveBlocker = useCallback(
+    async (blocker: UnsettledPaymentBlocker, method: 'cash' | 'card') => {
+      const actionKey = `${blocker.orderId}:${method}`;
+      setResolvingBlockerKey(actionKey);
+      setSubmitResult(null);
+
+      try {
+        const result = await bridge.reports.resolvePaymentBlocker({
+          orderId: blocker.orderId,
+          method,
+        });
+
+        if (result?.success === false) {
+          const paymentIntegrityPayload = extractPaymentIntegrityPayload(result);
+          if (paymentIntegrityPayload?.blockers?.length) {
+            setPaymentBlockers(paymentIntegrityPayload.blockers);
+          }
+          const errorMessage = formatPaymentIntegrityError(
+            result,
+            t('modals.zReport.submissionFailed'),
+          );
+          setSubmitResult(
+            t('modals.zReport.resolveBlockerFailed', {
+              orderNumber: blocker.orderNumber,
+              error: errorMessage,
+            }),
+          );
+          return;
+        }
+
+        setError(null);
+        setSubmitResult(
+          t('modals.zReport.resolveBlockerSuccess', {
+            orderNumber: blocker.orderNumber,
+            method: t(
+              method === 'cash'
+                ? 'modals.zReport.cash'
+                : 'modals.zReport.card',
+            ).toLowerCase(),
+          }),
+        );
+        setReportReloadVersion((current) => current + 1);
+      } catch (e: unknown) {
+        const paymentIntegrityPayload = extractPaymentIntegrityPayload(e);
+        if (paymentIntegrityPayload?.blockers?.length) {
+          setPaymentBlockers(paymentIntegrityPayload.blockers);
+        }
+        const errorMessage = extractErrorMessage(
+          e,
+          t('modals.zReport.submissionFailed'),
+        );
+        setSubmitResult(
+          t('modals.zReport.resolveBlockerFailed', {
+            orderNumber: blocker.orderNumber,
+            error: errorMessage,
+          }),
+        );
+      } finally {
+        setResolvingBlockerKey(null);
+      }
+    },
+    [bridge, t],
+  );
 
   const title = useMemo(() => t('modals.zReport.title', { date: selectedDate }), [selectedDate, t]);
   const submitButtonLabel = isPendingLocalSubmit
@@ -485,10 +552,12 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               title={t('modals.zReport.paymentIntegrityTitle', {
                 defaultValue: 'Orders Blocking Z-Report Closeout',
               })}
-              helperText={t('modals.zReport.paymentIntegrityHelper', {
+              helperText={t('modals.zReport.paymentIntegrityResolveHelper', {
                 defaultValue:
-                  'These orders must be repaired before the previous business day can be closed locally.',
+                  'Resolve the missing balance here. The fix is recorded against the original business-day drawer before you retry the Z-report.',
               })}
+              onResolveBlocker={handleResolveBlocker}
+              resolvingKey={resolvingBlockerKey}
             />
           )}
 
@@ -1250,7 +1319,7 @@ const ZReportModal: React.FC<ZReportModalProps> = ({
               }
             }}
             className={`px-3 py-2 rounded-md text-sm ${submitting ? 'bg-gray-400 cursor-not-allowed text-white' : liquidGlassModalButton('primary', 'sm')}`}
-            disabled={submitting || loading}
+            disabled={submitting || loading || Boolean(resolvingBlockerKey)}
             aria-busy={submitting}
           >
             {submitting ? t('modals.zReport.submitting') : submitButtonLabel}

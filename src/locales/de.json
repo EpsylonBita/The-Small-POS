@@ -2871,12 +2871,18 @@
       "pendingLocalSubmitQueued": "Der vorherige Tag wurde lokal abgeschlossen. Der Z-Report wurde für den Admin-Sync in die Warteschlange gestellt. Abmeldung…",
       "submitSuccessSynced": "Tag lokal abgeschlossen. Z-Report wurde bereits mit dem Admin synchronisiert. Abmeldung…",
       "submitFailed": "Fehlgeschlagen: {{error}}",
+      "resolveBlockerCash": "Barzahlung Erfassen",
+      "resolveBlockerCard": "Kartenzahlung Erfassen",
+      "resolvingPayment": "Zahlung wird erfasst…",
+      "resolveBlockerSuccess": "Für {{orderNumber}} wurde eine {{method}}-Zahlung erfasst. Prüfen Sie den aktualisierten Bericht und senden Sie den Z-Report erneut.",
+      "resolveBlockerFailed": "{{orderNumber}} konnte nicht behoben werden: {{error}}",
       "unknownError": "Unbekannter Fehler",
       "submissionFailed": "Einreichung fehlgeschlagen",
       "close": "Schließen",
       "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
       "pendingLocalSubmitTitle": "Der vorherige Geschäftstag ist geschlossen und wartet noch auf die lokale Z-Übermittlung",
-      "pendingLocalSubmitHelp": "Nutzen Sie die Hauptaktion unten, um den vorherigen Tag lokal abzuschließen. Das Datum bleibt gesperrt, damit nicht der falsche Geschäftstag übermittelt wird."
+      "pendingLocalSubmitHelp": "Nutzen Sie die Hauptaktion unten, um den vorherigen Tag lokal abzuschließen. Das Datum bleibt gesperrt, damit nicht der falsche Geschäftstag übermittelt wird.",
+      "paymentIntegrityResolveHelper": "Beheben Sie hier den fehlenden Betrag. Die Korrektur wird auf der ursprünglichen Kasse des Geschäftstags gespeichert, bevor Sie den Z-Report erneut versuchen."
     },
     "expense": {
       "title": "Kassenabflüsse",

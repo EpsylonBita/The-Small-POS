@@ -2871,12 +2871,18 @@
       "pendingLocalSubmitQueued": "La journée précédente a été clôturée localement. Le rapport Z est en file d'attente pour la synchronisation admin. Déconnexion…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Échec : {{error}}",
+      "resolveBlockerCash": "Encaisser en Espèces",
+      "resolveBlockerCard": "Encaisser par Carte",
+      "resolvingPayment": "Enregistrement du paiement…",
+      "resolveBlockerSuccess": "Un paiement {{method}} a été enregistré pour {{orderNumber}}. Vérifiez le rapport actualisé puis relancez le rapport Z.",
+      "resolveBlockerFailed": "Impossible de corriger {{orderNumber}} : {{error}}",
       "unknownError": "Erreur inconnue",
       "submissionFailed": "Échec de la soumission",
       "close": "Fermer",
       "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
       "pendingLocalSubmitTitle": "La journée précédente est clôturée mais attend encore la soumission locale du Z",
-      "pendingLocalSubmitHelp": "Utilisez l'action principale ci-dessous pour terminer localement la journée précédente. La date reste verrouillée afin d'éviter l'envoi d'une mauvaise journée d'activité."
+      "pendingLocalSubmitHelp": "Utilisez l'action principale ci-dessous pour terminer localement la journée précédente. La date reste verrouillée afin d'éviter l'envoi d'une mauvaise journée d'activité.",
+      "paymentIntegrityResolveHelper": "Corrigez ici le solde manquant. La correction est enregistrée sur la caisse d'origine de la journée avant de réessayer le rapport Z."
     },
     "expense": {
       "title": "Sorties de caisse",

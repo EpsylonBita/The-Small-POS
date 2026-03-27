@@ -1960,7 +1960,7 @@ fn recompute_active_cashier_staff_payment_total(
     Ok(total_staff_payments)
 }
 
-fn recompute_closed_cashier_shift_financial_snapshot(
+pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
     conn: &Connection,
     shift_id: &str,
     written_at: &str,
@@ -2005,41 +2005,14 @@ fn recompute_closed_cashier_shift_financial_snapshot(
 
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
 
-    let reconciled_cash_sales: f64 = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(op.amount), 0)
-                 FROM orders o
-                 LEFT JOIN order_payments op ON op.order_id = o.id
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND op.method = 'cash'
-                   AND op.status = 'completed'
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
-            ),
-            params![shift_id, check_in_time, check_out_time],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
-
-    let reconciled_card_sales: f64 = conn
-        .query_row(
-            &format!(
-                "SELECT COALESCE(SUM(op.amount), 0)
-                 FROM orders o
-                 LEFT JOIN order_payments op ON op.order_id = o.id
-                 WHERE COALESCE(op.staff_shift_id, o.staff_shift_id) = ?1
-                   AND op.method = 'card'
-                   AND op.status = 'completed'
-                   AND COALESCE(o.is_ghost, 0) = 0
-                   AND {order_financial_expr} >= ?2
-                   AND {order_financial_expr} <= ?3"
-            ),
-            params![shift_id, check_in_time, check_out_time],
-            |row| row.get(0),
-        )
-        .unwrap_or(0.0);
+    let (reconciled_order_count, reconciled_cash_sales, reconciled_card_sales, reconciled_total_sales) =
+        compute_shift_payment_totals_in_window(
+            conn,
+            shift_id,
+            &role_type,
+            Some(check_in_time.as_str()),
+            Some(check_out_time.as_str()),
+        )?;
 
     let reconciled_refunds: f64 = conn
         .query_row(
@@ -2144,10 +2117,23 @@ fn recompute_closed_cashier_shift_financial_snapshot(
         "UPDATE staff_shifts SET
             expected_cash_amount = ?1,
             cash_variance = ?2,
+            total_orders_count = ?3,
+            total_sales_amount = ?4,
+            total_cash_sales = ?5,
+            total_card_sales = ?6,
             sync_status = 'pending',
-            updated_at = ?3
-         WHERE id = ?4",
-        params![expected, variance, written_at, shift_id],
+            updated_at = ?7
+         WHERE id = ?8",
+        params![
+            expected,
+            variance,
+            reconciled_order_count,
+            reconciled_total_sales,
+            reconciled_cash_sales,
+            reconciled_card_sales,
+            written_at,
+            shift_id,
+        ],
     )
     .map_err(|e| format!("update corrected closed shift snapshot: {e}"))?;
 
@@ -2278,7 +2264,7 @@ fn build_shift_update_sync_payload_from_db(
     Ok(payload.to_string())
 }
 
-fn replace_unfinished_shift_sync_rows_with_current_snapshot(
+pub(crate) fn replace_unfinished_shift_sync_rows_with_current_snapshot(
     conn: &Connection,
     shift_id: &str,
     written_at: &str,

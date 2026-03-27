@@ -2871,12 +2871,18 @@
       "pendingLocalSubmitQueued": "Il giorno precedente è stato chiuso localmente. Il report Z è in coda per la sincronizzazione admin. Disconnessione…",
       "submitSuccessSynced": "Day closed locally. Z-report already synced to admin. Logging out…",
       "submitFailed": "Non riuscito: {{error}}",
+      "resolveBlockerCash": "Incassa Contanti",
+      "resolveBlockerCard": "Incassa Carta",
+      "resolvingPayment": "Registrazione pagamento…",
+      "resolveBlockerSuccess": "Registrato pagamento {{method}} per {{orderNumber}}. Controlla il report aggiornato e riprova il rapporto Z.",
+      "resolveBlockerFailed": "Impossibile risolvere {{orderNumber}}: {{error}}",
       "unknownError": "Errore sconosciuto",
       "submissionFailed": "Invio non riuscito",
       "close": "Chiudi",
       "pendingDateLocked": "This date is locked because the previous business day is already closed and still waiting for local Z-report submission.",
       "pendingLocalSubmitTitle": "Il giorno lavorativo precedente è chiuso ma attende ancora l'invio locale dello Z",
-      "pendingLocalSubmitHelp": "Usa l'azione principale qui sotto per completare localmente il giorno precedente. La data resta bloccata per evitare l'invio del giorno operativo sbagliato."
+      "pendingLocalSubmitHelp": "Usa l'azione principale qui sotto per completare localmente il giorno precedente. La data resta bloccata per evitare l'invio del giorno operativo sbagliato.",
+      "paymentIntegrityResolveHelper": "Risolvi qui il saldo mancante. La correzione viene registrata sul cassetto originale del giorno lavorativo prima di riprovare il rapporto Z."
     },
     "expense": {
       "title": "Uscite di cassa",

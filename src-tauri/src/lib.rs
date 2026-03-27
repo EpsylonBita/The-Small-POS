@@ -1074,6 +1074,7 @@ pub fn run() {
             commands::analytics::report_get_daily_staff_performance,
             commands::analytics::report_print_z_report,
             commands::analytics::report_submit_z_report,
+            commands::analytics::report_resolve_payment_blocker,
             // Modules
             commands::modules::modules_fetch_from_admin,
             commands::modules::modules_get_cached,

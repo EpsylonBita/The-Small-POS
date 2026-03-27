@@ -705,6 +705,11 @@ export interface RecordPaymentParams {
   }>;
 }
 
+export interface ResolvePaymentBlockerParams {
+  orderId: string;
+  method: "cash" | "card";
+}
+
 export interface UpdatePaymentMethodResult {
   orderId: string;
   paymentId: string;
@@ -1391,6 +1396,9 @@ export interface PlatformBridge {
       snapshot?: any;
       terminalName?: string;
     }): Promise<IpcResult>;
+    resolvePaymentBlocker(
+      params: ResolvePaymentBlockerParams,
+    ): Promise<IpcResult>;
     submitZReport(params: {
       branchId: string;
       date?: string;
@@ -1965,6 +1973,7 @@ export const CHANNEL_MAP: Record<string, string> = {
   "report:get-daily-staff-performance": "reports.getDailyStaffPerformance",
   "report:print-z-report": "reports.printZReport",
   "report:submit-z-report": "reports.submitZReport",
+  "report:resolve-payment-blocker": "reports.resolvePaymentBlocker",
 
   // Product dashboard metrics
   "inventory:get-stock-metrics": "inventory.getStockMetrics",
@@ -2676,6 +2685,8 @@ export class TauriBridge implements PlatformBridge {
       snapshot?: any;
       terminalName?: string;
     }) => this.inv("report:print-z-report", p),
+    resolvePaymentBlocker: (p: ResolvePaymentBlockerParams) =>
+      this.inv("report:resolve-payment-blocker", p),
     submitZReport: (p: { branchId: string; date?: string }) =>
       this.inv("report:submit-z-report", p),
   };

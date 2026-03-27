@@ -5,13 +5,16 @@
 //! and enqueued for sync to the admin dashboard via `/api/pos/payments`.
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::db::DbState;
-use crate::{order_ownership, print, printers, receipt_renderer, resolve_order_id};
+use crate::{
+    business_day, order_ownership, payment_integrity, print, printers, receipt_renderer,
+    resolve_order_id, shifts,
+};
 
 fn load_payment_items_for_payment(
     conn: &rusqlite::Connection,
@@ -47,6 +50,160 @@ fn load_payment_items_for_payment(
     }
 
     Ok(items)
+}
+
+#[derive(Clone, Debug)]
+struct HistoricalPaymentRepairContext {
+    shift_id: String,
+    staff_id: String,
+    shift_status: String,
+    recorded_at: String,
+}
+
+fn load_shift_role_status_and_staff(
+    conn: &Connection,
+    shift_id: &str,
+) -> Result<Option<(String, String, String)>, String> {
+    conn.query_row(
+        "SELECT role_type, staff_id, status
+         FROM staff_shifts
+         WHERE id = ?1
+         LIMIT 1",
+        params![shift_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("load shift role/status for payment repair: {e}"))
+}
+
+fn outstanding_amount_for_blocker(blocker: &payment_integrity::UnsettledPaymentBlocker) -> f64 {
+    (blocker.total_amount - blocker.settled_amount).max(0.0)
+}
+
+fn blocker_is_resolvable_from_z_report(
+    blocker: &payment_integrity::UnsettledPaymentBlocker,
+) -> bool {
+    blocker.reason_code != "unsupported_payment_method"
+        && outstanding_amount_for_blocker(blocker) > 0.009
+}
+
+fn build_payment_blocker_failure(
+    error: impl Into<String>,
+    blockers: &[payment_integrity::UnsettledPaymentBlocker],
+) -> Value {
+    let message = error.into();
+    serde_json::json!({
+        "success": false,
+        "errorCode": payment_integrity::UNSETTLED_PAYMENT_BLOCKER_ERROR_CODE,
+        "error": message,
+        "message": message,
+        "blockers": blockers,
+    })
+}
+
+fn resolve_historical_cashier_repair_context(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<HistoricalPaymentRepairContext, String> {
+    let (
+        branch_id,
+        order_type,
+        order_staff_shift_id,
+    ): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT COALESCE(branch_id, ''),
+                    COALESCE(order_type, 'dine-in'),
+                    staff_shift_id
+             FROM orders
+             WHERE id = ?1",
+            params![order_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("load order context for payment repair: {e}"))?;
+
+    let recorded_at = business_day::resolve_order_financial_effective_at(conn, order_id)?;
+
+    if order_type.eq_ignore_ascii_case("delivery") {
+        if let Some(driver_shift_id) = order_staff_shift_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if let Some((role_type, _, _)) = load_shift_role_status_and_staff(conn, driver_shift_id)?
+            {
+                if role_type == "driver" {
+                    return Err(
+                        "This blocked delivery order must be repaired from its driver/order settlement flow."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(shift_id) = order_staff_shift_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some((role_type, staff_id, shift_status)) =
+            load_shift_role_status_and_staff(conn, shift_id)?
+        {
+            if matches!(role_type.as_str(), "cashier" | "manager")
+                && business_day::shift_contains_timestamp(conn, shift_id, &recorded_at)?
+            {
+                return Ok(HistoricalPaymentRepairContext {
+                    shift_id: shift_id.to_string(),
+                    staff_id,
+                    shift_status,
+                    recorded_at,
+                });
+            }
+        }
+    }
+
+    if branch_id.trim().is_empty() {
+        return Err(
+            "No historical cashier drawer was found for this blocked order. Reopen the order or ask support to repair it."
+                .to_string(),
+        );
+    }
+
+    let Some((shift_id, staff_id)) =
+        business_day::find_cashier_owner_for_timestamp(conn, &branch_id, &recorded_at)?
+    else {
+        return Err(
+            "No historical cashier drawer was found for this blocked order. Reopen the order or ask support to repair it."
+                .to_string(),
+        );
+    };
+
+    let Some((role_type, _, shift_status)) = load_shift_role_status_and_staff(conn, &shift_id)?
+    else {
+        return Err(format!(
+            "Historical cashier shift {shift_id} is missing and cannot receive the repaired payment"
+        ));
+    };
+
+    if role_type != "cashier" && role_type != "manager" {
+        return Err(
+            "The original business-day owner is not a cashier drawer, so this blocker cannot be repaired automatically from Z-report."
+                .to_string(),
+        );
+    }
+
+    Ok(HistoricalPaymentRepairContext {
+        shift_id,
+        staff_id,
+        shift_status,
+        recorded_at,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -468,24 +625,46 @@ pub(crate) fn record_payment_in_connection(
     let cashier_collected_delivery_cash = order_type.eq_ignore_ascii_case("delivery")
         && input.method == "cash"
         && matches!(input.collected_by.as_deref(), Some("cashier_drawer"));
+    let explicit_cashier_drawer_shift = matches!(input.collected_by.as_deref(), Some("cashier_drawer"))
+        && input
+            .requested_staff_shift_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some();
 
     let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
         (None, None)
-    } else if cashier_collected_delivery_cash {
+    } else if explicit_cashier_drawer_shift {
         let shift_id = input
             .requested_staff_shift_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.to_string())
-            .ok_or("Cashier-collected delivery payments require an active cashier shift context")?;
+            .ok_or("Cashier-collected payments require a cashier shift context")?;
+        let Some((role_type, shift_staff_id, _)) =
+            load_shift_role_status_and_staff(conn, &shift_id)?
+        else {
+            return Err(format!(
+                "Requested cashier shift {shift_id} does not exist for this payment"
+            ));
+        };
+        if role_type != "cashier" && role_type != "manager" {
+            return Err(format!(
+                "Requested shift {shift_id} is not a cashier or manager drawer"
+            ));
+        }
         let staff_id = input
             .requested_staff_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| value.to_string());
+            .map(|value| value.to_string())
+            .or(Some(shift_staff_id));
         (Some(shift_id), staff_id)
+    } else if cashier_collected_delivery_cash {
+        return Err("Cashier-collected delivery payments require a cashier shift context".to_string());
     } else {
         order_ownership::resolve_order_owner(
             conn,
@@ -744,6 +923,114 @@ pub fn record_payment(db: &DbState, payload: &Value) -> Result<Value, String> {
         "syncState": recorded.sync_state,
         "message": format!("Payment of {:.2} recorded", input.amount),
     }))
+}
+
+pub fn resolve_unsettled_payment_blocker_payment(
+    db: &DbState,
+    payload: &Value,
+) -> Result<Value, String> {
+    let order_id_raw = str_field(payload, "orderId")
+        .or_else(|| str_field(payload, "order_id"))
+        .ok_or("Missing orderId")?;
+    let method = match str_field(payload, "method")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "cash" => "cash",
+        "card" => "card",
+        _ => return Err("Invalid method. Must be cash or card".to_string()),
+    };
+
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actual_order_id =
+        resolve_order_id(&conn, &order_id_raw).ok_or_else(|| "Order not found".to_string())?;
+    let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+    let Some(blocker) = blockers.first() else {
+        return Ok(build_payment_blocker_failure(
+            "This order no longer has a payment blocker. Refresh the Z-report preview.",
+            &[],
+        ));
+    };
+
+    if !blocker_is_resolvable_from_z_report(blocker) {
+        return Ok(build_payment_blocker_failure(
+            "This blocker needs manual review and cannot be repaired automatically from the Z-report screen.",
+            &blockers,
+        ));
+    }
+
+    let outstanding_amount = outstanding_amount_for_blocker(blocker);
+    let repair_context = match resolve_historical_cashier_repair_context(&conn, &actual_order_id) {
+        Ok(context) => context,
+        Err(error) => return Ok(build_payment_blocker_failure(error, &blockers)),
+    };
+
+    let now = repair_context.recorded_at.clone();
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| format!("begin transaction: {e}"))?;
+
+    let result = (|| -> Result<Value, String> {
+        let record_payload = serde_json::json!({
+            "orderId": actual_order_id.clone(),
+            "method": method,
+            "amount": outstanding_amount,
+            "cashReceived": if method == "cash" { Some(outstanding_amount) } else { None::<f64> },
+            "changeGiven": if method == "cash" { Some(0.0) } else { None::<f64> },
+            "paymentOrigin": "manual",
+            "staffId": repair_context.staff_id.clone(),
+            "staffShiftId": repair_context.shift_id.clone(),
+            "collectedBy": "cashier_drawer",
+        });
+        let input = build_payment_record_input(&record_payload)?;
+        let mut options = PaymentInsertOptions::local();
+        options.sync_order_owner_with_payment = false;
+        options.mark_order_sync_pending_on_owner_change = false;
+        options.created_at = Some(now.clone());
+        options.updated_at = Some(now.clone());
+
+        let recorded = record_payment_in_connection(&conn, &input, &options)?;
+
+        if repair_context.shift_status == "closed" {
+            shifts::recompute_closed_cashier_shift_financial_snapshot(
+                &conn,
+                &repair_context.shift_id,
+                &now,
+            )?;
+            shifts::replace_unfinished_shift_sync_rows_with_current_snapshot(
+                &conn,
+                &repair_context.shift_id,
+                &now,
+            )?;
+        }
+
+        let remaining_blockers =
+            payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "orderId": actual_order_id.clone(),
+            "paymentId": recorded.payment_id,
+            "method": method,
+            "amount": outstanding_amount,
+            "recordedAt": now,
+            "cashierShiftId": repair_context.shift_id.clone(),
+            "remainingBlockers": remaining_blockers,
+        }))
+    })();
+
+    match result {
+        Ok(value) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("commit: {e}"))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 fn build_payment_sync_payload_for_payment(
@@ -2271,6 +2558,163 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cash_sales, 0.0, "total_cash_sales should remain 0.0");
+    }
+
+    #[test]
+    fn test_resolve_unsettled_payment_blocker_backfills_historical_cashier_payment() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let check_in = "2026-03-26T08:00:00Z";
+        let historical_at = "2026-03-26T21:15:00Z";
+        let check_out = "2026-03-26T23:30:00Z";
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, role_type, branch_id, terminal_id, check_in_time, check_out_time,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                status, calculation_version, sync_status, created_at, updated_at
+            ) VALUES (
+                'shift-z-block', 'cashier-z', 'cashier', 'branch-z', 'terminal-z', ?1, ?2,
+                100.0, 113.7, 100.0, 13.7, 'closed', 2, 'synced', ?1, ?2
+            )",
+            params![check_in, check_out],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_drawer_sessions (
+                id, staff_shift_id, cashier_id, branch_id, terminal_id, opening_amount,
+                closing_amount, expected_amount, variance_amount, total_cash_sales,
+                total_card_sales, opened_at, closed_at, reconciled, created_at, updated_at
+            ) VALUES (
+                'drawer-z-block', 'shift-z-block', 'cashier-z', 'branch-z', 'terminal-z',
+                100.0, 113.7, 100.0, 13.7, 0.0, 0.0, ?1, ?2, 1, ?1, ?2
+            )",
+            params![check_in, check_out],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO orders (
+                id, order_number, items, total_amount, status, payment_status, payment_method,
+                sync_status, branch_id, terminal_id, staff_shift_id, created_at, updated_at
+            ) VALUES (
+                'ord-z-block', 'ORD-20260326-0049', '[]', 13.7, 'completed', 'pending', 'other',
+                'synced', 'branch-z', 'terminal-z', 'shift-z-block', ?1, ?1
+            )",
+            params![historical_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key, status
+            ) VALUES (
+                'shift', 'shift-z-block', 'update', '{}', 'shift:z-block:stale', 'pending'
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = resolve_unsettled_payment_blocker_payment(
+            &db,
+            &serde_json::json!({
+                "orderId": "ord-z-block",
+                "method": "cash",
+            }),
+        )
+        .expect("repair blocked payment from z-report");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["amount"], 13.7);
+
+        let conn = db.conn.lock().unwrap();
+        let (payment_method, payment_amount, payment_created_at, payment_shift_id): (
+            String,
+            f64,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT method, amount, created_at, staff_shift_id
+                 FROM order_payments
+                 WHERE order_id = 'ord-z-block'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(payment_method, "cash");
+        assert_eq!(payment_amount, 13.7);
+        assert_eq!(payment_created_at, historical_at);
+        assert_eq!(payment_shift_id.as_deref(), Some("shift-z-block"));
+
+        let (order_payment_status, order_payment_method): (String, String) = conn
+            .query_row(
+                "SELECT payment_status, payment_method
+                 FROM orders
+                 WHERE id = 'ord-z-block'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(order_payment_status, "paid");
+        assert_eq!(order_payment_method, "cash");
+
+        let effective_at =
+            crate::business_day::resolve_order_financial_effective_at(&conn, "ord-z-block")
+                .expect("resolve repaired financial timestamp");
+        assert_eq!(effective_at, historical_at);
+
+        let (
+            drawer_cash_sales,
+            drawer_expected,
+            drawer_variance,
+            shift_total_orders,
+            shift_total_sales,
+            shift_cash_sales,
+        ): (f64, f64, f64, i64, f64, f64) = conn
+            .query_row(
+                "SELECT cds.total_cash_sales, cds.expected_amount, cds.variance_amount,
+                        ss.total_orders_count, ss.total_sales_amount, ss.total_cash_sales
+                 FROM cash_drawer_sessions cds
+                 JOIN staff_shifts ss ON ss.id = cds.staff_shift_id
+                 WHERE cds.staff_shift_id = 'shift-z-block'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(drawer_cash_sales, 13.7);
+        assert_eq!(drawer_expected, 113.7);
+        assert_eq!(drawer_variance, 0.0);
+        assert_eq!(shift_total_orders, 1);
+        assert_eq!(shift_total_sales, 13.7);
+        assert_eq!(shift_cash_sales, 13.7);
+
+        let shift_sync_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND entity_id = 'shift-z-block'
+                   AND status IN ('pending', 'in_progress', 'failed', 'deferred')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            shift_sync_count, 1,
+            "closed shift repair should replace stale sync rows with one fresh snapshot"
+        );
+
+        let blockers = payment_integrity::load_order_payment_blockers(&conn, "ord-z-block")
+            .expect("load blockers after repair");
+        assert!(blockers.is_empty(), "repair should clear payment blockers");
     }
 
     #[test]

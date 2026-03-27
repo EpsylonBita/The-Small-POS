@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use tauri::Emitter;
 use tracing::{info, warn};
 
-use crate::{db, order_ownership, payment_integrity, print, value_str, zreport};
+use crate::{db, order_ownership, payment_integrity, payments, print, value_str, zreport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +81,14 @@ struct ReportDailyStaffPerformancePayload {
     date: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvePaymentBlockerPayload {
+    #[serde(alias = "order_id")]
+    order_id: String,
+    method: String,
+}
+
 fn normalize_payload_with_branch(arg0: Option<serde_json::Value>) -> serde_json::Value {
     match arg0 {
         Some(serde_json::Value::String(branch_id)) => serde_json::json!({
@@ -117,6 +125,26 @@ fn parse_driver_branch_payload(arg0: Option<serde_json::Value>) -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_default()
+}
+
+fn parse_resolve_payment_blocker_payload(
+    arg0: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let payload = arg0.unwrap_or_else(|| serde_json::json!({}));
+    let mut parsed: ResolvePaymentBlockerPayload = serde_json::from_value(payload.clone())
+        .map_err(|e| format!("Invalid payment blocker repair payload: {e}"))?;
+    parsed.order_id = parsed.order_id.trim().to_string();
+    parsed.method = parsed.method.trim().to_ascii_lowercase();
+    if parsed.order_id.is_empty() {
+        return Err("Missing orderId".into());
+    }
+    if parsed.method != "cash" && parsed.method != "card" {
+        return Err("Method must be cash or card".into());
+    }
+    Ok(serde_json::json!({
+        "orderId": parsed.order_id,
+        "method": parsed.method,
+    }))
 }
 
 fn parse_delivery_zone_analytics_payload(arg0: Option<serde_json::Value>) -> Option<String> {
@@ -1443,6 +1471,15 @@ pub async fn report_submit_z_report(
 
     let _ = app.emit("sync_complete", serde_json::json!({ "entity": "z_report" }));
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn report_resolve_payment_blocker(
+    arg0: Option<serde_json::Value>,
+    db: tauri::State<'_, db::DbState>,
+) -> Result<serde_json::Value, String> {
+    let payload = parse_resolve_payment_blocker_payload(arg0)?;
+    payments::resolve_unsettled_payment_blocker_payment(&db, &payload)
 }
 
 #[tauri::command]
