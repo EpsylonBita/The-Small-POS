@@ -230,6 +230,29 @@ pub struct SyncState {
     pub last_sync: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RecurringSyncRecoverySummary {
+    business_day_repairs: usize,
+    cashier_reference_requeues: usize,
+    retryable_shift_requeues: usize,
+    failed_shift_bound_financial_recoveries: usize,
+    deferred_payment_promotions: usize,
+    deferred_adjustment_promotions: usize,
+    deferred_financial_promotions: usize,
+}
+
+impl RecurringSyncRecoverySummary {
+    fn total_actions(&self) -> usize {
+        self.business_day_repairs
+            + self.cashier_reference_requeues
+            + self.retryable_shift_requeues
+            + self.failed_shift_bound_financial_recoveries
+            + self.deferred_payment_promotions
+            + self.deferred_adjustment_promotions
+            + self.deferred_financial_promotions
+    }
+}
+
 /// Ensure failed-order validation requeue runs once per process start.
 static FAILED_ORDER_REQUEUE_DONE: AtomicBool = AtomicBool::new(false);
 /// Disable stuck-receipt cleanup DELETE calls for this process when backend does not support it.
@@ -1604,6 +1627,124 @@ pub async fn check_network_status() -> Value {
     }
 }
 
+fn run_recurring_sync_recovery(db: &DbState) -> RecurringSyncRecoverySummary {
+    let mut summary = RecurringSyncRecoverySummary::default();
+
+    match backfill_active_shift_business_day_context(db) {
+        Ok(repaired) => {
+            summary.business_day_repairs = repaired;
+            if repaired > 0 {
+                info!(
+                    repaired,
+                    "Recurring sync recovery repaired active shift business-day metadata"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to repair business-day metadata");
+        }
+    }
+
+    match requeue_failed_shift_cashier_reference_rows(db) {
+        Ok(requeued) => {
+            summary.cashier_reference_requeues = requeued;
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Recurring sync recovery requeued failed shift cashier-reference rows"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to requeue cashier-reference rows");
+        }
+    }
+
+    match requeue_retryable_failed_shift_rows(db) {
+        Ok(requeued) => {
+            summary.retryable_shift_requeues = requeued;
+            if requeued > 0 {
+                info!(
+                    requeued,
+                    "Recurring sync recovery requeued retryable failed shifts"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to requeue retryable shifts");
+        }
+    }
+
+    match reconcile_failed_shift_bound_financials(db) {
+        Ok(recovered) => {
+            summary.failed_shift_bound_financial_recoveries = recovered;
+            if recovered > 0 {
+                info!(
+                    recovered,
+                    "Recurring sync recovery recovered failed shift-bound financial rows"
+                );
+            }
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to recover shift-bound financial rows");
+        }
+    }
+
+    match reconcile_deferred_payments(db) {
+        Ok(promoted) => {
+            summary.deferred_payment_promotions = promoted;
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to reconcile deferred payments");
+        }
+    }
+
+    match reconcile_deferred_adjustments(db) {
+        Ok(promoted) => {
+            summary.deferred_adjustment_promotions = promoted;
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to reconcile deferred adjustments");
+        }
+    }
+
+    match reconcile_deferred_financials(db) {
+        Ok(promoted) => {
+            summary.deferred_financial_promotions = promoted;
+        }
+        Err(error) => {
+            warn!(error = %error, "Recurring sync recovery failed to reconcile deferred financials");
+        }
+    }
+
+    summary
+}
+
+fn has_actionable_remote_sync_work(db: &DbState) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let actionable: Option<i64> = conn
+        .query_row(
+            "SELECT 1
+             FROM sync_queue
+             WHERE status = 'queued_remote'
+                OR (
+                    status IN ('pending', 'in_progress')
+                    AND retry_count < max_retries
+                    AND (
+                        next_retry_at IS NULL
+                        OR julianday(next_retry_at) <= julianday('now')
+                    )
+                )
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("inspect actionable sync queue rows: {e}"))?;
+
+    Ok(actionable.is_some())
+}
+
 fn read_terminal_setting(conn: &rusqlite::Connection, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| db::get_setting(conn, "terminal", key))
@@ -1908,39 +2049,39 @@ pub fn start_sync_loop(
                 continue;
             }
 
+            let recovery_summary = run_recurring_sync_recovery(&db);
+            let actionable_remote_work = match has_actionable_remote_sync_work(&db) {
+                Ok(has_work) => has_work,
+                Err(error) => {
+                    warn!(error = %error, "Failed to inspect actionable sync queue work");
+                    false
+                }
+            };
+
             if !network_is_online {
                 if previous_network_online != Some(false) {
-                    info!("Network offline; deferring remote sync and keeping queue pending");
+                    if actionable_remote_work {
+                        info!(
+                            recovery_actions = recovery_summary.total_actions(),
+                            "Network probe offline; attempting remote sync because actionable queue work remains"
+                        );
+                    } else {
+                        info!("Network offline; deferring remote sync and keeping queue pending");
+                    }
                 }
                 previous_network_online = Some(false);
 
-                let status = get_sync_status_for_event(&db, &last_sync, false);
-                let _ = app.emit("sync_status", &status);
-                let _ = app.emit("sync-status-changed", &status);
-                continue;
-            }
-
-            if previous_network_online == Some(false) {
-                info!("Network restored; resuming queued sync");
-            }
-            previous_network_online = Some(true);
-
-            // Run payment reconciliation before the main sync cycle
-            // so that deferred payments get promoted to pending.
-            if let Err(e) = reconcile_deferred_payments(&db) {
-                warn!("Payment reconciliation failed: {e}");
-            }
-
-            // Run adjustment reconciliation: promote waiting_parent adjustments
-            // whose parent payment has synced and has a canonical remote id.
-            if let Err(e) = reconcile_deferred_adjustments(&db) {
-                warn!("Adjustment reconciliation failed: {e}");
-            }
-
-            // Run financial reconciliation: promote deferred financial items
-            // whose parent shift has synced (sync_status = 'synced').
-            if let Err(e) = reconcile_deferred_financials(&db) {
-                warn!("Financial reconciliation failed: {e}");
+                if !actionable_remote_work {
+                    let status = get_sync_status_for_event(&db, &last_sync, false);
+                    let _ = app.emit("sync_status", &status);
+                    let _ = app.emit("sync-status-changed", &status);
+                    continue;
+                }
+            } else {
+                if previous_network_online == Some(false) {
+                    info!("Network restored; resuming queued sync");
+                }
+                previous_network_online = Some(true);
             }
 
             match run_sync_cycle(&db, &app).await {
@@ -1983,15 +2124,7 @@ pub async fn force_sync(
         return Err("Terminal not configured".into());
     }
 
-    if let Err(e) = reconcile_deferred_payments(db) {
-        warn!("Payment reconciliation failed during force sync: {e}");
-    }
-    if let Err(e) = reconcile_deferred_adjustments(db) {
-        warn!("Adjustment reconciliation failed during force sync: {e}");
-    }
-    if let Err(e) = reconcile_deferred_financials(db) {
-        warn!("Financial reconciliation failed during force sync: {e}");
-    }
+    let _ = run_recurring_sync_recovery(db);
 
     let synced = run_sync_cycle(db, app).await?;
     info!("Force sync complete: {synced} items synced");
@@ -5667,22 +5800,6 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
                 );
             }
         }
-        if let Ok(requeued) = requeue_failed_shift_cashier_reference_rows(db) {
-            if requeued > 0 {
-                info!(
-                    requeued,
-                    "Requeued failed shifts blocked by missing cashier-shift references"
-                );
-            }
-        }
-        if let Ok(repaired) = backfill_active_shift_business_day_context(db) {
-            if repaired > 0 {
-                info!(
-                    repaired,
-                    "Backfilled active shift business-day metadata and requeued live shift inserts"
-                );
-            }
-        }
     }
 
     if Z_REPORT_HISTORY_REPAIR_DONE
@@ -7957,6 +8074,99 @@ fn reset_shift_queue_row_to_pending(
     Ok(())
 }
 
+fn align_local_financial_sync_state(
+    conn: &rusqlite::Connection,
+    entity_type: &str,
+    entity_id: &str,
+    queue_status: &str,
+    now: &str,
+) {
+    if entity_type != "shift_expense" {
+        return;
+    }
+
+    let local_sync_status = match queue_status {
+        "failed" => "failed",
+        "synced" => "synced",
+        _ => "pending",
+    };
+
+    let _ = conn.execute(
+        "UPDATE shift_expenses
+         SET sync_status = ?1,
+             updated_at = ?2
+         WHERE id = ?3",
+        params![local_sync_status, now, entity_id],
+    );
+}
+
+fn requeue_retryable_failed_shift_rows(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let mut repaired = 0usize;
+
+    let mut failed_shift_stmt = conn
+        .prepare(
+            "SELECT DISTINCT entity_id
+             FROM sync_queue
+             WHERE entity_type = 'shift'
+               AND status = 'failed'",
+        )
+        .map_err(|e| format!("prepare failed shift selector: {e}"))?;
+    let failed_shift_ids: Vec<String> = failed_shift_stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("query failed shift selector: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(failed_shift_stmt);
+
+    for shift_id in &failed_shift_ids {
+        let Some(queue_row) = load_parent_shift_queue_row(&conn, shift_id) else {
+            continue;
+        };
+
+        if queue_row.status != "failed" {
+            continue;
+        }
+
+        if !is_retryable_shift_sync_error(queue_row.last_error.as_deref()) {
+            continue;
+        }
+
+        reset_shift_queue_row_to_pending(&conn, shift_id, queue_row.queue_id, &now)?;
+        repaired += 1;
+    }
+
+    let mut failed_shift_without_queue_stmt = conn
+        .prepare(
+            "SELECT ss.id
+             FROM staff_shifts ss
+             WHERE ss.sync_status = 'failed'
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM sync_queue sq
+                    WHERE sq.entity_type = 'shift'
+                      AND sq.entity_id = ss.id
+                      AND sq.status IN ('pending', 'in_progress', 'deferred', 'failed')
+               )",
+        )
+        .map_err(|e| format!("prepare failed shift without queue selector: {e}"))?;
+    let failed_shift_ids_without_queue: Vec<String> = failed_shift_without_queue_stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("query failed shift without queue selector: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(failed_shift_without_queue_stmt);
+
+    for shift_id in &failed_shift_ids_without_queue {
+        if enqueue_reconstructed_shift_sync_row(&conn, shift_id, &now)?.is_some() {
+            repaired += 1;
+        }
+    }
+
+    Ok(repaired)
+}
+
 pub(crate) fn resolve_financial_parent_shift_dependency(
     conn: &rusqlite::Connection,
     entity_type: &str,
@@ -8070,18 +8280,18 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let now = Utc::now().to_rfc3339();
 
-    let row: Option<(String, String)> = conn
+    let row: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT entity_type, payload
+            "SELECT entity_type, entity_id, payload
              FROM sync_queue
              WHERE id = ?1",
             params![queue_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|e| format!("load financial queue row for retry: {e}"))?;
 
-    let Some((entity_type, payload)) = row else {
+    let Some((entity_type, entity_id, payload)) = row else {
         return Err("Financial sync item not found".into());
     };
 
@@ -8105,6 +8315,7 @@ pub(crate) fn retry_financial_queue_item(db: &DbState, queue_id: i64) -> Result<
         params![status, last_error, now, queue_id],
     )
     .map_err(|e| format!("retry financial queue row: {e}"))?;
+    align_local_financial_sync_state(&conn, &entity_type, &entity_id, status, &now);
 
     if entity_type == "payment_adjustment" {
         let _ = conn.execute(
@@ -9447,6 +9658,95 @@ fn reconcile_deferred_payments(db: &DbState) -> Result<usize, String> {
 ///
 /// Called once per sync loop iteration, before `run_sync_cycle`, mirroring the
 /// pattern used by `reconcile_deferred_payments` for order→payment dependencies.
+fn reconcile_failed_shift_bound_financials(db: &DbState) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, entity_type, entity_id, payload, last_error
+             FROM sync_queue
+             WHERE entity_type IN ('shift_expense', 'staff_payment')
+               AND status = 'failed'",
+        )
+        .map_err(|e| format!("prepare failed shift-bound financial selector: {e}"))?;
+
+    let rows: Vec<(i64, String, String, String, Option<String>)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| format!("query failed shift-bound financial selector: {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut recovered = 0usize;
+
+    for (queue_id, entity_type, entity_id, payload, last_error) in &rows {
+        let dependency =
+            ensure_financial_parent_shift_dependency_recovery(&conn, entity_type, payload, &now)?;
+
+        let Some(dependency) = dependency else {
+            continue;
+        };
+
+        let block_reason = dependency.dependency_block_reason.clone();
+        let next_status = match block_reason.as_deref() {
+            None => Some("pending"),
+            Some(WAITING_FOR_CASHIER_SHIFT_SYNC_REASON) => Some("deferred"),
+            Some(CASHIER_SHIFT_SYNC_NEEDS_ATTENTION_REASON)
+            | Some(CASHIER_SHIFT_MISSING_LOCALLY_REASON) => None,
+            Some(_) => Some("deferred"),
+        };
+
+        if let Some(status) = next_status {
+            let last_error = if status == "deferred" {
+                block_reason.clone()
+            } else {
+                None
+            };
+            conn.execute(
+                "UPDATE sync_queue
+                 SET status = ?1,
+                     retry_count = 0,
+                     last_error = ?2,
+                     next_retry_at = NULL,
+                     updated_at = ?3
+                 WHERE id = ?4
+                   AND status = 'failed'",
+                params![status, last_error, now, queue_id],
+            )
+            .map_err(|e| format!("recover failed shift-bound financial row: {e}"))?;
+            align_local_financial_sync_state(&conn, entity_type, entity_id, status, &now);
+            recovered += 1;
+            continue;
+        }
+
+        if last_error.as_deref() != block_reason.as_deref() {
+            conn.execute(
+                "UPDATE sync_queue
+                 SET last_error = ?1,
+                     updated_at = ?2
+                 WHERE id = ?3
+                   AND status = 'failed'",
+                params![block_reason, now, queue_id],
+            )
+            .map_err(|e| format!("refresh failed shift-bound financial blocker reason: {e}"))?;
+        }
+    }
+
+    Ok(recovered)
+}
+
 fn reconcile_deferred_financials(db: &DbState) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
@@ -12484,6 +12784,203 @@ mod tests {
     }
 
     #[test]
+    fn test_run_recurring_sync_recovery_repairs_active_shift_business_day_context() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                 check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-recurring-business-day', 'staff-1', 'Cashier One', 'branch-1', 'term-1', 'cashier',
+                 '2026-03-22T16:00:00Z', 'active', 'synced', '2026-03-22T16:00:00Z', '2026-03-22T16:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = run_recurring_sync_recovery(&db);
+        assert_eq!(summary.business_day_repairs, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (report_date, period_start_at, sync_status): (Option<String>, Option<String>, String) =
+            conn.query_row(
+                "SELECT report_date, period_start_at, sync_status
+                 FROM staff_shifts
+                 WHERE id = 'shift-recurring-business-day'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift'
+                   AND entity_id = 'shift-recurring-business-day'
+                   AND operation = 'insert'
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(report_date.is_some());
+        assert!(period_start_at.is_some());
+        assert_eq!(sync_status, "pending");
+        assert_eq!(queue_status, "pending");
+    }
+
+    #[test]
+    fn test_requeue_retryable_failed_shift_rows_resets_retryable_shift() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-retryable-auto', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'shift', 'shift-retryable-auto', 'insert', '{}', 'shift-retryable-auto:open',
+                 'failed', 4, 5, 'Network error while syncing shift'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_retryable_failed_shift_rows(&db).unwrap();
+        assert_eq!(requeued, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count, last_error): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT status, retry_count, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-retryable-auto'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let shift_sync_status: String = conn
+            .query_row(
+                "SELECT sync_status
+                 FROM staff_shifts
+                 WHERE id = 'shift-retryable-auto'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "pending");
+        assert_eq!(retry_count, 0);
+        assert_eq!(last_error, None);
+        assert_eq!(shift_sync_status, "pending");
+    }
+
+    #[test]
+    fn test_requeue_retryable_failed_shift_rows_keeps_permanent_shift_failure() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-permanent-auto', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'shift', 'shift-permanent-auto', 'insert', '{}', 'shift-permanent-auto:open',
+                 'failed', 5, 5, 'Validation failed: branch access denied'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let requeued = requeue_retryable_failed_shift_rows(&db).unwrap();
+        assert_eq!(requeued, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let (queue_status, retry_count): (String, i64) = conn
+            .query_row(
+                "SELECT status, retry_count
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-permanent-auto'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let shift_sync_status: String = conn
+            .query_row(
+                "SELECT sync_status
+                 FROM staff_shifts
+                 WHERE id = 'shift-permanent-auto'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(queue_status, "failed");
+        assert_eq!(retry_count, 5);
+        assert_eq!(shift_sync_status, "failed");
+    }
+
+    #[test]
+    fn test_has_actionable_remote_sync_work_only_reports_ready_queue_rows() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key, status, next_retry_at
+             ) VALUES (
+                 'shift_expense', 'expense-blocked-only', 'insert', '{}', 'expense-blocked-only:insert',
+                 'deferred', NULL
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(!has_actionable_remote_sync_work(&db).unwrap());
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key, status
+             ) VALUES (
+                 'shift', 'shift-pending-ready', 'insert', '{}', 'shift-pending-ready:insert',
+                 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(has_actionable_remote_sync_work(&db).unwrap());
+    }
+
+    #[test]
     fn test_requeue_failed_payment_adjustments_blocked_by_missing_endpoint_404() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -13020,6 +13517,99 @@ mod tests {
     }
 
     #[test]
+    fn test_reconcile_failed_shift_bound_financials_recovers_retryable_parent_shift_blocker() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-parent-retryable-failed-child', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'shift', 'shift-parent-retryable-failed-child', 'insert', '{}', 'shift-parent-retryable-failed-child:open',
+                 'failed', 3, 5, 'Network error while syncing shift'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shift_expenses (
+                 id, staff_shift_id, staff_id, branch_id, expense_type, amount, description,
+                 sync_status, created_at, updated_at
+             ) VALUES (
+                 'expense-failed-recovery', 'shift-parent-retryable-failed-child', 'cashier-1', 'branch-1', 'other', 10.0, 'Test expense',
+                 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'shift_expense', 'expense-failed-recovery', 'insert',
+                '{\"shiftId\":\"shift-parent-retryable-failed-child\",\"amount\":10}',
+                'expense-failed-recovery:insert',
+                'failed', 5, 5, 'Parent shift sync failed temporarily'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let recovered = reconcile_failed_shift_bound_financials(&db).unwrap();
+        assert_eq!(recovered, 1);
+
+        let conn = db.conn.lock().unwrap();
+        let (shift_queue_status, shift_sync_status): (String, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT status FROM sync_queue WHERE entity_type = 'shift' AND entity_id = 'shift-parent-retryable-failed-child' ORDER BY id DESC LIMIT 1),
+                    (SELECT sync_status FROM staff_shifts WHERE id = 'shift-parent-retryable-failed-child')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (child_status, child_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'shift_expense' AND entity_id = 'expense-failed-recovery'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let local_expense_sync_status: String = conn
+            .query_row(
+                "SELECT sync_status
+                 FROM shift_expenses
+                 WHERE id = 'expense-failed-recovery'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(shift_queue_status, "pending");
+        assert_eq!(shift_sync_status, "pending");
+        assert_eq!(child_status, "deferred");
+        assert_eq!(
+            child_error.as_deref(),
+            Some("Waiting for cashier shift sync")
+        );
+        assert_eq!(local_expense_sync_status, "pending");
+    }
+
+    #[test]
     fn test_reconcile_financials_keeps_child_blocked_when_parent_shift_failure_is_permanent() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
@@ -13085,6 +13675,78 @@ mod tests {
             .unwrap();
 
         assert_eq!(child_status, "deferred");
+        assert_eq!(
+            child_error.as_deref(),
+            Some("Cashier shift sync needs attention")
+        );
+        assert_eq!(shift_queue_status, "failed");
+    }
+
+    #[test]
+    fn test_reconcile_failed_shift_bound_financials_keeps_failed_child_blocked_for_permanent_parent(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                 id, staff_id, role_type, check_in_time, status, sync_status, created_at, updated_at
+             ) VALUES (
+                 'shift-parent-permanent-failed-child', 'cashier-1', 'cashier', datetime('now'), 'active', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'shift', 'shift-parent-permanent-failed-child', 'insert', '{}', 'shift-parent-permanent-failed-child:open',
+                 'failed', 5, 5, 'Validation failed: branch access denied'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+             ) VALUES (
+                'staff_payment', 'payment-failed-permanent-parent', 'insert',
+                '{\"cashierShiftId\":\"shift-parent-permanent-failed-child\",\"amount\":20}',
+                'payment-failed-permanent-parent:insert',
+                'failed', 5, 5, 'Parent shift sync failed'
+             )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let recovered = reconcile_failed_shift_bound_financials(&db).unwrap();
+        assert_eq!(recovered, 0);
+
+        let conn = db.conn.lock().unwrap();
+        let (child_status, child_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, last_error
+                 FROM sync_queue
+                 WHERE entity_type = 'staff_payment' AND entity_id = 'payment-failed-permanent-parent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let shift_queue_status: String = conn
+            .query_row(
+                "SELECT status
+                 FROM sync_queue
+                 WHERE entity_type = 'shift' AND entity_id = 'shift-parent-permanent-failed-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(child_status, "failed");
         assert_eq!(
             child_error.as_deref(),
             Some("Cashier shift sync needs attention")

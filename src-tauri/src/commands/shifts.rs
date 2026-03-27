@@ -29,11 +29,7 @@ async fn emit_sync_status_snapshot(
     }
 }
 
-fn schedule_immediate_sync(
-    app: tauri::AppHandle,
-    entity_type: &'static str,
-    entity_id: String,
-) {
+fn schedule_immediate_sync(app: tauri::AppHandle, entity_type: &'static str, entity_id: String) {
     tauri::async_runtime::spawn(async move {
         let sync_state = {
             let state = app.state::<std::sync::Arc<crate::sync::SyncState>>();
@@ -345,10 +341,7 @@ fn parse_shift_expense_delete_payload(
             "expenseId": expense_id,
             "shiftId": shift_id
         }),
-        (
-            Some(serde_json::Value::String(expense_id)),
-            Some(serde_json::Value::Object(mut obj)),
-        ) => {
+        (Some(serde_json::Value::String(expense_id)), Some(serde_json::Value::Object(mut obj))) => {
             obj.entry("expenseId".to_string())
                 .or_insert(serde_json::Value::String(expense_id));
             serde_json::Value::Object(obj)

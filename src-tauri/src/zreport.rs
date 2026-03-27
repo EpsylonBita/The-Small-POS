@@ -631,7 +631,10 @@ fn canonicalize_report_json_period(report_json: &mut Value, period_start: &str, 
             "periodStart".to_string(),
             Value::String(period_start.to_string()),
         );
-        obj.insert("periodEnd".to_string(), Value::String(period_end.to_string()));
+        obj.insert(
+            "periodEnd".to_string(),
+            Value::String(period_end.to_string()),
+        );
     }
 }
 
@@ -4506,8 +4509,14 @@ mod tests {
         let report = &result["report"];
         assert_eq!(report["reportDate"], "2026-02-15");
         assert_eq!(report["reportJson"]["date"], "2026-02-15");
-        assert_eq!(report["reportJson"]["period"]["start"], "2026-02-16T09:00:00Z");
-        assert_eq!(report["reportJson"]["period"]["end"], "2026-02-16T18:00:00Z");
+        assert_eq!(
+            report["reportJson"]["period"]["start"],
+            "2026-02-16T09:00:00Z"
+        );
+        assert_eq!(
+            report["reportJson"]["period"]["end"],
+            "2026-02-16T18:00:00Z"
+        );
         assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
     }
 
@@ -5931,8 +5940,14 @@ mod tests {
         assert_eq!(report["reportDate"], "2026-02-16");
         assert_eq!(report["totalOrders"], 3);
         assert_eq!(report["grossSales"], 100.0);
-        assert_eq!(report["reportJson"]["period"]["start"], "2026-02-16T09:00:00Z");
-        assert_eq!(report["reportJson"]["period"]["end"], "2026-02-16T18:00:00Z");
+        assert_eq!(
+            report["reportJson"]["period"]["start"],
+            "2026-02-16T09:00:00Z"
+        );
+        assert_eq!(
+            report["reportJson"]["period"]["end"],
+            "2026-02-16T18:00:00Z"
+        );
         assert_eq!(report["reportJson"]["periodStart"], "2026-02-16T09:00:00Z");
         assert_eq!(report["reportJson"]["periodEnd"], "2026-02-16T18:00:00Z");
     }

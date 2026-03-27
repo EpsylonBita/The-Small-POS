@@ -1080,31 +1080,25 @@ pub fn get_shift_sync_state(db: &DbState, shift_id: &str) -> Result<Value, Strin
         .optional()
         .map_err(|e| format!("load shift sync queue state: {e}"))?;
 
-    let (
-        queue_status,
-        last_error,
-        retry_count,
-        next_retry_at,
-        queue_created_at,
-        queue_updated_at,
-    ) = match queue_row {
-        Some((
-            queue_status,
-            last_error,
-            retry_count,
-            next_retry_at,
-            queue_created_at,
-            queue_updated_at,
-        )) => (
-            Some(queue_status),
-            last_error,
-            retry_count,
-            next_retry_at,
-            queue_created_at,
-            queue_updated_at,
-        ),
-        None => (None, None, 0_i64, None, None, None),
-    };
+    let (queue_status, last_error, retry_count, next_retry_at, queue_created_at, queue_updated_at) =
+        match queue_row {
+            Some((
+                queue_status,
+                last_error,
+                retry_count,
+                next_retry_at,
+                queue_created_at,
+                queue_updated_at,
+            )) => (
+                Some(queue_status),
+                last_error,
+                retry_count,
+                next_retry_at,
+                queue_created_at,
+                queue_updated_at,
+            ),
+            None => (None, None, 0_i64, None, None, None),
+        };
 
     Ok(serde_json::json!({
         "shiftId": shift_id,
@@ -4389,7 +4383,10 @@ mod tests {
         let payload: Value =
             serde_json::from_str(&payload).expect("delete sync payload should be valid json");
 
-        assert_eq!(deleted_count, 0, "deleted expense row should be removed locally");
+        assert_eq!(
+            deleted_count, 0,
+            "deleted expense row should be removed locally"
+        );
         assert_eq!(
             total_expenses, 5.0,
             "drawer total_expenses should be recomputed from remaining expenses"
@@ -4589,8 +4586,8 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let sync_state =
-            get_shift_sync_state(&db, "shift-sync-failed").expect("shift sync state should resolve");
+        let sync_state = get_shift_sync_state(&db, "shift-sync-failed")
+            .expect("shift sync state should resolve");
 
         assert_eq!(sync_state["shiftId"], "shift-sync-failed");
         assert_eq!(sync_state["shiftSyncStatus"], "failed");
