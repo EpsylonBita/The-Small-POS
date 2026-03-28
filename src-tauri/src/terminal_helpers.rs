@@ -161,6 +161,13 @@ fn is_local_only_setting_category(category: &str) -> bool {
     )
 }
 
+fn is_syncable_system_setting(setting_key: &str) -> bool {
+    matches!(
+        setting_key.trim().to_ascii_lowercase().as_str(),
+        "business_day_start_hour" | "business_day_start"
+    )
+}
+
 fn is_local_only_terminal_setting(setting_key: &str) -> bool {
     matches!(
         setting_key.trim().to_ascii_lowercase().as_str(),
@@ -351,14 +358,18 @@ pub(crate) fn cache_terminal_settings_snapshot(
 
     if let Some(settings_obj) = resp.get("settings").and_then(|value| value.as_object()) {
         for (category, category_values) in settings_obj {
-            if is_local_only_setting_category(category) {
+            let normalized_category = category.trim().to_ascii_lowercase();
+            if is_local_only_setting_category(category) && normalized_category != "system" {
                 continue;
             }
             let Some(values_obj) = category_values.as_object() else {
                 continue;
             };
             for (key, raw_value) in values_obj {
-                if category == "terminal"
+                if normalized_category == "system" && !is_syncable_system_setting(key) {
+                    continue;
+                }
+                if normalized_category == "terminal"
                     && (is_sensitive_terminal_setting(key) || is_local_only_terminal_setting(key))
                 {
                     continue;
@@ -913,6 +924,55 @@ mod tests {
         assert_eq!(
             db::get_setting(&conn, "terminal", "store_name").as_deref(),
             Some("Downtown Branch")
+        );
+    }
+
+    #[test]
+    fn cache_snapshot_only_persists_whitelisted_system_settings() {
+        let db = test_db();
+        let payload = serde_json::json!({
+            "settings": {
+                "system": {
+                    "business_day_start_hour": 7,
+                    "business_day_start": "07:00",
+                    "last_z_report_timestamp": "2026-03-27T22:00:00Z",
+                    "random_runtime_value": "skip-me"
+                },
+                "ui": {
+                    "theme": "dark"
+                }
+            }
+        });
+
+        let updated = cache_terminal_settings_snapshot(&db, &payload).expect("cache snapshot");
+        let conn = db.conn.lock().expect("lock db");
+
+        assert!(updated
+            .iter()
+            .any(|key| key == "system.business_day_start_hour"));
+        assert!(updated.iter().any(|key| key == "system.business_day_start"));
+        assert!(!updated
+            .iter()
+            .any(|key| key == "system.last_z_report_timestamp"));
+        assert_eq!(
+            db::get_setting(&conn, "system", "business_day_start_hour").as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            db::get_setting(&conn, "system", "business_day_start").as_deref(),
+            Some("07:00")
+        );
+        assert!(
+            db::get_setting(&conn, "system", "last_z_report_timestamp").is_none(),
+            "local-only runtime system keys must stay local"
+        );
+        assert!(
+            db::get_setting(&conn, "system", "random_runtime_value").is_none(),
+            "unapproved system keys must not be cached"
+        );
+        assert!(
+            db::get_setting(&conn, "ui", "theme").is_none(),
+            "ui remains a fully local-only category"
         );
     }
 

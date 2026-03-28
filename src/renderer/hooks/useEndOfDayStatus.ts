@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getBridge, offEvent, onEvent } from '../../lib';
 import type { EndOfDayStatusResponse } from '../../lib/ipc-contracts';
-import { toLocalDateString } from '../utils/date';
 import { useSystemClock } from './useSystemClock';
 
 const IDLE_END_OF_DAY_STATUS: EndOfDayStatusResponse = {
@@ -19,7 +18,6 @@ const IDLE_END_OF_DAY_STATUS: EndOfDayStatusResponse = {
 export function useEndOfDayStatus(branchId?: string | null) {
   const bridge = getBridge();
   const now = useSystemClock();
-  const currentDate = toLocalDateString(now);
   const [endOfDayStatus, setEndOfDayStatus] = useState<EndOfDayStatusResponse>(
     IDLE_END_OF_DAY_STATUS
   );
@@ -51,7 +49,7 @@ export function useEndOfDayStatus(branchId?: string | null) {
 
   useEffect(() => {
     void refreshEndOfDayStatus();
-  }, [currentDate, refreshEndOfDayStatus]);
+  }, [now, refreshEndOfDayStatus]);
 
   useEffect(() => {
     const handleShiftUpdated = () => {

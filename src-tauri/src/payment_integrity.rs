@@ -114,8 +114,7 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
             &row,
             "missing_local_payment_row",
             "Order is marked paid but no local cash/card payment row was saved.".to_string(),
-            "Refresh the order payments or reopen the order and collect cash or card."
-                .to_string(),
+            "Refresh the order payments or reopen the order and collect cash or card.".to_string(),
         ));
     }
 
@@ -152,7 +151,10 @@ fn classify_blocker_row(row: RawBlockerRow) -> Option<UnsettledPaymentBlocker> {
         });
     }
 
-    if row.payment_method == "split" || row.payment_method == "mixed" || row.completed_payment_count > 1 {
+    if row.payment_method == "split"
+        || row.payment_method == "mixed"
+        || row.completed_payment_count > 1
+    {
         return Some(build_blocker(
             &row,
             "split_payment_incomplete",
@@ -228,7 +230,9 @@ fn order_blocker_row_select() -> String {
         .to_string()
 }
 
-fn map_blocker_rows<F>(rows: rusqlite::MappedRows<'_, F>) -> Result<Vec<UnsettledPaymentBlocker>, String>
+fn map_blocker_rows<F>(
+    rows: rusqlite::MappedRows<'_, F>,
+) -> Result<Vec<UnsettledPaymentBlocker>, String>
 where
     F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<RawBlockerRow>,
 {
@@ -451,9 +455,7 @@ mod tests {
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].reason_code, "split_payment_incomplete");
         assert!(
-            blockers[0]
-                .suggested_fix
-                .contains("Resume split payment"),
+            blockers[0].suggested_fix.contains("Resume split payment"),
             "split payments should suggest resuming the split flow"
         );
     }

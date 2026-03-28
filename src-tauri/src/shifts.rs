@@ -486,15 +486,11 @@ pub fn close_shift(db: &DbState, payload: &Value) -> Result<Value, String> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("begin transaction: {e}"))?;
 
-    order_ownership::repair_historical_pickup_financial_attribution(
-        &conn,
-        &shift_branch_id,
-        &now,
-    )
-    .map_err(|e| {
-        let _ = conn.execute_batch("ROLLBACK");
-        e
-    })?;
+    order_ownership::repair_historical_pickup_financial_attribution(&conn, &shift_branch_id, &now)
+        .map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            e
+        })?;
 
     if role_type == "cashier" || role_type == "manager" {
         let blockers = payment_integrity::load_branch_window_payment_blockers(
@@ -2005,14 +2001,18 @@ pub(crate) fn recompute_closed_cashier_shift_financial_snapshot(
 
     let order_financial_expr = business_day::order_financial_timestamp_expr("o");
 
-    let (reconciled_order_count, reconciled_cash_sales, reconciled_card_sales, reconciled_total_sales) =
-        compute_shift_payment_totals_in_window(
-            conn,
-            shift_id,
-            &role_type,
-            Some(check_in_time.as_str()),
-            Some(check_out_time.as_str()),
-        )?;
+    let (
+        reconciled_order_count,
+        reconciled_cash_sales,
+        reconciled_card_sales,
+        reconciled_total_sales,
+    ) = compute_shift_payment_totals_in_window(
+        conn,
+        shift_id,
+        &role_type,
+        Some(check_in_time.as_str()),
+        Some(check_out_time.as_str()),
+    )?;
 
     let reconciled_refunds: f64 = conn
         .query_row(
@@ -2272,7 +2272,10 @@ pub(crate) fn replace_unfinished_shift_sync_rows_with_current_snapshot(
     clear_unfinished_sync_queue_rows(conn, "shift", shift_id)?;
 
     let sync_payload = build_shift_update_sync_payload_from_db(conn, shift_id)?;
-    let idempotency_key = format!("shift:staff-payment-correction:{shift_id}:{}", Uuid::new_v4());
+    let idempotency_key = format!(
+        "shift:staff-payment-correction:{shift_id}:{}",
+        Uuid::new_v4()
+    );
 
     conn.execute(
         "INSERT INTO sync_queue (
@@ -2341,7 +2344,13 @@ fn enqueue_staff_payment_upsert_sync(
             entity_type, entity_id, operation, payload, idempotency_key,
             created_at, updated_at
         ) VALUES ('staff_payment', ?1, ?2, ?3, ?4, ?5, ?5)",
-        params![payment_id, operation, sync_payload, idempotency_key, updated_at],
+        params![
+            payment_id,
+            operation,
+            sync_payload,
+            idempotency_key,
+            updated_at
+        ],
     )
     .map_err(|e| format!("enqueue staff payment {operation} sync: {e}"))?;
 
@@ -5503,7 +5512,15 @@ mod tests {
                  FROM staff_payments
                  WHERE id = 'payment-update-target'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         let total_staff_payments: f64 = conn
@@ -5732,7 +5749,15 @@ mod tests {
                  JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
                  WHERE ss.id = 'cashier-staff-closed-update'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         let queue_rows: Vec<(String, String, String)> = conn
@@ -5851,7 +5876,15 @@ mod tests {
                  JOIN cash_drawer_sessions cds ON cds.staff_shift_id = ss.id
                  WHERE ss.id = 'cashier-staff-closed-delete'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .unwrap();
         let queue_rows: Vec<(String, String, String)> = conn

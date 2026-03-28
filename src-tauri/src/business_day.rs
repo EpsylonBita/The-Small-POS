@@ -1,9 +1,13 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Days, Local, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db;
 
 pub(crate) const EPOCH_RFC3339: &str = "1970-01-01T00:00:00Z";
+pub(crate) const DEFAULT_BUSINESS_DAY_START_HOUR: u32 = 7;
+const DEFAULT_BUSINESS_DAY_START_MINUTES: u32 = DEFAULT_BUSINESS_DAY_START_HOUR * 60;
+const BUSINESS_DAY_START_HOUR_KEY: &str = "business_day_start_hour";
+const BUSINESS_DAY_START_KEY: &str = "business_day_start";
 
 pub(crate) fn is_epoch_timestamp(value: &str) -> bool {
     let trimmed = value.trim();
@@ -66,6 +70,66 @@ pub(crate) fn load_shift_time_bounds(
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<chrono::FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn parse_business_day_start_minutes_value(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((hour, minute)) = trimmed.split_once(':') {
+        let hour = hour.trim().parse::<u32>().ok()?;
+        let minute = minute.trim().parse::<u32>().ok()?;
+        if hour < 24 && minute < 60 {
+            return Some(hour * 60 + minute);
+        }
+        return None;
+    }
+
+    let hour = trimmed.parse::<u32>().ok()?;
+    if hour < 24 {
+        Some(hour * 60)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn resolve_business_day_start_minutes(conn: &Connection) -> u32 {
+    db::get_setting(conn, "system", BUSINESS_DAY_START_HOUR_KEY)
+        .and_then(|value| parse_business_day_start_minutes_value(&value))
+        .or_else(|| {
+            db::get_setting(conn, "system", BUSINESS_DAY_START_KEY)
+                .and_then(|value| parse_business_day_start_minutes_value(&value))
+        })
+        .unwrap_or(DEFAULT_BUSINESS_DAY_START_MINUTES)
+}
+
+fn business_day_report_date_at_minutes(
+    now: DateTime<Local>,
+    business_day_start_minutes: u32,
+) -> String {
+    let local_minutes = now.hour() * 60 + now.minute();
+    let report_date = if local_minutes < business_day_start_minutes {
+        now.date_naive()
+            .checked_sub_days(Days::new(1))
+            .unwrap_or_else(|| now.date_naive())
+    } else {
+        now.date_naive()
+    };
+
+    report_date.format("%Y-%m-%d").to_string()
+}
+
+pub(crate) fn current_business_day_report_date_at(
+    conn: &Connection,
+    now: DateTime<Local>,
+) -> String {
+    business_day_report_date_at_minutes(now, resolve_business_day_start_minutes(conn))
+}
+
+pub(crate) fn current_business_day_report_date(conn: &Connection) -> String {
+    current_business_day_report_date_at(conn, Local::now())
 }
 
 pub(crate) fn local_report_date_from_timestamp(value: &str) -> String {
@@ -206,4 +270,104 @@ pub(crate) fn find_cashier_owner_for_timestamp(
     )
     .optional()
     .map_err(|e| format!("find cashier owner for timestamp: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use chrono::TimeZone;
+    use rusqlite::Connection;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE local_settings (
+                setting_category TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (setting_category, setting_key)
+            );",
+        )
+        .expect("create local_settings");
+        conn
+    }
+
+    fn local_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()
+            .expect("valid local datetime")
+    }
+
+    #[test]
+    fn parse_business_day_start_values_accept_numeric_and_hhmm() {
+        assert_eq!(parse_business_day_start_minutes_value("7"), Some(7 * 60));
+        assert_eq!(parse_business_day_start_minutes_value("07"), Some(7 * 60));
+        assert_eq!(
+            parse_business_day_start_minutes_value("07:00"),
+            Some(7 * 60)
+        );
+    }
+
+    #[test]
+    fn resolve_business_day_start_minutes_falls_back_to_seven_am() {
+        let conn = test_conn();
+        assert_eq!(
+            resolve_business_day_start_minutes(&conn),
+            DEFAULT_BUSINESS_DAY_START_MINUTES
+        );
+
+        db::set_setting(&conn, "system", BUSINESS_DAY_START_HOUR_KEY, "invalid")
+            .expect("store invalid hour");
+        db::set_setting(&conn, "system", BUSINESS_DAY_START_KEY, "25:99")
+            .expect("store invalid start");
+
+        assert_eq!(
+            resolve_business_day_start_minutes(&conn),
+            DEFAULT_BUSINESS_DAY_START_MINUTES
+        );
+        assert_eq!(
+            resolve_business_day_start_minutes(&conn) / 60,
+            DEFAULT_BUSINESS_DAY_START_HOUR
+        );
+    }
+
+    #[test]
+    fn current_business_day_report_date_uses_fallback_boundary() {
+        let conn = test_conn();
+
+        assert_eq!(
+            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 0, 30, 0)),
+            "2026-02-16"
+        );
+        assert_eq!(
+            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 7, 0, 0)),
+            "2026-02-17"
+        );
+    }
+
+    #[test]
+    fn current_business_day_report_date_uses_configured_boundary() {
+        let conn = test_conn();
+        db::set_setting(&conn, "system", BUSINESS_DAY_START_KEY, "06:00")
+            .expect("store business day start");
+
+        assert_eq!(
+            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 5, 59, 0)),
+            "2026-02-16"
+        );
+        assert_eq!(
+            current_business_day_report_date_at(&conn, local_datetime(2026, 2, 17, 6, 0, 0)),
+            "2026-02-17"
+        );
+    }
 }

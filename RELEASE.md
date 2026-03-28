@@ -4,11 +4,11 @@
 
 This document defines the release contract for the native-only desktop app in `pos-tauri/`.
 
-## Current Release Baseline (2026-02-23)
+## Current Release Baseline (2026-03-27)
 
 - Desktop source of truth: `pos-tauri/`
 - Public distribution repo: `EpsylonBita/The-Small-POS`
-- Active workflow: `.github/workflows/pos-tauri-auto-release.yml`
+- Active workflow: `.github/workflows/pos-tauri-auto-release.yml` (`workflow_dispatch` only)
 - Runtime model: Tauri-native only (no Electron desktop fallback in `pos-tauri`)
 
 ## Required Secrets (GitHub Actions)
@@ -60,18 +60,35 @@ Required shape:
 }
 ```
 
-## CI Release Flow
+## Manual Public Release Flow
 
-When `pos-tauri/**` changes on release branch policy:
+Public `pos-tauri` releases are dispatched manually from the private source repo after the code is already merged.
+
+Operational rule:
+
+1. Merge the tested `pos-tauri` change and version bump into private `main` or `master`.
+2. Open GitHub Actions in `EpsylonBita/The-Small-002`.
+3. Run `POS Tauri Auto Release` with `workflow_dispatch` from `main` or `master`.
+4. Let the workflow validate version sync, inject the updater key, build/sign the installer, generate `latest.json`, sync `pos-tauri/` into `EpsylonBita/The-Small-POS`, and recreate the public release tag `v<version>`.
+
+The workflow fails fast if it is dispatched from any ref other than branch `main` or `master`.
+
+No separate private release commit or private release tag is required. The public release tag and GitHub release are created in `EpsylonBita/The-Small-POS`.
+
+This keeps `The-Small-002` as the source of truth while avoiding a second private push just to publish the public desktop release.
+
+## Manual Release Output
+
+Each manual run still performs the same release work:
 
 1. Validate version sync.
 2. Inject updater public key into `src-tauri/tauri.conf.json`.
 3. Build signed Windows NSIS installer.
 4. Validate icon parity policy.
 5. Generate `latest.json`.
-6. Sync `pos-tauri/` source to public distribution repo root.
-7. Create or replace release tag `v<version>`.
-8. Upload `.exe`, `.sig`, and `latest.json` as latest release artifacts.
+6. Sync `pos-tauri/` source to the public distribution repo root.
+7. Create or replace public release tag `v<version>`.
+8. Upload `.exe`, `.sig`, and `latest.json` as the latest public release artifacts.
 
 ## Pre-Release Checklist
 

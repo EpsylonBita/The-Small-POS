@@ -9,7 +9,7 @@
 //! from `local_settings` (category='system') so that successive Z-Reports
 //! never double-count orders or payments.
 
-use chrono::{Local, SecondsFormat, Utc};
+use chrono::{DateTime, Local, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,8 +194,8 @@ fn resolve_lower_bound_mode(conn: &Connection) -> LowerBoundMode {
     }
 }
 
-fn default_report_date() -> String {
-    Local::now().format("%Y-%m-%d").to_string()
+fn default_report_date(conn: &Connection) -> String {
+    business_day::current_business_day_report_date(conn)
 }
 
 fn report_date_for_business_window(period_start_at: &str, cutoff_at: &str) -> String {
@@ -249,9 +249,10 @@ fn load_stored_pending_z_report_context(
     }
 }
 
-fn synthesize_pending_z_report_context(
+fn synthesize_pending_z_report_context_at(
     conn: &Connection,
     branch_id: &str,
+    now: DateTime<Local>,
 ) -> Option<PendingZReportContext> {
     let latest_closed_at: Option<String> = conn
         .query_row(
@@ -272,12 +273,11 @@ fn synthesize_pending_z_report_context(
     latest_closed_at.and_then(|cutoff_at| {
         let period_start_at = resolve_period_start_at(conn, branch_id, Some(cutoff_at.as_str()));
         let report_date = report_date_for_business_window(&period_start_at, &cutoff_at);
-        let today = Local::now().format("%Y-%m-%d").to_string();
+        let current_business_day = business_day::current_business_day_report_date_at(conn, now);
 
-        // Only synthesize a pending context for shifts from a previous day.
-        // Same-day shifts should not lock the business day — staff can check
-        // back in at any time.
-        if report_date >= today {
+        // Only synthesize a pending context for shifts from a previous
+        // business day. Same-business-day shifts should not lock the terminal.
+        if report_date >= current_business_day {
             return None;
         }
 
@@ -290,11 +290,12 @@ fn synthesize_pending_z_report_context(
     })
 }
 
-fn load_pending_z_report_context(
+fn load_pending_z_report_context_at(
     conn: &Connection,
     branch_id: &str,
+    now: DateTime<Local>,
 ) -> Option<PendingZReportContext> {
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    let current_business_day = business_day::current_business_day_report_date_at(conn, now);
 
     if let Some(mut stored) = load_stored_pending_z_report_context(conn, branch_id) {
         if business_day::stored_period_start(conn)
@@ -307,10 +308,9 @@ fn load_pending_z_report_context(
             return None;
         }
 
-        // A stored context for today (or later) is not actionable yet — the
-        // business day is still in progress.  Clear it so it does not block
-        // staff from checking back in.
-        if stored.report_date >= today {
+        // A stored context for the current business day (or later) is not
+        // actionable yet — the business day is still in progress.
+        if stored.report_date >= current_business_day {
             let _ = clear_pending_z_report_context(conn);
             return None;
         }
@@ -325,7 +325,14 @@ fn load_pending_z_report_context(
         return Some(stored);
     }
 
-    synthesize_pending_z_report_context(conn, branch_id)
+    synthesize_pending_z_report_context_at(conn, branch_id, now)
+}
+
+fn load_pending_z_report_context(
+    conn: &Connection,
+    branch_id: &str,
+) -> Option<PendingZReportContext> {
+    load_pending_z_report_context_at(conn, branch_id, Local::now())
 }
 
 fn persist_pending_z_report_context(
@@ -391,7 +398,7 @@ fn resolve_effective_z_report_window(
     }
 
     EffectiveZReportWindow {
-        report_date: str_field(payload, "date").unwrap_or_else(default_report_date),
+        report_date: str_field(payload, "date").unwrap_or_else(|| default_report_date(conn)),
         period_start_at: resolve_period_start_at(conn, branch_id, None),
         cutoff_at: None,
         lower_bound_mode,
@@ -414,10 +421,7 @@ fn load_unsettled_payment_blockers_for_window(
 }
 
 fn unsettled_payment_blocker_message(blockers: &[UnsettledPaymentBlocker]) -> Option<String> {
-    payment_integrity::build_unsettled_payment_blocker_message(
-        "Cannot generate Z-report",
-        blockers,
-    )
+    payment_integrity::build_unsettled_payment_blocker_message("Cannot generate Z-report", blockers)
 }
 
 pub(crate) fn unsettled_payment_blockers(
@@ -2690,21 +2694,27 @@ pub fn print_z_report(db: &DbState, payload: &Value) -> Result<Value, String> {
     crate::print::enqueue_print_job(db, "z_report", &z_report_id, None)
 }
 
-pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, String> {
+fn get_end_of_day_status_at(
+    db: &DbState,
+    payload: &Value,
+    now: DateTime<Utc>,
+) -> Result<Value, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     let branch_id = str_field(payload, "branchId")
         .or_else(|| str_field(payload, "branch_id"))
         .unwrap_or_else(|| storage::get_credential("branch_id").unwrap_or_default());
 
+    let now_rfc3339 = now.to_rfc3339();
     let _ = order_ownership::repair_historical_pickup_financial_attribution(
         &conn,
         branch_id.as_str(),
-        &Utc::now().to_rfc3339(),
+        &now_rfc3339,
     )?;
-    let now = Utc::now().to_rfc3339();
-    let active_period_start_at = resolve_period_start_at(&conn, &branch_id, Some(now.as_str()));
-    let active_report_date = report_date_for_business_window(&active_period_start_at, &now);
+    let active_period_start_at =
+        resolve_period_start_at(&conn, &branch_id, Some(now_rfc3339.as_str()));
+    let active_report_date =
+        business_day::current_business_day_report_date_at(&conn, now.with_timezone(&Local));
 
     let latest_z_report = conn
         .query_row(
@@ -2725,7 +2735,9 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         .optional()
         .map_err(|e| format!("query latest z-report status: {e}"))?;
 
-    if let Some(context) = load_pending_z_report_context(&conn, &branch_id) {
+    if let Some(context) =
+        load_pending_z_report_context_at(&conn, &branch_id, now.with_timezone(&Local))
+    {
         return Ok(serde_json::json!({
             "status": "pending_local_submit",
             "pendingReportDate": context.report_date,
@@ -2766,6 +2778,10 @@ pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, Str
         "latestZReportSyncState": Value::Null,
         "canOpenPendingZReport": false,
     }))
+}
+
+pub fn get_end_of_day_status(db: &DbState, payload: &Value) -> Result<Value, String> {
+    get_end_of_day_status_at(db, payload, Utc::now())
 }
 
 // ---------------------------------------------------------------------------
@@ -4205,7 +4221,7 @@ fn num_field(v: &Value, key: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::db;
-    use chrono::TimeZone;
+    use chrono::{LocalResult, TimeZone};
     use rusqlite::Connection;
 
     fn test_db() -> DbState {
@@ -4221,6 +4237,34 @@ mod tests {
             conn: std::sync::Mutex::new(conn),
             db_path: std::path::PathBuf::from(":memory:"),
         }
+    }
+
+    fn local_datetime(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> DateTime<Local> {
+        match Local.with_ymd_and_hms(year, month, day, hour, minute, second) {
+            LocalResult::Single(value) => value,
+            LocalResult::Ambiguous(earliest, _) => earliest,
+            LocalResult::None => panic!("invalid local datetime"),
+        }
+    }
+
+    fn utc_rfc3339_from_local(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+        second: u32,
+    ) -> String {
+        local_datetime(year, month, day, hour, minute, second)
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     }
 
     /// Insert a closed shift with associated data for testing.
@@ -5651,16 +5695,11 @@ mod tests {
     }
 
     #[test]
-    fn test_get_end_of_day_status_idle_for_same_day_closed_shifts() {
+    fn test_get_end_of_day_status_idle_for_current_business_day_before_seven_am() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
-
-        // Insert a shift that closed *today* — this should NOT trigger pending status
-        let today = Local::now();
-        let check_in = (today - chrono::Duration::hours(8))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
-        let check_out = today.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
 
         conn.execute(
             "INSERT INTO staff_shifts (
@@ -5669,64 +5708,44 @@ mod tests {
                 check_in_time, check_out_time, status, calculation_version,
                 sync_status, created_at, updated_at
              ) VALUES (
-                'shift-today', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
+                'shift-current-business-day', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
                 200.0, 235.0, 235.0, 0.0,
                 ?1, ?2, 'closed', 2,
                 'pending', ?2, ?2
              )",
             params![check_in, check_out],
         )
-        .expect("insert today shift");
-
-        // Seed minimal order data so the repair query does not error
+        .expect("insert closed shift");
         conn.execute(
             "INSERT INTO orders (id, branch_id, order_number, order_type, status, total_amount, created_at, updated_at)
-             VALUES ('ord-today', 'branch-1', 1001, 'dine_in', 'completed', 10.0, ?1, ?1)",
+             VALUES ('ord-current-business-day', 'branch-1', 1002, 'dine_in', 'completed', 10.0, ?1, ?1)",
             params![check_out],
         )
         .expect("insert order");
-
         drop(conn);
 
-        let status = get_end_of_day_status(
+        let status = get_end_of_day_status_at(
             &db,
             &serde_json::json!({
                 "branchId": "branch-1",
             }),
+            local_datetime(2026, 2, 17, 0, 30, 0).with_timezone(&Utc),
         )
         .expect("status should load");
 
-        // Same-day closed shifts must NOT produce a pending Z-report
         assert_eq!(
             status["status"], "idle",
-            "same-day closed shifts should not trigger pending Z-report"
+            "the previous calendar day is still the active business day before 07:00"
         );
+        assert_eq!(status["activeReportDate"], "2026-02-16");
     }
 
     #[test]
-    fn test_get_end_of_day_status_uses_business_day_start_for_overnight_shift() {
+    fn test_get_end_of_day_status_marks_previous_business_day_pending_at_boundary() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
-
-        let today = Local::now().date_naive();
-        let previous_day = today
-            .checked_sub_days(chrono::Days::new(1))
-            .expect("previous day");
-        let check_in_local = Local
-            .from_local_datetime(&previous_day.and_hms_opt(15, 0, 0).expect("15:00"))
-            .single()
-            .expect("local 15:00");
-        let check_out_local = Local
-            .from_local_datetime(&today.and_hms_opt(6, 0, 0).expect("06:00"))
-            .single()
-            .expect("local 06:00");
-        let check_in = check_in_local
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let check_out = check_out_local
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let expected_report_date = previous_day.format("%Y-%m-%d").to_string();
+        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
 
         conn.execute(
             "INSERT INTO staff_shifts (
@@ -5745,35 +5764,24 @@ mod tests {
         .expect("insert overnight shift");
         drop(conn);
 
-        let status = get_end_of_day_status(
+        let status = get_end_of_day_status_at(
             &db,
             &serde_json::json!({
                 "branchId": "branch-1",
             }),
+            local_datetime(2026, 2, 17, 7, 0, 0).with_timezone(&Utc),
         )
         .expect("status should load");
 
         assert_eq!(status["status"], "pending_local_submit");
-        assert_eq!(status["pendingReportDate"], expected_report_date);
+        assert_eq!(status["pendingReportDate"], "2026-02-16");
     }
 
     #[test]
     fn test_get_end_of_day_status_idle_exposes_active_business_window() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
-
-        let today = Local::now().date_naive();
-        let previous_day = today
-            .checked_sub_days(chrono::Days::new(1))
-            .expect("previous day");
-        let check_in_local = Local
-            .from_local_datetime(&previous_day.and_hms_opt(15, 0, 0).expect("15:00"))
-            .single()
-            .expect("local 15:00");
-        let check_in = check_in_local
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let expected_report_date = previous_day.format("%Y-%m-%d").to_string();
+        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
 
         conn.execute(
             "INSERT INTO staff_shifts (
@@ -5790,17 +5798,109 @@ mod tests {
         .expect("insert active overnight shift");
         drop(conn);
 
-        let status = get_end_of_day_status(
+        let status = get_end_of_day_status_at(
             &db,
             &serde_json::json!({
                 "branchId": "branch-1",
             }),
+            local_datetime(2026, 2, 17, 0, 30, 0).with_timezone(&Utc),
         )
         .expect("status should load");
 
         assert_eq!(status["status"], "idle");
-        assert_eq!(status["activeReportDate"], expected_report_date);
+        assert_eq!(status["activeReportDate"], "2026-02-16");
         assert_eq!(status["activePeriodStartAt"], check_in);
+    }
+
+    #[test]
+    fn test_load_pending_z_report_context_suppresses_current_business_day_before_boundary() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: "branch-1".to_string(),
+                report_date: "2026-02-16".to_string(),
+                cutoff_at: utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0),
+                period_start_at: utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0),
+            },
+        )
+        .expect("persist pending context");
+
+        let suppressed = load_pending_z_report_context_at(
+            &conn,
+            "branch-1",
+            local_datetime(2026, 2, 17, 0, 30, 0),
+        );
+        assert!(
+            suppressed.is_none(),
+            "current business day should stay open before 07:00"
+        );
+        assert!(
+            db::get_setting(&conn, "system", PENDING_Z_REPORT_CONTEXT_KEY).is_none(),
+            "suppressed same-business-day pending context should be cleared"
+        );
+
+        persist_pending_z_report_context(
+            &conn,
+            &PendingZReportContext {
+                branch_id: "branch-1".to_string(),
+                report_date: "2026-02-16".to_string(),
+                cutoff_at: utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0),
+                period_start_at: utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0),
+            },
+        )
+        .expect("persist pending context again");
+
+        let actionable = load_pending_z_report_context_at(
+            &conn,
+            "branch-1",
+            local_datetime(2026, 2, 17, 7, 1, 0),
+        );
+        assert!(
+            actionable.is_some(),
+            "pending context should become actionable after 07:00"
+        );
+    }
+
+    #[test]
+    fn test_get_end_of_day_status_respects_configured_business_day_boundary() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        db::set_setting(&conn, "system", "business_day_start", "06:00")
+            .expect("store business day start");
+
+        let check_in = utc_rfc3339_from_local(2026, 2, 16, 15, 0, 0);
+        let check_out = utc_rfc3339_from_local(2026, 2, 16, 23, 15, 0);
+        conn.execute(
+            "INSERT INTO staff_shifts (
+                id, staff_id, staff_name, branch_id, terminal_id, role_type,
+                opening_cash_amount, closing_cash_amount, expected_cash_amount, cash_variance,
+                check_in_time, check_out_time, status, calculation_version,
+                sync_status, created_at, updated_at
+             ) VALUES (
+                'shift-configured-boundary', 'staff-1', 'John', 'branch-1', 'term-1', 'cashier',
+                200.0, 235.0, 235.0, 0.0,
+                ?1, ?2, 'closed', 2,
+                'pending', ?2, ?2
+             )",
+            params![check_in, check_out],
+        )
+        .expect("insert closed shift");
+        drop(conn);
+
+        let status = get_end_of_day_status_at(
+            &db,
+            &serde_json::json!({
+                "branchId": "branch-1",
+            }),
+            local_datetime(2026, 2, 17, 6, 30, 0).with_timezone(&Utc),
+        )
+        .expect("status should load");
+
+        assert_eq!(status["status"], "pending_local_submit");
+        assert_eq!(status["pendingReportDate"], "2026-02-16");
     }
 
     #[test]

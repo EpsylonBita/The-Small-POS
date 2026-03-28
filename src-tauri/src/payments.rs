@@ -111,11 +111,7 @@ fn resolve_historical_cashier_repair_context(
     conn: &Connection,
     order_id: &str,
 ) -> Result<HistoricalPaymentRepairContext, String> {
-    let (
-        branch_id,
-        order_type,
-        order_staff_shift_id,
-    ): (String, String, Option<String>) = conn
+    let (branch_id, order_type, order_staff_shift_id): (String, String, Option<String>) = conn
         .query_row(
             "SELECT COALESCE(branch_id, ''),
                     COALESCE(order_type, 'dine-in'),
@@ -135,7 +131,8 @@ fn resolve_historical_cashier_repair_context(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if let Some((role_type, _, _)) = load_shift_role_status_and_staff(conn, driver_shift_id)?
+            if let Some((role_type, _, _)) =
+                load_shift_role_status_and_staff(conn, driver_shift_id)?
             {
                 if role_type == "driver" {
                     return Err(
@@ -625,13 +622,14 @@ pub(crate) fn record_payment_in_connection(
     let cashier_collected_delivery_cash = order_type.eq_ignore_ascii_case("delivery")
         && input.method == "cash"
         && matches!(input.collected_by.as_deref(), Some("cashier_drawer"));
-    let explicit_cashier_drawer_shift = matches!(input.collected_by.as_deref(), Some("cashier_drawer"))
-        && input
-            .requested_staff_shift_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some();
+    let explicit_cashier_drawer_shift =
+        matches!(input.collected_by.as_deref(), Some("cashier_drawer"))
+            && input
+                .requested_staff_shift_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some();
 
     let (resolved_shift_id, resolved_staff_id) = if keep_delivery_unassigned {
         (None, None)
@@ -664,7 +662,9 @@ pub(crate) fn record_payment_in_connection(
             .or(Some(shift_staff_id));
         (Some(shift_id), staff_id)
     } else if cashier_collected_delivery_cash {
-        return Err("Cashier-collected delivery payments require a cashier shift context".to_string());
+        return Err(
+            "Cashier-collected delivery payments require a cashier shift context".to_string(),
+        );
     } else {
         order_ownership::resolve_order_owner(
             conn,
