@@ -4032,6 +4032,150 @@ fn resolve_duplicate_payment_total_conflict(
     resolve_duplicate_payment_total_conflict_with_conn(&conn, payment_id, &resolved_at)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct StaleLocalPaymentConflictResolution {
+    pub order_id: String,
+    pub amount: f64,
+    pub outstanding_before: f64,
+}
+
+pub(crate) fn resolve_stale_local_payment_total_conflict_with_conn(
+    conn: &Connection,
+    payment_id: &str,
+    resolved_at: &str,
+) -> Result<Option<StaleLocalPaymentConflictResolution>, String> {
+    let payment_context: Option<(String, f64, String, String, Option<String>, i64)> = conn
+        .query_row(
+            "SELECT
+                 order_id,
+                 amount,
+                 COALESCE(sync_status, ''),
+                 COALESCE(sync_state, ''),
+                 NULLIF(TRIM(COALESCE(remote_payment_id, '')), ''),
+                 (
+                     SELECT COUNT(*)
+                     FROM payment_adjustments
+                     WHERE payment_id = op.id
+                 )
+             FROM order_payments op
+             WHERE op.id = ?1
+               AND op.status = 'completed'
+             LIMIT 1",
+            params![payment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("load stale payment conflict context: {e}"))?;
+
+    let Some((order_id, amount, sync_status, sync_state, remote_payment_id, adjustment_count)) =
+        payment_context
+    else {
+        return Ok(None);
+    };
+
+    if adjustment_count > 0
+        || remote_payment_id.is_some()
+        || (sync_status.eq_ignore_ascii_case("synced")
+            && sync_state.eq_ignore_ascii_case("applied"))
+    {
+        return Ok(None);
+    }
+
+    let order_total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(total_amount, 0)
+             FROM orders
+             WHERE id = ?1",
+            params![order_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("load stale payment conflict order total: {e}"))?;
+
+    let other_net_paid: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(
+                CASE
+                    WHEN op.amount - COALESCE((
+                        SELECT SUM(pa.amount)
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0) > 0
+                    THEN op.amount - COALESCE((
+                        SELECT SUM(pa.amount)
+                        FROM payment_adjustments pa
+                        WHERE pa.payment_id = op.id
+                          AND pa.adjustment_type = 'refund'
+                    ), 0)
+                    ELSE 0
+                END
+             ), 0)
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND op.id != ?2
+               AND op.status = 'completed'",
+            params![order_id.as_str(), payment_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let outstanding_before = (order_total - other_net_paid).max(0.0);
+    let exceeds_order_total = amount > order_total + 0.01;
+    let exceeds_outstanding = amount > outstanding_before + 0.01;
+    if !exceeds_order_total && !exceeds_outstanding {
+        return Ok(None);
+    }
+
+    let void_reason = format!(
+        "Auto-voided stale unsynced local payment after order total changed; no canonical remote payment found (order total {order_total:.2}, outstanding {outstanding_before:.2})"
+    );
+
+    conn.execute(
+        "UPDATE order_payments
+         SET status = 'voided',
+             voided_at = ?1,
+             void_reason = ?2,
+             sync_status = 'synced',
+             sync_state = 'applied',
+             sync_retry_count = 0,
+             sync_last_error = NULL,
+             sync_next_retry_at = NULL,
+             updated_at = ?1
+         WHERE id = ?3
+           AND status = 'completed'
+           AND NULLIF(TRIM(COALESCE(remote_payment_id, '')), '') IS NULL",
+        params![resolved_at, void_reason, payment_id],
+    )
+    .map_err(|e| format!("void stale local overpay payment row: {e}"))?;
+
+    mark_payment_queue_row_synced(conn, payment_id, resolved_at)?;
+    recompute_local_order_payment_snapshot(conn, &order_id, resolved_at)?;
+
+    Ok(Some(StaleLocalPaymentConflictResolution {
+        order_id,
+        amount,
+        outstanding_before,
+    }))
+}
+
+pub(crate) fn resolve_stale_local_payment_total_conflict(
+    db: &DbState,
+    payment_id: &str,
+) -> Result<Option<StaleLocalPaymentConflictResolution>, String> {
+    let resolved_at = Utc::now().to_rfc3339();
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    resolve_stale_local_payment_total_conflict_with_conn(&conn, payment_id, &resolved_at)
+}
+
 fn recompute_local_order_payment_snapshot(
     conn: &Connection,
     order_id: &str,
@@ -4054,6 +4198,18 @@ fn recompute_local_order_payment_snapshot(
         .map_err(|e| format!("load local payment snapshot for order recompute: {e}"))?;
 
     let Some((payment_id, method)) = payment_context else {
+        conn.execute(
+            "UPDATE orders
+             SET payment_status = 'pending',
+                 payment_method = 'pending',
+                 payment_transaction_id = NULL,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![now, order_id],
+        )
+        .map_err(|e| {
+            format!("reset local payment snapshot after completed payment removal: {e}")
+        })?;
         return Ok(());
     };
 
@@ -5665,6 +5821,7 @@ async fn recover_payment_total_conflicts(
 
     let mut remote_reconciled = 0usize;
     let mut duplicate_resolved = 0usize;
+    let mut stale_overpay_resolved = 0usize;
 
     for (payment_id, local_order_id) in pending_conflicts {
         remote_reconciled +=
@@ -5681,18 +5838,31 @@ async fn recover_payment_total_conflicts(
                 canonical_payment_id = %canonical_payment_id,
                 "Resolved stale duplicate local payment conflict after canonical payment recovery"
             );
+            continue;
+        }
+
+        if let Some(resolution) = resolve_stale_local_payment_total_conflict(db, &payment_id)? {
+            stale_overpay_resolved += 1;
+            info!(
+                payment_id = %payment_id,
+                order_id = %resolution.order_id,
+                amount = resolution.amount,
+                outstanding_before = resolution.outstanding_before,
+                "Resolved stale unsynced local overpay after payment total conflict"
+            );
         }
     }
 
-    if remote_reconciled > 0 || duplicate_resolved > 0 {
+    if remote_reconciled > 0 || duplicate_resolved > 0 || stale_overpay_resolved > 0 {
         info!(
             remote_reconciled,
             duplicate_resolved,
+            stale_overpay_resolved,
             "Recovered stale payment total-conflict rows from canonical remote payments"
         );
     }
 
-    Ok(remote_reconciled + duplicate_resolved)
+    Ok(remote_reconciled + duplicate_resolved + stale_overpay_resolved)
 }
 
 /// Execute one sync cycle: read pending queue items and POST to admin.
@@ -8821,6 +8991,29 @@ async fn sync_payment_items(
                             );
                         }
                     }
+
+                    match resolve_stale_local_payment_total_conflict(db, entity_id) {
+                        Ok(Some(resolution)) => {
+                            info!(
+                                payment_id = %entity_id,
+                                order_id = %resolution.order_id,
+                                amount = resolution.amount,
+                                outstanding_before = resolution.outstanding_before,
+                                "Payment sync conflict resolved by voiding stale unsynced local overpay"
+                            );
+                            synced += 1;
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(resolve_error) => {
+                            warn!(
+                                payment_id = %entity_id,
+                                order_id = %local_order_id,
+                                error = %resolve_error,
+                                "Failed to resolve stale unsynced local overpay payment conflict"
+                            );
+                        }
+                    }
                 }
 
                 warn!(payment_id = %entity_id, error = %e, "Payment sync failed");
@@ -11664,6 +11857,170 @@ mod tests {
         assert_eq!(order_payment_status, "paid");
         assert_eq!(order_payment_method.as_deref(), Some("split"));
         assert_eq!(order_transaction_id.as_deref(), Some("pay-canonical"));
+    }
+
+    #[test]
+    fn test_resolve_stale_local_payment_total_conflict_voids_unsynced_overpay_and_preserves_other_payments(
+    ) {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                payment_transaction_id, sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-stale', 'remote-payment-stale', '[]', 6.9, 'completed',
+                'partially_paid', 'split', 'pay-stale', 'synced', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-valid', 'ord-payment-stale', 'cash', 2.0, 'EUR', 'completed',
+                'remote-pay-valid', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-stale', 'ord-payment-stale', 'cash', 7.4, 'EUR', 'completed',
+                'failed', 'failed', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'payment', 'pay-stale', 'insert', '{}', 'payment:pay-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                entity_type, entity_id, operation, payload, idempotency_key,
+                status, retry_count, max_retries, last_error
+            ) VALUES (
+                'order_payments', 'pay-stale', 'insert', '{}', 'order_payments:pay-stale',
+                'failed', 5, 5, 'Payment exceeds order total'
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO orders (
+                id, supabase_id, items, total_amount, status, payment_status, payment_method,
+                sync_status, created_at, updated_at
+            ) VALUES (
+                'ord-payment-other', 'remote-payment-other', '[]', 9.5, 'completed',
+                'paid', 'cash', 'synced', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                id, order_id, method, amount, currency, status,
+                remote_payment_id, sync_status, sync_state, created_at, updated_at
+            ) VALUES (
+                'pay-other', 'ord-payment-other', 'cash', 9.5, 'EUR', 'completed',
+                'remote-pay-other', 'synced', 'applied', datetime('now'), datetime('now')
+            )",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let resolved_at = "2026-03-28T11:15:00Z";
+        let resolution = {
+            let conn = db.conn.lock().unwrap();
+            resolve_stale_local_payment_total_conflict_with_conn(&conn, "pay-stale", resolved_at)
+                .expect("resolve stale local overpay")
+        };
+
+        let resolution = resolution.expect("stale local overpay should resolve");
+        assert_eq!(resolution.order_id, "ord-payment-stale");
+        assert!((resolution.amount - 7.4).abs() < 0.001);
+        assert!((resolution.outstanding_before - 4.9).abs() < 0.001);
+
+        let conn = db.conn.lock().unwrap();
+        let (status, sync_status, sync_state, void_reason): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state, void_reason
+                 FROM order_payments
+                 WHERE id = 'pay-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+        assert!(void_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no canonical remote payment found"));
+
+        let synced_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_id = 'pay-stale'
+                   AND entity_type IN ('payment', 'order_payments')
+                   AND status = 'synced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_queue_rows, 2);
+
+        let (order_payment_status, order_payment_method, order_transaction_id): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT payment_status, payment_method, payment_transaction_id
+                 FROM orders
+                 WHERE id = 'ord-payment-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(order_payment_status, "partially_paid");
+        assert_eq!(order_payment_method.as_deref(), Some("split"));
+        assert_eq!(order_transaction_id.as_deref(), Some("pay-valid"));
+
+        let (other_status, other_remote_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, remote_payment_id
+                 FROM order_payments
+                 WHERE id = 'pay-other'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(other_status, "completed");
+        assert_eq!(other_remote_id.as_deref(), Some("remote-pay-other"));
     }
 
     #[test]

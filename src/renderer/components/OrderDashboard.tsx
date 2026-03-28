@@ -2779,24 +2779,46 @@ export const OrderDashboard = memo<OrderDashboardProps>(
           previews[0]?.requiredAction === "collect"
         ) {
           const request = normalizedRequests[0];
-          const preview = previews[0];
           await bridge.orders.applyEditSettlement({
             orderId: request.orderId,
             items: request.items,
             orderNotes: request.orderNotes,
             action: { type: "mark_partial" },
           });
+          const refreshedPreview = await bridge.orders.previewEditSettlement({
+            orderId: request.orderId,
+            items: request.items,
+            orderNotes: request.orderNotes,
+          });
           resetEditOrderState();
           clearBulkSelection();
           setPendingEditRefundSettlement(null);
-          openEditSettlementCollectionPrompt(preview, request);
+          if (refreshedPreview?.requiredAction === "refund") {
+            setPendingEditRefundSettlement({
+              preview: refreshedPreview,
+              request,
+            });
+            return;
+          }
+
+          if (refreshedPreview?.requiredAction === "collect") {
+            openEditSettlementCollectionPrompt(refreshedPreview, request);
+            toast.success(
+              t("orderDashboard.orderEditAwaitingPayment", {
+                defaultValue:
+                  "Order changes saved. Collect the remaining balance to finish settlement.",
+              }),
+            );
+            await silentRefresh().catch(() => {});
+            return;
+          }
+
           toast.success(
-            t("orderDashboard.orderEditAwaitingPayment", {
-              defaultValue:
-                "Order changes saved. Collect the remaining balance to finish settlement.",
+            t("orderDashboard.orderItemsUpdated", {
+              count: 1,
             }),
           );
-          await silentRefresh().catch(() => {});
+          await loadOrders();
           return;
         }
 

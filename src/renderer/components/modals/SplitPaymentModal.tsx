@@ -45,6 +45,13 @@ interface OrderFinancialState {
   taxAmount: number; deliveryFee: number; tipAmount: number;
 }
 
+interface SplitStateSnapshot {
+  payments: any[];
+  paidIndices: number[];
+  financials: OrderFinancialState;
+  outstanding: number;
+}
+
 const EMPTY_EXISTING_PAYMENTS: any[] = [];
 let nextGeneratedPortionId = 1;
 const round2 = (value: number) => Math.round(value * 100) / 100;
@@ -117,6 +124,34 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const price = round2(quantity > 0 ? Number(item.price ?? (totalPrice / quantity)) : Number(item.price || 0));
     return { ...item, quantity, itemIndex, price, totalPrice };
   }), [items]);
+  const buildFallbackSplitState = useCallback((): SplitStateSnapshot => {
+    const payments = unwrapBridgeArray<any>(existingPayments).filter(isCompletedPaymentRecord);
+    const financials = extractOrderFinancialState(null, orderTotal);
+    return {
+      payments,
+      paidIndices: [],
+      financials,
+      outstanding: round2(Math.max(0, financials.totalAmount - payments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0))),
+    };
+  }, [existingPayments, orderTotal]);
+  const fetchLatestSplitState = useCallback(async (): Promise<SplitStateSnapshot> => {
+    const [paymentResult, paidItemsResult, orderResult] = await Promise.all([
+      bridge.payments.getOrderPayments(orderId),
+      bridge.payments.getPaidItems(orderId),
+      bridge.orders.getById(orderId),
+    ]);
+    const payments = unwrapBridgeArray<any>(paymentResult).filter(isCompletedPaymentRecord);
+    const paidIndices = unwrapBridgeArray<any>(paidItemsResult)
+      .map((item: any) => Number(item?.itemIndex ?? item?.item_index))
+      .filter((itemIndex: number) => Number.isInteger(itemIndex));
+    const financials = extractOrderFinancialState(orderResult, orderTotal);
+    return {
+      payments,
+      paidIndices,
+      financials,
+      outstanding: round2(Math.max(0, financials.totalAmount - payments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0))),
+    };
+  }, [bridge, orderId, orderTotal]);
 
   const alreadyPaidAmount = useMemo(
     () => round2(completedPayments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0)),
@@ -156,6 +191,29 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     setDiscountEditorPortionId(null);
     setDiscountDraftValue('');
   }, [personLabel, withCollectionDefaults]);
+  const applySplitStateSnapshot = useCallback((snapshot: SplitStateSnapshot, options?: { resetDraft?: boolean; mode?: TabMode }) => {
+    setOrderFinancials(snapshot.financials);
+    setCompletedPayments(snapshot.payments);
+    setPaidItemIndices(Array.from(new Set(snapshot.paidIndices)));
+    if (options?.resetDraft) {
+      initializePortions(options.mode ?? activeTab, snapshot.outstanding);
+    }
+  }, [activeTab, initializePortions]);
+  const hasLiveSplitStateDrift = useCallback((snapshot: SplitStateSnapshot) => {
+    if (Math.abs(snapshot.financials.totalAmount - orderFinancials.totalAmount) >= 0.01) {
+      return true;
+    }
+    if (Math.abs(snapshot.outstanding - persistedOutstanding) >= 0.01) {
+      return true;
+    }
+    const snapshotPaidAmount = round2(snapshot.payments.reduce((sum, payment) => sum + getNetRecordedPaymentAmount(payment), 0));
+    if (Math.abs(snapshotPaidAmount - alreadyPaidAmount) >= 0.01) {
+      return true;
+    }
+    const currentPaid = Array.from(new Set(paidItemIndices)).sort((left, right) => left - right);
+    const nextPaid = Array.from(new Set(snapshot.paidIndices)).sort((left, right) => left - right);
+    return currentPaid.length !== nextPaid.length || currentPaid.some((value, index) => value !== nextPaid[index]);
+  }, [alreadyPaidAmount, orderFinancials.totalAmount, paidItemIndices, persistedOutstanding]);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,28 +221,32 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     const loadState = async () => {
       setIsInitializing(true);
       try {
-        const [paymentResult, paidItemsResult, orderResult] = await Promise.all([existingPayments.length > 0 ? Promise.resolve(existingPayments) : bridge.payments.getOrderPayments(orderId), bridge.payments.getPaidItems(orderId), bridge.orders.getById(orderId)]);
+        const snapshot = await fetchLatestSplitState();
         if (cancelled) return;
-        const payments = unwrapBridgeArray<any>(paymentResult).filter(isCompletedPaymentRecord);
-        const paidIndices = unwrapBridgeArray<any>(paidItemsResult).map((item: any) => Number(item?.itemIndex ?? item?.item_index)).filter((itemIndex: number) => Number.isInteger(itemIndex));
-        const financials = extractOrderFinancialState(orderResult, orderTotal);
-        setOrderFinancials(financials);
-        setCompletedPayments(payments);
-        setPaidItemIndices(Array.from(new Set(paidIndices)));
-        initializePortions(
-          initialMode,
-          round2(Math.max(0, financials.totalAmount - payments.reduce((sum: number, payment: any) => sum + getNetRecordedPaymentAmount(payment), 0))),
-        );
+        applySplitStateSnapshot(snapshot, { resetDraft: true, mode: initialMode });
       } catch (error) {
         console.error('[SplitPaymentModal] Failed to load split state:', error);
-        if (!cancelled) initializePortions(initialMode, round2(Math.max(0, orderTotal)));
+        if (!cancelled) {
+          applySplitStateSnapshot(buildFallbackSplitState(), { resetDraft: true, mode: initialMode });
+        }
       } finally {
         if (!cancelled) setIsInitializing(false);
       }
     };
     void loadState();
     return () => { cancelled = true; };
-  }, [bridge, existingPayments, initializePortions, initialMode, isOpen, orderId, orderTotal]);
+  }, [applySplitStateSnapshot, buildFallbackSplitState, fetchLatestSplitState, initialMode, isOpen]);
+
+  const ensureLatestOutstanding = useCallback(async (attemptedAmount: number, mode: TabMode) => {
+    const snapshot = await fetchLatestSplitState();
+    if (hasLiveSplitStateDrift(snapshot) || attemptedAmount > snapshot.outstanding + 0.01) {
+      applySplitStateSnapshot(snapshot, { resetDraft: true, mode });
+      throw new Error(t('splitPayment.balanceChanged', {
+        defaultValue: 'Order balance changed while split payment was open. The split was refreshed to the latest outstanding amount of EUR {{amount}}.',
+        amount: snapshot.outstanding.toFixed(2),
+      }));
+    }
+  }, [applySplitStateSnapshot, fetchLatestSplitState, hasLiveSplitStateDrift, t]);
 
   useEffect(() => {
     if (activeTab !== 'by-items') return;
@@ -249,8 +311,10 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
 
   const resolveReadyTerminal = useCallback(async () => { const raw: any = await bridge.ecr.getDefaultTerminal(); const device = raw?.device ?? raw?.data?.device ?? null; const deviceId = typeof device?.id === 'string' ? device.id : ''; if (!deviceId) return null; const status: any = await bridge.ecr.getDeviceStatus(deviceId); return status?.connected === true && status?.ready === true && status?.busy !== true ? { deviceId, name: device?.name || deviceId } : null; }, [bridge]);
   const handleTerminalCardPayment = useCallback(async (portionId: string) => {
-    const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; setPortionMethod(portionId, 'card'); if (portion.amount <= 0.009) return;
+    const portion = getPortion(portionId); if (!portion || portion.status !== 'draft') return; if (portion.amount <= 0.009) return;
     if (processingPortionId && processingPortionId !== portionId) { toast.error(t('splitPayment.cardBusy', { defaultValue: 'Another card payment is already in progress' })); return; }
+    try { await ensureLatestOutstanding(portion.amount, activeTab); } catch (error) { toast.error(error instanceof Error ? error.message : t('splitPayment.failed', 'Split payment failed. Please try again.')); return; }
+    setPortionMethod(portionId, 'card');
     let terminal: { deviceId: string; name: string } | null = null; try { terminal = await resolveReadyTerminal(); } catch (error) { console.warn('[SplitPaymentModal] Failed to resolve terminal:', error); }
     if (!terminal) { toast(t('splitPayment.manualCardFallback', { defaultValue: 'No ready payment terminal. This portion will be recorded as a manual card payment on confirm.' })); return; }
     updatePortion(portionId, (current) => ({ ...current, method: 'card', status: 'processing', paymentOrigin: 'terminal', terminalDeviceId: terminal!.deviceId }));
@@ -268,13 +332,14 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
       updatePortion(portionId, (current) => ({ ...current, status: 'draft', paymentOrigin: 'manual' }));
       toast.error(error instanceof Error ? error.message : t('splitPayment.cardFailed', { defaultValue: 'Card payment failed' }));
     }
-  }, [alreadyPaidAmount, bridge, completeAndClose, getPortion, orderId, persistAdditionalDiscount, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
+  }, [activeTab, alreadyPaidAmount, bridge, completeAndClose, ensureLatestOutstanding, getPortion, orderId, persistAdditionalDiscount, processingPortionId, receiptMode, recordPortionPayment, resolveReadyTerminal, safePrintSplitReceipt, setPortionMethod, t, updatePortion]);
 
   const handleConfirm = useCallback(async () => {
     if (!canConfirm) return;
     const draftPortions = portions.filter((portion) => portion.status === 'draft' && portion.amount > 0.009); if (!draftPortions.length) return;
     setIsProcessing(true);
     try {
+      await ensureLatestOutstanding(round2(draftPortions.reduce((sum, portion) => sum + portion.amount, 0)), activeTab);
       const updatedFinancials = await persistAdditionalDiscount(round2(draftPortions.reduce((sum, portion) => sum + portion.discountAmount, 0)));
       const paymentIds: string[] = []; const recordedPortions: SplitPortion[] = [];
       for (const portion of draftPortions) { const origin: PaymentOrigin = portion.method === 'card' ? (portion.paymentOrigin || 'manual') : 'manual'; const paymentId = await recordPortionPayment(portion, origin, portion.transactionRef, portion.terminalDeviceId); paymentIds.push(paymentId); recordedPortions.push({ ...portion, status: 'paid', paymentId, paymentOrigin: origin }); if (receiptMode === 'individual') await safePrintSplitReceipt(paymentId); }
@@ -285,7 +350,7 @@ export const SplitPaymentModal: React.FC<SplitPaymentModalProps> = ({ isOpen, on
     } finally {
       setIsProcessing(false);
     }
-  }, [canConfirm, completeAndClose, persistAdditionalDiscount, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
+  }, [activeTab, canConfirm, completeAndClose, ensureLatestOutstanding, persistAdditionalDiscount, portions, receiptMode, recordPortionPayment, safePrintSplitReceipt, t]);
 
   const MethodToggle: React.FC<{ portion: SplitPortion }> = ({ portion }) => {
     const locked = portion.status !== 'draft' || isProcessing;

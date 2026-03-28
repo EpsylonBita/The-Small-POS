@@ -691,6 +691,59 @@ fn load_net_paid_for_order(conn: &rusqlite::Connection, order_id: &str) -> Resul
         .sum())
 }
 
+fn determine_edit_settlement_required_action(paid_total: f64, next_total: f64) -> &'static str {
+    if paid_total + 0.01 < next_total {
+        "collect"
+    } else if paid_total > next_total + 0.01 {
+        "refund"
+    } else {
+        "none"
+    }
+}
+
+fn resolve_stale_unsynced_overpay_payments_for_order(
+    conn: &rusqlite::Connection,
+    order_id: &str,
+    resolved_at: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT op.id
+             FROM order_payments op
+             WHERE op.order_id = ?1
+               AND op.status = 'completed'
+               AND NULLIF(TRIM(COALESCE(op.remote_payment_id, '')), '') IS NULL
+               AND (
+                    COALESCE(op.sync_status, '') != 'synced'
+                    OR COALESCE(op.sync_state, '') != 'applied'
+               )
+             ORDER BY COALESCE(op.updated_at, op.created_at, '') DESC, op.id DESC",
+        )
+        .map_err(|e| format!("prepare stale payment cleanup query: {e}"))?;
+
+    let payment_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![order_id], |row| row.get(0))
+        .map_err(|e| format!("query stale payment cleanup candidates: {e}"))?
+        .filter_map(|row| row.ok())
+        .collect();
+    drop(stmt);
+
+    let mut resolved_ids = Vec::new();
+    for payment_id in payment_ids {
+        if sync::resolve_stale_local_payment_total_conflict_with_conn(
+            conn,
+            &payment_id,
+            resolved_at,
+        )?
+        .is_some()
+        {
+            resolved_ids.push(payment_id);
+        }
+    }
+
+    Ok(resolved_ids)
+}
+
 fn refresh_order_payment_snapshot(
     conn: &rusqlite::Connection,
     order_id: &str,
@@ -761,13 +814,16 @@ fn refresh_order_payment_snapshot(
     };
 
     let normalized_current_method = current_payment_method.trim().to_ascii_lowercase();
-    let next_payment_method = if next_payment_status == "partially_paid"
+    let next_payment_method = if total_paid <= 0.009 {
+        "pending".to_string()
+    } else if next_payment_status == "partially_paid"
         || has_item_assignments
         || completed_payment_count > 1
         || matches!(
             normalized_current_method.as_str(),
             "pending" | "split" | "mixed"
-        ) {
+        )
+    {
         "split".to_string()
     } else {
         last_completed_method
@@ -1089,8 +1145,7 @@ pub async fn order_update_status(
         let previous_status =
             ensure_order_status_transition_allowed(&conn, &actual_order_id, &status)?;
         if status_requires_payment_integrity_guard(&status) {
-            let blockers =
-                payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
+            let blockers = payment_integrity::load_order_payment_blockers(&conn, &actual_order_id)?;
             if !blockers.is_empty() {
                 let action_label = if status == "delivered" {
                     "Cannot mark order as delivered"
@@ -1503,13 +1558,7 @@ pub async fn orders_preview_edit_settlement(
         .map(net_paid_amount_from_edit_payment)
         .sum::<f64>();
     let delta = next_total - current_total;
-    let required_action = if paid_total + 0.01 < next_total {
-        "collect"
-    } else if paid_total > next_total + 0.01 {
-        "refund"
-    } else {
-        "none"
-    };
+    let required_action = determine_edit_settlement_required_action(paid_total, next_total);
     let driver_settlement = load_active_driver_settlement(&conn, &actual_order_id)?;
     let driver_cash_owned =
         order_type.eq_ignore_ascii_case("delivery") && driver_settlement.is_some();
@@ -1558,8 +1607,6 @@ pub async fn orders_apply_edit_settlement(
         .map_err(|e| format!("begin transaction: {e}"))?;
 
     let result = (|| -> Result<serde_json::Value, String> {
-        let paid_total_before = load_net_paid_for_order(&conn, &actual_order_id)?;
-
         update_order_items_in_connection(
             &conn,
             &actual_order_id,
@@ -1569,6 +1616,10 @@ pub async fn orders_apply_edit_settlement(
             next_subtotal,
             &now,
         )?;
+
+        let stale_payment_ids =
+            resolve_stale_unsynced_overpay_payments_for_order(&conn, &actual_order_id, &now)?;
+        let paid_total_before = load_net_paid_for_order(&conn, &actual_order_id)?;
 
         match action {
             EditSettlementActionPayload::None | EditSettlementActionPayload::MarkPartial => {}
@@ -1644,6 +1695,8 @@ pub async fn orders_apply_edit_settlement(
 
         let (payment_status, payment_method, paid_total_after) =
             refresh_order_payment_snapshot(&conn, &actual_order_id, &now)?;
+        let required_action =
+            determine_edit_settlement_required_action(paid_total_after, next_total);
         enqueue_order_edit_sync(
             &conn,
             &actual_order_id,
@@ -1661,6 +1714,8 @@ pub async fn orders_apply_edit_settlement(
             "paidTotal": paid_total_after,
             "paymentStatus": payment_status,
             "paymentMethod": payment_method,
+            "requiredAction": required_action,
+            "stalePaymentIdsVoided": stale_payment_ids,
         }))
     })();
 
@@ -3197,11 +3252,9 @@ mod transition_tests {
         }
 
         let conn = db.conn.lock().unwrap();
-        let blockers = crate::payment_integrity::load_order_payment_blockers(
-            &conn,
-            "order-unpaid-final",
-        )
-        .expect("blockers should load");
+        let blockers =
+            crate::payment_integrity::load_order_payment_blockers(&conn, "order-unpaid-final")
+                .expect("blockers should load");
 
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].order_number, "ORD-guard-1");
@@ -3469,6 +3522,124 @@ mod transition_tests {
         assert_eq!(payment_status, "partially_paid");
         assert_eq!(payment_method, "split");
         assert!((total_paid - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn determine_edit_settlement_required_action_selects_collect_refund_and_none() {
+        assert_eq!(
+            determine_edit_settlement_required_action(5.0, 6.9),
+            "collect"
+        );
+        assert_eq!(
+            determine_edit_settlement_required_action(7.4, 6.9),
+            "refund"
+        );
+        assert_eq!(determine_edit_settlement_required_action(6.9, 6.9), "none");
+    }
+
+    #[test]
+    fn resolve_stale_unsynced_overpay_payments_for_order_voids_unsynced_payment_after_total_drop() {
+        let db = test_db();
+        insert_order_with_financials(
+            &db,
+            "order-edit-stale",
+            r#"[{"name":"Toast","quantity":1,"unit_price":10.0,"total_price":10.0}]"#,
+            10.0,
+            10.0,
+            "split",
+            "partially_paid",
+        );
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO order_payments (
+                 id, order_id, method, amount, status, sync_status, sync_state, created_at, updated_at
+             ) VALUES (
+                 'payment-edit-stale', 'order-edit-stale', 'cash', 7.4, 'completed',
+                 'failed', 'failed', datetime('now'), datetime('now')
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'payment', 'payment-edit-stale', 'insert', '{}', 'payment:payment-edit-stale',
+                 'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (
+                 entity_type, entity_id, operation, payload, idempotency_key,
+                 status, retry_count, max_retries, last_error
+             ) VALUES (
+                 'order_payments', 'payment-edit-stale', 'insert', '{}', 'order_payments:payment-edit-stale',
+                 'failed', 5, 5, 'Payment exceeds order total'
+             )",
+            [],
+        )
+        .unwrap();
+
+        update_order_items_in_connection(
+            &conn,
+            "order-edit-stale",
+            &[serde_json::json!({
+                "name": "Toast",
+                "quantity": 1,
+                "unit_price": 6.9,
+                "total_price": 6.9
+            })],
+            None,
+            6.9,
+            6.9,
+            "2026-03-28T10:00:00Z",
+        )
+        .unwrap();
+
+        let resolved_ids = resolve_stale_unsynced_overpay_payments_for_order(
+            &conn,
+            "order-edit-stale",
+            "2026-03-28T10:00:00Z",
+        )
+        .expect("resolve stale payment rows");
+        assert_eq!(resolved_ids, vec!["payment-edit-stale".to_string()]);
+
+        let (status, sync_status, sync_state): (String, String, String) = conn
+            .query_row(
+                "SELECT status, sync_status, sync_state
+                 FROM order_payments
+                 WHERE id = 'payment-edit-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "voided");
+        assert_eq!(sync_status, "synced");
+        assert_eq!(sync_state, "applied");
+
+        let synced_queue_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM sync_queue
+                 WHERE entity_id = 'payment-edit-stale'
+                   AND entity_type IN ('payment', 'order_payments')
+                   AND status = 'synced'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_queue_rows, 2);
+
+        let (payment_status, payment_method, total_paid) =
+            refresh_order_payment_snapshot(&conn, "order-edit-stale", "2026-03-28T10:00:00Z")
+                .expect("refresh payment snapshot after stale cleanup");
+        assert_eq!(payment_status, "pending");
+        assert_eq!(payment_method, "pending");
+        assert!(total_paid.abs() < 0.001);
     }
 
     #[test]
