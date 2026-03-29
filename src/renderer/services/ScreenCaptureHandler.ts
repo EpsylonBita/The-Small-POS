@@ -1,4 +1,4 @@
-import { getBridge, offEvent, onEvent } from '../../lib'
+import { emitCompatEvent, getBridge, offEvent, onEvent } from '../../lib'
 import type {
   ScreenCaptureRequestState,
   ScreenCaptureSignal,
@@ -23,6 +23,9 @@ interface TerminalSessionPayload {
 
 type ControlAction = 'approve_control' | 'deny_control'
 
+const CONTROL_REQUEST_EVENT = 'screen-capture:control-request'
+const CONTROL_REQUEST_CLEARED_EVENT = 'screen-capture:control-request-cleared'
+
 class ScreenCaptureHandler {
   private peerConnection: RTCPeerConnection | null = null
   private screenStream: MediaStream | null = null
@@ -37,6 +40,7 @@ class ScreenCaptureHandler {
   private controlChannel: RTCDataChannel | null = null
   private eventUnsubscribers: Array<() => void> = []
   private sessionPollTimer: ReturnType<typeof setInterval> | null = null
+  private sessionPollingEnabled = false
   private sessionPollInFlight = false
   private currentRequestState: (ScreenCaptureRequestState & { id?: string }) | null = null
   private lastControlPromptKey: string | null = null
@@ -53,7 +57,6 @@ class ScreenCaptureHandler {
 
   constructor() {
     this.setupIPCListeners()
-    this.startIdleSessionPolling()
   }
 
   private async fetchFromAdmin(
@@ -68,7 +71,7 @@ class ScreenCaptureHandler {
   }
 
   private startIdleSessionPolling(): void {
-    if (this.sessionPollTimer) {
+    if (!this.sessionPollingEnabled || this.sessionPollTimer) {
       return
     }
 
@@ -87,7 +90,7 @@ class ScreenCaptureHandler {
   }
 
   private async pollForPendingSession(): Promise<void> {
-    if (this.sessionPollInFlight || this.isStreaming || this.isStarting) {
+    if (!this.sessionPollingEnabled || this.sessionPollInFlight || this.isStreaming || this.isStarting) {
       return
     }
 
@@ -184,6 +187,7 @@ class ScreenCaptureHandler {
     denialReason?: string
   ): Promise<void> {
     if (!this.config) {
+      this.clearControlRequestPrompt()
       return
     }
 
@@ -203,10 +207,32 @@ class ScreenCaptureHandler {
     if (payload?.request) {
       this.currentRequestState = payload.request
     }
+
+    this.lastControlPromptKey = null
+    this.clearControlRequestPrompt()
   }
 
-  private async maybePromptForControlApproval(): Promise<void> {
+  private publishControlRequestPrompt(): void {
+    if (!this.config || !this.currentRequestState) {
+      return
+    }
+
+    emitCompatEvent(CONTROL_REQUEST_EVENT, {
+      requestId: this.config.requestId,
+      requestedAt: this.currentRequestState.control_requested_at || null,
+      terminalId: this.config.terminalId || null,
+    })
+  }
+
+  private clearControlRequestPrompt(): void {
+    emitCompatEvent(CONTROL_REQUEST_CLEARED_EVENT, {
+      requestId: this.config?.requestId || this.currentRequestState?.id || null,
+    })
+  }
+
+  private maybePromptForControlApproval(): void {
     if (!this.config || !this.currentRequestState || this.currentRequestState.control_status !== 'requested') {
+      this.clearControlRequestPrompt()
       return
     }
 
@@ -216,18 +242,7 @@ class ScreenCaptureHandler {
     }
 
     this.lastControlPromptKey = promptKey
-
-    try {
-      const approved = window.confirm(
-        'Admin requested control of this terminal. Allow remote interaction for this session?'
-      )
-      await this.respondToControlRequest(
-        approved ? 'approve_control' : 'deny_control',
-        approved ? undefined : 'Terminal operator denied control.'
-      )
-    } catch (error) {
-      console.warn('[ScreenCapture] Failed to respond to control request', error)
-    }
+    this.publishControlRequestPrompt()
   }
 
   private async applyIncomingSignals(signals: ScreenCaptureSignal[]): Promise<void> {
@@ -310,12 +325,13 @@ class ScreenCaptureHandler {
       ? this.currentRequestState.status
       : null
 
-    await this.maybePromptForControlApproval()
+    this.maybePromptForControlApproval()
 
     if (requestStatus === 'stopped' || requestStatus === 'failed') {
       if (this.isStreaming || this.isStarting) {
         void this.stopCapture({ status: requestStatus as 'stopped' | 'failed' })
       }
+      this.clearControlRequestPrompt()
       return
     }
 
@@ -358,6 +374,7 @@ class ScreenCaptureHandler {
       control_status: 'view_only',
     }
     this.lastControlPromptKey = null
+    this.clearControlRequestPrompt()
 
     try {
       let primaryScreenId: string | null = null
@@ -735,6 +752,32 @@ class ScreenCaptureHandler {
     }
 
     this.currentRequestState = null
+    this.clearControlRequestPrompt()
+  }
+
+  setIdleSessionPollingEnabled(enabled: boolean): void {
+    if (this.sessionPollingEnabled === enabled) {
+      return
+    }
+
+    this.sessionPollingEnabled = enabled
+    if (enabled) {
+      this.startIdleSessionPolling()
+      return
+    }
+
+    this.stopIdleSessionPolling()
+  }
+
+  async approvePendingControlRequest(): Promise<void> {
+    await this.respondToControlRequest('approve_control')
+  }
+
+  async denyPendingControlRequest(): Promise<void> {
+    await this.respondToControlRequest(
+      'deny_control',
+      'Terminal operator denied control.',
+    )
   }
 
   cleanup(): void {

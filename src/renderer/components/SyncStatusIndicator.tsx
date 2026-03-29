@@ -17,6 +17,7 @@ import {
 import { OrderSyncRouteIndicator } from './OrderSyncRouteIndicator';
 import { FinancialSyncPanel } from './FinancialSyncPanel';
 import { HealthSupportEntryPoint } from './support/HealthSupportEntryPoint';
+import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useFeatures } from '../hooks/useFeatures';
 import { useShift } from '../contexts/shift-context';
 import { useEndOfDayStatus } from '../hooks/useEndOfDayStatus';
@@ -862,6 +863,21 @@ export const SyncStatusIndicator: React.FC<SyncStatusIndicatorProps> = ({
     'inline-flex items-center gap-2 rounded-full border border-slate-200/90 bg-white/88 px-3 py-1.5 text-xs font-semibold text-slate-700 dark:border-white/10 dark:bg-white/[0.04] dark:text-slate-200';
   const footerClass =
     'sticky bottom-0 z-10 mt-5 border-t border-slate-200/80 bg-white/88 px-6 py-4 backdrop-blur-xl dark:border-white/10 dark:bg-[#071018]/88';
+  const detailPanelBlockerMetadata = useMemo(
+    () => ({
+      advancedExpanded,
+      showFinancialPanel,
+    }),
+    [advancedExpanded, showFinancialPanel],
+  );
+
+  useBlockerRegistration({
+    id: 'sync-status-detail-panel',
+    label: 'Sync detail panel',
+    source: 'sync-status',
+    active: showDetailPanel,
+    metadata: detailPanelBlockerMetadata,
+  });
 
   const renderMetricTile = ({
     label,

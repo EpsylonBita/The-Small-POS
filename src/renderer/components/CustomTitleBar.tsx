@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { useTheme } from '../contexts/theme-context';
+import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { useWindowState } from '../hooks/useWindowState';
 import { getBridge } from '../../lib';
 import {
@@ -60,6 +61,21 @@ const CustomTitleBar: React.FC<CustomTitleBarProps> = ({ updateAvailable = false
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState('');
   const [isResetting, setIsResetting] = useState(false);
+  const resetDialogMetadata = React.useMemo(
+    () => ({
+      isResetting,
+      confirmationLength: resetConfirmText.length,
+    }),
+    [isResetting, resetConfirmText.length],
+  );
+
+  useBlockerRegistration({
+    id: 'custom-titlebar-reset-dialog',
+    label: 'Reset terminal dialog',
+    source: 'custom-titlebar',
+    active: showResetDialog,
+    metadata: resetDialogMetadata,
+  });
 
   // Detect platform
   useEffect(() => {

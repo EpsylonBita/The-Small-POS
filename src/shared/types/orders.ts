@@ -17,6 +17,7 @@ export type SyncStatus = 'synced' | 'pending' | 'failed';
 /** Order plugin - where the order originated from */
 export type OrderPlugin =
   | 'pos'           // In-store POS system
+  | 'kiosk'         // Self-service kiosk routed via linked parent terminal
   | 'web'           // Customer web app
   | 'android-ios'   // Customer mobile app
   | 'wolt'          // Wolt delivery plugin
@@ -174,6 +175,7 @@ export interface Order {
   ownerTerminalId?: string | null;
   branch_id?: string | null;
   branchId?: string | null; // For backward compatibility
+  source?: string | null;
 
   // Enhanced pricing breakdown
   pricing?: OrderPricing;
@@ -253,6 +255,7 @@ export interface OrderRow {
   terminal_id?: string | null;
   owner_terminal_id?: string | null;
   branch_id?: string | null;
+  source?: string | null;
   // Plugin tracking
   plugin?: OrderPlugin | string;
   external_plugin_order_id?: string;

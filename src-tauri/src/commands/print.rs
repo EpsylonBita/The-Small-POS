@@ -101,6 +101,17 @@ fn receipt_type_value(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn parse_printer_profile_id_payload(
+    arg0: Option<&serde_json::Value>,
+    arg1: Option<&serde_json::Value>,
+) -> Option<String> {
+    arg0
+        .and_then(|value| value_str(value, &["printerProfileId", "printer_profile_id"]))
+        .or_else(|| {
+            arg1.and_then(|value| value_str(value, &["printerProfileId", "printer_profile_id"]))
+        })
+}
+
 fn parse_profile_id_payload(arg0: Option<serde_json::Value>) -> Result<String, String> {
     payload_arg0_as_string(arg0, &["profileId", "profile_id", "id"])
         .ok_or("Missing profileId".into())
@@ -603,6 +614,7 @@ pub async fn payment_print_receipt(
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let entity_type = parse_requested_receipt_entity_type(arg0.as_ref(), arg1.as_ref());
+    let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), arg1.as_ref());
     let order_id_raw = parse_order_id_payload(arg0)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_id = resolve_order_id(&conn, &order_id_raw).ok_or("Order not found")?;
@@ -612,7 +624,12 @@ pub async fn payment_print_receipt(
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
 
-    let enqueue_result = print::enqueue_print_job(&db, entity_type, &order_id, None)?;
+    let enqueue_result = print::enqueue_print_job(
+        &db,
+        entity_type,
+        &order_id,
+        printer_profile_id.as_deref(),
+    )?;
 
     // Process the job immediately instead of waiting for the background worker
     let data_dir = app
@@ -632,11 +649,17 @@ pub async fn kitchen_print_ticket(
     db: tauri::State<'_, db::DbState>,
     app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
+    let printer_profile_id = parse_printer_profile_id_payload(arg0.as_ref(), None);
     let order_id = parse_order_id_payload(arg0)?;
     if !crate::print::is_print_action_enabled(&db, "kitchen_ticket") {
         return Ok(serde_json::json!({ "success": true, "skipped": true }));
     }
-    let enqueue_result = print::enqueue_print_job(&db, "kitchen_ticket", &order_id, None)?;
+    let enqueue_result = print::enqueue_print_job(
+        &db,
+        "kitchen_ticket",
+        &order_id,
+        printer_profile_id.as_deref(),
+    )?;
 
     // Process the job immediately instead of waiting for the background worker
     let data_dir = app
@@ -3733,6 +3756,19 @@ mod dto_tests {
             ),
             "delivery_slip"
         );
+    }
+
+    #[test]
+    fn parse_printer_profile_id_payload_accepts_object_shape() {
+        let profile_id = parse_printer_profile_id_payload(
+            Some(&serde_json::json!({
+                "orderId": "order-1",
+                "printerProfileId": "receipt-profile-1"
+            })),
+            None,
+        );
+
+        assert_eq!(profile_id.as_deref(), Some("receipt-profile-1"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import type {
   SyncFinancialQueueItem,
   SyncFinancialQueueStatus,
@@ -225,6 +226,22 @@ export const FinancialSyncPanel: React.FC<FinancialSyncPanelProps> = ({
   const failedItemsCount = actionableItems.filter(
     (item) => item.normalizedStatus === 'failed',
   ).length;
+  const blockerMetadata = useMemo(
+    () => ({
+      actionableSummaryCount,
+      failedItemsCount,
+      hasQueueDetails,
+    }),
+    [actionableSummaryCount, failedItemsCount, hasQueueDetails],
+  );
+
+  useBlockerRegistration({
+    id: 'financial-sync-panel',
+    label: 'Financial sync panel',
+    source: 'sync-status',
+    active: isOpen,
+    metadata: blockerMetadata,
+  });
 
   const handleRetryItem = async (queueId: number) => {
     setProcessing(String(queueId));

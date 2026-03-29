@@ -370,6 +370,7 @@ struct ReconcileSkipLogState {
 }
 
 static SYNC_WARN_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
+static SYNC_BOOTSTRAP_LOG_DEDUPE_STATE: OnceLock<Mutex<WarnLogDedupeState>> = OnceLock::new();
 static RECONCILE_SKIP_LOG_STATE: OnceLock<Mutex<HashMap<String, ReconcileSkipLogState>>> =
     OnceLock::new();
 
@@ -2877,24 +2878,140 @@ pub(crate) fn set_sync_bootstrap_mode(db: &DbState, mode: &str) -> Result<(), St
     local_setting_set(db, SYNC_BOOTSTRAP_CATEGORY, SYNC_BOOTSTRAP_MODE_KEY, mode)
 }
 
-fn ensure_sync_bootstrap_mode(db: &DbState) -> Result<String, String> {
-    let current = get_sync_bootstrap_mode(db);
-    if current != SYNC_BOOTSTRAP_MODE_LIVE {
-        return Ok(current);
-    }
+#[derive(Debug, Clone)]
+struct SyncBootstrapInspection {
+    current_mode: String,
+    orders_since_cursor: String,
+    order_count: i64,
+}
 
+fn inspect_sync_bootstrap_state(db: &DbState) -> Result<SyncBootstrapInspection, String> {
+    let current_mode = get_sync_bootstrap_mode(db);
+    let orders_since_cursor =
+        sanitize_orders_since_cursor(local_setting_get(db, "sync", "orders_since"));
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let order_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM orders", [], |row| row.get(0))
         .unwrap_or(0);
-    drop(conn);
 
-    if order_count == 0 {
-        set_sync_bootstrap_mode(db, SYNC_BOOTSTRAP_MODE_EMPTY_DB)?;
-        return Ok(SYNC_BOOTSTRAP_MODE_EMPTY_DB.to_string());
+    Ok(SyncBootstrapInspection {
+        current_mode,
+        orders_since_cursor,
+        order_count,
+    })
+}
+
+fn should_emit_bootstrap_transition_log(fingerprint: &str, now: DateTime<Utc>) -> bool {
+    let state =
+        SYNC_BOOTSTRAP_LOG_DEDUPE_STATE.get_or_init(|| Mutex::new(WarnLogDedupeState::default()));
+    let mut guard = match state.lock() {
+        Ok(guard) => guard,
+        Err(_) => return true,
+    };
+
+    let should_emit = !matches!(
+        (&guard.last_fingerprint, guard.last_warned_at),
+        (Some(last), Some(last_at))
+            if last == fingerprint
+                && (now - last_at) < ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS)
+    );
+
+    if should_emit {
+        guard.last_fingerprint = Some(fingerprint.to_string());
+        guard.last_warned_at = Some(now);
     }
 
-    Ok(current)
+    should_emit
+}
+
+fn log_sync_bootstrap_transition(
+    previous_mode: &str,
+    next_mode: &str,
+    reason: &str,
+    orders_since_cursor: &str,
+    order_count: i64,
+) {
+    let now = Utc::now();
+    let fingerprint =
+        format!("{previous_mode}|{next_mode}|{reason}|{orders_since_cursor}|{order_count}");
+
+    if should_emit_bootstrap_transition_log(&fingerprint, now) {
+        info!(
+            previous_mode = %previous_mode,
+            next_mode = %next_mode,
+            reason = %reason,
+            orders_since_cursor = %orders_since_cursor,
+            order_count,
+            "Sync bootstrap mode transition"
+        );
+    } else {
+        debug!(
+            previous_mode = %previous_mode,
+            next_mode = %next_mode,
+            reason = %reason,
+            orders_since_cursor = %orders_since_cursor,
+            order_count,
+            "Sync bootstrap mode transition (deduped)"
+        );
+    }
+}
+
+fn transition_sync_bootstrap_mode(
+    db: &DbState,
+    next_mode: &str,
+    reason: &str,
+) -> Result<String, String> {
+    let inspection = inspect_sync_bootstrap_state(db)?;
+    if inspection.current_mode == next_mode {
+        return Ok(inspection.current_mode);
+    }
+
+    set_sync_bootstrap_mode(db, next_mode)?;
+    log_sync_bootstrap_transition(
+        inspection.current_mode.as_str(),
+        next_mode,
+        reason,
+        inspection.orders_since_cursor.as_str(),
+        inspection.order_count,
+    );
+
+    Ok(next_mode.to_string())
+}
+
+fn ensure_sync_bootstrap_mode(db: &DbState) -> Result<String, String> {
+    let inspection = inspect_sync_bootstrap_state(db)?;
+    if inspection.current_mode != SYNC_BOOTSTRAP_MODE_LIVE {
+        return Ok(inspection.current_mode);
+    }
+
+    // Keep the sync mode live once a cursor exists, even if the local cache is
+    // temporarily empty after cleanup. Re-enter bootstrap only when the sync
+    // state is genuinely uninitialized.
+    if inspection.order_count == 0 && inspection.orders_since_cursor == ORDER_SYNC_SINCE_FALLBACK {
+        return transition_sync_bootstrap_mode(
+            db,
+            SYNC_BOOTSTRAP_MODE_EMPTY_DB,
+            "empty_local_orders_with_fallback_cursor",
+        );
+    }
+
+    Ok(inspection.current_mode)
+}
+
+fn finalize_sync_bootstrap_mode_after_remote_catchup(
+    db: &DbState,
+    outcome: &RemoteOrderReconcileOutcome,
+) -> Result<(), String> {
+    if !outcome.history_complete || outcome.bootstrap_mode == SYNC_BOOTSTRAP_MODE_LIVE {
+        return Ok(());
+    }
+
+    let _ = transition_sync_bootstrap_mode(
+        db,
+        SYNC_BOOTSTRAP_MODE_LIVE,
+        "remote_order_history_complete",
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -6006,17 +6123,8 @@ async fn run_sync_cycle(db: &DbState, app: &AppHandle) -> Result<usize, String> 
 
     let reconciled_orders = reconcile_remote_orders(db, &admin_url, &api_key, app).await?;
     total_progress += reconciled_orders.reconciled;
-    if reconciled_orders.history_complete
-        && reconciled_orders.bootstrap_mode != SYNC_BOOTSTRAP_MODE_LIVE
-    {
-        if let Err(error) = set_sync_bootstrap_mode(db, SYNC_BOOTSTRAP_MODE_LIVE) {
-            warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
-        } else {
-            info!(
-                previous_mode = %reconciled_orders.bootstrap_mode,
-                "Remote order catch-up complete; sync bootstrap mode returned to live"
-            );
-        }
+    if let Err(error) = finalize_sync_bootstrap_mode_after_remote_catchup(db, &reconciled_orders) {
+        warn!(error = %error, "Failed to clear sync bootstrap mode after remote catch-up");
     }
     let reconciled_payments = reconcile_remote_payments(db, &admin_url, &api_key).await?;
     total_progress += reconciled_payments;
@@ -12126,6 +12234,66 @@ mod tests {
             "order|b",
             now + ChronoDuration::seconds(SYNC_LOG_DEDUPE_COOLDOWN_SECS + 30)
         ));
+    }
+
+    #[test]
+    fn test_ensure_sync_bootstrap_mode_initializes_empty_db_without_cursor() {
+        let db = test_db();
+
+        let mode = ensure_sync_bootstrap_mode(&db).expect("bootstrap mode");
+
+        assert_eq!(mode, SYNC_BOOTSTRAP_MODE_EMPTY_DB);
+        assert_eq!(get_sync_bootstrap_mode(&db), SYNC_BOOTSTRAP_MODE_EMPTY_DB);
+    }
+
+    #[test]
+    fn test_ensure_sync_bootstrap_mode_keeps_live_for_empty_db_with_existing_cursor() {
+        let db = test_db();
+        local_setting_set(&db, "sync", "orders_since", "2026-03-27T10:48:42.000Z")
+            .expect("seed orders_since cursor");
+
+        let mode = ensure_sync_bootstrap_mode(&db).expect("bootstrap mode");
+
+        assert_eq!(mode, SYNC_BOOTSTRAP_MODE_LIVE);
+        assert_eq!(get_sync_bootstrap_mode(&db), SYNC_BOOTSTRAP_MODE_LIVE);
+    }
+
+    #[test]
+    fn test_ensure_sync_bootstrap_mode_preserves_explicit_rebuild_mode() {
+        let db = test_db();
+        set_sync_bootstrap_mode(&db, SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD)
+            .expect("set explicit bootstrap mode");
+
+        let mode = ensure_sync_bootstrap_mode(&db).expect("bootstrap mode");
+
+        assert_eq!(mode, SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD);
+        assert_eq!(
+            get_sync_bootstrap_mode(&db),
+            SYNC_BOOTSTRAP_MODE_REMOTE_REBUILD
+        );
+    }
+
+    #[test]
+    fn test_finalize_sync_bootstrap_mode_after_remote_catchup_keeps_live_sticky() {
+        let db = test_db();
+        local_setting_set(&db, "sync", "orders_since", "2026-03-27T10:48:42.000Z")
+            .expect("seed orders_since cursor");
+        set_sync_bootstrap_mode(&db, SYNC_BOOTSTRAP_MODE_EMPTY_DB).expect("seed bootstrap mode");
+
+        let outcome = RemoteOrderReconcileOutcome {
+            reconciled: 0,
+            history_complete: true,
+            bootstrap_mode: SYNC_BOOTSTRAP_MODE_EMPTY_DB.to_string(),
+        };
+
+        finalize_sync_bootstrap_mode_after_remote_catchup(&db, &outcome)
+            .expect("finalize bootstrap mode");
+
+        assert_eq!(get_sync_bootstrap_mode(&db), SYNC_BOOTSTRAP_MODE_LIVE);
+        assert_eq!(
+            ensure_sync_bootstrap_mode(&db).expect("sticky live bootstrap mode"),
+            SYNC_BOOTSTRAP_MODE_LIVE
+        );
     }
 
     #[test]

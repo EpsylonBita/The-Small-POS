@@ -8,13 +8,31 @@ interface UseAppEventsProps {
     onLogout: () => void;
 }
 
+type ShutdownKind = 'shutdown' | 'restart';
+
+interface ShutdownOverlayState {
+    active: boolean;
+    kind: ShutdownKind | null;
+    source: string | null;
+    startedAt: string | null;
+}
+
+const SHUTDOWN_OVERLAY_TIMEOUT_MS = 12000;
+const SHUTDOWN_TOAST_ID = 'pos-app-lifecycle';
+
 export function useAppEvents({ onLogout }: UseAppEventsProps) {
     const { t } = useI18n();
-    const [isShuttingDown, setIsShuttingDown] = useState(false);
+    const [shutdownState, setShutdownState] = useState<ShutdownOverlayState>({
+        active: false,
+        kind: null,
+        source: null,
+        startedAt: null,
+    });
 
     // Use refs to store latest values to avoid re-subscribing on every render
     const onLogoutRef = useRef(onLogout);
     const tRef = useRef(t);
+    const shutdownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Update refs when values change
     useEffect(() => {
@@ -23,9 +41,49 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
     }, [onLogout, t]);
 
     useEffect(() => {
+        return () => {
+            if (shutdownTimerRef.current) {
+                clearTimeout(shutdownTimerRef.current);
+                shutdownTimerRef.current = null;
+            }
+        };
+    }, []);
+
+    useEffect(() => {
         // Use refs inside handlers to get latest values without re-subscribing
         const handleAppClose = () => {
             // Handle graceful shutdown if needed
+        };
+
+        const activateShutdownOverlay = (kind: ShutdownKind, data: any) => {
+            const startedAt = new Date().toISOString();
+            const source = typeof data?.source === 'string' ? data.source : null;
+
+            setShutdownState({
+                active: true,
+                kind,
+                source,
+                startedAt,
+            });
+
+            if (shutdownTimerRef.current) {
+                clearTimeout(shutdownTimerRef.current);
+            }
+
+            shutdownTimerRef.current = setTimeout(() => {
+                console.warn('[useAppEvents] Clearing stale shutdown overlay after timeout', {
+                    kind,
+                    source,
+                    startedAt,
+                });
+                setShutdownState({
+                    active: false,
+                    kind: null,
+                    source: null,
+                    startedAt: null,
+                });
+                toast.dismiss(SHUTDOWN_TOAST_ID);
+            }, SHUTDOWN_OVERLAY_TIMEOUT_MS);
         };
 
         const handleControlCommand = (data: any) => {
@@ -38,18 +96,20 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
 
         const handleShutdownInitiated = (data: any) => {
             console.log('Shutdown initiated:', data);
-            setIsShuttingDown(true);
+            activateShutdownOverlay('shutdown', data);
             toast.error(tRef.current('system.shuttingDown'), {
                 duration: Infinity,
+                id: SHUTDOWN_TOAST_ID,
                 icon: createElement(Power, { className: 'w-4 h-4 text-red-500' }),
             });
         };
 
         const handleRestartInitiated = (data: any) => {
             console.log('Restart initiated:', data);
-            setIsShuttingDown(true);
+            activateShutdownOverlay('restart', data);
             toast.loading(tRef.current('system.restarting'), {
                 duration: Infinity,
+                id: SHUTDOWN_TOAST_ID,
                 icon: createElement(RefreshCw, { className: 'w-4 h-4 text-blue-500 animate-spin' }),
             });
         };
@@ -113,5 +173,8 @@ export function useAppEvents({ onLogout }: UseAppEventsProps) {
         };
     }, []); // Empty deps - only run once on mount
 
-    return { isShuttingDown };
+    return {
+        isShuttingDown: shutdownState.active,
+        shutdownState,
+    };
 }

@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { getBridge, offEvent, onEvent } from '../../lib';
+import { useBlockerRegistration } from '../hooks/useBlockerRegistration';
 import { usePrivilegedActionConfirmation } from '../hooks/usePrivilegedActionConfirmation';
 import { getErrorMessage } from '../utils/privileged-actions';
 
@@ -37,6 +38,21 @@ export const SyncNotificationManager: React.FC<SyncNotificationManagerProps> = (
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [restartRequired, setRestartRequired] = useState<RestartNotification | null>(null);
   const [autoApply, setAutoApply] = useState(true);
+  const restartBlockerMetadata = useMemo(
+    () => ({
+      reason: restartRequired?.reason || null,
+      hardwareType: restartRequired?.hardware_type || null,
+    }),
+    [restartRequired],
+  );
+
+  useBlockerRegistration({
+    id: 'sync-restart-required-modal',
+    label: 'Restart required modal',
+    source: 'sync-notifications',
+    active: restartRequired !== null,
+    metadata: restartBlockerMetadata,
+  });
 
   // Category labels for display
   const categoryLabels: Record<string, string> = {

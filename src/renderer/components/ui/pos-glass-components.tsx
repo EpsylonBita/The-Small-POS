@@ -3,6 +3,7 @@
 import React from 'react'
 import { cn } from '../../utils/cn'
 import { useI18n } from '../../contexts/i18n-context'
+import { useBlockerRegistration } from '../../hooks/useBlockerRegistration'
 
 // Import the glassmorphism CSS
 import '../../styles/glassmorphism.css'
@@ -272,6 +273,23 @@ export const POSGlassModal: React.FC<POSGlassModalProps> = ({
 }) => {
   const { t } = useI18n();
   const previousOverflowRef = React.useRef<string>('');
+  const blockerId = React.useId();
+  const blockerMetadata = React.useMemo(
+    () => ({
+      size,
+      title: title || null,
+      closeOnBackdrop,
+    }),
+    [closeOnBackdrop, size, title],
+  );
+
+  useBlockerRegistration({
+    id: `pos-glass-modal:${blockerId}`,
+    label: title ? `POSGlassModal:${title}` : 'POSGlassModal',
+    source: 'shared-modal',
+    active: isOpen,
+    metadata: blockerMetadata,
+  });
 
   // Handle escape key
   React.useEffect(() => {
@@ -556,6 +574,25 @@ export const LiquidGlassModal: React.FC<LiquidGlassModalProps> = ({
   // Internal state for closing animation
   const [isClosing, setIsClosing] = React.useState(false)
   const [mounted, setMounted] = React.useState(false)
+  const blockerId = React.useId()
+  const blockerMetadata = React.useMemo(
+    () => ({
+      size,
+      title: title || null,
+      ariaLabel: ariaLabel || null,
+      closeOnBackdrop,
+      closeOnEscape,
+    }),
+    [ariaLabel, closeOnBackdrop, closeOnEscape, size, title],
+  )
+
+  useBlockerRegistration({
+    id: `liquid-glass-modal:${blockerId}`,
+    label: title ? `LiquidGlassModal:${title}` : 'LiquidGlassModal',
+    source: 'shared-modal',
+    active: mounted,
+    metadata: blockerMetadata,
+  })
 
   // Handle close with animation
   const handleClose = React.useCallback(() => {

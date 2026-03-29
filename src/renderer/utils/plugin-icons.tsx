@@ -37,7 +37,7 @@ const KNOWN_EXTERNAL_PLUGINS: readonly string[] = [
 /**
  * Known internal plugins (not external)
  */
-const KNOWN_INTERNAL_PLUGINS: readonly string[] = ['pos', 'web', 'android-ios'] as const;
+const KNOWN_INTERNAL_PLUGINS: readonly string[] = ['pos', 'kiosk', 'web', 'android-ios'] as const;
 
 /**
  * All known plugins for type checking
@@ -54,6 +54,7 @@ const PLUGIN_COLORS: Record<OrderPlugin, string> = {
   tripadvisor: '#00AF87', // TripAdvisor green
   airbnb: '#FF5A5F',    // Airbnb pink/red
   pos: '#6B7280',       // Gray for internal
+  kiosk: '#2563EB',     // Blue for kiosk-origin orders
   web: '#6B7280',       // Gray for internal
   'android-ios': '#6B7280', // Gray for internal
 };
@@ -68,6 +69,7 @@ const PLUGIN_NAMES: Record<OrderPlugin, string> = {
   tripadvisor: 'TripAdvisor',
   airbnb: 'Airbnb',
   pos: 'POS',
+  kiosk: 'Kiosk',
   web: 'Web',
   'android-ios': 'Mobile App',
 };
@@ -82,6 +84,7 @@ const PLUGIN_ABBREV: Record<OrderPlugin, string> = {
   tripadvisor: 'TA',
   airbnb: 'A',
   pos: 'POS',
+  kiosk: 'Kiosk',
   web: 'Web',
   'android-ios': 'App',
 };

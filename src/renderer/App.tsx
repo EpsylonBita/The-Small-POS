@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { HashRouter, Routes, Route } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
 import { AlertTriangle } from "lucide-react";
@@ -12,16 +12,18 @@ import NewOrderPage from "./pages/NewOrderPage";
 import LoginPage from "./pages/LoginPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import { ErrorBoundary } from "./components/error/ErrorBoundary";
+import { ScreenCaptureControlRequestModal } from "./components/ScreenCaptureControlRequestModal";
 import { SyncNotificationManager } from "./components/SyncNotificationManager";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 
 import { ActivityTracker } from "./services/ActivityTracker";
-// Initialize screen capture IPC listeners (side-effect import)
-import "./services/ScreenCaptureHandler";
+import { screenCaptureHandler } from "./services/ScreenCaptureHandler";
 import AnimatedBackground from "./components/AnimatedBackground";
 import ThemeToggle from "./components/ThemeToggle";
 import CustomTitleBar from "./components/CustomTitleBar";
 import FullscreenAwareLayout from "./components/FullscreenAwareLayout";
+import { useBlockerRegistration } from "./hooks/useBlockerRegistration";
+import { useFreezeWatchdog } from "./hooks/useFreezeWatchdog";
 import { useMenuVersionPolling } from "./hooks/useMenuVersionPolling";
 import { useAppEvents } from "./hooks/useAppEvents";
 import { useCallerIdNotifications } from "./hooks/useCallerIdNotifications";
@@ -429,6 +431,7 @@ function AppContent() {
   const [isLoading, setIsLoading] = useState(true);
   const { setStaff } = useShift();
   const autoUpdater = useAutoUpdater();
+  const windowState = useWindowState();
 
   // Auto-check for updates on app startup
   useEffect(() => {
@@ -457,12 +460,33 @@ function AppContent() {
   ]);
 
   // Use custom hook for app events
-  const { isShuttingDown } = useAppEvents({
+  const { isShuttingDown, shutdownState } = useAppEvents({
     onLogout: () => {
       localStorage.removeItem("pos-user");
       setUser(null);
       // Do NOT clear shift on session timeout to preserve active shift per EOD policy
     }
+  });
+  const shutdownBlockerMetadata = useMemo(
+    () => ({
+      kind: shutdownState.kind,
+      source: shutdownState.source,
+      startedAt: shutdownState.startedAt,
+    }),
+    [shutdownState.kind, shutdownState.source, shutdownState.startedAt],
+  );
+
+  useBlockerRegistration({
+    id: 'app-shutdown-overlay',
+    label: 'App shutdown overlay',
+    source: 'app-shell',
+    active: isShuttingDown,
+    metadata: shutdownBlockerMetadata,
+  });
+
+  useFreezeWatchdog({
+    enabled: !!user && !isLoading,
+    windowState,
   });
 
   // Start background menu version polling once a user session exists
@@ -470,6 +494,43 @@ function AppContent() {
 
   // Caller ID notifications (gated by module availability inside the hook)
   useCallerIdNotifications();
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return;
+    }
+
+    const syncPollingState = () => {
+      const shouldPoll =
+        Boolean(user) &&
+        document.visibilityState === 'visible' &&
+        navigator.onLine;
+      screenCaptureHandler.setIdleSessionPollingEnabled(shouldPoll);
+    };
+
+    syncPollingState();
+
+    const handleVisibilityChange = () => {
+      syncPollingState();
+    };
+    const handleOnline = () => {
+      syncPollingState();
+    };
+    const handleOffline = () => {
+      syncPollingState();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      screenCaptureHandler.setIdleSessionPollingEnabled(false);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [user]);
 
   // Track hash route for unauthenticated screens so UI updates without reload
   const [hash, setHash] = useState<string>(typeof window !== 'undefined' ? window.location.hash : '');
@@ -701,7 +762,11 @@ function AppContent() {
                 <div className="bg-white/10 backdrop-blur-md rounded-3xl p-8 shadow-2xl border border-white/30 text-center">
                   <div className="w-16 h-16 border-4 border-t-transparent border-white rounded-full animate-spin mx-auto mb-4"></div>
                   <h2 className="text-2xl font-bold text-white mb-2">{t('app.pleaseWait')}</h2>
-                  <p className="text-white/80">{t('app.shuttingDownMessage')}</p>
+                  <p className="text-white/80">
+                    {shutdownState.kind === 'restart'
+                      ? t('system.restarting')
+                      : t('app.shuttingDownMessage')}
+                  </p>
                 </div>
               </div>
             )}
@@ -719,6 +784,8 @@ function AppContent() {
               <Route path="/new-order" element={<NewOrderPage />} />
               <Route path="*" element={<RefactoredMainLayout onLogout={handleLogout} />} />
             </Routes>
+
+            <ScreenCaptureControlRequestModal />
 
             {/* Sync Notification Manager */}
             <SyncNotificationManager

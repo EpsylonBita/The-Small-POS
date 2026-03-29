@@ -50,6 +50,7 @@ import type { DeliveryBoundaryValidationResponse } from "../../shared/types/deli
 import { useDeliveryValidation } from "../hooks/useDeliveryValidation";
 import { useResolvedPosIdentity } from "../hooks/useResolvedPosIdentity";
 import { useTerminalSettings } from "../hooks/useTerminalSettings";
+import { useKioskOrderAutoPrint } from "../hooks/useKioskOrderAutoPrint";
 import { openExternalUrl } from "../utils/electron-api";
 import {
   buildSingleDeliveryRouteStop,
@@ -251,7 +252,12 @@ export const OrderDashboard = memo<OrderDashboardProps>(
     const {
       branchId: resolvedIdentityBranchId,
       organizationId: resolvedIdentityOrganizationId,
+      terminalId: resolvedTerminalId,
     } = useResolvedPosIdentity("branch+organization");
+
+    // Auto-print kitchen tickets and receipts for incoming kiosk orders
+    // assigned to this terminal. Only active when the terminal identity is resolved.
+    useKioskOrderAutoPrint(resolvedTerminalId);
 
     // Get branchId and organizationId from terminal credential cache / IPC
     const [branchId, setBranchId] = useState<string | null>(null);
